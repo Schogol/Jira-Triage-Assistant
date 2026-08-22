@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.1.1
+// @version     3.1.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -22,6 +22,7 @@
 // @connect     atlassian.net
 // @connect     atlassian.com
 // @connect     translate.googleapis.com
+// @connect     clients5.google.com
 // ==/UserScript==
 /* global $ */
 
@@ -424,34 +425,61 @@ waitForKeyElements(issueItem, function () {
 });
 
 
-// Free translation via Google's keyless "gtx" endpoint (translate_a/single). No API key, no cost - this
-// replaces the old paid Cloud Translation v2 API that kept hitting the free-tier quota. We POST (rather
-// than GET) so a long EVE description can't blow the URL length limit, and go through GM_xmlhttpRequest so
-// CORS is a non-issue (no session cookie needed). Source language is auto-detected (sl=auto -> tl=en).
-// Resolves to: the translated string, '' for empty input, or null on failure (HTTP error / throttle / parse).
-function jitaTranslateFree(text) {
+// Free, keyless translation via Google (no API key, no cost - replaces the old paid Cloud Translation v2
+// API that kept hitting the free-tier quota). Two endpoints with DIFFERENT response shapes; Google throttles
+// each independently (429 "your computer may be sending automated queries"), so we keep a STICKY preference
+// and fail over: try the preferred endpoint, and only if it fails switch the preference to the other and try
+// that. The preference is persisted (GM flag 'sdTxPref') so we don't keep hammering a throttled endpoint, and
+// each failure flips it, so it naturally switches back when whichever one we're on dies. We POST (not GET) so
+// a long EVE description can't blow the URL length limit, and go through GM_xmlhttpRequest so CORS is a
+// non-issue (no session cookie needed). Source language is auto-detected (sl=auto -> tl=en).
+var JITA_TX_ENDPOINTS = [
+    {   // classic gtx endpoint. Response: arr[0] = list of sentence chunks, each chunk[0] = translated text.
+        name: 'gtx',
+        url: 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t',
+        parse: function (arr) { return (arr && arr[0]) ? arr[0].map(function (c) { return (c && c[0]) ? c[0] : ''; }).join('') : ''; }
+    },
+    {   // Chrome dictionary endpoint. Response: arr[0] = [translatedText, detectedLang]; newlines preserved.
+        name: 'dict-chrome-ex',
+        url: 'https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=en',
+        parse: function (arr) { return (arr && arr[0] && arr[0][0]) ? arr[0][0] : ''; }
+    }
+];
+
+// One attempt against a specific endpoint. Resolves the translated string (may be '' on a 2xx with empty
+// parse), or null on failure (HTTP error / throttle / network / parse) so the caller can fail over.
+function jitaTranslateVia(ep, text) {
     return new Promise(function (resolve) {
-        var t = (text || '').trim();
-        if (!t) { resolve(''); return; }
         GM_xmlhttpRequest({
             method: 'POST',
-            url: 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t',
+            url: ep.url,
             headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-            data: 'q=' + encodeURIComponent(t),
+            data: 'q=' + encodeURIComponent(text),
             onload: function (resp) {
                 try {
                     if (resp.status < 200 || resp.status >= 300) { resolve(null); return; }
-                    // Response is a nested array: arr[0] is a list of sentence chunks, each chunk[0] is the
-                    // translated text; join them. (arr[2] is the detected source language, unused.)
-                    var arr = JSON.parse(resp.responseText);
-                    var out = (arr && arr[0])
-                        ? arr[0].map(function (c) { return (c && c[0]) ? c[0] : ''; }).join('')
-                        : '';
-                    resolve(out);
+                    resolve(ep.parse(JSON.parse(resp.responseText)));
                 } catch (e) { resolve(null); }
             },
             onerror: function () { resolve(null); },
             ontimeout: function () { resolve(null); }
+        });
+    });
+}
+
+// Sticky-failover translation across the two endpoints. Resolves the translated string, '' for empty input,
+// or null only when BOTH endpoints fail on this call (the caller shows the "rate-limiting" error then).
+function jitaTranslateFree(text) {
+    var t = (text || '').trim();
+    if (!t) { return Promise.resolve(''); }
+    var a = gmGet('sdTxPref', 0) === 1 ? 1 : 0;                 // sticky preferred endpoint index
+    return jitaTranslateVia(JITA_TX_ENDPOINTS[a], t).then(function (out) {
+        if (out !== null) { return out; }                      // preferred worked -> keep the preference
+        gmSet('sdTxPref', 1 - a);                              // it failed -> switch preference to the other
+        return jitaTranslateVia(JITA_TX_ENDPOINTS[1 - a], t).then(function (out2) {
+            if (out2 !== null) { return out2; }                // fallback worked -> it's now the sticky preference
+            gmSet('sdTxPref', a);                              // both failed this call -> flip back for next time
+            return null;
         });
     });
 }
@@ -4622,9 +4650,13 @@ JiTA.sync = {
                 }).done(function (data, status, xhr) {
                     resolve({ data: data, xhr: xhr });
                 }).fail(function (xhr) {
-                    if (xhr.status === 429 && retries > 0) {
+                    // Retry transient failures: 429 (rate limit), 5xx, and status 0 (network drop /
+                    // outage / aborted request). Every _apiPost caller is an idempotent read
+                    // (/search/jql, /search/approximate-count), so a retry can't double-apply anything.
+                    if ((xhr.status === 429 || xhr.status >= 500 || xhr.status === 0) && retries > 0) {
                         var ra = parseInt(xhr.getResponseHeader('Retry-After'), 10);
-                        var wait = (isNaN(ra) ? 5 : ra) * 1000;
+                        var wait = xhr.status === 429 ? (isNaN(ra) ? 5 : ra) * 1000
+                                                      : (JiTA.MAX_RETRIES - retries + 1) * 1000;   // 1s,2s,3s...
                         setTimeout(function () { attempt(retries - 1); }, wait);
                     } else {
                         reject(new Error('Jira API ' + path + ' failed: HTTP ' + xhr.status));
@@ -7418,11 +7450,22 @@ JiTA.ui = {
     _jqlQuote: function (s) { return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'; },
 
     // This report's Original Reporter ID, read live from Jira (one field). '' when the field is empty/absent.
+    // Retries transient failures (429 / 5xx / status 0) so a network blip doesn't masquerade as "no reporter ID".
     _getReporterId: function (key) {
         return new Promise(function (resolve) {
-            $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=customfield_11660', dataType: 'json' })
-                .done(function (d) { var v = d && d.fields && d.fields.customfield_11660; resolve(typeof v === 'string' ? v.trim() : ''); })
-                .fail(function () { resolve(''); });
+            (function attempt(retries) {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=customfield_11660', dataType: 'json' })
+                    .done(function (d) { var v = d && d.fields && d.fields.customfield_11660; resolve(typeof v === 'string' ? v.trim() : ''); })
+                    .fail(function (xhr) {
+                        if ((xhr.status === 429 || xhr.status >= 500 || xhr.status === 0) && retries > 0) {
+                            var ra = parseInt(xhr.getResponseHeader('Retry-After'), 10);
+                            var wait = xhr.status === 429 ? (isNaN(ra) ? 5 : ra) * 1000 : (JiTA.MAX_RETRIES - retries + 1) * 1000;
+                            setTimeout(function () { attempt(retries - 1); }, wait);
+                        } else {
+                            resolve('');   // genuine failure / field absent -> treat as no reporter ID
+                        }
+                    });
+            })(JiTA.MAX_RETRIES);
         });
     },
 
