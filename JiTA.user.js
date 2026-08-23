@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.2.0
+// @version     3.2.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -300,6 +300,9 @@ function ensureButtonsPresent() {
 // (cheap, early-exiting) check at most once every 200ms rather than on every individual mutation.
 var jitaButtonGuardScheduled = false;
 var jitaButtonObserver = new MutationObserver(function () {
+    // Synchronous first (before the 200ms debounce below): if a re-render just wiped our field/section hides,
+    // re-assert them THIS microtask so they never flash back into view. Cheap - early-exits when nothing's hidden.
+    try { if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.reassertFast(); } } catch (e0) { /* ignore */ }
     if (jitaButtonGuardScheduled) { return; }
     jitaButtonGuardScheduled = true;
     setTimeout(function () {
@@ -6795,6 +6798,10 @@ JiTA.ui = {
 
         if (anchor.nextSibling) { anchor.parentNode.insertBefore(group, anchor.nextSibling); }
         else { anchor.parentNode.appendChild(group); }
+        // We just (re)built an EMPTY group. If this is a re-mount of the issue still on screen (Jira wiped us),
+        // paint the last results straight back so the panel reappears populated instead of blank. No-op on a
+        // fresh navigation (snapshot key won't match the new issue) - that path renders clean from scratch.
+        JiTA.ui._restoreSnapshot();
         return true;
     },
 
@@ -7315,12 +7322,66 @@ JiTA.ui = {
             JiTA.ui._renderTimer = null;
             var k = JiTA.ui.currentKey;
             if (!k) { return; }
-            if (/^EBR-/.test(k)) { JiTA.ui.render(k); }
-            else if (JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k); }
+            if (/^EBR-/.test(k)) { JiTA.ui.render(k, true); }               // background: don't blank the list first
+            else if (JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k, true); }
         }, 600);
     },
 
-    render: function (key) {
+    // ---- seamless re-mount after a Jira wipe ----------------------------------------------------------------
+    // In sidebar mode our injected group lives inside Jira's React-managed context column, so a first-load
+    // settle re-render (or a Keyword->Hybrid upgrade landing mid-settle) can WIPE it. We keep a snapshot of the
+    // last-rendered list content and paint it back the instant the group is rebuilt, so the panel reappears
+    // already populated instead of flashing empty / "Finding…" while the ranking re-runs in the background.
+    // (Floating mode lives on <body> and never gets wiped, so this whole path is sidebar-only.)
+    _snapshot: null,
+    _snap: function (key) {
+        var list = document.getElementById('jita-sd-list');
+        if (!list) { return; }
+        var st = document.getElementById('jita-sd-status'),
+            md = document.getElementById('jita-sd-mode'),
+            ti = document.getElementById('jita-sd-title');
+        JiTA.ui._snapshot = {
+            key: key,
+            list: list.innerHTML,
+            status: st ? st.innerHTML : '',
+            mode: md ? md.textContent : '',
+            title: ti ? ti.textContent : ''
+        };
+    },
+    // Paint the cached content back into a freshly (re)built group. No-op unless the snapshot is for the issue
+    // currently on screen, so a fresh navigation to a different issue still renders clean from scratch. The
+    // restored rows are handler-less placeholders (innerHTML copy); the background re-render that follows swaps
+    // in the real, interactive rows a moment later.
+    _restoreSnapshot: function () {
+        var s = JiTA.ui._snapshot;
+        // Skip in reporter-reports mode: that view is a live search we never snapshot, so a stale similar-defects
+        // snapshot would flash the wrong list before the search clears it. Let it rebuild clean instead.
+        if (!s || s.key !== JiTA.ui.currentKey || JiTA.ui.reporterMode) { return; }
+        var list = document.getElementById('jita-sd-list');
+        if (!list) { return; }
+        list.innerHTML = s.list;
+        var st = document.getElementById('jita-sd-status'),
+            md = document.getElementById('jita-sd-mode'),
+            ti = document.getElementById('jita-sd-title');
+        if (st) { st.innerHTML = s.status; }
+        if (md) { md.textContent = s.mode; }
+        if (ti) { ti.textContent = s.title; }
+    },
+    // Eager re-mount: called synchronously from the DOM observer so a wiped sidebar group goes back in the SAME
+    // tick (with its cached content) instead of after the 300ms debounce - that debounce gap is the visible
+    // "vanishes for a fraction of a second" flicker. Only fires in sidebar mode when our group is actually gone;
+    // the follow-up scheduleRender() then swaps the placeholder rows for live, interactive ones.
+    _reensureFast: function () {
+        if (!savedVariables[5][1] || !JiTA.ui.currentKey) { return; }
+        if (JiTA.ui.mode() !== 'sidebar' || JiTA.ui._chromePresent()) { return; }
+        try {
+            if (JiTA.ui._ensureSidebar()) { JiTA.ui.scheduleRender(); }
+        } catch (e) { /* ignore */ }
+    },
+
+    // `background` (set only by scheduleRender, i.e. a data-driven refresh): keep the current list on screen
+    // and only swap in the new results when they're ready, instead of emptying to a "Finding…" state first.
+    render: function (key, background) {
         // View-mode switch: when the funnel's "this reporter's other reports" toggle is on, the EBR panel lists
         // the reporter's OTHER reports instead of similar defects. Every re-render path funnels through here, so
         // the branch lives here (one chokepoint) rather than at each caller.
@@ -7331,8 +7392,7 @@ JiTA.ui = {
         $('#jita-sd-title').text('Similar defects');   // reset title (the panel is shared with the EDR reports view)
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section; clear it on the EBR view
         JiTA.ui.renderLogLink(key);   // scan the attached log for known defects (no need to open it)
-        $('#jita-sd-list').empty();
-        JiTA.ui.setStatus('Finding similar defects…');
+        if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar defects…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countDefectsOnly().then(function (n) {
                 if (!n) {
@@ -7344,7 +7404,7 @@ JiTA.ui = {
                 return JiTA.rank.suggestBest(text, key, brCreated, JiTA.ui.modeOverride, terms).then(function (out) {
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
-                    if (!results.length) { JiTA.ui.setStatus('No similar defects found (' + n + ' indexed).'); return; }
+                    if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar defects found (' + n + ' indexed).'); return; }   // clear a stale list if a refresh now finds nothing
                     JiTA.ui.setStatus(results.length + ' suggestions · ' + out.mode + ' · ' + n + ' indexed');
                     // Feature C: enrich the displayed results with each defect's full description (which
                     // includes the reproduction steps) for the hover tooltip. Only a handful of indexed-DB
@@ -7359,6 +7419,7 @@ JiTA.ui = {
                         $list.empty();   // clear atomically right before filling: a concurrent re-render (e.g. after an auto-sync) also emptied at its top, but both appended later - emptying here keeps each render self-contained and avoids doubled rows
                         for (var i = 0; i < results.length; i++) { $list.append(JiTA.ui._item(results[i])); }
                         JiTA.ui._fitVertical();   // list height changed - re-check it still fits / drops up
+                        JiTA.ui._snap(key);   // cache for a seamless re-paint if Jira wipes the sidebar group
                     });
                 });
                 });
@@ -7368,15 +7429,15 @@ JiTA.ui = {
 
     // EDR (defect) view: rank the OPEN bug reports that best match this defect's description (keyword BM25),
     // and list them in the same panel. Mirrors render() but over the EBR index, with no log-scan / mark-dup.
-    renderReports: function (key) {
+    renderReports: function (key, background) {
         JiTA.ui._ensurePanel();
         JiTA.ui._syncFilterBtn();   // reflect any active session filters on the funnel
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Matching bug reports');
         $('#jita-sd-loglink').removeClass('has-hits').empty();   // EBR-only section; unused on a defect
-        $('#jita-sd-list').empty();
+        if (!background) { $('#jita-sd-list').empty(); }   // background refresh keeps the list until new results are ready
         JiTA.ui.renderExceptionCluster(key);   // list other defects that reported the same exception
-        JiTA.ui.setStatus('Finding matching bug reports…');
+        if (!background) { JiTA.ui.setStatus('Finding matching bug reports…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countEbr().then(function (n) {
                 if (!n) {
@@ -7387,7 +7448,7 @@ JiTA.ui = {
                 return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms).then(function (out) {
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
-                    if (!results.length) { JiTA.ui.setStatus('No matching bug reports found (' + n + ' open).'); return; }
+                    if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No matching bug reports found (' + n + ' open).'); return; }   // clear a stale list if a refresh now finds nothing
                     JiTA.ui.setStatus(results.length + ' matches · ' + out.mode + ' · ' + n + ' open reports');
                     // Enrich with each report's full description for the hover preview (a handful of reads).
                     return Promise.all(results.map(function (r) {
@@ -7400,6 +7461,7 @@ JiTA.ui = {
                         $list.empty();   // clear atomically right before filling (see render() - avoids doubled rows from a concurrent re-render)
                         for (var i = 0; i < results.length; i++) { $list.append(JiTA.ui._reportItem(results[i])); }
                         JiTA.ui._fitVertical();   // list height changed - re-check it still fits / drops up
+                        JiTA.ui._snap(key);   // cache for a seamless re-paint if Jira wipes the sidebar group
                     });
                 });
             });
@@ -7573,12 +7635,16 @@ JiTA.ui = {
         // Skip only when the chrome is mounted AND it's the same issue. In sidebar mode a Jira re-render can
         // wipe our injected section; _chromePresent() then reports false and we re-mount + repopulate here.
         if (JiTA.ui._chromePresent() && JiTA.ui.currentKey === key) { return; }
+        // Same issue but chrome missing => Jira wiped our group. Re-mount in the BACKGROUND so the restored
+        // snapshot (painted in _ensureSidebar) stays on screen and the ranking refreshes without a "Finding…"
+        // flash. A genuinely new issue renders foreground (blank + "Finding…") as before.
+        var remount = (JiTA.ui.currentKey === key);
         if (JiTA.ui.currentKey !== key) { JiTA.ui.reporterMode = false; }   // new issue -> leave the reporter-reports view (its reporter is per-issue)
         JiTA.ui.currentKey = key;
         if (isEbr) {
-            JiTA.ui.render(key);              // bug report -> similar defects
+            JiTA.ui.render(key, remount);              // bug report -> similar defects
         } else {
-            JiTA.ui.renderReports(key);       // defect / EO / PLAT issue -> matching open bug reports
+            JiTA.ui.renderReports(key, remount);       // defect / EO / PLAT issue -> matching open bug reports
             // Only EDR/EO are in the crawled scope, so only they get the "index this issue if missing" catch-up.
             if (JiTA.ui._isDefectKey(key)) { JiTA.ui._maybeSyncForDefect(key); }
         }
@@ -10062,6 +10128,21 @@ JiTA.declutter = {
         }
         reconcile(JiTA.declutter._fieldRows(), cfg.fields);
         reconcile(JiTA.declutter._sections(), cfg.sections);
+        // Remember how many elements we currently have hidden, so the observer's cheap synchronous guard
+        // (reassertFast) can tell when a Jira re-render has wiped some of them and re-hide before the next paint.
+        JiTA.declutter._lastHidden = document.querySelectorAll('[data-jita-declutter="1"]').length;
+    },
+
+    // Cheap synchronous guard, called from the DOM observer on every mutation batch (a microtask, so it runs
+    // BEFORE the browser paints). When Jira re-renders the Details column it rebuilds the field/section nodes
+    // fresh - without our display:none - so they'd flash visible until the 200ms-debounced apply() catches up.
+    // Here we detect that in O(1)ish (one querySelector count) and re-assert the hides immediately, in the same
+    // tick, so nothing ever paints visible. Costs nothing when nothing is hidden (_lastHidden stays 0).
+    _lastHidden: 0,
+    reassertFast: function () {
+        if (!JiTA.declutter._lastHidden) { return; }   // nothing hidden -> no work, no query
+        if (document.querySelectorAll('[data-jita-declutter="1"]').length >= JiTA.declutter._lastHidden) { return; }   // all hides still in place
+        JiTA.declutter.apply();   // a hide went missing (re-render) -> re-hide now, before paint
     },
 
     // ---- config overlay (lists what's on the current issue; ticking hides it live) ----
@@ -10116,6 +10197,9 @@ JiTA.declutter = {
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
     var scheduled = false;
     var observer = new MutationObserver(function () {
+        // Synchronous first: if Jira just wiped our sidebar group, put it back THIS tick (with cached content)
+        // so it never visibly vanishes. Cheap - a getElementById guard skips it whenever the group is present.
+        try { JiTA.ui._reensureFast(); } catch (e0) { /* swallow */ }
         if (scheduled) { return; }
         scheduled = true;
         setTimeout(function () {
