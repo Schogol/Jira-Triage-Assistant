@@ -10074,8 +10074,11 @@ JiTA.declutter = {
             return;
         }
         var label = type === 'ebr' ? 'Bug reports (EBR)' : 'Defects (EDR / EO / PLAT)';
+        var other = type === 'ebr' ? 'a defect (EDR / EO / PLAT)' : 'a bug report (EBR)';
         $('<div class="jita-menu-status" style="padding-top:2px;"></div>')
             .text('Hiding for ' + label + '  -  detected from ' + jitaCurrentKey() + '; applies to every issue of this type.').appendTo($body);
+        $('<div class="jita-menu-status" style="padding-top:6px;color:#7a8694;font-size:11px;"></div>')
+            .text('Only fields/sections on this issue are listed. Open this menu on ' + other + ', or on an issue that has different fields, to hide those too - each choice is saved for its whole type.').appendTo($body);
 
         var cfg = JiTA.declutter._cfg(type);
         function group(title, items, key) {
