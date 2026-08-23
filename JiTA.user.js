@@ -9993,14 +9993,16 @@ JiTA.declutter = {
         return out;
     },
     _fieldRow: function (h) {
-        // Walk up from the heading to the row that also holds the field VALUE, so hiding it removes both.
-        var valSel = '[data-testid^="issue.issue-view-layout.issue-view-"], [data-testid^="issue.views.issue-base.context."], [data-testid^="issue.views.field"]';
-        var el = h;
-        for (var up = 0; up < 6 && el.parentElement; up++) {
-            el = el.parentElement;
-            if (el.querySelector && el.querySelector(valSel)) { return el; }
+        // The row = the LARGEST ancestor of this heading that doesn't also enclose a SECOND field-heading.
+        // This works for every field type (incl. Team/Labels, whose value wrappers use their own testids like
+        // issue-field-team.ui.view--container): stopping at the first ancestor that would span another field's
+        // heading is what keeps us from grabbing the entire Details group.
+        var el = h, up = 0;
+        while (el.parentElement && up < 10) {
+            if (el.parentElement.querySelectorAll('[data-testid^="issue-field-heading-styled-field-heading"]').length > 1) { break; }
+            el = el.parentElement; up++;
         }
-        return h.parentElement;
+        return el;
     },
     // Collapsible sections -> [{ name, el }] (el = the card to hide). Section headers are <h2> in the issue
     // view (Details, More fields, Development, Automation, Sentry, Zendesk Support, ...).
