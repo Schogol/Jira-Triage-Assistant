@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.1.3
+// @version     3.2.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -201,8 +201,13 @@ if (!JITA_IS_FORGE_FRAME) {
     });
     // Open the ISD Credits overlay (your live monthly total + the leads-only leaderboard). The overlay's
     // Refresh recomputes the selected month's full leaderboard on demand.
-    GM_registerMenuCommand("📊 ISD Credits leaderboard…", function () {
+    GM_registerMenuCommand("ISD Credits leaderboard…", function () {
         if (typeof JiTA !== 'undefined' && JiTA.credits) { JiTA.credits.openView(); }
+    });
+    // Declutter: choose which Details fields / collapsible sections to hide (per issue-type). Built from the
+    // issue you're viewing, so open a bug report or defect first.
+    GM_registerMenuCommand("Declutter Jira fields…", function () {
+        if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.openConfig(); }
     });
 }
 
@@ -302,6 +307,7 @@ var jitaButtonObserver = new MutationObserver(function () {
         ensureButtonsPresent();
         try { jitaShowIssueDates(); } catch (e) { /* ignore */ }   // mirror Created/Updated into the top header
         try { jitaHideNativeDates(); } catch (e) { /* ignore */ }   // ...and hide Jira's native bottom timestamps
+        try { if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.apply(); } } catch (e) { /* ignore */ }   // re-apply the user's field/section hides
     }, 200);
 });
 if (!JITA_IS_FORGE_FRAME) { jitaButtonObserver.observe(document.body, { childList: true, subtree: true }); }
@@ -422,6 +428,7 @@ function jitaHideNativeDates() {
 waitForKeyElements(issueItem, function () {
     try { jitaShowIssueDates(); } catch (e) { /* ignore */ }
     try { jitaHideNativeDates(); } catch (e) { /* ignore */ }
+    try { if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.apply(); } } catch (e) { /* ignore */ }
 });
 
 
@@ -9930,6 +9937,175 @@ JiTA.worker = {
             }
         };
         return '(' + jitaWorkerBody.toString() + ')(' + JSON.stringify(cfg) + ');';
+    }
+};
+
+
+/* ---- Declutter: hide chosen Jira fields + sections, per issue-type (bug reports vs defects) -----------
+ * Detect-from-page: the config overlay lists the Details FIELDS (by label) and collapsible SECTIONS (by
+ * heading) actually present on the open issue, and the user ticks which to hide. Choices persist per
+ * issue-type and are re-applied across Jira's React re-renders via jitaButtonObserver, the same way
+ * jitaHideNativeDates works. Matching is by visible text, so it covers standard + custom fields and Connect
+ * app panels without depending on instance-specific field ids.
+ * The field-row / section-card SELECTORS in _fieldRows()/_sections() are the parts most likely to need a
+ * tweak if Atlassian changes the issue-view markup - they're grouped there for exactly that reason.
+ */
+JiTA.declutter = {
+    // Which persisted bucket applies to the open issue.
+    _type: function () {
+        var k = (typeof jitaCurrentKey === 'function') ? jitaCurrentKey() : '';
+        if (/^EBR-/i.test(k)) { return 'ebr'; }
+        if (/^(EDR|EO|PLAT)-/i.test(k)) { return 'defect'; }
+        return '';
+    },
+    _cfg: function (type) {
+        var v = gmGet('sdHide_' + type, null);
+        return { fields: (v && v.fields) ? v.fields.slice() : [], sections: (v && v.sections) ? v.sections.slice() : [] };
+    },
+    _save: function (type, cfg) { gmSet('sdHide_' + type, { fields: cfg.fields, sections: cfg.sections }); },
+    _norm: function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase(); },
+    _has: function (list, val) {
+        var n = JiTA.declutter._norm(val);
+        for (var i = 0; i < list.length; i++) { if (JiTA.declutter._norm(list[i]) === n) { return true; } }
+        return false;
+    },
+    // Skip our own overlays/panels so we never detect (or hide) JiTA's own headings/fields.
+    _mine: function (el) { return !!(el.closest && el.closest('[id^="jita"], #gpanel')); },
+
+    // ---- detection (the selectors most likely to need live tuning) ----
+    // Details field rows -> [{ label, el }]. Each sidebar field is wrapped in a testid starting
+    // "issue.views.field"; take the OUTERMOST such wrapper and read its heading as the label.
+    // Each Details field has a heading container "issue-field-heading-styled-field-heading.<key>" whose label
+    // text lives in a "*field-heading-title" element (with a multiline variant used by Labels / Team). We read
+    // the clean label from there and hide the whole ROW (the ancestor that also holds the value).
+    _fieldRows: function () {
+        var out = [], seen = [];
+        var heads = document.querySelectorAll('[data-testid^="issue-field-heading-styled-field-heading"]');
+        for (var i = 0; i < heads.length; i++) {
+            var h = heads[i];
+            if (JiTA.declutter._mine(h)) { continue; }
+            var titleEl = h.querySelector('[data-component-selector$="field-heading-title"]') || h;
+            var label = (titleEl.textContent || '').replace(/\s+/g, ' ').trim();   // raw case; matching normalizes
+            if (!label || label.length > 60) { continue; }
+            var row = JiTA.declutter._fieldRow(h);
+            if (row && seen.indexOf(row) === -1) { seen.push(row); out.push({ label: label, el: row }); }
+        }
+        return out;
+    },
+    _fieldRow: function (h) {
+        // The row = the LARGEST ancestor of this heading that doesn't also enclose a SECOND field-heading.
+        // This works for every field type (incl. Team/Labels, whose value wrappers use their own testids like
+        // issue-field-team.ui.view--container): stopping at the first ancestor that would span another field's
+        // heading is what keeps us from grabbing the entire Details group.
+        var el = h, up = 0;
+        while (el.parentElement && up < 10) {
+            if (el.parentElement.querySelectorAll('[data-testid^="issue-field-heading-styled-field-heading"]').length > 1) { break; }
+            el = el.parentElement; up++;
+        }
+        return el;
+    },
+    // Collapsible sections -> [{ name, el }] (el = the card to hide). Section headers are <h2> in the issue
+    // view (Details, More fields, Development, Automation, Sentry, Zendesk Support, ...).
+    // Sections are collapsible groups titled "issue-view-layout-group.common.ui.collapsible-group-factory.title"
+    // (Details, Development, More fields, Automation, Sentry, Zendesk Support, ...). Hide the whole enclosing
+    // <section>, not just the title, and read the name without its sub-title (e.g. "More fields" alone).
+    _sections: function () {
+        var out = [], seen = [];
+        var titles = document.querySelectorAll('[data-testid$="collapsible-group-factory.title"]');
+        for (var i = 0; i < titles.length; i++) {
+            var t = titles[i];
+            if (JiTA.declutter._mine(t)) { continue; }
+            var name = JiTA.declutter._sectionName(t);
+            if (!name || name.length > 40) { continue; }
+            var card = JiTA.declutter._sectionCard(t);
+            if (card && seen.indexOf(card) === -1) { seen.push(card); out.push({ name: name, el: card }); }
+        }
+        return out;
+    },
+    _sectionCard: function (t) {
+        // The <section> wraps only the HEADER; the expanded content is a sibling in the per-section container.
+        // So (like _fieldRow) take the largest ancestor of the title that doesn't also enclose a SECOND section
+        // title - that lands on the per-section container (header + content), not just the header.
+        var el = t, up = 0;
+        while (el.parentElement && up < 12) {
+            if (el.parentElement.querySelectorAll('[data-testid$="collapsible-group-factory.title"]').length > 1) { break; }
+            el = el.parentElement; up++;
+        }
+        return el;
+    },
+    _sectionName: function (t) {
+        // Drop the sub-title span (e.g. "More fields  Environment, Original estimate, ...") -> just the name.
+        var c = t.cloneNode(true), subs = c.querySelectorAll('[data-component-selector*="sub-title"]');
+        for (var i = 0; i < subs.length; i++) { if (subs[i].parentNode) { subs[i].parentNode.removeChild(subs[i]); } }
+        return (c.textContent || '').replace(/\s+/g, ' ').trim();
+    },
+
+    // ---- apply: hide selected, un-hide anything we'd hidden that is no longer selected. Idempotent + safe;
+    // called from the shared observer so it survives re-renders and SPA navigation.
+    apply: function () {
+        var type = JiTA.declutter._type();
+        if (!type) { return; }
+        var cfg = JiTA.declutter._cfg(type);
+        function reconcile(items, wanted) {
+            for (var i = 0; i < items.length; i++) {
+                var el = items[i].el, hide = JiTA.declutter._has(wanted, items[i].label || items[i].name);
+                try {
+                    if (hide && el.getAttribute('data-jita-declutter') !== '1') {
+                        el.setAttribute('data-jita-declutter', '1');
+                        el.style.setProperty('display', 'none', 'important');
+                    } else if (!hide && el.getAttribute('data-jita-declutter') === '1') {
+                        el.style.removeProperty('display');
+                        el.removeAttribute('data-jita-declutter');
+                    }
+                } catch (e) { /* ignore */ }
+            }
+        }
+        reconcile(JiTA.declutter._fieldRows(), cfg.fields);
+        reconcile(JiTA.declutter._sections(), cfg.sections);
+    },
+
+    // ---- config overlay (lists what's on the current issue; ticking hides it live) ----
+    openConfig: function () {
+        var type = JiTA.declutter._type();
+        var ov = JiTA.menu._openOverlay({ title: 'Declutter Jira' });
+        var $body = $('<div class="jita-menu-sect"></div>').appendTo(ov.$menu);
+        if (!type) {
+            $('<div class="jita-menu-status" style="padding-top:4px;">Open a bug report (EBR) or a defect (EDR / EO / PLAT) first. The list is built from the issue you are viewing, and your choices are saved separately for each type.</div>').appendTo($body);
+            return;
+        }
+        var label = type === 'ebr' ? 'Bug reports (EBR)' : 'Defects (EDR / EO / PLAT)';
+        var other = type === 'ebr' ? 'a defect (EDR / EO / PLAT)' : 'a bug report (EBR)';
+        $('<div class="jita-menu-status" style="padding-top:2px;"></div>')
+            .text('Hiding for ' + label + '  -  detected from ' + jitaCurrentKey() + '; applies to every issue of this type.').appendTo($body);
+        $('<div class="jita-menu-status" style="padding-top:6px;color:#7a8694;font-size:11px;"></div>')
+            .text('Only fields/sections on this issue are listed. Open this menu on ' + other + ', or on an issue that has different fields, to hide those too - each choice is saved for its whole type.').appendTo($body);
+
+        var cfg = JiTA.declutter._cfg(type);
+        function group(title, items, key) {
+            if (!items.length) { return; }
+            $('<h3 style="margin:14px 0 4px;color:#7a8694;font-size:11px;text-transform:uppercase;letter-spacing:.04em;"></h3>').text(title).appendTo($body);
+            var seen = {};
+            items.forEach(function (it) {
+                var name = it.label || it.name, n = JiTA.declutter._norm(name);
+                if (!n || seen[n]) { return; }
+                seen[n] = true;
+                var $row = $('<label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;font-size:13px;"></label>');
+                var $cb = $('<input type="checkbox">').prop('checked', JiTA.declutter._has(cfg[key], name));
+                $cb.on('change', function () {
+                    cfg[key] = cfg[key].filter(function (x) { return JiTA.declutter._norm(x) !== n; });
+                    if ($cb.prop('checked')) { cfg[key].push(name); }
+                    JiTA.declutter._save(type, cfg);
+                    JiTA.declutter.apply();
+                });
+                $row.append($cb).append($('<span></span>').text(name));
+                $body.append($row);
+            });
+        }
+        group('Fields (Details)', JiTA.declutter._fieldRows(), 'fields');
+        group('Sections', JiTA.declutter._sections(), 'sections');
+        if (!$body.find('input').length) {
+            $('<div class="jita-menu-status" style="margin-top:10px;color:#ffd479;">Nothing detected yet - if the issue is still loading, close and reopen this dialog.</div>').appendTo($body);
+        }
     }
 };
 
