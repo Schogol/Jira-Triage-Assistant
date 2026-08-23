@@ -201,12 +201,12 @@ if (!JITA_IS_FORGE_FRAME) {
     });
     // Open the ISD Credits overlay (your live monthly total + the leads-only leaderboard). The overlay's
     // Refresh recomputes the selected month's full leaderboard on demand.
-    GM_registerMenuCommand("📊 ISD Credits leaderboard…", function () {
+    GM_registerMenuCommand("ISD Credits leaderboard…", function () {
         if (typeof JiTA !== 'undefined' && JiTA.credits) { JiTA.credits.openView(); }
     });
     // Declutter: choose which Details fields / collapsible sections to hide (per issue-type). Built from the
     // issue you're viewing, so open a bug report or defect first.
-    GM_registerMenuCommand("🧹 Declutter Jira fields…", function () {
+    GM_registerMenuCommand("Declutter Jira fields…", function () {
         if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.openConfig(); }
     });
 }
