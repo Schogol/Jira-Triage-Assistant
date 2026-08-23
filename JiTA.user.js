@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.2.0
+// @version     3.2.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -7315,12 +7315,14 @@ JiTA.ui = {
             JiTA.ui._renderTimer = null;
             var k = JiTA.ui.currentKey;
             if (!k) { return; }
-            if (/^EBR-/.test(k)) { JiTA.ui.render(k); }
-            else if (JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k); }
+            if (/^EBR-/.test(k)) { JiTA.ui.render(k, true); }               // background: don't blank the list first
+            else if (JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k, true); }
         }, 600);
     },
 
-    render: function (key) {
+    // `background` (set only by scheduleRender, i.e. a data-driven refresh): keep the current list on screen
+    // and only swap in the new results when they're ready, instead of emptying to a "Finding…" state first.
+    render: function (key, background) {
         // View-mode switch: when the funnel's "this reporter's other reports" toggle is on, the EBR panel lists
         // the reporter's OTHER reports instead of similar defects. Every re-render path funnels through here, so
         // the branch lives here (one chokepoint) rather than at each caller.
@@ -7331,8 +7333,7 @@ JiTA.ui = {
         $('#jita-sd-title').text('Similar defects');   // reset title (the panel is shared with the EDR reports view)
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section; clear it on the EBR view
         JiTA.ui.renderLogLink(key);   // scan the attached log for known defects (no need to open it)
-        $('#jita-sd-list').empty();
-        JiTA.ui.setStatus('Finding similar defects…');
+        if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar defects…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countDefectsOnly().then(function (n) {
                 if (!n) {
@@ -7344,7 +7345,7 @@ JiTA.ui = {
                 return JiTA.rank.suggestBest(text, key, brCreated, JiTA.ui.modeOverride, terms).then(function (out) {
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
-                    if (!results.length) { JiTA.ui.setStatus('No similar defects found (' + n + ' indexed).'); return; }
+                    if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar defects found (' + n + ' indexed).'); return; }   // clear a stale list if a refresh now finds nothing
                     JiTA.ui.setStatus(results.length + ' suggestions · ' + out.mode + ' · ' + n + ' indexed');
                     // Feature C: enrich the displayed results with each defect's full description (which
                     // includes the reproduction steps) for the hover tooltip. Only a handful of indexed-DB
@@ -7368,15 +7369,15 @@ JiTA.ui = {
 
     // EDR (defect) view: rank the OPEN bug reports that best match this defect's description (keyword BM25),
     // and list them in the same panel. Mirrors render() but over the EBR index, with no log-scan / mark-dup.
-    renderReports: function (key) {
+    renderReports: function (key, background) {
         JiTA.ui._ensurePanel();
         JiTA.ui._syncFilterBtn();   // reflect any active session filters on the funnel
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Matching bug reports');
         $('#jita-sd-loglink').removeClass('has-hits').empty();   // EBR-only section; unused on a defect
-        $('#jita-sd-list').empty();
+        if (!background) { $('#jita-sd-list').empty(); }   // background refresh keeps the list until new results are ready
         JiTA.ui.renderExceptionCluster(key);   // list other defects that reported the same exception
-        JiTA.ui.setStatus('Finding matching bug reports…');
+        if (!background) { JiTA.ui.setStatus('Finding matching bug reports…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countEbr().then(function (n) {
                 if (!n) {
@@ -7387,7 +7388,7 @@ JiTA.ui = {
                 return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms).then(function (out) {
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
-                    if (!results.length) { JiTA.ui.setStatus('No matching bug reports found (' + n + ' open).'); return; }
+                    if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No matching bug reports found (' + n + ' open).'); return; }   // clear a stale list if a refresh now finds nothing
                     JiTA.ui.setStatus(results.length + ' matches · ' + out.mode + ' · ' + n + ' open reports');
                     // Enrich with each report's full description for the hover preview (a handful of reads).
                     return Promise.all(results.map(function (r) {
