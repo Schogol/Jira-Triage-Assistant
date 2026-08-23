@@ -8227,6 +8227,7 @@ JiTA.credits = {
         if (JiTA.credits.running) { JiTA.ui.toast('A credit computation is already running…'); return Promise.resolve(null); }
         JiTA.credits.running = true;
         var t0 = Date.now();
+        var quiet = JiTA.credits._quiet;   // capture THIS run's quietness at start: a concurrent manual "Refresh now" flips the shared _quiet then early-returns on the running-guard, so reading it later in the catch could wrongly flash a background error
         return JiTA.credits.computeMonth(y, m, mentor).then(function (res) {
             return JiTA.credits.putCached(res).then(function () {
                 JiTA.credits.running = false;
@@ -8236,9 +8237,9 @@ JiTA.credits = {
         }).catch(function (e) {
             JiTA.credits.running = false;
             // Surface only on user-initiated runs; background/scheduled runs stay silent (the badge + scheduler
-            // backoff cover those, so a worker outage does not flash an error pill every poll). _flash self-clears
-            // _quiet internally, so gate on it HERE.
-            if (!JiTA.credits._quiet) { JiTA.credits._flash('Credits error: ' + (e && e.message || e), 8000); }
+            // backoff cover those, so a worker outage does not flash an error pill every poll). Use the captured
+            // per-run `quiet`, not the shared _quiet (which a concurrent manual refresh could have flipped).
+            if (!quiet) { JiTA.credits._flash('Credits error: ' + (e && e.message || e), 8000); }
             throw e;
         });
     },
