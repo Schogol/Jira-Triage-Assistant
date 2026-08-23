@@ -10011,16 +10011,27 @@ JiTA.declutter = {
     // <section>, not just the title, and read the name without its sub-title (e.g. "More fields" alone).
     _sections: function () {
         var out = [], seen = [];
-        var titles = document.querySelectorAll('[data-testid="issue-view-layout-group.common.ui.collapsible-group-factory.title"]');
+        var titles = document.querySelectorAll('[data-testid$="collapsible-group-factory.title"]');
         for (var i = 0; i < titles.length; i++) {
             var t = titles[i];
             if (JiTA.declutter._mine(t)) { continue; }
             var name = JiTA.declutter._sectionName(t);
             if (!name || name.length > 40) { continue; }
-            var card = (t.closest && t.closest('section')) || t.parentElement;
+            var card = JiTA.declutter._sectionCard(t);
             if (card && seen.indexOf(card) === -1) { seen.push(card); out.push({ name: name, el: card }); }
         }
         return out;
+    },
+    _sectionCard: function (t) {
+        // The <section> wraps only the HEADER; the expanded content is a sibling in the per-section container.
+        // So (like _fieldRow) take the largest ancestor of the title that doesn't also enclose a SECOND section
+        // title - that lands on the per-section container (header + content), not just the header.
+        var el = t, up = 0;
+        while (el.parentElement && up < 12) {
+            if (el.parentElement.querySelectorAll('[data-testid$="collapsible-group-factory.title"]').length > 1) { break; }
+            el = el.parentElement; up++;
+        }
+        return el;
     },
     _sectionName: function (t) {
         // Drop the sub-title span (e.g. "More fields  Environment, Original estimate, ...") -> just the name.
