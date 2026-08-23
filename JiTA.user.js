@@ -9975,48 +9975,56 @@ JiTA.declutter = {
     // ---- detection (the selectors most likely to need live tuning) ----
     // Details field rows -> [{ label, el }]. Each sidebar field is wrapped in a testid starting
     // "issue.views.field"; take the OUTERMOST such wrapper and read its heading as the label.
+    // Each Details field has a heading container "issue-field-heading-styled-field-heading.<key>" whose label
+    // text lives in a "*field-heading-title" element (with a multiline variant used by Labels / Team). We read
+    // the clean label from there and hide the whole ROW (the ancestor that also holds the value).
     _fieldRows: function () {
-        var out = [], wraps = document.querySelectorAll('[data-testid^="issue.views.field"]');
-        for (var i = 0; i < wraps.length; i++) {
-            var w = wraps[i];
-            if (JiTA.declutter._mine(w)) { continue; }
-            var nested = false, p = w.parentElement;
-            while (p) { var tid = (p.getAttribute && p.getAttribute('data-testid')) || ''; if (tid.indexOf('issue.views.field') === 0) { nested = true; break; } p = p.parentElement; }
-            if (nested) { continue; }                       // keep only the outermost field wrapper
-            var label = JiTA.declutter._fieldLabel(w);
-            if (label) { out.push({ label: label, el: w }); }
-        }
-        return out;
-    },
-    _fieldLabel: function (w) {
-        var h = w.querySelector('[data-testid*="field-heading"], [data-component-selector*="field-heading"], label, h3');
-        var raw = h ? h.textContent : ((w.textContent || '').split('\n')[0]);
-        var t = JiTA.declutter._norm(raw);
-        return (t && t.length <= 60) ? t : '';
-    },
-    // Collapsible sections -> [{ name, el }] (el = the card to hide). Section headers are <h2> in the issue
-    // view (Details, More fields, Development, Automation, Sentry, Zendesk Support, ...).
-    _sections: function () {
-        var out = [], heads = document.querySelectorAll('h2');
+        var out = [], seen = [];
+        var heads = document.querySelectorAll('[data-testid^="issue-field-heading-styled-field-heading"]');
         for (var i = 0; i < heads.length; i++) {
             var h = heads[i];
             if (JiTA.declutter._mine(h)) { continue; }
-            var name = JiTA.declutter._norm((h.textContent || '').split('\n')[0]);
-            if (!name || name.length > 40) { continue; }
-            var card = JiTA.declutter._sectionCard(h);
-            if (card) { out.push({ name: name, el: card }); }
+            var titleEl = h.querySelector('[data-component-selector$="field-heading-title"]') || h;
+            var label = (titleEl.textContent || '').replace(/\s+/g, ' ').trim();   // raw case; matching normalizes
+            if (!label || label.length > 60) { continue; }
+            var row = JiTA.declutter._fieldRow(h);
+            if (row && seen.indexOf(row) === -1) { seen.push(row); out.push({ label: label, el: row }); }
         }
         return out;
     },
-    _sectionCard: function (h) {
-        // Nearest ancestor carrying a data-testid = the section wrapper; cap the climb so we never hide the
-        // whole panel. Falls back to the heading's parent.
-        var el = h.parentElement, best = h.parentElement;
-        for (var up = 0; up < 5 && el; up++) {
-            if (el.getAttribute && el.getAttribute('data-testid')) { best = el; break; }
+    _fieldRow: function (h) {
+        // Walk up from the heading to the row that also holds the field VALUE, so hiding it removes both.
+        var valSel = '[data-testid^="issue.issue-view-layout.issue-view-"], [data-testid^="issue.views.issue-base.context."], [data-testid^="issue.views.field"]';
+        var el = h;
+        for (var up = 0; up < 6 && el.parentElement; up++) {
             el = el.parentElement;
+            if (el.querySelector && el.querySelector(valSel)) { return el; }
         }
-        return best;
+        return h.parentElement;
+    },
+    // Collapsible sections -> [{ name, el }] (el = the card to hide). Section headers are <h2> in the issue
+    // view (Details, More fields, Development, Automation, Sentry, Zendesk Support, ...).
+    // Sections are collapsible groups titled "issue-view-layout-group.common.ui.collapsible-group-factory.title"
+    // (Details, Development, More fields, Automation, Sentry, Zendesk Support, ...). Hide the whole enclosing
+    // <section>, not just the title, and read the name without its sub-title (e.g. "More fields" alone).
+    _sections: function () {
+        var out = [], seen = [];
+        var titles = document.querySelectorAll('[data-testid="issue-view-layout-group.common.ui.collapsible-group-factory.title"]');
+        for (var i = 0; i < titles.length; i++) {
+            var t = titles[i];
+            if (JiTA.declutter._mine(t)) { continue; }
+            var name = JiTA.declutter._sectionName(t);
+            if (!name || name.length > 40) { continue; }
+            var card = (t.closest && t.closest('section')) || t.parentElement;
+            if (card && seen.indexOf(card) === -1) { seen.push(card); out.push({ name: name, el: card }); }
+        }
+        return out;
+    },
+    _sectionName: function (t) {
+        // Drop the sub-title span (e.g. "More fields  Environment, Original estimate, ...") -> just the name.
+        var c = t.cloneNode(true), subs = c.querySelectorAll('[data-component-selector*="sub-title"]');
+        for (var i = 0; i < subs.length; i++) { if (subs[i].parentNode) { subs[i].parentNode.removeChild(subs[i]); } }
+        return (c.textContent || '').replace(/\s+/g, ' ').trim();
     },
 
     // ---- apply: hide selected, un-hide anything we'd hidden that is no longer selected. Idempotent + safe;
