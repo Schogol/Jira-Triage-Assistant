@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.2.2
+// @version     3.2.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -300,6 +300,9 @@ function ensureButtonsPresent() {
 // (cheap, early-exiting) check at most once every 200ms rather than on every individual mutation.
 var jitaButtonGuardScheduled = false;
 var jitaButtonObserver = new MutationObserver(function () {
+    // Synchronous first (before the 200ms debounce below): if a re-render just wiped our field/section hides,
+    // re-assert them THIS microtask so they never flash back into view. Cheap - early-exits when nothing's hidden.
+    try { if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.reassertFast(); } } catch (e0) { /* ignore */ }
     if (jitaButtonGuardScheduled) { return; }
     jitaButtonGuardScheduled = true;
     setTimeout(function () {
@@ -10125,6 +10128,21 @@ JiTA.declutter = {
         }
         reconcile(JiTA.declutter._fieldRows(), cfg.fields);
         reconcile(JiTA.declutter._sections(), cfg.sections);
+        // Remember how many elements we currently have hidden, so the observer's cheap synchronous guard
+        // (reassertFast) can tell when a Jira re-render has wiped some of them and re-hide before the next paint.
+        JiTA.declutter._lastHidden = document.querySelectorAll('[data-jita-declutter="1"]').length;
+    },
+
+    // Cheap synchronous guard, called from the DOM observer on every mutation batch (a microtask, so it runs
+    // BEFORE the browser paints). When Jira re-renders the Details column it rebuilds the field/section nodes
+    // fresh - without our display:none - so they'd flash visible until the 200ms-debounced apply() catches up.
+    // Here we detect that in O(1)ish (one querySelector count) and re-assert the hides immediately, in the same
+    // tick, so nothing ever paints visible. Costs nothing when nothing is hidden (_lastHidden stays 0).
+    _lastHidden: 0,
+    reassertFast: function () {
+        if (!JiTA.declutter._lastHidden) { return; }   // nothing hidden -> no work, no query
+        if (document.querySelectorAll('[data-jita-declutter="1"]').length >= JiTA.declutter._lastHidden) { return; }   // all hides still in place
+        JiTA.declutter.apply();   // a hide went missing (re-render) -> re-hide now, before paint
     },
 
     // ---- config overlay (lists what's on the current issue; ticking hides it live) ----
