@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.4.0
+// @version     3.5.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8128,7 +8128,7 @@ JiTA.credits = {
     CLOSED_STATUS: 'Closed',
     OPEN_STATUS: 'Open',                                          // reports are Open before being closed/trashed
     // CCP's convert-to-support automation closes the report AS the member and leaves this exact comment. A
-    // Closed report carrying it is a REASSIGN (worth reassigned credit), not a TRASH - see _reportsClosed.
+    // Closed report carrying it is a REASSIGN (worth reassigned credit), not a TRASH - see the crawl's reassign split.
     CONVERT_COMMENT: 'BR converted to support ticket. Zendesk ticket has been unlinked. Closing bug report.',
     TEAM_JQL: 'Team[Team]',
     TEAM_CF: 'customfield_10001',
@@ -8182,7 +8182,6 @@ JiTA.credits = {
             el.textContent = '📊 ISD credits\n' + msg;
         } catch (e) { /* ignore */ }
     },
-    _log: function (msg) { JiTA.credits._pill(msg); if (window.console) { console.log('[JiTA] credits: ' + msg); } },
     _clearProgress: function () {
         try { var el = document.getElementById('jita-credits-progress'); if (el && el.parentNode) { el.parentNode.removeChild(el); } } catch (e) { /* ignore */ }
     },
@@ -8196,473 +8195,22 @@ JiTA.credits = {
         JiTA.credits._flashTimer = setTimeout(function () { JiTA.credits._clearProgress(); }, ms || 4000);
     },
 
-    // ---- REST (session-authenticated, read-only) --------------------------------------------------------
-    // Client-side token-bucket rate limiter: paces each endpoint's requests to just under Atlassian's published
-    // per-endpoint RPS cap (RATE_LIMITS x RATE_SAFETY), so the parallel fan-out saturates the cap without a 429
-    // storm. One bucket per endpoint key, refilling continuously; a request waits for a token before it fires.
-    _rateBuckets: {},
-    _rateKey: function (s) {
-        if (s.indexOf('approximate-count') !== -1) { return 'search/approximate-count'; }
-        if (s.indexOf('/search/jql') !== -1) { return 'search/jql'; }
-        if (s.indexOf('/changelog') !== -1) { return 'changelog'; }
-        return 'default';
-    },
-    _gate: function (key) {
-        var C = JiTA.credits, b = C._rateBuckets[key];
-        if (!b) { var rps = (C.RATE_LIMITS[key] || C.RATE_LIMITS.default) * C.RATE_SAFETY; b = C._rateBuckets[key] = { tokens: rps, rps: rps, last: Date.now() }; }
-        return new Promise(function (resolve) {
-            (function step() {
-                var now = Date.now();
-                b.tokens = Math.min(b.rps, b.tokens + (now - b.last) / 1000 * b.rps); b.last = now;
-                if (b.tokens >= 1) { b.tokens -= 1; resolve(); }
-                else { setTimeout(step, Math.max(5, Math.ceil((1 - b.tokens) / b.rps * 1000))); }
-            })();
-        });
-    },
-
-    // GET with the session cookie; retries on 429 (honoring Retry-After) and transient 5xx.
-    _get: function (path) {
-        return JiTA.credits._gate(JiTA.credits._rateKey(path)).then(function () {
-            return new Promise(function (resolve, reject) {
-                (function attempt(retries) {
-                    $.ajax({ url: JiTA.HOST + path, type: 'GET', dataType: 'json' })
-                        .done(function (data) { resolve(data); })
-                        .fail(function (xhr) {
-                            if ((xhr.status === 429 || xhr.status >= 500) && retries > 0) {
-                                var ra = parseInt(xhr.getResponseHeader('Retry-After'), 10);
-                                setTimeout(function () { attempt(retries - 1); }, (isNaN(ra) ? 3 : ra) * 1000);
-                            } else {
-                                reject(new Error('GET ' + path + ' -> HTTP ' + xhr.status));
-                            }
-                        });
-                })(JiTA.MAX_RETRIES);
-            });
-        });
-    },
-
-    // One page of /search/jql (reuses the sync engine's POST helper: session auth + 429 retry).
-    _searchPage: function (jql, fields, token) {
-        var body = { jql: jql, fields: fields, maxResults: JiTA.credits.PAGE_SIZE };
-        if (token) { body.nextPageToken = token; }
-        return JiTA.credits._gate('search/jql').then(function () {
-            return JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) { return r.data || {}; });
-        });
-    },
-
-    // All matching issues (full field objects), paginated.
-    _fetchIssues: function (jql, fields) {
-        var out = [];
-        function page(token) {
-            return JiTA.credits._searchPage(jql, fields, token).then(function (d) {
-                out = out.concat(d.issues || []);
-                var next = d.nextPageToken || null;
-                if (!next || d.isLast) { return out; }
-                return JiTA.util.delay(JiTA.PAGE_DELAY_MS).then(function () { return page(next); });
-            });
-        }
-        return page(null);
-    },
-
-    // Just the keys matching jql, as a { key: true } set.
-    _allKeys: function (jql) {
-        return JiTA.credits._fetchIssues(jql, ['key']).then(function (issues) {
-            var keys = {};
-            for (var i = 0; i < issues.length; i++) { keys[issues[i].key] = true; }
-            return keys;
-        });
-    },
-
-    // Fast count for a jql via the approximate-count endpoint: ONE request, no issue pages. Exact for the small
-    // per-member/per-month sets we use it on. Used for trashed + reassigned where we only need the tally.
-    _count: function (jql) {
-        return JiTA.credits._gate('search/approximate-count').then(function () {
-            return JiTA.sync._apiPost('/rest/api/3/search/approximate-count', { jql: jql }).then(function (r) { return (r.data && r.data.count) || 0; });
-        });
-    },
-
-    // Full changelog for an issue (dedicated paginated endpoint, so no 100-entry truncation), oldest-first.
-    _allHistories: function (key) {
-        var out = [];
-        function page(start) {
-            return JiTA.credits._get('/rest/api/3/issue/' + key + '/changelog?startAt=' + start + '&maxResults=100').then(function (res) {
-                var vals = res.values || [];
-                out = out.concat(vals);
-                if (start + vals.length >= (res.total || 0) || !vals.length) {
-                    out.sort(function (a, b) { return (a.created || '') < (b.created || '') ? -1 : 1; });
-                    return out;
-                }
-                return page(start + vals.length);
-            });
-        }
-        return page(0);
-    },
-
-    // Run fn(item, i) over items ONE AT A TIME (polite to rate limits), resolving to the array of results.
-    _serial: function (items, fn) {
-        var out = [];
-        return items.reduce(function (p, item, i) {
-            return p.then(function () { return fn(item, i); }).then(function (r) { out.push(r); });
-        }, Promise.resolve()).then(function () { return out; });
-    },
-
-    // Like _serial but runs up to `limit` of fn(item, i) at once (bounded so we don't trip Jira's rate limiter;
-    // the 429/Retry-After retry in _get/_search/_count is the backstop). Resolves results in original order.
-    _parallel: function (items, limit, fn) {
-        return new Promise(function (resolve, reject) {
-            var out = new Array(items.length), next = 0, done = 0, failed = false;
-            if (!items.length) { resolve(out); return; }
-            var n = Math.min(limit || 1, items.length);
-            function startOne() {
-                if (next >= items.length || failed) { return; }
-                var i = next++;
-                Promise.resolve().then(function () { return fn(items[i], i); }).then(function (r) {
-                    out[i] = r; done++;
-                    if (done === items.length) { resolve(out); } else { startOne(); }
-                }, function (e) { if (!failed) { failed = true; reject(e); } });
-            }
-            for (var k = 0; k < n; k++) { startOne(); }
-        });
-    },
-
-    _accList: function (accounts) {
-        return accounts.map(function (a) { return '"' + a + '"'; }).join(', ');
-    },
-
-    // ---- member resolution (group members + pre-migration <handle>@ccpgames.com accounts) ----------------
-    _groupMembers: function (group) {
-        group = group || JiTA.credits.GROUP;
-        var out = [];
-        function page(param, start) {
-            return JiTA.credits._get('/rest/api/3/group/member?' + param +
-                '&includeInactiveUsers=true&startAt=' + start + '&maxResults=50').then(function (res) {
-                var vals = res.values || [];
-                out = out.concat(vals);
-                if (res.isLast || !vals.length) { return out; }
-                return page(param, start + vals.length);
-            });
-        }
-        // Prefer groupname; fall back to groupId (some instances reject groupname on /group/member).
-        return page('groupname=' + encodeURIComponent(group), 0).catch(function () {
-            return JiTA.credits._get('/rest/api/3/groups/picker?query=' + encodeURIComponent(group)).then(function (res) {
-                var gid = null, gs = (res && res.groups) || [];
-                for (var i = 0; i < gs.length; i++) { if ((gs[i].name || '').toLowerCase() === group.toLowerCase()) { gid = gs[i].groupId; } }
-                if (!gid) { throw new Error('group not found: ' + group); }
-                out = [];
-                return page('groupId=' + encodeURIComponent(gid), 0);
-            });
-        });
-    },
-
-    // Candidate login handles for a member, most reliable first (email local-part, then display name variants).
-    _handles: function (member) {
-        var out = [], seen = {};
-        var email = member.emailAddress || '';
-        if (email.indexOf('@') > 0) { out.push(email.split('@')[0]); }
-        var dn = (member.displayName || '').replace(/^\s+|\s+$/g, '');
-        var norm = /^isd /i.test(dn) ? dn.slice(4) : dn;
-        out.push(norm.replace(/ /g, '').toLowerCase());
-        out.push(norm.split(' ')[0].toLowerCase());
-        var uniq = [];
-        for (var i = 0; i < out.length; i++) { var h = out[i]; if (h && !seen[h]) { seen[h] = true; uniq.push(h); } }
-        return uniq;
-    },
-
-    // accountId that `value` resolves to (read off one of its issues); '' if it resolves but has no issues,
-    // null if it doesn't resolve to a user at all.
-    _reporterAccount: function (value) {
-        return JiTA.credits._searchPage('reporter = "' + value + '"', ['reporter'], null).then(function (d) {
-            var issues = d.issues || [];
-            if (!issues.length) { return ''; }
-            return ((issues[0].fields || {}).reporter || {}).accountId || '';
-        }, function () { return null; });
-    },
-
-    // For each member, find & verify their <handle>@OLD_DOMAIN account. Returns { oldIds: {id:true},
-    // oldNames: {oldAccountId: currentMemberName} }.
-    _resolveOldReporters: function (members) {
-        var C = JiTA.credits, claimed = {}, oldIds = {}, oldNames = {}, done = 0;
-        return C._parallel(members, C.CONCURRENCY, function (m) {
-            var dn = m.displayName || m.accountId;
-            var cands = C._handles(m).map(function (h) { return h + '@' + C.OLD_DOMAIN; });
-            return C._serial(cands, function (cand) {
-                if (claimed[cand]) { return null; }
-                return C._reporterAccount(cand).then(function (aid) {
-                    return aid === null ? null : { cand: cand, aid: aid };
-                });
-            }).then(function (results) {
-                for (var i = 0; i < results.length; i++) {
-                    var hit = results[i];
-                    if (hit) {
-                        claimed[hit.cand] = true;
-                        if (hit.aid) { oldIds[hit.aid] = true; oldNames[hit.aid] = dn; }
-                        break;   // first resolving handle wins for this member
-                    }
-                }
-                done++; C._pill('resolving members: ' + done + '/' + members.length);
-            });
-        }).then(function () { return { oldIds: oldIds, oldNames: oldNames }; });
-    },
-
-    // ---- month + formula --------------------------------------------------------------------------------
-    _monthBounds: function (y, m) {
-        var ny = m === 12 ? y + 1 : y, nm = m === 12 ? 1 : m + 1;
-        var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
-        return { start: y + '-' + p2(m) + '-01', end: ny + '-' + p2(nm) + '-01' };
-    },
-
-    // NOTE: diverges from monthly_report.py - the Extra Credits (lead/mentor bonus) is intentionally NOT
-    // added to the score here. It's still computed + stored (index 7) but no longer affects Credits or rank.
-    _creditFormula: function (r) {
-        var filtered = r.attached + r.trashed;
-        var c = 0.3 * Math.min(100, filtered) + 0.1 * Math.max(0, filtered - 100);
-        c += 0.1 * r.reassigned + r.created + r.resolved;
-        return Math.round(c * 10) / 10;
-    },
-
-    // ---- defects (created + resolved, clone-deduped) ----------------------------------------------------
-    _defectsCreated: function (accounts, b, acctToName, rows) {
-        var jql = 'project in (' + JiTA.credits.PROJECTS + ') AND issuetype = Defect ' +
-            'AND reporter in (' + JiTA.credits._accList(accounts) + ') ' +
-            'AND created >= "' + b.start + '" AND created < "' + b.end + '" ' +
-            'AND (resolution is EMPTY OR resolution != Duplicate)';
-        return JiTA.credits._fetchIssues(jql, ['reporter', 'project']).then(function (issues) {
-            for (var i = 0; i < issues.length; i++) {
-                var name = acctToName[((issues[i].fields || {}).reporter || {}).accountId];
-                if (name) { rows[name].created++; }
-            }
-        });
-    },
-
-    _defectsResolved: function (accounts, b, acctToName, rows) {
-        var jql = 'project in (' + JiTA.credits.PROJECTS + ') AND issuetype = Defect ' +
-            'AND reporter in (' + JiTA.credits._accList(accounts) + ') ' +
-            'AND resolution in (' + JiTA.credits.RESOLUTIONS + ') ' +
-            'AND resolved >= "' + b.start + '" AND resolved < "' + b.end + '"';
-        return JiTA.credits._fetchIssues(jql, ['reporter', 'project', 'issuelinks']).then(function (issues) {
-            var present = {}, meta = {};
-            for (var i = 0; i < issues.length; i++) { present[issues[i].key] = true; meta[issues[i].key] = issues[i]; }
-            // union-find over Cloners links so a cloned pair counts as ONE real defect (chains too).
-            var parent = {};
-            function find(x) { if (parent[x] === undefined) { parent[x] = x; } while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
-            function union(a, c) { var ra = find(a), rb = find(c); if (ra !== rb) { parent[ra] = rb; } }
-            for (var k in present) { if (present.hasOwnProperty(k)) { find(k); } }
-            for (var j = 0; j < issues.length; j++) {
-                var links = (issues[j].fields || {}).issuelinks || [];
-                for (var l = 0; l < links.length; l++) {
-                    if (!JiTA.credits.DEDUP_LINK_TYPES[(links[l].type || {}).name]) { continue; }
-                    var other = links[l].inwardIssue || links[l].outwardIssue;
-                    if (other && present[other.key]) { union(issues[j].key, other.key); }
-                }
-            }
-            function rank(key) {
-                var pk = (meta[key].fields.project || {}).key;
-                var pr = JiTA.credits.PROJECT_RANK[pk]; return (pr === undefined ? 99 : pr);
-            }
-            var comps = {};
-            for (var kk in present) { if (present.hasOwnProperty(kk)) { var root = find(kk); (comps[root] = comps[root] || []).push(kk); } }
-            for (var root2 in comps) {
-                if (!comps.hasOwnProperty(root2)) { continue; }
-                var keep = comps[root2][0];
-                for (var q = 1; q < comps[root2].length; q++) {
-                    var cand = comps[root2][q];
-                    if (rank(cand) < rank(keep) || (rank(cand) === rank(keep) && cand < keep)) { keep = cand; }
-                }
-                var name = acctToName[((meta[keep].fields || {}).reporter || {}).accountId];
-                if (name) { rows[name].resolved++; }
-            }
-        });
-    },
-
-    // ---- reports Attached / Trashed (reopen-aware, automation re-credited) ------------------------------
-    _isAutomation: function (author) {
-        if (!author) { return false; }
-        if (JiTA.credits.AUTOMATION_ID && author.accountId === JiTA.credits.AUTOMATION_ID) { return true; }
-        if ((author.emailAddress || '').toLowerCase() === JiTA.credits.AUTOMATION_EMAIL.toLowerCase()) { return true; }
-        return (author.displayName || '').toLowerCase().indexOf('automation for jira') !== -1;
-    },
-
-    _assigneeAt: function (histories, ts) {
-        var who = null;
-        for (var i = 0; i < histories.length; i++) {           // oldest-first
-            if ((histories[i].created || '') > ts) { break; }
-            var items = histories[i].items || [];
-            for (var j = 0; j < items.length; j++) { if (items[j].field === 'assignee') { who = items[j].to; } }
-        }
-        return who;
-    },
-
-    // accountId to credit for a report currently in target_status: author of the last (still-in-effect)
-    // transition into it, if in-month; automation transitions are re-credited to the assignee at that moment.
-    _effectiveActioner: function (histories, targetStatus, b) {
-        var last = null;
-        for (var i = 0; i < histories.length; i++) {
-            var items = histories[i].items || [];
-            for (var j = 0; j < items.length; j++) {
-                if (items[j].field !== 'status') { continue; }
-                last = items[j].toString === targetStatus ? histories[i] : null;   // else = undone by a later change
-            }
-        }
-        if (!last) { return null; }
-        var created = last.created || '';
-        if (!(b.start <= created.slice(0, 10) && created.slice(0, 10) < b.end)) { return null; }
-        var author = last.author || {};
-        return JiTA.credits._isAutomation(author) ? JiTA.credits._assigneeAt(histories, created) : author.accountId;
-    },
-
-    // ---- reports Attached (reopen-aware; trashed + reassigned moved to _reportsClosed) -------------------
-    // A report that left Attached this month needs its effective actioner resolved from the changelog (an
-    // attach-then-detach must not credit the detacher); the rest are direct BY-author counts minus moved-out.
-    _reportsActioned: function (memberAccounts, b, rows, acctToName) {
-        var C = JiTA.credits, names = Object.keys(memberAccounts).sort();
-        var win = 'DURING ("' + b.start + '", "' + b.end + '")';
-        var movedOut = {};
-        return C._allKeys('project = ' + C.EBR + ' AND status CHANGED FROM "' + C.ATTACHED_STATUS + '" ' + win).then(function (a) {
-            for (var k in a) { if (a.hasOwnProperty(k)) { movedOut[k] = true; } }
-        }).then(function () {
-            var attDone = 0;
-            return C._parallel(names, C.CONCURRENCY, function (name) {
-                var accs = memberAccounts[name], att = {}, queries = [];
-                for (var qi = 0; qi < accs.length; qi++) {
-                    queries.push('project = ' + C.EBR + ' AND status CHANGED TO "' + C.ATTACHED_STATUS + '" BY "' + accs[qi] + '" ' + win);
-                }
-                if (C.AUTOMATION_ID) {   // automation did the transition, but this member (assignee) triggered it
-                    queries.push('project = ' + C.EBR + ' AND status CHANGED TO "' + C.ATTACHED_STATUS + '" BY "' + C.AUTOMATION_ID + '" ' + win + ' AND assignee in (' + C._accList(accs) + ')');
-                }
-                return C._serial(queries, function (jql) {
-                    return C._allKeys(jql).then(function (keys) { for (var kk in keys) { if (keys.hasOwnProperty(kk)) { att[kk] = true; } } });
-                }).then(function () {
-                    var a = 0;
-                    for (var kA in att) { if (att.hasOwnProperty(kA) && !movedOut[kA]) { a++; } }
-                    rows[name].attached += a;
-                    attDone++; C._pill('attached: ' + attDone + '/' + names.length);
-                });
-            });
-        }).then(function () {
-            var movedKeys = Object.keys(movedOut), moDone = 0;
-            if (movedKeys.length) { C._log('resolving ' + movedKeys.length + ' moved-out attach(es) via changelog…'); }
-            return C._parallel(movedKeys, C.CONCURRENCY, function (k) {
-                return C._allHistories(k).then(function (hist) {
-                    var an = acctToName[C._effectiveActioner(hist, C.ATTACHED_STATUS, b)];
-                    if (an) { rows[an].attached += 1; }
-                    moDone++; C._pill('moved-out attaches: ' + moDone + '/' + movedKeys.length);
-                });
-            });
-        });
-    },
-
-    // ---- reports Trashed + Reassigned (count-only via the fast approximate-count endpoint, no crawl) -----
-    // A report the member closed (Open -> Closed) this month is a REASSIGN if it carries CCP's convert-to-
-    // support comment (the automation closes it AS the member), otherwise a TRASH. So reassigned = closes-with-
-    // that-comment and trashed = all closes minus reassigned (deducting so a reassign scores 0.1, not 0.3+0.1).
-    // Per-account counts are summed: a transition has one author, and cross-account same-report closes by one
-    // person are vanishingly rare, so no dedup is needed.
-    _reportsClosed: function (memberAccounts, b, rows, acctToName) {
-        var C = JiTA.credits, names = Object.keys(memberAccounts).sort();
-        var win = 'DURING ("' + b.start + '", "' + b.end + '")';
-        var done = 0;
-        return C._parallel(names, C.CONCURRENCY, function (name) {
-            var accs = memberAccounts[name], closed = 0, reassigned = 0;
-            return C._serial(accs, function (acc) {
-                var base = 'project = ' + C.EBR + ' AND status CHANGED FROM "' + C.OPEN_STATUS + '" TO "' + C.CLOSED_STATUS + '" BY "' + acc + '" ' + win;
-                return C._count(base).then(function (nClosed) {
-                    closed += nClosed;
-                    return C._count(base + ' AND comment ~ "' + C.CONVERT_COMMENT + '"').then(function (nReassign) { reassigned += nReassign; });
-                });
-            }).then(function () {
-                rows[name].reassigned += reassigned;
-                rows[name].trashed += Math.max(0, closed - reassigned);
-                done++; C._pill('closed/reassigns: ' + done + '/' + names.length);
-            });
-        });
-    },
-
-    // ---- extra credits (lead bonus + optional mentor overrides) -----------------------------------------
-    _computeExtra: function (names, mentor) {
-        var out = {};
-        for (var i = 0; i < names.length; i++) {
-            var n = names[i];
-            var toks = {}; n.toLowerCase().replace(/-/g, ' ').split(/\s+/).forEach(function (t) { if (t) { toks[t] = true; } });
-            var e = 0;
-            for (var lead in JiTA.credits.LEADS) { if (JiTA.credits.LEADS.hasOwnProperty(lead) && toks[lead]) { e += JiTA.credits.LEAD_BONUS; } }
-            if (mentor) { for (var h in mentor) { if (mentor.hasOwnProperty(h) && toks[h]) { e += mentor[h]; } } }
-            if (e) { out[n] = e; }
-        }
-        return out;
-    },
 
     // ---- orchestration ----------------------------------------------------------------------------------
     // Compute the full per-member credit table for month (y, m). Resolves { ym, computedAt, header, table,
     // rows, nameToAcc }. `table` rows are arrays aligned to `header` (last row is the Total).
-    // The crawl is fetch + politeness-sleep heavy, so it runs in the shared worker where a hidden/unfocused
-    // tab's background timer throttling can't stall it. Falls back to the in-tab crawl (_computeMonthLocal)
-    // when the worker is unavailable; progress streams back as throttled 'creditsProgress' events -> the pill.
+    // Worker-only: the crawl runs entirely in the shared worker (crComputeMonth) where a hidden/unfocused tab's
+    // background timer throttling can't stall it; progress streams back as throttled 'creditsProgress' events ->
+    // the pill. No in-tab fallback - if the worker is unavailable we reject so callers surface an error/retry.
     computeMonth: function (y, m, mentor) {
         var C = JiTA.credits;
-        if (JiTA.worker && JiTA.worker._started) {
-            var tag = (JiTA.sched.tabId) + ':' + (++C._tagSeq);
-            C._workerTag = tag;
-            return JiTA.worker.call('creditsMonth', { y: y, m: m, mentor: mentor || null, tag: tag }, { timeoutMs: C.WORKER_TIMEOUT_MS })
-                .then(function (res) { C._workerTag = null; return res; }, function (err) {
-                    C._workerTag = null;
-                    if (window.console) { console.log('[JiTA] credits: worker crawl failed, running in-tab:', (err && err.message) || err); }
-                    return C._computeMonthLocal(y, m, mentor);
-                });
-        }
-        return C._computeMonthLocal(y, m, mentor);
+        if (!(JiTA.worker && JiTA.worker._started)) { return Promise.reject(new Error('credits: worker unavailable')); }
+        var tag = (JiTA.sched.tabId) + ':' + (++C._tagSeq);
+        C._workerTag = tag;
+        return JiTA.worker.call('creditsMonth', { y: y, m: m, mentor: mentor || null, tag: tag }, { timeoutMs: C.WORKER_TIMEOUT_MS })
+            .then(function (res) { C._workerTag = null; return res; }, function (err) { C._workerTag = null; throw err; });
     },
 
-    // In-tab crawl: the fallback path, and the reference implementation the worker copy (crComputeMonth) mirrors.
-    _computeMonthLocal: function (y, m, mentor) {
-        var C = JiTA.credits, b = C._monthBounds(y, m);
-        var ym = b.start.slice(0, 7);
-        C._log(ym + ': resolving group members…');
-        return C._groupMembers().then(function (members) {
-            var active = members.filter(function (x) { return x.active !== false; });
-            return C._resolveOldReporters(active).then(function (old) {
-                var acctToName = {}, memberAccounts = {}, nameToAcc = {};
-                active.forEach(function (x) {
-                    acctToName[x.accountId] = x.displayName;
-                    (memberAccounts[x.displayName] = memberAccounts[x.displayName] || []).push(x.accountId);
-                    if (!nameToAcc[x.displayName]) { nameToAcc[x.displayName] = x.accountId; }
-                });
-                for (var oid in old.oldNames) {
-                    if (!old.oldNames.hasOwnProperty(oid)) { continue; }
-                    var nm = old.oldNames[oid];
-                    acctToName[oid] = nm;
-                    (memberAccounts[nm] = memberAccounts[nm] || []).push(oid);
-                }
-                var names = Object.keys(memberAccounts).sort();
-                var rows = {};
-                names.forEach(function (n) { rows[n] = { created: 0, resolved: 0, attached: 0, trashed: 0, reassigned: 0 }; });
-                var allAccounts = Object.keys(acctToName);
-
-                C._log(ym + ': ' + names.length + ' members - fetching defects…');
-                return C._defectsCreated(allAccounts, b, acctToName, rows)
-                    .then(function () { return C._defectsResolved(allAccounts, b, acctToName, rows); })
-                    .then(function () { C._log(ym + ': reports attached…'); return C._reportsActioned(memberAccounts, b, rows, acctToName); })
-                    .then(function () { C._log(ym + ': closed (trashed / reassigned)…'); return C._reportsClosed(memberAccounts, b, rows, acctToName); })
-                    .then(function () {
-                        var extras = C._computeExtra(names, mentor);
-                        var header = ['Name', 'Defects Created', 'Defects Resolved', 'Reports Attached',
-                            'Reports Trashed', 'Reports Reassigned', 'Total Actioned', 'Extra Credits', 'Credits Earned'];
-                        var table = [];
-                        var tot = { created: 0, resolved: 0, attached: 0, trashed: 0, reassigned: 0, actioned: 0, extra: 0, credits: 0 };
-                        names.forEach(function (n) {
-                            var r = rows[n], extra = extras[n] || 0;
-                            var actioned = r.attached + r.trashed + r.reassigned + r.created;
-                            var earned = C._creditFormula(r);
-                            table.push([n, r.created, r.resolved, r.attached, r.trashed, r.reassigned, actioned, extra, earned]);
-                            tot.created += r.created; tot.resolved += r.resolved; tot.attached += r.attached;
-                            tot.trashed += r.trashed; tot.reassigned += r.reassigned; tot.actioned += actioned;
-                            tot.extra += extra; tot.credits += earned;
-                        });
-                        table.push(['Total', tot.created, tot.resolved, tot.attached, tot.trashed, tot.reassigned,
-                            tot.actioned, Math.round(tot.extra * 10) / 10, Math.round(tot.credits * 10) / 10]);
-                        return { ym: ym, computedAt: new Date().toISOString(), header: header, table: table, rows: rows, nameToAcc: nameToAcc, memberAccounts: memberAccounts };
-                    });
-            });
-        });
-    },
 
     // ---- cache (meta store: credits:<YYYY-MM>) ----------------------------------------------------------
     _cacheKey: function (ym) { return 'credits:' + ym; },
@@ -8679,6 +8227,7 @@ JiTA.credits = {
         if (JiTA.credits.running) { JiTA.ui.toast('A credit computation is already running…'); return Promise.resolve(null); }
         JiTA.credits.running = true;
         var t0 = Date.now();
+        var quiet = JiTA.credits._quiet;   // capture THIS run's quietness at start: a concurrent manual "Refresh now" flips the shared _quiet then early-returns on the running-guard, so reading it later in the catch could wrongly flash a background error
         return JiTA.credits.computeMonth(y, m, mentor).then(function (res) {
             return JiTA.credits.putCached(res).then(function () {
                 JiTA.credits.running = false;
@@ -8687,7 +8236,10 @@ JiTA.credits = {
             });
         }).catch(function (e) {
             JiTA.credits.running = false;
-            JiTA.credits._flash('Credits error: ' + (e && e.message || e), 8000);
+            // Surface only on user-initiated runs; background/scheduled runs stay silent (the badge + scheduler
+            // backoff cover those, so a worker outage does not flash an error pill every poll). Use the captured
+            // per-run `quiet`, not the shared _quiet (which a concurrent manual refresh could have flipped).
+            if (!quiet) { JiTA.credits._flash('Credits error: ' + (e && e.message || e), 8000); }
             throw e;
         });
     },
@@ -8699,100 +8251,19 @@ JiTA.credits = {
     _selfKey: function (ym) { return 'creditsSelf:' + ym; },
     getSelf: function (ym) { return JiTA.db.getMeta(JiTA.credits._selfKey(ym)); },
 
-    // Resolve the viewer's name + accounts (+ their cached Reassigned/Extra and the full table for ranking),
-    // preferring the last full-leaderboard cache; falls back to /myself + old-account resolution if there's none.
-    _selfIdentity: function (me, full) {
-        var C = JiTA.credits;
-        if (full && full.nameToAcc) {
-            var myName = null;
-            for (var n in full.nameToAcc) { if (full.nameToAcc.hasOwnProperty(n) && full.nameToAcc[n] === me) { myName = n; } }
-            if (myName) {
-                var myAccounts = (full.memberAccounts && full.memberAccounts[myName]) || [me];
-                var reassigned = (full.rows && full.rows[myName] && full.rows[myName].reassigned) || 0;
-                var extra = 0;
-                (full.table || []).forEach(function (row) { if (row[0] === myName) { extra = row[7] || 0; } });
-                return Promise.resolve({ myName: myName, myAccounts: myAccounts, reassigned: reassigned, extra: extra, fullTable: full.table });
-            }
-        }
-        return C._get('/rest/api/2/myself').then(function (mys) {
-            var myName = (mys && mys.displayName) || null;
-            return C._resolveOldReporters([{ accountId: me, displayName: myName, emailAddress: (mys && mys.emailAddress) || '' }]).then(function (old) {
-                var myAccounts = [me];
-                for (var oid in old.oldNames) { if (old.oldNames.hasOwnProperty(oid)) { myAccounts.push(oid); } }
-                var extra = myName ? (C._computeExtra([myName])[myName] || 0) : 0;
-                return { myName: myName, myAccounts: myAccounts, reassigned: 0, extra: extra, fullTable: null };
-            });
-        }, function () { return { myName: null, myAccounts: [me], reassigned: 0, extra: 0, fullTable: null }; });
-    },
 
-    // Attached (reopen-aware, limited to the reports I touched) + Trashed/Reassigned (count-only) for MY accounts.
-    // Mirrors _reportsActioned + _reportsClosed but self-scoped, so the badge / your-card reflect the same rules.
-    _reportsActionedSelf: function (accs, b) {
-        var C = JiTA.credits, win = 'DURING ("' + b.start + '", "' + b.end + '")';
-        var attQueries = [];
-        for (var i = 0; i < accs.length; i++) {
-            attQueries.push('project = ' + C.EBR + ' AND status CHANGED TO "' + C.ATTACHED_STATUS + '" BY "' + accs[i] + '" ' + win);
-        }
-        if (C.AUTOMATION_ID) {
-            attQueries.push('project = ' + C.EBR + ' AND status CHANGED TO "' + C.ATTACHED_STATUS + '" BY "' + C.AUTOMATION_ID + '" ' + win + ' AND assignee in (' + C._accList(accs) + ')');
-        }
-        var movedOut = {}, attSet = {}, attached = 0, trashed = 0, reassigned = 0;
-        // trashed + reassigned via fast counts (a close with the convert comment is a reassign, not a trash)
-        return C._serial(accs, function (acc) {
-            var base = 'project = ' + C.EBR + ' AND status CHANGED FROM "' + C.OPEN_STATUS + '" TO "' + C.CLOSED_STATUS + '" BY "' + acc + '" ' + win;
-            return C._count(base).then(function (nClosed) {
-                return C._count(base + ' AND comment ~ "' + C.CONVERT_COMMENT + '"').then(function (nReassign) { reassigned += nReassign; trashed += (nClosed - nReassign); });
-            });
-        }).then(function () {
-            return C._allKeys('project = ' + C.EBR + ' AND status CHANGED FROM "' + C.ATTACHED_STATUS + '" ' + win).then(function (a) {
-                for (var k in a) { if (a.hasOwnProperty(k)) { movedOut[k] = true; } }
-            });
-        }).then(function () {
-            return C._serial(attQueries, function (jql) { return C._allKeys(jql).then(function (keys) { for (var kk in keys) { if (keys.hasOwnProperty(kk)) { attSet[kk] = true; } } }); });
-        }).then(function () {
-            var myAcc = {}; accs.forEach(function (a) { myAcc[a] = true; });
-            var ambiguous = [];
-            for (var kA in attSet) { if (attSet.hasOwnProperty(kA)) { if (!movedOut[kA]) { attached++; } else { ambiguous.push(kA); } } }
-            return C._serial(ambiguous, function (k) {
-                return JiTA.util.delay(C.CRAWL_DELAY_MS).then(function () { return C._allHistories(k); }).then(function (hist) {
-                    var actioner = C._effectiveActioner(hist, C.ATTACHED_STATUS, b);
-                    if (actioner && myAcc[actioner]) { attached++; }
-                });
-            });
-        }).then(function () { return { attached: attached, trashed: Math.max(0, trashed), reassigned: reassigned }; });
-    },
-
-    // Compute + cache only the viewer's numbers for (y, m). Resolves the self record (also written to creditsSelf:<ym>).
+    // Compute + cache only the viewer's numbers for (y, m) via the shared worker (worker-only: no in-tab crawl).
+    // The tab still owns currentUser + the full-cache read + the meta write; the worker (crComputeSelf) does the
+    // crawl. Resolves the self record (also written to creditsSelf:<ym>); rejects if the worker is unavailable.
     computeSelf: function (y, m) {
-        var C = JiTA.credits, b = C._monthBounds(y, m), ym = b.start.slice(0, 7);
+        var C = JiTA.credits, ym = y + '-' + (m < 10 ? '0' : '') + m;   // ym inline (was C._monthBounds, now worker-side)
+        if (!(JiTA.worker && JiTA.worker._started)) { return Promise.reject(new Error('credits: worker unavailable')); }
         return JiTA.link.currentUser().then(function (me) {
             if (!me) { return null; }
             return C.getCached(ym).then(function (full) {
-                return C._selfIdentity(me, full).then(function (id) {
-                    if (!id.myName) { return null; }   // couldn't identify the viewer as a member
-                    var rows = {}; rows[id.myName] = { created: 0, resolved: 0, attached: 0, trashed: 0, reassigned: 0 };
-                    var acctToName = {}; id.myAccounts.forEach(function (a) { acctToName[a] = id.myName; });
-                    return C._defectsCreated(id.myAccounts, b, acctToName, rows)
-                        .then(function () { return C._defectsResolved(id.myAccounts, b, acctToName, rows); })
-                        .then(function () { return C._reportsActionedSelf(id.myAccounts, b); })
-                        .then(function (rep) {
-                            var r = rows[id.myName];
-                            // reassigned is now cheap (a single count), so recompute it live instead of reusing id.reassigned from cache
-                            r.attached = rep.attached; r.trashed = rep.trashed; r.reassigned = rep.reassigned;
-                            var credits = C._creditFormula(r);
-                            var actioned = r.attached + r.trashed + r.reassigned + r.created;
-                            var rank = null, total = null;
-                            if (id.fullTable) {
-                                var real = id.fullTable.slice(0, id.fullTable.length - 1);
-                                var better = 0;
-                                real.forEach(function (row) { var cv = (row[0] === id.myName) ? credits : row[8]; if (cv > credits) { better++; } });
-                                rank = better + 1; total = real.length;
-                            }
-                            var out = { ym: ym, computedAt: new Date().toISOString(), me: me, myName: id.myName,
-                                created: r.created, resolved: r.resolved, attached: r.attached, trashed: r.trashed,
-                                reassigned: r.reassigned, actioned: actioned, extra: id.extra, credits: credits, rank: rank, total: total };
-                            return JiTA.db.setMeta(C._selfKey(ym), out).then(function () { return out; });
-                        });
+                return JiTA.worker.call('creditsSelf', { y: y, m: m, me: me, full: full || null }, { timeoutMs: C.WORKER_TIMEOUT_MS }).then(function (out) {
+                    if (!out) { return null; }
+                    return JiTA.db.setMeta(C._selfKey(ym), out).then(function () { return out; });
                 });
             });
         });
@@ -9075,6 +8546,9 @@ JiTA.credits = {
         HEARTBEAT_MS: 30 * 1000,
         LAST_FULL_KEY: 'creditsLastFullTs',
         LAST_SELF_KEY: 'creditsLastSelfTs',
+        FAIL_MS: 3 * 60 * 1000,          // after a FAILED run, wait this long before retrying (stops a 30s retry loop during a worker outage; short enough to recover soon after the worker returns)
+        FAIL_FULL_KEY: 'creditsFullFailTs',
+        FAIL_SELF_KEY: 'creditsSelfFailTs',
         FULL_LEASE_KEY: 'creditsFullLease',
         SELF_LEASE_KEY: 'creditsSelfLease',
         _timer: null,
@@ -9095,24 +8569,28 @@ JiTA.credits = {
             var now = JiTA.credits._ymNow();
 
             // Full leaderboard (heavy) takes priority. Heartbeats + releases its lease, then refreshes self off the fresh result.
-            if (S._elapsed(S.LAST_FULL_KEY, S.FULL_MS) && S._lease(S.FULL_LEASE_KEY, S.FULL_TTL_MS)) {
+            if (S._elapsed(S.LAST_FULL_KEY, S.FULL_MS) && S._elapsed(S.FAIL_FULL_KEY, S.FAIL_MS) && S._lease(S.FULL_LEASE_KEY, S.FULL_TTL_MS)) {
                 JiTA.credits._quiet = true;
                 try { var b = document.getElementById('jita-credits-badge'); if (b) { b.textContent = '📊 updating…'; } } catch (e) { /* ignore */ }
                 var hb = setInterval(function () { gmSet(S.FULL_LEASE_KEY, { tabId: JiTA.sched.tabId, ts: Date.now() }); }, S.HEARTBEAT_MS);
                 JiTA.credits.refresh(now.y, now.m).then(function () {
-                    gmSet(S.LAST_FULL_KEY, Date.now());
+                    gmSet(S.LAST_FULL_KEY, Date.now()); gmSet(S.FAIL_FULL_KEY, 0);   // success: clear the failure backoff
                     clearInterval(hb); S._release(S.FULL_LEASE_KEY);
-                    return JiTA.credits.refreshSelf(now.y, now.m).then(function () { gmSet(S.LAST_SELF_KEY, Date.now()); });
+                    return JiTA.credits.refreshSelf(now.y, now.m).then(function () { gmSet(S.LAST_SELF_KEY, Date.now()); gmSet(S.FAIL_SELF_KEY, 0); });
                 }).then(function () { try { JiTA.credits.badge.refresh(); } catch (e) { /* ignore */ } })
-                    .catch(function () { clearInterval(hb); S._release(S.FULL_LEASE_KEY); });
+                    .catch(function () {
+                        gmSet(S.FAIL_FULL_KEY, Date.now());   // back off so a persistent worker outage doesn't retry every poll
+                        clearInterval(hb); S._release(S.FULL_LEASE_KEY);
+                        try { JiTA.credits.badge.refresh(); } catch (e) { /* ignore */ }   // drop the "updating…" badge back to the last cached value
+                    });
                 return;   // one job per tick
             }
 
             // Your own credits (cheap, frequent).
-            if (S._elapsed(S.LAST_SELF_KEY, S.SELF_MS) && S._lease(S.SELF_LEASE_KEY, S.SELF_TTL_MS)) {
+            if (S._elapsed(S.LAST_SELF_KEY, S.SELF_MS) && S._elapsed(S.FAIL_SELF_KEY, S.FAIL_MS) && S._lease(S.SELF_LEASE_KEY, S.SELF_TTL_MS)) {
                 JiTA.credits.refreshSelf(now.y, now.m).then(function () {
-                    gmSet(S.LAST_SELF_KEY, Date.now()); S._release(S.SELF_LEASE_KEY);
-                }).catch(function () { S._release(S.SELF_LEASE_KEY); });
+                    gmSet(S.LAST_SELF_KEY, Date.now()); gmSet(S.FAIL_SELF_KEY, 0); S._release(S.SELF_LEASE_KEY);
+                }).catch(function () { gmSet(S.FAIL_SELF_KEY, Date.now()); S._release(S.SELF_LEASE_KEY); });
             }
         },
 
@@ -9436,9 +8914,9 @@ function jitaWorkerBody(cfg) {
     }
 
     // ---- ISD credits: the monthly leaderboard crawl runs HERE now, so its fetches + politeness sleeps live off
-    // the tab's main thread and can't be background-timer-throttled when the tab is unfocused. This mirrors
-    // JiTA.credits._computeMonthLocal (the tab keeps that copy as the fallback). Same-origin fetch carries the
-    // session cookie; progress is streamed back as throttled 'creditsProgress' events tagged to the requesting tab.
+    // the tab's main thread and can't be background-timer-throttled when the tab is unfocused. This is the SOLE
+    // ISD-credit crawl now - the tab side is just a thin worker dispatch (no in-tab fallback). Same-origin fetch
+    // carries the session cookie; progress is streamed back as throttled 'creditsProgress' events tagged to the requesting tab.
     var crc = cfg.credits || {};
     var crActiveTags = [], crLastTick = 0;   // progress tags of the crawl currently executing (serialized: one crawl at a time)
     var crLast = null;                       // { key, tags, promise } : the most recent crawl (running or queued), for coalescing
@@ -9713,7 +9191,7 @@ function jitaWorkerBody(cfg) {
         var author = last.author || {};
         return crIsAutomation(author) ? crAssigneeAt(histories, created) : author.accountId;
     }
-    // Reports Attached (reopen-aware). Mirrors JiTA.credits._reportsActioned; trashed + reassigned -> crReportsClosed.
+    // Reports Attached (reopen-aware), full-leaderboard scope; the self path uses crReportsActionedSelf. Trashed + reassigned -> crReportsClosed.
     function crReportsActioned(memberAccounts, b, rows, acctToName) {
         var names = Object.keys(memberAccounts).sort();
         var win = 'DURING ("' + b.start + '", "' + b.end + '")';
@@ -9751,7 +9229,7 @@ function jitaWorkerBody(cfg) {
             });
         });
     }
-    // Reports Trashed + Reassigned, count-only (fast approximate-count, no crawl). Mirrors JiTA.credits._reportsClosed:
+    // Reports Trashed + Reassigned, count-only (fast approximate-count, no crawl):
     // a close carrying CCP's convert-to-support comment is a reassign; trashed = all closes minus reassigns.
     function crReportsClosed(memberAccounts, b, rows) {
         var names = Object.keys(memberAccounts).sort();
@@ -9784,7 +9262,7 @@ function jitaWorkerBody(cfg) {
         }
         return out;
     }
-    // Full per-member credit table for (y, m). Mirrors JiTA.credits._computeMonthLocal; resolves the same shape.
+    // Full per-member credit table for (y, m) - worker-only; the tab (computeMonth) dispatches here.
     function crComputeMonth(payload) {
         payload = payload || {};
         var y = payload.y, m = payload.m, mentor = payload.mentor || null;
@@ -9836,6 +9314,103 @@ function jitaWorkerBody(cfg) {
             });
         });
     }
+
+    // ---- ISD credits: SELF (viewer-only) compute -----------------------------------------------------------
+    // Mirrors JiTA.credits.computeSelf / _selfIdentity / _reportsActionedSelf but runs in the worker off the cr*
+    // twins. me + the last full-leaderboard cache (full) arrive in the payload (the tab still owns currentUser +
+    // getCached + the meta write); this returns the self-record shape - no DOM / no meta access here.
+    function crSelfIdentity(me, full) {
+        if (full && full.nameToAcc) {
+            var myName = null;
+            for (var n in full.nameToAcc) { if (full.nameToAcc.hasOwnProperty(n) && full.nameToAcc[n] === me) { myName = n; } }
+            if (myName) {
+                var myAccounts = (full.memberAccounts && full.memberAccounts[myName]) || [me];
+                var reassigned = (full.rows && full.rows[myName] && full.rows[myName].reassigned) || 0;
+                var extra = 0;
+                (full.table || []).forEach(function (row) { if (row[0] === myName) { extra = row[7] || 0; } });
+                return Promise.resolve({ myName: myName, myAccounts: myAccounts, reassigned: reassigned, extra: extra, fullTable: full.table });
+            }
+        }
+        return crGet('/rest/api/2/myself').then(function (mys) {
+            var myName = (mys && mys.displayName) || null;
+            return crResolveOldReporters([{ accountId: me, displayName: myName, emailAddress: (mys && mys.emailAddress) || '' }]).then(function (old) {
+                var myAccounts = [me];
+                for (var oid in old.oldNames) { if (old.oldNames.hasOwnProperty(oid)) { myAccounts.push(oid); } }
+                var extra = myName ? (crComputeExtra([myName])[myName] || 0) : 0;
+                return { myName: myName, myAccounts: myAccounts, reassigned: 0, extra: extra, fullTable: null };
+            });
+        }, function () { return { myName: null, myAccounts: [me], reassigned: 0, extra: 0, fullTable: null }; });
+    }
+
+    // Attached (reopen-aware, self-scoped) + Trashed/Reassigned (count-only) for MY accounts. Mirrors the tab
+    // JiTA.credits._reportsActionedSelf; a close carrying the convert comment is a reassign, not a trash.
+    function crReportsActionedSelf(accs, b) {
+        var win = 'DURING ("' + b.start + '", "' + b.end + '")';
+        var attQueries = [];
+        for (var i = 0; i < accs.length; i++) {
+            attQueries.push('project = ' + crc.EBR + ' AND status CHANGED TO "' + crc.ATTACHED_STATUS + '" BY "' + accs[i] + '" ' + win);
+        }
+        if (crc.AUTOMATION_ID) {
+            attQueries.push('project = ' + crc.EBR + ' AND status CHANGED TO "' + crc.ATTACHED_STATUS + '" BY "' + crc.AUTOMATION_ID + '" ' + win + ' AND assignee in (' + crAccList(accs) + ')');
+        }
+        var movedOut = {}, attSet = {}, attached = 0, trashed = 0, reassigned = 0;
+        return crSerial(accs, function (acc) {
+            var base = 'project = ' + crc.EBR + ' AND status CHANGED FROM "' + crc.OPEN_STATUS + '" TO "' + crc.CLOSED_STATUS + '" BY "' + acc + '" ' + win;
+            return crCount(base).then(function (nClosed) {
+                return crCount(base + ' AND comment ~ "' + crc.CONVERT_COMMENT + '"').then(function (nReassign) { reassigned += nReassign; trashed += (nClosed - nReassign); });
+            });
+        }).then(function () {
+            return crAllKeys('project = ' + crc.EBR + ' AND status CHANGED FROM "' + crc.ATTACHED_STATUS + '" ' + win).then(function (a) {
+                for (var k in a) { if (a.hasOwnProperty(k)) { movedOut[k] = true; } }
+            });
+        }).then(function () {
+            return crSerial(attQueries, function (jql) { return crAllKeys(jql).then(function (keys) { for (var kk in keys) { if (keys.hasOwnProperty(kk)) { attSet[kk] = true; } } }); });
+        }).then(function () {
+            var myAcc = {}; accs.forEach(function (a) { myAcc[a] = true; });
+            var ambiguous = [];
+            for (var kA in attSet) { if (attSet.hasOwnProperty(kA)) { if (!movedOut[kA]) { attached++; } else { ambiguous.push(kA); } } }
+            return crSerial(ambiguous, function (k) {
+                return crSleep(crc.CRAWL_DELAY_MS).then(function () { return crAllHistories(k); }).then(function (hist) {
+                    var actioner = crEffectiveActioner(hist, crc.ATTACHED_STATUS, b);
+                    if (actioner && myAcc[actioner]) { attached++; }
+                });
+            });
+        }).then(function () { return { attached: attached, trashed: Math.max(0, trashed), reassigned: reassigned }; });
+    }
+
+    // Compute only the viewer's numbers for (y, m). payload = { y, m, me, full }; resolves the self record
+    // (SAME shape the tab writes to creditsSelf:<ym>). The tab does the meta write + badge refresh.
+    function crComputeSelf(payload) {
+        payload = payload || {};
+        var y = payload.y, m = payload.m, me = payload.me, full = payload.full || null;
+        if (!me) { return Promise.resolve(null); }
+        var b = crMonthBounds(y, m), ym = b.start.slice(0, 7);
+        return crSelfIdentity(me, full).then(function (id) {
+            if (!id.myName) { return null; }
+            var rows = {}; rows[id.myName] = { created: 0, resolved: 0, attached: 0, trashed: 0, reassigned: 0 };
+            var acctToName = {}; id.myAccounts.forEach(function (a) { acctToName[a] = id.myName; });
+            return crDefectsCreated(id.myAccounts, b, acctToName, rows)
+                .then(function () { return crDefectsResolved(id.myAccounts, b, acctToName, rows); })
+                .then(function () { return crReportsActionedSelf(id.myAccounts, b); })
+                .then(function (rep) {
+                    var r = rows[id.myName];
+                    r.attached = rep.attached; r.trashed = rep.trashed; r.reassigned = rep.reassigned;
+                    var credits = crCreditFormula(r);
+                    var actioned = r.attached + r.trashed + r.reassigned + r.created;
+                    var rank = null, total = null;
+                    if (id.fullTable) {
+                        var real = id.fullTable.slice(0, id.fullTable.length - 1);
+                        var better = 0;
+                        real.forEach(function (row) { var cv = (row[0] === id.myName) ? credits : row[8]; if (cv > credits) { better++; } });
+                        rank = better + 1; total = real.length;
+                    }
+                    return { ym: ym, computedAt: new Date().toISOString(), me: me, myName: id.myName,
+                        created: r.created, resolved: r.resolved, attached: r.attached, trashed: r.trashed,
+                        reassigned: r.reassigned, actioned: actioned, extra: id.extra, credits: credits, rank: rank, total: total };
+                });
+        });
+    }
+
     // Single-flight so two tabs (e.g. a scheduled run + a manual Refresh) never crawl the same month at once:
     // a same-month caller COALESCES onto the in-flight crawl (one crawl, one result, one clean progress stream for
     // all of them); a different-month request is queued behind it. Without this, concurrent crawls doubled the REST
@@ -9890,6 +9465,12 @@ function jitaWorkerBody(cfg) {
                 // so two tabs never crawl the same month at once; progress streams as tagged 'creditsProgress' events.
                 result = await runCreditsMonth(payload);
             }
+            else if (type === 'creditsSelf') {
+                // Cheap, self-scoped. The tab's SELF lease already gates cadence to one tab per ~2 min and refreshSelf
+                // is guarded by the shared running flag, so no cross-tab coalescing is needed here (unlike creditsMonth).
+                // Runs directly; shares the crGate rate buckets. Streams no progress (self never drove a pill).
+                result = await crComputeSelf(payload);
+            }
             else if (type === 'invalidate') { vecCache = null; kwCache = null; logsigCache = null; result = { ok: true }; }   // drop all indexes after a sync writes the DB
             else { throw new Error('unknown worker request: ' + type); }
             self.postMessage({ id: id, ok: true, result: result });
@@ -9911,6 +9492,7 @@ JiTA.worker = {
     CHANNEL: 'jita-rank-v1',
     LOCK: 'jita-rank-leader-v1',
     RPC_TIMEOUT_MS: 30000,
+    LEADER_ACK_MS: 6000,      // a follower rejects if no leader ACKs its req within this, instead of waiting out the full op timeout (up to 15 min for credits)
     RESPAWN_MAX: 3,           // respawn a dead worker up to this many times per leadership session before stepping down
     RESPAWN_BACKOFF_MS: 1000, // base backoff between respawns (grows per attempt: 1s, 2s, 3s)
     REELECT_DELAY_MS: 3000,   // after stepping down, wait this long before re-requesting the leader lock
@@ -10119,11 +9701,20 @@ JiTA.worker = {
         opts = opts || {};
         var timeoutMs = opts.timeoutMs || JiTA.worker.RPC_TIMEOUT_MS;   // long crawls (credits) pass a bigger cap
         if (JiTA.worker._isLeader && JiTA.worker._worker) { return JiTA.worker._workerCall(type, payload, timeoutMs); }
+        // Leader but its worker is momentarily down (respawn / self-heal): fail fast. Routing our own req over the
+        // channel would hang - a tab never receives its OWN BroadcastChannel messages, and no other tab is leader.
+        if (JiTA.worker._isLeader && !JiTA.worker._worker) { return Promise.reject(new Error('leader worker restarting')); }
         return new Promise(function (resolve, reject) {
             if (!JiTA.worker._bc) { reject(new Error('no leader / no channel')); return; }
             var id = (JiTA.sched.tabId) + ':' + (++JiTA.worker._tabSeq);
             var timer = setTimeout(function () { delete JiTA.worker._tabPending[id]; reject(new Error('rpc timeout (no leader ready?)')); }, timeoutMs);
-            JiTA.worker._tabPending[id] = { resolve: resolve, reject: reject, timer: timer };
+            // Ack timer: if no leader ACKs within LEADER_ACK_MS, assume no leader is ready and reject promptly rather
+            // than waiting out a long op timeout. An ACK cancels this and keeps the (longer) op timer running.
+            var ackTimer = setTimeout(function () {
+                var pp = JiTA.worker._tabPending[id];
+                if (pp) { clearTimeout(pp.timer); delete JiTA.worker._tabPending[id]; reject(new Error('no leader ready')); }
+            }, JiTA.worker.LEADER_ACK_MS);
+            JiTA.worker._tabPending[id] = { resolve: resolve, reject: reject, timer: timer, ackTimer: ackTimer };
             JiTA.worker._bc.postMessage({ kind: 'req', id: id, type: type, payload: payload, timeoutMs: timeoutMs });
         });
     },
@@ -10178,16 +9769,25 @@ JiTA.worker = {
     _onBc: function (e) {
         var m = e.data || {};
         if (m.kind === 'req') {
-            if (!JiTA.worker._isLeader || !JiTA.worker._worker) { return; }   // only the leader answers
+            if (!JiTA.worker._isLeader) { return; }   // only the leader answers; followers stay silent
+            if (!JiTA.worker._worker) {               // leader up but worker (re)spawning -> tell the follower NOW so it fails fast
+                JiTA.worker._bc.postMessage({ kind: 'res', id: m.id, ok: false, error: 'leader worker restarting' });
+                return;
+            }
+            JiTA.worker._bc.postMessage({ kind: 'ack', id: m.id });   // instant main-thread ACK -> cancels the follower's ack timer (a long crawl is not false-killed)
             JiTA.worker._workerCall(m.type, m.payload, m.timeoutMs).then(function (result) {
                 JiTA.worker._bc.postMessage({ kind: 'res', id: m.id, ok: true, result: result });
             }, function (err) {
                 JiTA.worker._bc.postMessage({ kind: 'res', id: m.id, ok: false, error: String((err && err.message) || err) });
             });
+        } else if (m.kind === 'ack') {
+            var pa = JiTA.worker._tabPending[m.id];
+            if (pa && pa.ackTimer) { clearTimeout(pa.ackTimer); pa.ackTimer = null; }   // leader picked it up; keep the op timer
         } else if (m.kind === 'res') {
             var p = JiTA.worker._tabPending[m.id];
             if (!p) { return; }
-            clearTimeout(p.timer); delete JiTA.worker._tabPending[m.id];
+            clearTimeout(p.timer); if (p.ackTimer) { clearTimeout(p.ackTimer); }
+            delete JiTA.worker._tabPending[m.id];
             if (m.ok) { p.resolve(m.result); } else { p.reject(new Error(m.error || 'remote error')); }
         } else if (m.kind === 'event') {
             JiTA.worker._applyEvent(m.data);   // a worker event the leader relayed (e.g. embed pass finished)
