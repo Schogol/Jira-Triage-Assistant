@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.2.4
+// @version     3.4.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -2772,6 +2772,14 @@ var JiTA = {
     PAGE_DELAY_MS: 250,                            // polite gap between search pages
     NEAR_LIMIT_DELAY_MS: 3000,                     // back off harder when the rate-limit budget is low
     MAX_RETRIES: 5,
+    // This build's userscript version (from the Tampermonkey metadata). Injected into the shared worker at spawn
+    // and echoed back from its 'ping', so any tab can detect it's talking to a worker built from OLDER code (a
+    // leader tab that wasn't reloaded after an update) and trigger a re-election. '' if GM_info is unavailable.
+    SCRIPT_VERSION: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '',
+    // Gated debug logger: emits to the console only when "Debug logging" is enabled in Settings (the 'sdDebug' flag).
+    dlog: function () {
+        try { if (window.console && gmGet('sdDebug', false)) { console.log.apply(console, arguments); } } catch (e) { /* ignore */ }
+    },
     // How many related issues the panel lists (similar defects / matching bug reports). User-configurable
     // from the settings menu, persisted in the GM flag 'sdTopN'; default 8, clamped 1..30 (kept below
     // JiTA.rank.CAND so the fusion candidate pool is never the limiting factor). Read live at query time,
@@ -7677,7 +7685,7 @@ JiTA.menu = {
   align-items: center; justify-content: center; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }\
 #jita-menu { width: 360px; max-height: 82vh; overflow-y: auto; background: #1D2125; color: #e6e6e6;\
   border: 1px solid #3a434d; border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.55); font-size: 13px; }\
-#jita-menu .jita-menu-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #282d33; border-radius: 8px 8px 0 0; position: sticky; top: 0; }\
+#jita-menu .jita-menu-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #282d33; border-radius: 8px 8px 0 0; position: sticky; top: 0; z-index: 2; }\
 #jita-menu .jita-menu-head h2 { margin: 0; font-size: 14px; font-weight: 700; flex: 1; color: #f2f2f4; }\
 #jita-menu .jita-menu-x { cursor: pointer; font-weight: 700; font-size: 18px; line-height: 1; padding: 0 4px; color: #9aa6b2; }\
 #jita-menu .jita-menu-x:hover { color: #fff; }\
@@ -7936,6 +7944,41 @@ JiTA.menu = {
 
             $p.append($ta);
         }
+
+        // ---- Debug (worker diagnostics + self-heal test) ----
+        var $dbg = $('<div class="jita-menu-sect"></div>');
+        $('<h3>Debug</h3>').appendTo($dbg);
+        var w = JiTA.worker;
+        var wstat = !w._started ? 'not started'
+                  : (w._isLeader ? 'this tab is the worker LEADER' : 'follower (leader is another tab)');
+        $('<div class="jita-menu-status"></div>')
+            .text('Worker: ' + wstat + ' · this tab v' + (JiTA.SCRIPT_VERSION || '?')).appendTo($dbg);
+
+        // Debug logging toggle (GM flag 'sdDebug'; a custom row since it is not a savedVariables feature).
+        var dbgOn = !!gmGet('sdDebug', false);
+        var $dRow = $('<div class="jita-menu-row"></div>');
+        $('<span class="lbl">Debug logging</span>')
+            .append($('<span class="sub"></span>').text('Verbose [JiTA] console output for worker/credits diagnostics'))
+            .appendTo($dRow);
+        var $dSw = $('<div class="jita-sw"><span class="knob"></span></div>');
+        if (dbgOn) { $dSw.addClass('on'); }
+        $dSw.on('click', function () { gmSet('sdDebug', !gmGet('sdDebug', false)); refreshMenu(); });
+        $dRow.append($dSw);
+        $dbg.append($dRow);
+
+        // Self-heal test (shown only when debug is on, to keep it out of casual reach). Calls _onWorkerDead, which
+        // only acts on the leader tab's own worker, so it is disabled on followers with a hint about where to click.
+        if (dbgOn) {
+            var $dbgAct = $('<div class="jita-menu-actions"></div>').appendTo($dbg);
+            var $sim = $('<button class="jita-btn">Simulate worker death</button>')
+                .on('click', function () { JiTA.menu.close(); try { JiTA.worker._onWorkerDead('manual test'); } catch (e) { /* ignore */ } });
+            if (!w._isLeader) { $sim.prop('disabled', true); }
+            $dbgAct.append($sim);
+            var hint = w._isLeader ? 'Kills the worker on this tab; it should respawn (watch the console).'
+                                   : 'Open this on the LEADER tab to test worker recovery.';
+            $('<div class="jita-menu-status" style="color:#7a8694;"></div>').text(hint).appendTo($dbg);
+        }
+        $p.append($dbg);
     }
 };
 
@@ -9819,7 +9862,7 @@ function jitaWorkerBody(cfg) {
         var d = e.data || {}, id = d.id, type = d.type, payload = d.payload;
         try {
             var result;
-            if (type === 'ping') { result = { pong: true, backend: backend }; }
+            if (type === 'ping') { result = { pong: true, backend: backend, version: cfg.SCRIPT_VERSION }; }
             else if (type === 'embed') { var v = await embed((payload && payload.text) || ''); result = { backend: backend, dim: v.length, vec: Array.from(v) }; }
             else if (type === 'rankSemantic') { result = await rankSemantic(payload); }
             else if (type === 'rankKeyword') { result = await rankKeyword(payload); }
@@ -9868,6 +9911,11 @@ JiTA.worker = {
     CHANNEL: 'jita-rank-v1',
     LOCK: 'jita-rank-leader-v1',
     RPC_TIMEOUT_MS: 30000,
+    RESPAWN_MAX: 3,           // respawn a dead worker up to this many times per leadership session before stepping down
+    RESPAWN_BACKOFF_MS: 1000, // base backoff between respawns (grows per attempt: 1s, 2s, 3s)
+    REELECT_DELAY_MS: 3000,   // after stepping down, wait this long before re-requesting the leader lock
+    GIVEUP_AFTER: 12,         // consecutive failures (no successful RPC in between) before giving up entirely
+    MAX_STANDASIDE: 2,        // times a stale tab yields the lock to a newer one before leading anyway (so a closed newer tab can't leave us leaderless)
 
     _bc: null,           // BroadcastChannel (every tab)
     _worker: null,       // the dedicated Worker (leader only)
@@ -9877,43 +9925,192 @@ JiTA.worker = {
     _tabSeq: 0,
     _wPending: {},       // id -> {resolve,reject,timer}  : worker requests the LEADER is awaiting
     _wSeq: 0,
+    _releaseLock: null,  // resolves the held Web Lock -> steps down so another tab can win leadership
+    _respawns: 0,        // respawns used in the current leadership session (reset on a fresh session / proof of life)
+    _failStreak: 0,      // consecutive worker failures with no successful RPC in between (reset on any success)
+    _recovering: false,  // re-entry guard: a death is already being handled
+    _gaveUp: false,      // hit GIVEUP_AFTER -> stop trying to be leader
+    _maxSeenVersion: JiTA.SCRIPT_VERSION,  // highest userscript version known to exist across tabs; we never take/keep leadership with a worker OLDER than this
+    _standAsides: 0,     // times we've ceded the lock to let a newer tab lead (bounded by MAX_STANDASIDE)
 
     start: function () {
         if (JiTA.worker._started || JITA_IS_FORGE_FRAME) { return; }
         JiTA.worker._started = true;
         try { JiTA.worker._bc = new BroadcastChannel(JiTA.worker.CHANNEL); JiTA.worker._bc.onmessage = JiTA.worker._onBc; } catch (e) { /* no channel -> leader-only */ }
-        // Elect a single leader: hold an exclusive Web Lock for this tab's lifetime. When the leader tab closes
-        // the lock releases and another tab's pending request wins -> it becomes leader and spawns its worker.
+        // Elect a single leader: hold an exclusive Web Lock for this tab's lifetime. When the leader steps down
+        // (its worker is unrecoverable) or the tab closes, the lock releases and another waiting tab wins it.
+        if (navigator.locks && navigator.locks.request) {
+            JiTA.worker._requestLock();
+        } else {
+            JiTA.worker._becomeLeader();   // no Web Locks -> degrade to a per-tab worker
+        }
+        // Once things settle, verify the (leader's) worker was built from THIS script version. If it's older, a
+        // leader tab wasn't reloaded after an update -> request a re-election so a fresher tab rebuilds the worker.
+        // Two spaced attempts cover a leader whose worker isn't up yet on the first try.
+        setTimeout(JiTA.worker._checkWorkerVersion, 12000);
+        setTimeout(JiTA.worker._checkWorkerVersion, 30000);
+    },
+
+    // Queue for the leader lock; on winning it, become leader and hold the lock (via an unresolved promise) until
+    // we call _releaseLock() to step down, or the tab closes. Re-used by _stepDown to rejoin the election.
+    _requestLock: function () {
         try {
-            if (navigator.locks && navigator.locks.request) {
-                navigator.locks.request(JiTA.worker.LOCK, function () {
+            navigator.locks.request(JiTA.worker.LOCK, function () {
+                return new Promise(function (release) {
+                    JiTA.worker._releaseLock = release;
                     JiTA.worker._becomeLeader();
-                    return new Promise(function () { /* never resolve: hold the lock until the tab is gone */ });
                 });
-            } else {
-                JiTA.worker._becomeLeader();   // no Web Locks -> degrade to a per-tab worker
-            }
+            });
         } catch (e) { if (window.console) { console.log('[JiTA worker] leader election failed:', e); } }
     },
 
     _becomeLeader: function () {
         if (JiTA.worker._isLeader) { return; }
+        // Version-aware election: if a NEWER tab is known to exist, don't spawn a worker from our older code - cede
+        // the lock so the newer tab leads and builds a current worker. Bounded by MAX_STANDASIDE, so if that newer
+        // tab has since closed we stop yielding and lead anyway (a stale worker beats no worker at all).
+        if (JiTA.worker._releaseLock
+            && JiTA.worker._maxSeenVersion
+            && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, JiTA.worker._maxSeenVersion) < 0
+            && JiTA.worker._standAsides < JiTA.worker.MAX_STANDASIDE) {
+            JiTA.worker._standAsides++;
+            JiTA.dlog('[JiTA worker] standing aside (' + JiTA.worker._standAsides + '/' + JiTA.worker.MAX_STANDASIDE + ') for newer v' + JiTA.worker._maxSeenVersion + ' (this tab v' + JiTA.SCRIPT_VERSION + ')');
+            var release = JiTA.worker._releaseLock; JiTA.worker._releaseLock = null;
+            try { release(); } catch (e) { /* ignore */ }   // let the next (hopefully newer) waiter take the lock
+            setTimeout(JiTA.worker._requestLock, JiTA.worker.REELECT_DELAY_MS);
+            return;
+        }
+        JiTA.worker._standAsides = 0;
         JiTA.worker._isLeader = true;
+        JiTA.worker._respawns = 0;   // fresh leadership session -> fresh respawn budget
+        JiTA.worker._spawnWorker();
+    },
+
+    // (Re)spawn the dedicated worker. Called when we become leader and on every self-heal respawn. A spawn throw,
+    // or a later worker `onerror`, routes to _onWorkerDead, which respawns with backoff or steps down.
+    _spawnWorker: function () {
+        if (!JiTA.worker._isLeader || JiTA.worker._gaveUp) { return; }
+        JiTA.worker._killWorker();   // tear down any previous handle first (defensive)
         try {
             var url = URL.createObjectURL(new Blob([JiTA.worker._src()], { type: 'text/javascript' }));
-            JiTA.worker._worker = new Worker(url, { type: 'module' });
-            JiTA.worker._worker.onmessage = JiTA.worker._onWorker;
-            JiTA.worker._worker.onerror = function (e) { if (window.console) { console.log('[JiTA worker] worker error:', (e && e.message) || e); } };
+            var w = new Worker(url, { type: 'module' });
+            JiTA.worker._worker = w;
+            w.onmessage = JiTA.worker._onWorker;
+            w.onerror = function (e) {
+                if (window.console) { console.log('[JiTA worker] worker error:', (e && e.message) || e); }
+                JiTA.worker._onWorkerDead('error');
+            };
             setTimeout(function () { try { URL.revokeObjectURL(url); } catch (x) { /* ignore */ } }, 15000);   // keep the URL alive long enough for the worker to load its module
-            if (window.console) { console.log('[JiTA worker] this tab is now the ranking LEADER (worker spawned)'); }
+            if (window.console) { console.log('[JiTA worker] leader spawned worker' + (JiTA.worker._respawns ? ' (respawn ' + JiTA.worker._respawns + ')' : '')); }
             // Embed anything outstanding in the worker (also warms the model there for ranking). Delayed so it
             // doesn't compete with first paint. Single-flight in the worker, so a concurrent prepare() is harmless.
             setTimeout(function () {
+                if (JiTA.worker._worker !== w) { return; }   // a respawn replaced this worker meanwhile
                 JiTA.worker._workerCall('embedPass').then(function (r) {
                     if (r && r.embedded > 0) { if (window.console) { console.log('[JiTA worker] embed pass: ' + r.embedded + ' embedded'); } try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ } }
                 }, function () { /* ignore */ });
             }, 8000);
-        } catch (e) { JiTA.worker._isLeader = false; if (window.console) { console.log('[JiTA worker] worker spawn failed:', e); } }
+        } catch (e) {
+            if (window.console) { console.log('[JiTA worker] worker spawn failed:', e); }
+            JiTA.worker._onWorkerDead('spawn');
+        }
+    },
+
+    // Terminate the current worker (if any) and reject its in-flight RPCs now, so the leader's own callers AND
+    // followers waiting over the channel get an error immediately instead of hanging for the full RPC timeout.
+    _killWorker: function () {
+        var w = JiTA.worker._worker;
+        JiTA.worker._worker = null;
+        if (w) { try { w.onmessage = null; w.onerror = null; w.terminate(); } catch (e) { /* ignore */ } }
+        var pend = JiTA.worker._wPending; JiTA.worker._wPending = {};
+        Object.keys(pend).forEach(function (id) {
+            try { clearTimeout(pend[id].timer); pend[id].reject(new Error('worker died')); } catch (e) { /* ignore */ }
+        });
+    },
+
+    // The worker died (spawn threw, or it fired onerror). Respawn with backoff up to RESPAWN_MAX per session; past
+    // that, step down so a different tab can try to lead. GIVEUP_AFTER consecutive failures (with no successful RPC
+    // in between) means the environment can't run a worker at all -> stop trying. Any success (_onWorker) resets
+    // both counters, so a worker that dies once after running fine gets a full fresh budget.
+    _onWorkerDead: function (reason) {
+        if (!JiTA.worker._isLeader || JiTA.worker._recovering) { return; }
+        JiTA.worker._recovering = true;
+        JiTA.worker._killWorker();
+        JiTA.worker._failStreak++;
+        if (window.console) { console.log('[JiTA worker] worker down (' + reason + '); failure ' + JiTA.worker._failStreak); }
+        if (JiTA.worker._failStreak >= JiTA.worker.GIVEUP_AFTER) {
+            if (window.console) { console.log('[JiTA worker] giving up leadership after ' + JiTA.worker._failStreak + ' consecutive failures'); }
+            JiTA.worker._gaveUp = true;
+            JiTA.worker._recovering = false;
+            JiTA.worker._stepDown(false);   // release the lock; do NOT re-request
+            return;
+        }
+        if (JiTA.worker._respawns < JiTA.worker.RESPAWN_MAX) {
+            JiTA.worker._respawns++;
+            var wait = JiTA.worker.RESPAWN_BACKOFF_MS * JiTA.worker._respawns;
+            setTimeout(function () { JiTA.worker._recovering = false; JiTA.worker._spawnWorker(); }, wait);
+        } else {
+            if (window.console) { console.log('[JiTA worker] respawn budget spent; stepping down for re-election'); }
+            JiTA.worker._recovering = false;
+            JiTA.worker._stepDown(true);   // release the lock so another tab can lead; re-request after a delay
+        }
+    },
+
+    // Give up leadership: kill the worker, release the held Web Lock (a waiting tab then wins it and spawns its own
+    // worker - fixing the old deadlock where a failed spawn held the lock forever), and optionally re-queue for the
+    // lock after a delay so we reclaim it and retry if no other tab is available.
+    _stepDown: function (reRequest) {
+        JiTA.worker._killWorker();
+        JiTA.worker._isLeader = false;
+        JiTA.worker._respawns = 0;
+        var release = JiTA.worker._releaseLock; JiTA.worker._releaseLock = null;
+        if (release) {
+            try { release(); } catch (e) { /* ignore */ }   // resolve the lock promise -> another tab can win it
+            if (reRequest && !JiTA.worker._gaveUp) { setTimeout(JiTA.worker._requestLock, JiTA.worker.REELECT_DELAY_MS); }
+        } else if (reRequest && !JiTA.worker._gaveUp) {
+            setTimeout(JiTA.worker._becomeLeader, JiTA.worker.REELECT_DELAY_MS);   // no Web Locks -> just retry our own worker
+        }
+    },
+
+    // Compare two "a.b.c" version strings numerically: <0 if a<b, 0 if equal, >0 if a>b. Missing/short parts count
+    // as 0, and any non-numeric part parses to 0, so a garbage string sorts as 0.0.0 and never beats a real version.
+    _verCmp: function (a, b) {
+        var pa = String(a || '').split('.'), pb = String(b || '').split('.');
+        var n = Math.max(pa.length, pb.length);
+        for (var i = 0; i < n; i++) {
+            var x = parseInt(pa[i], 10) || 0, y = parseInt(pb[i], 10) || 0;
+            if (x !== y) { return x < y ? -1 : 1; }
+        }
+        return 0;
+    },
+
+    // Ping the (leader's) worker and compare its build version to ours. If the worker is OLDER, the leader is
+    // running stale serialized code (script updated but that leader tab was never reloaded) -> broadcast a
+    // re-election request so a fresher tab rebuilds the worker from current code. A leader pinging its own worker
+    // always matches (no-op); an unreachable worker is ignored (the self-heal path covers that).
+    _checkWorkerVersion: function () {
+        if (!JiTA.worker._started || !JiTA.SCRIPT_VERSION) { return; }
+        JiTA.worker.call('ping', null, { timeoutMs: 8000 }).then(function (r) {
+            var wv = (r && r.version) || '';
+            if (!wv) { return; }   // a pre-stamp (older) worker reports no version -> nothing reliable to compare
+            if (JiTA.worker._verCmp(wv, JiTA.SCRIPT_VERSION) < 0) {
+                if (window.console) { console.log('[JiTA worker] running worker is v' + wv + ' but this tab is v' + JiTA.SCRIPT_VERSION + ' -> requesting re-election'); }
+                try { if (JiTA.worker._bc) { JiTA.worker._bc.postMessage({ kind: 'reelect', want: JiTA.SCRIPT_VERSION }); } } catch (e) { /* ignore */ }
+            } else {
+                JiTA.dlog('[JiTA worker] worker version OK (v' + wv + ')');
+            }
+        }, function () { /* worker unreachable -> self-heal covers it */ });
+    },
+
+    // Handle a re-election request (broadcast by a tab that saw a stale worker): remember the newest version known
+    // to exist (so we won't take/keep leadership with older code - see _becomeLeader), and if WE are the stale
+    // leader, step down so a fresher tab rebuilds the worker.
+    _applyReelect: function (want) {
+        if (want && JiTA.worker._verCmp(want, JiTA.worker._maxSeenVersion) > 0) { JiTA.worker._maxSeenVersion = want; }
+        if (JiTA.worker._isLeader && want && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, want) < 0) {
+            if (window.console) { console.log('[JiTA worker] stale leader (v' + JiTA.SCRIPT_VERSION + ' < v' + want + '); stepping down for re-election'); }
+            JiTA.worker._stepDown(true);
+        }
     },
 
     // Public: call the ranking worker from ANY tab. Resolves with the worker's result (or rejects on timeout /
@@ -9947,7 +10144,12 @@ JiTA.worker = {
         var p = JiTA.worker._wPending[d.id];
         if (!p) { return; }
         clearTimeout(p.timer); delete JiTA.worker._wPending[d.id];
-        if (d.ok) { p.resolve(d.result); } else { p.reject(new Error(d.error || 'worker error')); }
+        if (d.ok) {
+            JiTA.worker._respawns = 0; JiTA.worker._failStreak = 0;   // proof of life -> reset the self-heal budgets
+            p.resolve(d.result);
+        } else {
+            p.reject(new Error(d.error || 'worker error'));
+        }
     },
     // The leader relays a worker event to every tab (over the channel) and applies it locally.
     _relayEvent: function (d) {
@@ -9989,6 +10191,8 @@ JiTA.worker = {
             if (m.ok) { p.resolve(m.result); } else { p.reject(new Error(m.error || 'remote error')); }
         } else if (m.kind === 'event') {
             JiTA.worker._applyEvent(m.data);   // a worker event the leader relayed (e.g. embed pass finished)
+        } else if (m.kind === 'reelect') {
+            JiTA.worker._applyReelect(m.want);   // a tab saw a stale worker -> remember the newer version / step down if we're the stale leader
         }
     },
 
@@ -10001,7 +10205,7 @@ JiTA.worker = {
             LIB: JiTA.embed.LIB_URL, MODEL: JiTA.embed.MODEL, MODEL_VERSION: JiTA.MODEL_VERSION,
             DB_NAME: JiTA.DB_NAME, DB_VERSION: JiTA.DB_VERSION, MAX_CHARS: JiTA.embed.MAX_CHARS, GM_TEAM_ID: JiTA.GM_TEAM_ID,
             tryGpu: gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false),
-            HOST: JiTA.HOST, MAX_RETRIES: JiTA.MAX_RETRIES, PAGE_DELAY_MS: JiTA.PAGE_DELAY_MS,
+            HOST: JiTA.HOST, MAX_RETRIES: JiTA.MAX_RETRIES, PAGE_DELAY_MS: JiTA.PAGE_DELAY_MS, SCRIPT_VERSION: JiTA.SCRIPT_VERSION,
             // ISD credits config (mirror of JiTA.credits' static fields) so the worker can run the monthly crawl.
             credits: {
                 PROJECTS: C.PROJECTS, RESOLUTIONS: C.RESOLUTIONS, GROUP: C.GROUP, OLD_DOMAIN: C.OLD_DOMAIN,
