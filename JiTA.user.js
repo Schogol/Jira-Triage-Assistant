@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.2.3
+// @version     3.2.4
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -7273,19 +7273,23 @@ JiTA.ui = {
 
     // Populate the "Known defects in attached log" section of the panel (hidden unless there are hits). Each
     // entry links to the defect and reuses the same hover-preview card as the suggestions.
-    renderLogLink: function (key) {
+    renderLogLink: function (key, background) {
         var $box = $('#jita-sd-loglink');
         if (!$box.length) { return; }
-        $box.removeClass('has-hits').empty();
+        // Foreground (navigation): clear the previous issue's hits immediately. Background (a data-driven refresh
+        // or a same-issue panel re-mount): keep what's shown until the new scan is ready, so the section doesn't
+        // blank and flash back with identical content (the scan is cached + deterministic per issue). The refill
+        // below is atomic - empty + append in one tick - so no empty state ever paints.
+        if (!background) { $box.removeClass('has-hits').empty(); }
         JiTA.db.countDefectsOnly().then(function (n) {
-            if (!n) { return; }   // no defects to match the log against yet
+            if (!n) { $box.removeClass('has-hits').empty(); return; }   // no defects to match the log against yet -> make sure it's clear
             JiTA.ui.scanIssueLog(key).then(function (found) {
                 if (JiTA.ui.currentKey !== key) { return; }   // navigated to another issue meanwhile
                 var keys = Object.keys(found || {});
                 keys = keys.filter(function (k) { return !JiTA.hidden.isHidden(k); });   // drop user-hidden defects from the list
-                if (!keys.length) { return; }
-                keys.sort(function (a, b) { return found[b].count - found[a].count || (a < b ? -1 : 1); });
                 var $b = $('#jita-sd-loglink');
+                if (!keys.length) { $b.removeClass('has-hits').empty(); return; }   // genuinely no hits now -> clear (also covers the background path that skipped the top empty)
+                keys.sort(function (a, b) { return found[b].count - found[a].count || (a < b ? -1 : 1); });
                 $b.empty();
                 $('<div class="jita-sd-loglink-head"></div>').text('⚠ Known defects in attached log (' + keys.length + ')').appendTo($b);
                 var $ul = $('<ul></ul>').appendTo($b);
@@ -7339,13 +7343,16 @@ JiTA.ui = {
         if (!list) { return; }
         var st = document.getElementById('jita-sd-status'),
             md = document.getElementById('jita-sd-mode'),
-            ti = document.getElementById('jita-sd-title');
+            ti = document.getElementById('jita-sd-title'),
+            ll = document.getElementById('jita-sd-loglink');
         JiTA.ui._snapshot = {
             key: key,
             list: list.innerHTML,
             status: st ? st.innerHTML : '',
             mode: md ? md.textContent : '',
-            title: ti ? ti.textContent : ''
+            title: ti ? ti.textContent : '',
+            loglink: ll ? ll.innerHTML : '',
+            loglinkHits: !!(ll && ll.className.indexOf('has-hits') !== -1)
         };
     },
     // Paint the cached content back into a freshly (re)built group. No-op unless the snapshot is for the issue
@@ -7366,6 +7373,11 @@ JiTA.ui = {
         if (st) { st.innerHTML = s.status; }
         if (md) { md.textContent = s.mode; }
         if (ti) { ti.textContent = s.title; }
+        var ll = document.getElementById('jita-sd-loglink');
+        if (ll) {
+            ll.innerHTML = s.loglink || '';
+            if (s.loglinkHits) { ll.classList.add('has-hits'); } else { ll.classList.remove('has-hits'); }
+        }
     },
     // Eager re-mount: called synchronously from the DOM observer so a wiped sidebar group goes back in the SAME
     // tick (with its cached content) instead of after the 300ms debounce - that debounce gap is the visible
@@ -7391,7 +7403,7 @@ JiTA.ui = {
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Similar defects');   // reset title (the panel is shared with the EDR reports view)
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section; clear it on the EBR view
-        JiTA.ui.renderLogLink(key);   // scan the attached log for known defects (no need to open it)
+        JiTA.ui.renderLogLink(key, background);   // scan the attached log for known defects (no need to open it); background = don't blank it first
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar defects…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countDefectsOnly().then(function (n) {
