@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.2.1
+// @version     3.2.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6795,6 +6795,10 @@ JiTA.ui = {
 
         if (anchor.nextSibling) { anchor.parentNode.insertBefore(group, anchor.nextSibling); }
         else { anchor.parentNode.appendChild(group); }
+        // We just (re)built an EMPTY group. If this is a re-mount of the issue still on screen (Jira wiped us),
+        // paint the last results straight back so the panel reappears populated instead of blank. No-op on a
+        // fresh navigation (snapshot key won't match the new issue) - that path renders clean from scratch.
+        JiTA.ui._restoreSnapshot();
         return true;
     },
 
@@ -7320,6 +7324,58 @@ JiTA.ui = {
         }, 600);
     },
 
+    // ---- seamless re-mount after a Jira wipe ----------------------------------------------------------------
+    // In sidebar mode our injected group lives inside Jira's React-managed context column, so a first-load
+    // settle re-render (or a Keyword->Hybrid upgrade landing mid-settle) can WIPE it. We keep a snapshot of the
+    // last-rendered list content and paint it back the instant the group is rebuilt, so the panel reappears
+    // already populated instead of flashing empty / "Finding…" while the ranking re-runs in the background.
+    // (Floating mode lives on <body> and never gets wiped, so this whole path is sidebar-only.)
+    _snapshot: null,
+    _snap: function (key) {
+        var list = document.getElementById('jita-sd-list');
+        if (!list) { return; }
+        var st = document.getElementById('jita-sd-status'),
+            md = document.getElementById('jita-sd-mode'),
+            ti = document.getElementById('jita-sd-title');
+        JiTA.ui._snapshot = {
+            key: key,
+            list: list.innerHTML,
+            status: st ? st.innerHTML : '',
+            mode: md ? md.textContent : '',
+            title: ti ? ti.textContent : ''
+        };
+    },
+    // Paint the cached content back into a freshly (re)built group. No-op unless the snapshot is for the issue
+    // currently on screen, so a fresh navigation to a different issue still renders clean from scratch. The
+    // restored rows are handler-less placeholders (innerHTML copy); the background re-render that follows swaps
+    // in the real, interactive rows a moment later.
+    _restoreSnapshot: function () {
+        var s = JiTA.ui._snapshot;
+        // Skip in reporter-reports mode: that view is a live search we never snapshot, so a stale similar-defects
+        // snapshot would flash the wrong list before the search clears it. Let it rebuild clean instead.
+        if (!s || s.key !== JiTA.ui.currentKey || JiTA.ui.reporterMode) { return; }
+        var list = document.getElementById('jita-sd-list');
+        if (!list) { return; }
+        list.innerHTML = s.list;
+        var st = document.getElementById('jita-sd-status'),
+            md = document.getElementById('jita-sd-mode'),
+            ti = document.getElementById('jita-sd-title');
+        if (st) { st.innerHTML = s.status; }
+        if (md) { md.textContent = s.mode; }
+        if (ti) { ti.textContent = s.title; }
+    },
+    // Eager re-mount: called synchronously from the DOM observer so a wiped sidebar group goes back in the SAME
+    // tick (with its cached content) instead of after the 300ms debounce - that debounce gap is the visible
+    // "vanishes for a fraction of a second" flicker. Only fires in sidebar mode when our group is actually gone;
+    // the follow-up scheduleRender() then swaps the placeholder rows for live, interactive ones.
+    _reensureFast: function () {
+        if (!savedVariables[5][1] || !JiTA.ui.currentKey) { return; }
+        if (JiTA.ui.mode() !== 'sidebar' || JiTA.ui._chromePresent()) { return; }
+        try {
+            if (JiTA.ui._ensureSidebar()) { JiTA.ui.scheduleRender(); }
+        } catch (e) { /* ignore */ }
+    },
+
     // `background` (set only by scheduleRender, i.e. a data-driven refresh): keep the current list on screen
     // and only swap in the new results when they're ready, instead of emptying to a "Finding…" state first.
     render: function (key, background) {
@@ -7360,6 +7416,7 @@ JiTA.ui = {
                         $list.empty();   // clear atomically right before filling: a concurrent re-render (e.g. after an auto-sync) also emptied at its top, but both appended later - emptying here keeps each render self-contained and avoids doubled rows
                         for (var i = 0; i < results.length; i++) { $list.append(JiTA.ui._item(results[i])); }
                         JiTA.ui._fitVertical();   // list height changed - re-check it still fits / drops up
+                        JiTA.ui._snap(key);   // cache for a seamless re-paint if Jira wipes the sidebar group
                     });
                 });
                 });
@@ -7401,6 +7458,7 @@ JiTA.ui = {
                         $list.empty();   // clear atomically right before filling (see render() - avoids doubled rows from a concurrent re-render)
                         for (var i = 0; i < results.length; i++) { $list.append(JiTA.ui._reportItem(results[i])); }
                         JiTA.ui._fitVertical();   // list height changed - re-check it still fits / drops up
+                        JiTA.ui._snap(key);   // cache for a seamless re-paint if Jira wipes the sidebar group
                     });
                 });
             });
@@ -7574,12 +7632,16 @@ JiTA.ui = {
         // Skip only when the chrome is mounted AND it's the same issue. In sidebar mode a Jira re-render can
         // wipe our injected section; _chromePresent() then reports false and we re-mount + repopulate here.
         if (JiTA.ui._chromePresent() && JiTA.ui.currentKey === key) { return; }
+        // Same issue but chrome missing => Jira wiped our group. Re-mount in the BACKGROUND so the restored
+        // snapshot (painted in _ensureSidebar) stays on screen and the ranking refreshes without a "Finding…"
+        // flash. A genuinely new issue renders foreground (blank + "Finding…") as before.
+        var remount = (JiTA.ui.currentKey === key);
         if (JiTA.ui.currentKey !== key) { JiTA.ui.reporterMode = false; }   // new issue -> leave the reporter-reports view (its reporter is per-issue)
         JiTA.ui.currentKey = key;
         if (isEbr) {
-            JiTA.ui.render(key);              // bug report -> similar defects
+            JiTA.ui.render(key, remount);              // bug report -> similar defects
         } else {
-            JiTA.ui.renderReports(key);       // defect / EO / PLAT issue -> matching open bug reports
+            JiTA.ui.renderReports(key, remount);       // defect / EO / PLAT issue -> matching open bug reports
             // Only EDR/EO are in the crawled scope, so only they get the "index this issue if missing" catch-up.
             if (JiTA.ui._isDefectKey(key)) { JiTA.ui._maybeSyncForDefect(key); }
         }
@@ -10117,6 +10179,9 @@ JiTA.declutter = {
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
     var scheduled = false;
     var observer = new MutationObserver(function () {
+        // Synchronous first: if Jira just wiped our sidebar group, put it back THIS tick (with cached content)
+        // so it never visibly vanishes. Cheap - a getElementById guard skips it whenever the group is present.
+        try { JiTA.ui._reensureFast(); } catch (e0) { /* swallow */ }
         if (scheduled) { return; }
         scheduled = true;
         setTimeout(function () {
