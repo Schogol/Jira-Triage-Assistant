@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.7.3
+// @version     3.8.5
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -2884,8 +2884,10 @@ var JiTA = {
         if (!isNaN(v) && v >= 1 && v <= 30) { return v; }
         return 8;
     })(),
-    MODEL_VERSION: 'gte-small-v3',                  // embedding model tag; bump to force a full re-embed
-                                                    // (v1 = NaN from fp16; v2 = fp32; v3 = boilerplate-stripped text)
+    MODEL_VERSION: 'e5-small-ml-v5',                // embedding model tag; bump to force a full re-embed
+                                                    // (v1 = NaN from fp16; v2 = fp32; v3 = boilerplate-stripped text;
+                                                    //  v4 = paraphrase-MiniLM multilingual (poor retrieval cosine);
+                                                    //  v5 = multilingual-e5-small, retrieval-tuned, query:/passage: prefixes)
     DATA_VERSION: 3                                 // stored-record SCHEMA version. Bump whenever a sync change
                                                     // adds/changes a FIELD on stored records - OR widens the crawl
                                                     // SCOPE - that a plain incremental catch-up can't backfill (it
@@ -5345,7 +5347,7 @@ JiTA.rank._bm25Score = function (idx, text, excludeKey, limit, filterTerms) {
  * fetch model weights directly. Any failure flips `unavailable` and the ranking layer falls back to BM25.
  */
 JiTA.embed = {
-    MODEL: 'Xenova/gte-small',   // English, retrieval-tuned, 384-dim (better recall than all-MiniLM for dup-finding)
+    MODEL: 'Xenova/multilingual-e5-small',   // multilingual + RETRIEVAL-tuned, 384-dim: cross-language EBR<->defect matching with sharp cosine like the old gte-small. REQUIRES the "query: " / "passage: " instruction prefixes - queries get "query: " (worker qEmbed), stored docs get "passage: " (embedPass, both tab + worker). Omitting them silently degrades recall.
     LIB_URL: 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.2/dist/transformers.min.js',
     BATCH: 16,
     MAX_CHARS: 1500,            // cap text per issue. Now that cleanForCompare strips the boilerplate, the
@@ -5385,10 +5387,11 @@ JiTA.embed = {
                     // Run the ONNX/WASM backend in a worker so embedding never blocks the page.
                     try { mod.env.backends.onnx.wasm.proxy = true; } catch (e) { /* older builds: ignore */ }
                 }
-                // Pick a backend that actually works. We deliberately do NOT use fp16 on WebGPU for this
-                // model: gte-small's intermediate activations exceed the tiny fp16 range and overflow to
-                // Inf/NaN, so embeddings come back as NaN (cosine -> NaN, "%" shows NaN, semantic ranking
-                // becomes noise). fp32 on WebGPU is reliable; the WASM/CPU fallback uses q8 (small + fine on
+                // Pick a backend that actually works. We deliberately do NOT use fp16 on WebGPU for these
+                // small sentence models: gte-small's intermediate activations famously overflowed the tiny
+                // fp16 range to Inf/NaN, so embeddings came back as NaN (cosine -> NaN, "%" shows NaN, semantic
+                // ranking becomes noise), and the current multilingual MiniLM is no safer a bet. fp32 on
+                // WebGPU is reliable; the WASM/CPU fallback uses q8 (small + fine on
                 // CPU). Each candidate is validated below, so any backend that yields bad numbers is rejected.
                 // After a GPU device loss we rebuild on WASM only; otherwise prefer WebGPU fp32 then WASM.
                 // WebGPU has proven unstable for this model: every dtype/batch size we tried eventually died
@@ -5503,7 +5506,7 @@ JiTA.embed = {
                 if (idx >= todo.length) { console.log('[JiTA] embed pass complete (' + todo.length + ' embedded)'); JiTA.rank._dirtyVec = true; JiTA.rank._dirtyEbrVec = true; return Promise.resolve(); }
                 var size = JiTA.embed.BATCH;
                 var slice = todo.slice(idx, idx + size);
-                var texts = slice.map(function (r) { return JiTA.util.cleanForCompare(r.summary, r.description); });
+                var texts = slice.map(function (r) { return 'passage: ' + JiTA.util.cleanForCompare(r.summary, r.description); });   // e5 "passage: " prefix on stored docs (query side gets "query: " in qEmbed)
                 // Watchdog: a WebGPU device loss can HANG the worker so embedBatch never resolves OR rejects,
                 // which would silently stall the whole pass. Race it against a timeout so a hung batch is
                 // treated as a failure and handled by the catch below (retry on the same backend, then pause).
@@ -8199,6 +8202,25 @@ JiTA.menu = {
                   : (w._isLeader ? 'this tab is the worker LEADER' : 'follower (leader is another tab)');
         $('<div class="jita-menu-status"></div>')
             .text('Worker: ' + wstat + ' · this tab v' + (JiTA.SCRIPT_VERSION || '?')).appendTo($dbg);
+        // Which embedding model this build uses. This is the TAB's configured model; the leader worker only
+        // runs it after the leader tab reloads (see the worker-reload gotcha). The authoritative cross-check
+        // is a stored record's embeddingModelVersion in IndexedDB, which the worker stamps as it re-embeds.
+        $('<div class="jita-menu-status"></div>')
+            .text('Embedding model: ' + JiTA.embed.MODEL + ' (' + JiTA.MODEL_VERSION + ')').appendTo($dbg);
+        // The worker's ACTUAL resolved backend (webgpu/fp32 = GPU, wasm/q8 = CPU). It attempts WebGPU when
+        // enabled but silently falls back to WASM/CPU if WebGPU init throws, so this is the only honest signal
+        // of whether embedding is GPU-accelerated. Filled async via the worker's ping (works from any tab).
+        var $wbk = $('<div class="jita-menu-status">Worker backend: checking…</div>').appendTo($dbg);
+        if (w._started) {
+            JiTA.worker.call('ping', null, { timeoutMs: 8000 }).then(function (r) {
+                if (!document.getElementById('jita-menu')) { return; }
+                var b = (r && r.backend) || 'unknown';
+                var label = (b === 'none' || b === 'unknown') ? (b + ' (model not loaded yet - open a bug report to trigger it)')
+                          : /webgpu/i.test(b) ? (b + ' (GPU)')
+                          : /wasm/i.test(b) ? (b + ' (CPU)') : b;
+                $wbk.text('Worker backend: ' + label);
+            }, function () { $wbk.text('Worker backend: (no response)'); });
+        } else { $wbk.text('Worker backend: worker not started'); }
 
         // Debug logging toggle (GM flag 'sdDebug'; a custom row since it is not a savedVariables feature).
         var dbgOn = !!gmGet('sdDebug', false);
@@ -8969,8 +8991,14 @@ function jitaWorkerBody(cfg) {
                 pipe = await mod.pipeline('feature-extraction', cfg.MODEL, attempts[i]);
                 backend = attempts[i].device + '/' + attempts[i].dtype;
                 BATCH = attempts[i].device === 'webgpu' ? 8 : 1;          // fp32 GPU batches; WASM one-at-a-time (batched hangs)
+                try { console.log('[JiTA worker] embedding backend: ' + backend); } catch (_e) { /* ignore */ }
                 return pipe;
-            } catch (e) { lastErr = e; }
+            } catch (e) {
+                lastErr = e;
+                // Surface WHY a backend was rejected - especially why WebGPU fell back to CPU. Otherwise the error
+                // is swallowed the moment WASM succeeds, leaving no signal that the GPU path ever failed.
+                try { console.warn('[JiTA worker] backend ' + attempts[i].device + '/' + attempts[i].dtype + ' unavailable: ' + ((e && e.stack) || (e && e.message) || e)); } catch (_e) { /* ignore */ }
+            }
         }
         throw lastErr || new Error('no backend loaded');
     }
@@ -8981,6 +9009,7 @@ function jitaWorkerBody(cfg) {
     }
     var qText = null, qVec = null;
     async function qEmbed(text) {   // cache the last query vector so filter-box re-queries don't re-embed the same text
+        text = 'query: ' + (text || '');   // e5 REQUIRES the "query: " instruction prefix on the search side (docs get "passage: " in embedPass)
         if (qText === text && qVec) { return qVec; }
         qVec = await embed(text); qText = text; return qVec;
     }
@@ -9037,10 +9066,14 @@ function jitaWorkerBody(cfg) {
                 todo.push(r);
             }
             if (!todo.length) { return { embedded: 0 }; }
-            var idx = 0, retries = 0;
+            var idx = 0, retries = 0, lastPost = 0;
+            // Post re-embed progress to the tab(s) so a long pass (minutes on CPU) is visible. Throttled to
+            // ~every 50 records; the tab shows it in the panel status (see _applyEvent 'embedPassProgress').
+            function postProgress() { try { self.postMessage({ event: 'embedPassProgress', done: idx, total: todo.length }); } catch (e) { /* only meaningful in a worker */ } }
+            postProgress();   // 0 / total up front so the pass is visible immediately
             while (idx < todo.length) {
                 var slice = todo.slice(idx, idx + BATCH);
-                var texts = slice.map(function (x) { return cleanForCompare(x.summary, x.description); });
+                var texts = slice.map(function (x) { return 'passage: ' + cleanForCompare(x.summary, x.description); });   // e5 "passage: " prefix on stored docs (query side gets "query: " in qEmbed)
                 try {
                     var vecs = await Promise.race([
                         embedBatch(texts),
@@ -9052,6 +9085,7 @@ function jitaWorkerBody(cfg) {
                     for (var j = 0; j < slice.length; j++) { slice[j].embedding = vecs[j]; slice[j].embeddingModelVersion = cfg.MODEL_VERSION; }
                     await bulkPut(slice);
                     idx += slice.length; retries = 0;
+                    if (idx - lastPost >= 50 || idx >= todo.length) { lastPost = idx; postProgress(); }
                 } catch (e) {
                     pipe = null;                                  // drop the (possibly dead) pipeline and rebuild
                     if (++retries > 3) { throw e; }
@@ -9712,6 +9746,8 @@ function jitaWorkerBody(cfg) {
         try {
             var result;
             if (type === 'ping') { result = { pong: true, backend: backend, version: cfg.SCRIPT_VERSION }; }
+            // NOTE: currently unused (no tab caller). If revived, decide query vs passage and add the e5
+            // "query: "/"passage: " prefix - embed() is raw, unlike qEmbed()/embedPass() which prefix.
             else if (type === 'embed') { var v = await embed((payload && payload.text) || ''); result = { backend: backend, dim: v.length, vec: Array.from(v) }; }
             else if (type === 'rankSemantic') { result = await rankSemantic(payload); }
             else if (type === 'rankKeyword') { result = await rankKeyword(payload); }
@@ -10026,6 +10062,15 @@ JiTA.worker = {
         if (d.event === 'embedPassDone' && d.embedded > 0) {
             if (window.console) { console.log('[JiTA worker] embed pass finished: ' + d.embedded + ' embedded'); }
             try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // re-rank the open view now the new vectors exist
+            return;
+        }
+        // Live re-embed progress (worker embedPass posts this ~every 50 records). Show it in the panel status so a
+        // long pass is visible; embedPassDone's re-render replaces it with real results when the pass finishes.
+        if (d.event === 'embedPassProgress') {
+            try {
+                var pctDone = d.total ? Math.round(d.done / d.total * 100) : 0;
+                JiTA.ui.setStatus('Embedding ' + d.done + ' / ' + d.total + ' (' + pctDone + '%)…');
+            } catch (e) { /* panel may not be mounted */ }
             return;
         }
         // Credits crawl progress from the worker. Broadcast to every tab, but only the tab that started THIS
