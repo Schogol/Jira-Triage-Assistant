@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.7.1
+// @version     3.7.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -4656,8 +4656,25 @@ JiTA.db = {
                     db.createObjectStore('meta', { keyPath: 'k' });
                 }
             };
-            req.onsuccess = function (e) { JiTA.db._db = e.target.result; resolve(JiTA.db._db); };
+            req.onsuccess = function (e) {
+                var db = e.target.result;
+                // Another tab bumping DB_VERSION needs every open connection to close first or its
+                // upgrade blocks forever. Close ours and drop the cached handle so the next access
+                // re-opens at the new version (this tab may itself be a stale build; that is fine).
+                db.onversionchange = function () {
+                    try { db.close(); } catch (x) {}
+                    if (JiTA.db._db === db) { JiTA.db._db = null; }
+                    JiTA.dlog('[JiTA.db] versionchange - closed stale connection to let another tab upgrade');
+                };
+                JiTA.db._db = db;
+                resolve(db);
+            };
             req.onerror = function (e) { reject(e.target.error); };
+            req.onblocked = function () {
+                // Our own upgrade is waiting on an older connection in another tab that hasn't
+                // closed yet (its onversionchange should close it momentarily). Surface, don't hang silently.
+                JiTA.dlog('[JiTA.db] open blocked - another Jira tab holds an older DB version open');
+            };
         });
     },
 
@@ -9044,8 +9061,36 @@ function jitaWorkerBody(cfg) {
         if (db) { return Promise.resolve(db); }
         return new Promise(function (resolve, reject) {
             var req = indexedDB.open(cfg.DB_NAME, cfg.DB_VERSION);   // pristine in a worker (no consent-gate wrapper)
-            req.onsuccess = function () { db = req.result; resolve(db); };
+            // Mirror the tab's schema (JiTA.db.open) so whichever context wins the open race at a
+            // NEW DB_VERSION creates the stores. Without this the worker could bump the version with
+            // no stores, and the tab's own open (same version) would then never fire onupgradeneeded.
+            // KEEP IN SYNC with JiTA.db.open's onupgradeneeded.
+            req.onupgradeneeded = function (e) {
+                var d = e.target.result;
+                if (!d.objectStoreNames.contains('defects')) {
+                    var s = d.createObjectStore('defects', { keyPath: 'key' });
+                    s.createIndex('by_updated', 'updated', { unique: false });
+                    s.createIndex('by_project', 'project', { unique: false });
+                    s.createIndex('by_modelVersion', 'embeddingModelVersion', { unique: false });
+                }
+                if (!d.objectStoreNames.contains('meta')) {
+                    d.createObjectStore('meta', { keyPath: 'k' });
+                }
+            };
+            req.onsuccess = function () {
+                db = req.result;
+                var conn = db;
+                // The worker outlives every reload, so a long-held connection would block a tab's
+                // DB_VERSION upgrade indefinitely. Close on versionchange; the next openDb re-opens
+                // (or fails cleanly if this worker is now a stale build, which re-election handles).
+                conn.onversionchange = function () {
+                    try { conn.close(); } catch (x) {}
+                    if (db === conn) { db = null; }
+                };
+                resolve(db);
+            };
             req.onerror = function () { reject(req.error); };
+            req.onblocked = function () { /* older connection elsewhere; it closes on versionchange */ };
         });
     }
     function allRecords() {
