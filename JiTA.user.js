@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.8.3
+// @version     3.8.4
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8207,6 +8207,20 @@ JiTA.menu = {
         // is a stored record's embeddingModelVersion in IndexedDB, which the worker stamps as it re-embeds.
         $('<div class="jita-menu-status"></div>')
             .text('Embedding model: ' + JiTA.embed.MODEL + ' (' + JiTA.MODEL_VERSION + ')').appendTo($dbg);
+        // The worker's ACTUAL resolved backend (webgpu/fp32 = GPU, wasm/q8 = CPU). It attempts WebGPU when
+        // enabled but silently falls back to WASM/CPU if WebGPU init throws, so this is the only honest signal
+        // of whether embedding is GPU-accelerated. Filled async via the worker's ping (works from any tab).
+        var $wbk = $('<div class="jita-menu-status">Worker backend: checking…</div>').appendTo($dbg);
+        if (w._started) {
+            JiTA.worker.call('ping', null, { timeoutMs: 8000 }).then(function (r) {
+                if (!document.getElementById('jita-menu')) { return; }
+                var b = (r && r.backend) || 'unknown';
+                var label = (b === 'none' || b === 'unknown') ? (b + ' (model not loaded yet - open a bug report to trigger it)')
+                          : /webgpu/i.test(b) ? (b + ' (GPU)')
+                          : /wasm/i.test(b) ? (b + ' (CPU)') : b;
+                $wbk.text('Worker backend: ' + label);
+            }, function () { $wbk.text('Worker backend: (no response)'); });
+        } else { $wbk.text('Worker backend: worker not started'); }
 
         // Debug logging toggle (GM flag 'sdDebug'; a custom row since it is not a savedVariables feature).
         var dbgOn = !!gmGet('sdDebug', false);
