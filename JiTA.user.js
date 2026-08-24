@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.8.1
+// @version     3.8.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -2884,8 +2884,10 @@ var JiTA = {
         if (!isNaN(v) && v >= 1 && v <= 30) { return v; }
         return 8;
     })(),
-    MODEL_VERSION: 'mMiniLM-ml-v4',                 // embedding model tag; bump to force a full re-embed (v4 = multilingual paraphrase-MiniLM swap)
-                                                    // (v1 = NaN from fp16; v2 = fp32; v3 = boilerplate-stripped text)
+    MODEL_VERSION: 'e5-small-ml-v5',                // embedding model tag; bump to force a full re-embed
+                                                    // (v1 = NaN from fp16; v2 = fp32; v3 = boilerplate-stripped text;
+                                                    //  v4 = paraphrase-MiniLM multilingual (poor retrieval cosine);
+                                                    //  v5 = multilingual-e5-small, retrieval-tuned, query:/passage: prefixes)
     DATA_VERSION: 3                                 // stored-record SCHEMA version. Bump whenever a sync change
                                                     // adds/changes a FIELD on stored records - OR widens the crawl
                                                     // SCOPE - that a plain incremental catch-up can't backfill (it
@@ -5345,7 +5347,7 @@ JiTA.rank._bm25Score = function (idx, text, excludeKey, limit, filterTerms) {
  * fetch model weights directly. Any failure flips `unavailable` and the ranking layer falls back to BM25.
  */
 JiTA.embed = {
-    MODEL: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',   // multilingual (50+ langs), symmetric, 384-dim: lets non-English bug reports match English defects cross-lingually (was English-only Xenova/gte-small)
+    MODEL: 'Xenova/multilingual-e5-small',   // multilingual + RETRIEVAL-tuned, 384-dim: cross-language EBR<->defect matching with sharp cosine like the old gte-small. REQUIRES the "query: " / "passage: " instruction prefixes - queries get "query: " (worker qEmbed), stored docs get "passage: " (embedPass, both tab + worker). Omitting them silently degrades recall.
     LIB_URL: 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.2/dist/transformers.min.js',
     BATCH: 16,
     MAX_CHARS: 1500,            // cap text per issue. Now that cleanForCompare strips the boilerplate, the
@@ -5504,7 +5506,7 @@ JiTA.embed = {
                 if (idx >= todo.length) { console.log('[JiTA] embed pass complete (' + todo.length + ' embedded)'); JiTA.rank._dirtyVec = true; JiTA.rank._dirtyEbrVec = true; return Promise.resolve(); }
                 var size = JiTA.embed.BATCH;
                 var slice = todo.slice(idx, idx + size);
-                var texts = slice.map(function (r) { return JiTA.util.cleanForCompare(r.summary, r.description); });
+                var texts = slice.map(function (r) { return 'passage: ' + JiTA.util.cleanForCompare(r.summary, r.description); });   // e5 "passage: " prefix on stored docs (query side gets "query: " in qEmbed)
                 // Watchdog: a WebGPU device loss can HANG the worker so embedBatch never resolves OR rejects,
                 // which would silently stall the whole pass. Race it against a timeout so a hung batch is
                 // treated as a failure and handled by the catch below (retry on the same backend, then pause).
@@ -8987,6 +8989,7 @@ function jitaWorkerBody(cfg) {
     }
     var qText = null, qVec = null;
     async function qEmbed(text) {   // cache the last query vector so filter-box re-queries don't re-embed the same text
+        text = 'query: ' + (text || '');   // e5 REQUIRES the "query: " instruction prefix on the search side (docs get "passage: " in embedPass)
         if (qText === text && qVec) { return qVec; }
         qVec = await embed(text); qText = text; return qVec;
     }
@@ -9046,7 +9049,7 @@ function jitaWorkerBody(cfg) {
             var idx = 0, retries = 0;
             while (idx < todo.length) {
                 var slice = todo.slice(idx, idx + BATCH);
-                var texts = slice.map(function (x) { return cleanForCompare(x.summary, x.description); });
+                var texts = slice.map(function (x) { return 'passage: ' + cleanForCompare(x.summary, x.description); });   // e5 "passage: " prefix on stored docs (query side gets "query: " in qEmbed)
                 try {
                     var vecs = await Promise.race([
                         embedBatch(texts),
@@ -9718,6 +9721,8 @@ function jitaWorkerBody(cfg) {
         try {
             var result;
             if (type === 'ping') { result = { pong: true, backend: backend, version: cfg.SCRIPT_VERSION }; }
+            // NOTE: currently unused (no tab caller). If revived, decide query vs passage and add the e5
+            // "query: "/"passage: " prefix - embed() is raw, unlike qEmbed()/embedPass() which prefix.
             else if (type === 'embed') { var v = await embed((payload && payload.text) || ''); result = { backend: backend, dim: v.length, vec: Array.from(v) }; }
             else if (type === 'rankSemantic') { result = await rankSemantic(payload); }
             else if (type === 'rankKeyword') { result = await rankKeyword(payload); }
