@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.8.0
+// @version     3.8.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8200,6 +8200,11 @@ JiTA.menu = {
                   : (w._isLeader ? 'this tab is the worker LEADER' : 'follower (leader is another tab)');
         $('<div class="jita-menu-status"></div>')
             .text('Worker: ' + wstat + ' · this tab v' + (JiTA.SCRIPT_VERSION || '?')).appendTo($dbg);
+        // Which embedding model this build uses. This is the TAB's configured model; the leader worker only
+        // runs it after the leader tab reloads (see the worker-reload gotcha). The authoritative cross-check
+        // is a stored record's embeddingModelVersion in IndexedDB, which the worker stamps as it re-embeds.
+        $('<div class="jita-menu-status"></div>')
+            .text('Embedding model: ' + JiTA.embed.MODEL + ' (' + JiTA.MODEL_VERSION + ')').appendTo($dbg);
 
         // Debug logging toggle (GM flag 'sdDebug'; a custom row since it is not a savedVariables feature).
         var dbgOn = !!gmGet('sdDebug', false);
