@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.6.2
+// @version     3.6.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -1541,7 +1541,7 @@ function ParseLogs() {
         var tableContent = document.getElementById('tableContent');
         var tableContentRowsLength = 0;
         var toIndex = tableContentRowsLength + rowQuantity;
-        for (var i = tableContentRowsLength, row, cellIndex, timeCell, facilityCell, typeCell, messageCell, clickHandler; i < toIndex; ++i) {
+        for (var i = tableContentRowsLength, row, cellIndex, timeCell, facilityCell, typeCell, messageCell; i < toIndex; ++i) {
             row = document.createElement('tr');
             row.className = 'row';
             cellIndex = -1;
@@ -1647,15 +1647,6 @@ function ParseLogs() {
             //  JiTA.logsig.applyToTable(), since the signature index is built async from IndexedDB.)
 
 
- /**
- * Currently unused clickHandler
- */
-            clickHandler = function(row) {
-                return function() {
-                    logs.loadItemInformation(table[row][0]);
-                };
-            };
-            //row.onclick = clickHandler(i);
             tableContent.tBodies[0].appendChild(row);
         }
     };
@@ -5337,7 +5328,6 @@ JiTA.embed = {
     ready: false,              // model pipeline is loaded and usable
     unavailable: false,        // load failed irrecoverably -> stay on BM25
     backend: null,             // 'webgpu/fp16' etc (for diagnostics)
-    _cpuFallback: false,       // set after a GPU device loss -> rebuild on WASM only
     _pipe: null,
     _loading: null,
     _preparing: null,
@@ -5379,8 +5369,8 @@ JiTA.embed = {
                 // NaN issues either). WebGPU is the DEFAULT backend (fast): `sdTryWebgpu` defaults to true and
                 // the menu toggle is the ONLY thing that switches backend - a GPU failure does NOT auto-fall
                 // back to CPU (it retries on GPU, then pauses). `sdForceCpu` is still honored if the menu sets
-                // it, but the embed/query paths no longer set it themselves.
-                var forceCpu = JiTA.embed._cpuFallback || gmGet('sdForceCpu', false);
+                // it, but nothing else forces CPU on its own.
+                var forceCpu = gmGet('sdForceCpu', false);
                 var tryGpu = !forceCpu && gmGet('sdTryWebgpu', true);
                 var attempts = tryGpu
                     ? [{ device: 'webgpu', dtype: 'fp32' }, { device: 'wasm', dtype: 'q8' }]
@@ -8523,7 +8513,7 @@ JiTA.credits = {
             var $hr = $('<tr></tr>');
             $('<th style="text-align:left;padding:5px 8px;border-bottom:1px solid #3a434d;color:#9aa6b2;">#</th>').appendTo($hr);
             short.forEach(function (c, i) {
-                if (i === 7) { return; }   // Extra Credits column removed (the bonus is still baked into Credits)
+                if (i === 7) { return; }   // Extra Credits column hidden (it is NOT part of the Credits total; crCreditFormula excludes it)
                 // numeric columns right-aligned; Name stays left
                 $('<th></th>').attr('style', 'padding:5px 8px;border-bottom:1px solid #3a434d;color:#9aa6b2;white-space:nowrap;text-align:' + (i === 0 ? 'left' : 'right') + ';').text(c).appendTo($hr);
             });
@@ -8540,7 +8530,7 @@ JiTA.credits = {
                 else { $nt.text(row[0]); }
                 $nt.appendTo($r);
                 for (var i = 1; i < row.length; i++) {
-                    if (i === 7) { continue; }   // Extra Credits column removed (still counted in Credits)
+                    if (i === 7) { continue; }   // Extra Credits column hidden (not part of the Credits total)
                     var st = 'padding:4px 8px;text-align:right;white-space:nowrap;color:#d7dce2;';
                     if (i === 8) { st = 'padding:4px 8px;text-align:right;color:#fff;font-weight:800;'; }               // Credits
                     $('<td></td>').attr('style', st).text(row[i]).appendTo($r);
@@ -9026,7 +9016,7 @@ function jitaWorkerBody(cfg) {
     function crProgress(msg) { if (crActiveTags.length) { try { self.postMessage({ event: 'creditsProgress', tags: crActiveTags, msg: msg }); } catch (e) { /* ignore */ } } }
     function crTick(i, total, msg) { var now = Date.now(); if (i === 0 || i + 1 === total || now - crLastTick > 400) { crLastTick = now; crProgress(msg); } }   // throttle per-item ticks so we don't flood the channel
     function crSleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-    // Client-side token-bucket rate limiter (mirrors JiTA.credits._gate): paces each endpoint to just under
+    // Client-side token-bucket rate limiter: paces each endpoint to just under
     // Atlassian's published per-endpoint RPS cap so the parallel fan-out doesn't 429-storm.
     var crRateBuckets = {};
     function crRateKey(s) {
@@ -9419,7 +9409,7 @@ function jitaWorkerBody(cfg) {
     }
 
     // ---- ISD credits: SELF (viewer-only) compute -----------------------------------------------------------
-    // Mirrors JiTA.credits.computeSelf / _selfIdentity / _reportsActionedSelf but runs in the worker off the cr*
+    // Worker-side self (viewer-only) compute - the crawl that used to live in the tab - built off the cr*
     // twins. me + the last full-leaderboard cache (full) arrive in the payload (the tab still owns currentUser +
     // getCached + the meta write); this returns the self-record shape - no DOM / no meta access here.
     function crSelfIdentity(me, full) {
@@ -9445,8 +9435,8 @@ function jitaWorkerBody(cfg) {
         }, function () { return { myName: null, myAccounts: [me], reassigned: 0, extra: 0, fullTable: null }; });
     }
 
-    // Attached (reopen-aware, self-scoped) + Trashed/Reassigned (count-only) for MY accounts. Mirrors the tab
-    // JiTA.credits._reportsActionedSelf; a close carrying the convert comment is a reassign, not a trash.
+    // Attached (reopen-aware, self-scoped) + Trashed/Reassigned (count-only) for MY accounts. A close carrying
+    // the convert comment is a reassign, not a trash.
     function crReportsActionedSelf(accs, b) {
         var win = 'DURING ("' + b.start + '", "' + b.end + '")';
         var attQueries = [];
