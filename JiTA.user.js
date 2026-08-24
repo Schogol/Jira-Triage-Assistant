@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.7.0
+// @version     3.7.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5942,6 +5942,9 @@ JiTA.ui = {
 #jita-sd-filterbtn:hover { color: #e6e6e6; background: #3a434d; }\
 #jita-sd-filterbtn.active { color: #4c9aff; }\
 #jita-sd-filterbtn.active::after { content: ""; position: absolute; top: 1px; right: 1px; width: 5px; height: 5px; border-radius: 50%; background: #4c9aff; }\
+#jita-sd-dupbtn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px; color: #9aa6b2; cursor: pointer; user-select: none; position: relative; flex: 0 0 auto; }\
+#jita-sd-dupbtn:hover { color: #e6e6e6; background: #3a434d; }\
+#jita-sd-dupbtn.active { color: #6bd0dc; }\
 #jita-sd-filtermenu { position: fixed; z-index: 10002; background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.55); padding: 10px; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; font-size: 12px; min-width: 190px; }\
 #jita-sd-filtermenu .jita-fm-label { color: #9aa6b2; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; margin: 2px 0 5px; }\
 #jita-sd-filtermenu .jita-fm-seg { display: flex; margin-bottom: 10px; border: 1px solid #3a434d; border-radius: 6px; overflow: hidden; }\
@@ -6039,6 +6042,9 @@ JiTA.ui = {
 #jita-side-group #jita-sd-filterbtn:hover { color: var(--ds-text, #172b4d); background: var(--ds-background-neutral, #091e420f); }\
 #jita-side-group #jita-sd-filterbtn.active { color: var(--ds-link, #0c66e4); }\
 #jita-side-group #jita-sd-filterbtn.active::after { background: var(--ds-link, #0c66e4); }\
+#jita-side-group #jita-sd-dupbtn { color: var(--ds-text-subtle, #44546f); }\
+#jita-side-group #jita-sd-dupbtn:hover { color: var(--ds-text, #172b4d); background: var(--ds-background-neutral, #091e420f); }\
+#jita-side-group #jita-sd-dupbtn.active { color: var(--ds-link, #0c66e4); }\
 #jita-side-group #jita-sd-filter { background: var(--ds-surface, #fff); color: var(--ds-text, #172b4d); border-color: var(--ds-border-input, #8590a2); }\
 #jita-side-group #jita-sd-filter:focus { border-color: var(--ds-border-focused, #388bff); }\
 #jita-side-group #jita-sd-status { padding: 4px 0; border-bottom: none; color: var(--ds-text-subtlest, #626f86); }\
@@ -6124,6 +6130,15 @@ JiTA.ui = {
             if (document.getElementById('jita-sd-filtermenu')) { JiTA.ui._closeFilterMenu(); }
             else { JiTA.ui._showFilterMenu(this); }
         });
+        // Duplicate-reports toggle: flip the persisted preference, reflect it on the button, and (on an EBR) show
+        // or clear the "possible duplicate reports" section right away.
+        $(document).on('click', '#jita-sd-dupbtn', function (e) {
+            e.preventDefault(); e.stopPropagation();
+            gmSet('sdDupReports', !JiTA.ui._dupOn());
+            JiTA.ui._syncDupBtn(true);
+            var k = JiTA.ui.currentKey;
+            if (k && /^EBR-/.test(k)) { JiTA.ui.renderEbrDups(k); }   // recompute now, or clear if just turned off
+        });
         // Debounced re-query as the user types. (We previously tried to keep Jira from flagging the page as
         // having "unsubmitted changes" - it warns on reload because the filter input lives inside its issue
         // view - but the detection runs ahead of anything we can intercept, so we just accept the warning.)
@@ -6201,6 +6216,18 @@ JiTA.ui = {
     _syncFilterBtn: function () {
         var $b = $('#jita-sd-filterbtn');
         if ($b.length) { $b.toggleClass('active', JiTA.ui._filtersActive()); }
+    },
+
+    // Duplicate-reports toggle (two-squares icon, EBR view only). OFF by default: the "possible duplicate reports"
+    // section is gated behind this button so it costs nothing and adds no clutter until the triager asks for it.
+    // Persisted in GM ('sdDupReports') so the preference sticks across reloads.
+    _dupSvg: '<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M5 1a1 1 0 0 0-1 1v1H3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-1h1a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H5zm7 1v8h-1V4a1 1 0 0 0-1-1H5V2h7zM3 4h7v9H3V4z"/></svg>',
+    _dupOn: function () { return !!gmGet('sdDupReports', false); },
+    _syncDupBtn: function (show) {
+        var $b = $('#jita-sd-dupbtn');
+        if (!$b.length) { return; }
+        $b.css('display', show ? '' : 'none');   // EBR-only control
+        $b.toggleClass('active', JiTA.ui._dupOn());
     },
 
     // Build + show the filter popover under the funnel button. Rebuilt each open so it can be view-aware
@@ -6607,7 +6634,7 @@ JiTA.ui = {
             if (e.which && e.which !== 1) { return; }                 // left button only
             if ($(e.target).closest('#jita-sd-collapse').length) { return; }  // let the collapse toggle work
             if ($(e.target).closest('#jita-sd-filter').length) { return; }    // let the filter input take focus / select text
-            if ($(e.target).closest('#jita-sd-filterbtn').length) { return; } // let the funnel open the filter popover
+            if ($(e.target).closest('#jita-sd-filterbtn, #jita-sd-dupbtn').length) { return; } // let the funnel / dup toggle handle their own clicks
             if ($(e.target).closest('#jita-sd-mode').length) { return; }      // let the mode badge toggle ranking
             // Drag relative to the HEADER's current top (works whether we're top-anchored or in drop-up),
             // so the header tracks the cursor and _fitVertical re-evaluates up/down on every move.
@@ -6684,6 +6711,7 @@ JiTA.ui = {
             '  <div id="jita-sd-head"><span id="jita-sd-title">Similar defects</span>' +
             '    <input id="jita-sd-filter" type="text" placeholder="Filter…" autocomplete="off" title="Filter the whole database by this text (key / title / description) and show the best matches">' +
             '    <span id="jita-sd-filterbtn" title="Filter results (status / recency)">' + JiTA.ui._funnelSvg + '</span>' +
+            '    <span id="jita-sd-dupbtn" style="display:none" title="Show possible duplicate reports">' + JiTA.ui._dupSvg + '</span>' +
             '    <span id="jita-sd-mode" title="Click to switch ranking mode (resets to automatic on reload)">Keyword</span>' +
             '    <span id="jita-sd-collapse" title="Collapse / expand">–</span></div>' +
             '  <div id="jita-sd-status"></div>' +
@@ -6721,6 +6749,7 @@ JiTA.ui = {
         return '<div class="jita-side-subhead"><span id="jita-sd-title">Similar defects</span>' +
                '<input id="jita-sd-filter" type="text" placeholder="Filter…" autocomplete="off" title="Filter the whole database by this text (key / title / description) and show the best matches">' +
                '<span id="jita-sd-filterbtn" title="Filter results (status / recency)">' + JiTA.ui._funnelSvg + '</span>' +
+               '<span id="jita-sd-dupbtn" style="display:none" title="Show possible duplicate reports">' + JiTA.ui._dupSvg + '</span>' +
                '<span id="jita-sd-mode" title="Click to switch ranking mode (resets to automatic on reload)">Keyword</span></div>' +
                '<div id="jita-sd-status"></div>' +
                '<div id="jita-sd-loglink"></div>' +
@@ -7451,6 +7480,7 @@ JiTA.ui = {
     renderEbrDups: function (key, background) {
         var $box = $('#jita-sd-ebrdups');
         if (!$box.length) { return; }
+        if (!JiTA.ui._dupOn()) { $box.removeClass('has-hits').empty(); return; }   // gated behind the dup-reports toggle (off by default)
         if (!background) { $box.removeClass('has-hits').empty(); }
         JiTA.db.countEbr().then(function (n) {
             if (!n) { $box.removeClass('has-hits').empty(); return; }
@@ -7593,6 +7623,7 @@ JiTA.ui = {
         if (JiTA.ui.reporterMode) { return JiTA.ui.renderReporterReports(key); }
         JiTA.ui._ensurePanel();
         JiTA.ui._syncFilterBtn();   // reflect any active session filters on the funnel
+        JiTA.ui._syncDupBtn(true);  // dup-reports toggle is EBR-only -> show it here
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Similar defects');   // reset title (the panel is shared with the EDR reports view)
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section; clear it on the EBR view
@@ -7638,6 +7669,7 @@ JiTA.ui = {
     renderReports: function (key, background) {
         JiTA.ui._ensurePanel();
         JiTA.ui._syncFilterBtn();   // reflect any active session filters on the funnel
+        JiTA.ui._syncDupBtn(false);  // dup-reports toggle is EBR-only -> hide it on the defect view
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Matching bug reports');
         $('#jita-sd-loglink').removeClass('has-hits').empty();   // EBR-only section; unused on a defect
@@ -7687,6 +7719,7 @@ JiTA.ui = {
         $('#jita-sd-exccluster').removeClass('has-hits').empty();     // defect-only section
         $('#jita-sd-loglink').removeClass('has-hits').empty();        // similar-defects-only section
         $('#jita-sd-ebrdups').removeClass('has-hits').empty();        // dup-reports section, not shown in this view
+        JiTA.ui._syncDupBtn(false);                                   // hide the EBR-only dup toggle in the reporter view
         $('#jita-sd-list').empty();
         JiTA.ui.setStatus('Finding this reporter’s other reports…');
         JiTA.ui._getReporterId(key).then(function (rid) {
