@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.5.3
+// @version     3.6.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -157,7 +157,7 @@ var SELECTORS = {
     SUMMARY_HEADING:   "h1[data-testid='issue.views.issue-base.foundation.summary.heading']",
     DESC_CONTAINER:    "div[data-component-selector='jira-issue-view-rich-text-inline-edit-view-container']",
     STATUS_FIELD_WRAP: "div[data-testid='issue.views.issue-base.foundation.status.status-field-wrapper']",
-    CODE_BLOCK:        "span[data-testid='code-block']",   // also spliced as CODE_BLOCK + ':contains(<header>)' by the parser
+    CODE_BLOCK:        "[data-testid='code-block']",   // <span> (small files) OR <code> (large files use a different Jira layout, same testid); also spliced as CODE_BLOCK + ':contains(<header>)' by the parser
     CM_LINE:           '.cm-line',                          // CodeMirror line wrapper (igbr.zip / new editor layout)
     GROUP_TITLE:       '[data-testid$="collapsible-group-factory.title"]',
     FIELD_HEADING:     '[data-testid^="issue-field-heading-styled-field-heading"]',
@@ -925,6 +925,36 @@ var cmSelector = SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")";
 waitForKeyElements(cmSelector, SwapUI);
 
 
+// ---- suppress the raw-log flash --------------------------------------------------------------------------
+// The parser is poll-driven (waitForKeyElements / a 100ms content poll), so a log's raw text renders and PAINTS
+// before SwapUI swaps in the parsed view - a visible flash. This synchronous observer hides a log container the
+// instant its header row appears (a MutationObserver callback is a microtask, so it runs BEFORE the next paint);
+// SwapUI removes the hide once it has mounted the parsed view. Only header-based logs (log / processHealth /
+// methodCalls, in the <span>/<code> OR CodeMirror layout) are hidden - matched by the header text - so ordinary
+// code-blocks and the comment editor are never touched, and a per-element fallback timer reveals anything that
+// somehow never gets parsed, so content can't get stuck invisible.
+(function () {
+    if (JITA_IS_FORGE_FRAME || !window.MutationObserver) { return; }
+    try { GM_addStyle('.jita-log-hiding { visibility: hidden !important; }'); } catch (e) { /* ignore */ }
+    var HIDE_SIG = new RegExp(LOG_HDR + '|dateTime\tpyDateTime\tprocCpu|Time\tMethod\tDuration');
+    function hideLogs() {
+        if (!flagOn('parser') || document.getElementById('tableContent')) { return; }   // feature off, or already parsed
+        var nodes = document.querySelectorAll(SELECTORS.CODE_BLOCK + ', .cm-content');
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            if (el.classList.contains('jita-log-hiding')) { continue; }
+            if (el.querySelector && (el.querySelector('#gpanel') || el.querySelector('#tableContent'))) { continue; }   // already our parsed UI
+            var t = el.textContent || '';
+            if (t && HIDE_SIG.test(t)) {
+                el.classList.add('jita-log-hiding');
+                (function (node) { setTimeout(function () { node.classList.remove('jita-log-hiding'); }, 2500); })(el);   // safety net
+            }
+        }
+    }
+    try { new MutationObserver(hideLogs).observe(document.body, { childList: true, subtree: true, characterData: true }); } catch (e) { /* ignore */ }
+})();
+
+
 // outstandingcalls.txt / lastcrashes.txt / PDMData.txt live inside the igbr.zip and - unlike the log /
 // processHealth / methodCalls files - have NO header row in their content to detect them by. So the only way to
 // tell them apart is WHICH file button was clicked: watch for each file's entry in the attachment list, and when
@@ -1116,6 +1146,13 @@ function SwapUI() {
         try { renderRequirements(pdmdata); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
         pdm = false;
     };
+
+    // The parsed view is now mounted (or this wasn't a parse branch) - reveal any log container the flash
+    // suppressor hid, so the parsed UI shows instead of staying invisible.
+    try {
+        var hid = document.querySelectorAll('.jita-log-hiding');
+        for (var hi = 0; hi < hid.length; hi++) { hid[hi].classList.remove('jita-log-hiding'); }
+    } catch (e) { /* ignore */ }
 
 
     // Functionality for the buttons in the gpanel to toggle show / hide specific table rows
@@ -1892,7 +1929,7 @@ var css = `
     }
 
     /* selector literal - keep in sync with SELECTORS.CODE_BLOCK (this is CSS, not a query, so it stays inline) */
-    span[data-testid="code-block"] {
+    [data-testid="code-block"] {
     background-color: #1d2125d6;
     }
 
