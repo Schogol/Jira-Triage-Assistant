@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.6.4
+// @version     3.7.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5973,10 +5973,18 @@ JiTA.ui = {
 #jita-sd-loglink a:hover { text-decoration: underline; }\
 #jita-sd-loglink .count { color: #cfd6dd; background: #3a434d; border-radius: 8px; padding: 0 7px; font-size: 10px; font-weight: 700; margin-left: 6px; }\
 .jita-sd-loose { font-size: 10px; color: #9aa6b2; margin-left: 6px; }\
+#jita-sd-ebrdups { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; }\
+#jita-sd-ebrdups.has-hits { display: block; }\
+#jita-sd-ebrdups .jita-sd-ebrdups-head { font-weight: 700; color: #6bd0dc; font-size: 11px; margin-bottom: 4px; }\
+#jita-sd-ebrdups ul { list-style: none; margin: 0; padding: 0; }\
+#jita-sd-ebrdups li { padding: 3px 0; cursor: default; }\
+#jita-sd-ebrdups a { color: #4c9aff; font-weight: 700; text-decoration: none; }\
+#jita-sd-ebrdups a:hover { text-decoration: underline; }\
+#jita-sd-ebrdups .jita-sd-ebrdups-sum { color: #cfd6dd; font-size: 11px; margin-left: 6px; }\
 #jita-sd-exccluster { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; }\
 #jita-sd-exccluster.has-hits { display: block; }\
 #jita-sd-exccluster .jita-sd-exccluster-head { font-weight: 700; color: #cfd6dd; font-size: 11px; margin-bottom: 4px; }\
-#jita-sd-panel.collapsed #jita-sd-status, #jita-sd-panel.collapsed #jita-sd-loglink, #jita-sd-panel.collapsed #jita-sd-exccluster, #jita-sd-panel.collapsed #jita-sd-list { display: none; }\
+#jita-sd-panel.collapsed #jita-sd-status, #jita-sd-panel.collapsed #jita-sd-loglink, #jita-sd-panel.collapsed #jita-sd-ebrdups, #jita-sd-panel.collapsed #jita-sd-exccluster, #jita-sd-panel.collapsed #jita-sd-list { display: none; }\
 #jita-sd-panel.jita-sd-up { flex-direction: column-reverse; }\
 #jita-sd-toast { position: fixed; right: 18px; bottom: 18px; z-index: 9001; background: #333; color: #eee; padding: 8px 14px;\
   border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.45); font-family: -apple-system,Arial,sans-serif; font-size: 12px; max-width: 320px; }\
@@ -6037,6 +6045,11 @@ JiTA.ui = {
 #jita-side-group #jita-sd-loglink { display: none; padding: 6px 0; border-bottom: 1px solid var(--ds-border, #091e4224); background: transparent; }\
 #jita-side-group #jita-sd-loglink.has-hits { display: block; }\
 #jita-side-group #jita-sd-loglink .jita-sd-loglink-head { color: var(--ds-text-warning, #974f0c); }\
+#jita-side-group #jita-sd-ebrdups { display: none; padding: 6px 0; border-bottom: 1px solid var(--ds-border, #091e4224); background: transparent; }\
+#jita-side-group #jita-sd-ebrdups.has-hits { display: block; }\
+#jita-side-group #jita-sd-ebrdups .jita-sd-ebrdups-head { color: var(--ds-text, #172b4d); }\
+#jita-side-group #jita-sd-ebrdups .jita-sd-ebrdups-sum { color: var(--ds-text-subtle, #44546f); }\
+#jita-side-group #jita-sd-ebrdups a { color: var(--ds-link, #0c66e4); }\
 #jita-side-group #jita-sd-exccluster { display: none; padding: 6px 0; border-bottom: 1px solid var(--ds-border, #091e4224); background: transparent; }\
 #jita-side-group #jita-sd-exccluster.has-hits { display: block; }\
 #jita-side-group #jita-sd-exccluster .jita-sd-exccluster-head { color: var(--ds-text, #172b4d); }\
@@ -6675,6 +6688,7 @@ JiTA.ui = {
             '    <span id="jita-sd-collapse" title="Collapse / expand">–</span></div>' +
             '  <div id="jita-sd-status"></div>' +
             '  <div id="jita-sd-loglink"></div>' +
+            '  <div id="jita-sd-ebrdups"></div>' +
             '  <div id="jita-sd-exccluster"></div>' +
             '  <ul id="jita-sd-list"></ul>' +
             '</div>'
@@ -6710,6 +6724,7 @@ JiTA.ui = {
                '<span id="jita-sd-mode" title="Click to switch ranking mode (resets to automatic on reload)">Keyword</span></div>' +
                '<div id="jita-sd-status"></div>' +
                '<div id="jita-sd-loglink"></div>' +
+               '<div id="jita-sd-ebrdups"></div>' +
                '<div id="jita-sd-exccluster"></div>' +
                '<ul id="jita-sd-list"></ul>';
     },
@@ -7426,6 +7441,54 @@ JiTA.ui = {
         });
     },
 
+    // EBR view extra section: OTHER open bug reports that closely match THIS report - likely a player filing the
+    // same bug again. Same engine as the defect view's "matching reports" (suggestEbrBest over the EBR index),
+    // excluding self, filtered to strong matches, top few, in its own #jita-sd-ebrdups box above the similar-
+    // defects list. Rows open in a new tab and share the suggestions' hover preview; no attach control (both sides
+    // are reports). Mirrors renderLogLink's background/atomic-refill so it never flashes on a data-driven refresh.
+    EBR_DUP_LIMIT: 5,
+    EBR_DUP_MIN_PCT: 40,   // drop weak matches so an unrelated report doesn't show phantom "duplicates"
+    renderEbrDups: function (key, background) {
+        var $box = $('#jita-sd-ebrdups');
+        if (!$box.length) { return; }
+        if (!background) { $box.removeClass('has-hits').empty(); }
+        JiTA.db.countEbr().then(function (n) {
+            if (!n) { $box.removeClass('has-hits').empty(); return; }
+            return JiTA.ui.getIssueText(key).then(function (text) {
+                if (JiTA.ui.currentKey !== key) { return; }
+                if (!text) { $box.removeClass('has-hits').empty(); return; }
+                return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, JiTA.ui._filterTerms()).then(function (out) {
+                    if (JiTA.ui.currentKey !== key) { return; }
+                    var results = (out.results || []).filter(function (r) { return (r.pct || 0) >= JiTA.ui.EBR_DUP_MIN_PCT; }).slice(0, JiTA.ui.EBR_DUP_LIMIT);
+                    var $b = $('#jita-sd-ebrdups');
+                    if (!results.length) { $b.removeClass('has-hits').empty(); return; }   // genuinely no strong dup now -> clear (covers the background path that skipped the top empty)
+                    return Promise.all(results.map(function (r) {
+                        return JiTA.db.getDefect(r.key).then(function (rec) {
+                            if (rec) { r.description = rec.description; r.created = rec.created; }
+                            return r;
+                        }, function () { return r; });
+                    })).then(function () {
+                        if (JiTA.ui.currentKey !== key) { return; }
+                        $b.empty();
+                        $('<div class="jita-sd-ebrdups-head"></div>').text('⧉ Possible duplicate reports (' + results.length + ')').appendTo($b);
+                        var $ul = $('<ul></ul>').appendTo($b);
+                        results.forEach(function (r) {
+                            var $li = $('<li></li>').attr('data-jita-key', r.key);
+                            $('<a></a>').attr('href', '/browse/' + r.key).attr('target', '_blank').text(r.key).appendTo($li);
+                            if (typeof r.pct === 'number') { $('<span class="jita-sd-score"></span>').text(r.pct + '%').appendTo($li); }
+                            $('<span class="jita-sd-ebrdups-sum"></span>').text(r.summary || '').attr('title', r.summary || '').appendTo($li);
+                            $li.on('mouseenter', function () { JiTA.ui._showTip(r, this, r.status || ''); });
+                            $li.on('mouseleave', function () { JiTA.ui._hideTip(); });
+                            $ul.append($li);
+                        });
+                        $b.addClass('has-hits');
+                        JiTA.ui._fitVertical();
+                    });
+                });
+            });
+        }).catch(function () { /* leave the section as-is on error */ });
+    },
+
     // Coalesce re-render requests. A single sync drives several "refresh the list" triggers in quick
     // succession - the sync's own completion, then embed.prepare()'s completion after the embed pass, and
     // (for autoSync) both the defect and EBR legs - and each render() empties + refills #jita-sd-list, so the
@@ -7459,6 +7522,7 @@ JiTA.ui = {
             md = document.getElementById('jita-sd-mode'),
             ti = document.getElementById('jita-sd-title'),
             ll = document.getElementById('jita-sd-loglink'),
+            eb = document.getElementById('jita-sd-ebrdups'),
             ex = document.getElementById('jita-sd-exccluster');
         JiTA.ui._snapshot = {
             key: key,
@@ -7468,6 +7532,8 @@ JiTA.ui = {
             title: ti ? ti.textContent : '',
             loglink: ll ? ll.innerHTML : '',
             loglinkHits: !!(ll && ll.className.indexOf('has-hits') !== -1),
+            ebrdups: eb ? eb.innerHTML : '',
+            ebrdupsHits: !!(eb && eb.className.indexOf('has-hits') !== -1),
             exccluster: ex ? ex.innerHTML : '',
             exclusterHits: !!(ex && ex.className.indexOf('has-hits') !== -1)
         };
@@ -7494,6 +7560,11 @@ JiTA.ui = {
         if (ll) {
             ll.innerHTML = s.loglink || '';
             if (s.loglinkHits) { ll.classList.add('has-hits'); } else { ll.classList.remove('has-hits'); }
+        }
+        var eb = document.getElementById('jita-sd-ebrdups');
+        if (eb) {
+            eb.innerHTML = s.ebrdups || '';
+            if (s.ebrdupsHits) { eb.classList.add('has-hits'); } else { eb.classList.remove('has-hits'); }
         }
         var ex = document.getElementById('jita-sd-exccluster');
         if (ex) {
@@ -7526,6 +7597,7 @@ JiTA.ui = {
         $('#jita-sd-title').text('Similar defects');   // reset title (the panel is shared with the EDR reports view)
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section; clear it on the EBR view
         JiTA.ui.renderLogLink(key, background);   // scan the attached log for known defects (no need to open it); background = don't blank it first
+        JiTA.ui.renderEbrDups(key, background);    // OTHER open reports that look like duplicates of this one
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar defects…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countDefectsOnly().then(function (n) {
@@ -7569,6 +7641,7 @@ JiTA.ui = {
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Matching bug reports');
         $('#jita-sd-loglink').removeClass('has-hits').empty();   // EBR-only section; unused on a defect
+        $('#jita-sd-ebrdups').removeClass('has-hits').empty();   // EBR-only section; unused on a defect
         if (!background) { $('#jita-sd-list').empty(); }   // background refresh keeps the list until new results are ready
         JiTA.ui.renderExceptionCluster(key, background);   // list other defects that reported the same exception; background = don't blank it first
         if (!background) { JiTA.ui.setStatus('Finding matching bug reports…'); }
@@ -7613,6 +7686,7 @@ JiTA.ui = {
         $('#jita-sd-mode').text('');                                  // no ranking mode in this view
         $('#jita-sd-exccluster').removeClass('has-hits').empty();     // defect-only section
         $('#jita-sd-loglink').removeClass('has-hits').empty();        // similar-defects-only section
+        $('#jita-sd-ebrdups').removeClass('has-hits').empty();        // dup-reports section, not shown in this view
         $('#jita-sd-list').empty();
         JiTA.ui.setStatus('Finding this reporter’s other reports…');
         JiTA.ui._getReporterId(key).then(function (rid) {
