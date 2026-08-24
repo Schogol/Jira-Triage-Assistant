@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.6.0
+// @version     3.6.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -1010,12 +1010,18 @@ document.addEventListener('click', function (e) {
 function jitaRunParserWhenLoaded(setFlag) {
     var myGen = ++jitaParserGen;
     var CB = SELECTORS.CODE_BLOCK;
+    // Hide the code-block now so this file's incoming raw text does not flash before SwapUI parses it. These
+    // igbr.zip files have no header row, so the flash-suppressor observer can't catch them by signature - hide
+    // at click time instead. Revealed on parse (SwapUI's end) or on give-up (timeout below); an unconditional
+    // safety timer reveals it regardless, so a supersede by an untracked-file click can't leave the viewer blank.
+    $(CB).addClass('jita-log-hiding');
+    setTimeout(function () { $(CB).removeClass('jita-log-hiding'); }, 2500);
     var HEADER_SIG = new RegExp(LOG_HDR + '|dateTime\tpyDateTime\tprocCpu|Time\tMethod\tDuration');
     var before = ($(CB).text() || '').trim();
     var start = Date.now(), MAX = 8000, POLL = 100;
     (function poll() {
-        if (myGen !== jitaParserGen) { return; }                 // superseded by a newer click
-        if (Date.now() - start > MAX) { return; }               // empty / never-loaded file -> don't parse
+        if (myGen !== jitaParserGen) { return; }                 // superseded by a newer click (its poller / the safety timer owns the reveal)
+        if (Date.now() - start > MAX) { $(CB).removeClass('jita-log-hiding'); return; }   // empty / never-loaded file -> reveal + don't parse
         var $cb = $(CB), now = ($cb.text() || '').trim();
         var ready = !document.getElementById('tableContent')    // no parser markup currently mounted
             && $cb.length && now && now !== before              // new, non-empty raw content
