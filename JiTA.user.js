@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.5.1
+// @version     3.5.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -124,9 +124,23 @@ function gmSet(key, val) {
 // Array which contains the locally saved values for a couple of variables.
 // NOTE: index 3 was "dropdowns" (Linked Issue Dropdowns), a RETIRED feature (removed when Jira's markup
 // changed). That dead slot is now REPURPOSED as "credits" (the ISD credit tracker) - the key name changed
-// so an existing install's orphaned "dropdowns" value is ignored and credits simply defaults on. Indices
-// 4 = buttons and 5 = similarDefects are referenced by number throughout this file, so they must not shift.
+// so an existing install's orphaned "dropdowns" value is ignored and credits simply defaults on. The index of
+// each feature is now recorded ONCE in the FLAG map below and read via flagOn(name) - so if a slot ever moves,
+// only FLAG needs updating (not scattered numeric reads); the persisted gm key per slot must still stay stable.
 var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""]];
+
+// Named accessors over savedVariables (the [gmKey, enabled] pairs above): map a stable feature name to its
+// fixed index so a wrong index breaks loudly at one named site instead of silently misreading a slot. flagOn
+// reads, setFlag writes - both go through the SAME savedVariables + GM persistence, so behavior is unchanged.
+// Index 0 ("key") is a reserved legacy slot with no boolean feature and is deliberately omitted.
+var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5 };
+function flagOn(name) { var i = FLAG[name]; return i != null && !!savedVariables[i][1]; }
+function setFlag(name, val) {
+    var i = FLAG[name];
+    if (i == null) { return; }
+    savedVariables[i][1] = !!val;
+    GM_setValue(savedVariables[i][0], !!val);
+}
 
 
 // Custom-scrollbar CSS, injected on load (when enabled) and by the scrollbar change-listener below. The
@@ -179,15 +193,14 @@ for (let i = 0; i < savedVariables.length; i++) {
 // so that a LATER manual toggle-off still sticks (we don't re-enable on every load).
 if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') {
     if (!GM_getValue('sdDefaultOn_v1', false)) {
-        GM_setValue(savedVariables[5][0], true);
-        savedVariables[5][1] = true;
+        setFlag('similarDefects', true);
         GM_setValue('sdDefaultOn_v1', true);
     }
 }
 
 
 // Activate a custom scrollbar if the scrollbar value is set to true
-if (savedVariables[2][1]) {
+if (flagOn('scrollbar')) {
     GM_addStyle(SCROLLBAR_CSS);
 };
 
@@ -271,7 +284,7 @@ function jitaCurrentKey() { return $.trim($(issueItem).text()); }
 
 // Check if the issue is a Bug report. If it is then we add the extra buttons
 function checkIssueType() {
-    if ($(issueItem + ':contains("EBR")').length > 0 && savedVariables[4][1]) {
+    if ($(issueItem + ':contains("EBR")').length > 0 && flagOn('buttons')) {
         addButtons();
     }
 };
@@ -289,7 +302,7 @@ function checkIssueType() {
 // anonymous <div> with no id/class/data-testid, so there is no stable selector to scope a narrower observer
 // to. The guard below early-exits in microseconds, so watching broadly is cheap.
 function ensureButtonsPresent() {
-    if (!savedVariables[4][1]) { return; }                                    // user toggled the buttons off
+    if (!flagOn('buttons')) { return; }                                    // user toggled the buttons off
     if ($('#translateButton').length) { return; }                            // already present, nothing to do
     if (!$(issueItem + ':contains("EBR")').length) { return; } // not a bug report
     if (!$('button[data-testid="issue-view-foundation.quick-add.quick-add-items-compact.apps-button-dropdown--trigger"]').length) { return; } // action bar not ready yet
@@ -808,9 +821,9 @@ function addButtons() {
                 // JiTA.ui.getIssueText), so now that they hold the ENGLISH translation, re-run the similar-
                 // defects search - otherwise it keeps matching against the reporter's native-language text and
                 // finds little. Guarded so this only fires when the Triage Assistant is enabled in settings
-                // (savedVariables[5]) AND its panel is live on this bug report; the typeof guard also keeps the
+                // (flagOn('similarDefects')) AND its panel is live on this bug report; the typeof guard also keeps the
                 // Translate button working when the Similar Defects feature's code isn't loaded at all.
-                if (typeof JiTA !== 'undefined' && JiTA.ui && savedVariables[5][1]
+                if (typeof JiTA !== 'undefined' && JiTA.ui && flagOn('similarDefects')
                     && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) {
                     JiTA.ui.render(JiTA.ui.currentKey);
                 }
@@ -1023,7 +1036,7 @@ function SwapUI() {
     // editors (a ``` code block in the comment box is also a .cm-editor / .cm-content), and operating on all of
     // them read the wrong (comment) text into `rows` AND injected the "Logfile Parser" UI into the comment box.
     var $logEd = $(".cm-line:contains(" + LOG_HDR + ")").first().closest('.cm-editor');
-    if ($logEd.length && !$("span[data-testid='code-block']").length && savedVariables[1][1]) {
+    if ($logEd.length && !$("span[data-testid='code-block']").length && flagOn('parser')) {
         var $cm = $logEd.find('.cm-content').first().attr('data-jita-cmsrc', '1');   // mark the exact source editor
         rows = getCmDocText();                                                       // reads the marked .cm-content
         $cm.removeAttr('data-jita-cmsrc');
@@ -1040,29 +1053,29 @@ function SwapUI() {
         // Toggle Notice / Warnings / Errors / Exceptions filter buttons get wired up.
     }
 
-    else if ($("span[data-testid='code-block']:contains(" + LOG_HDR + ")")[0] && savedVariables[1][1]) {
+    else if ($("span[data-testid='code-block']:contains(" + LOG_HDR + ")")[0] && flagOn('parser')) {
         mountParser(html, ParseLogs);
     }
 
-    else if ($("span[data-testid='code-block']:contains(dateTime	pyDateTime	procCpu	threadCpu	pyMem	virtualMem	taskletsProcessed	taskletsQueued	watchdog time	spf	serviceCalls	callsFromClient	bytesReceived	bytesSent	packetsReceived	packetsSent	sessionCount	tidiFactor)")[0] && savedVariables[1][1]) {
+    else if ($("span[data-testid='code-block']:contains(dateTime	pyDateTime	procCpu	threadCpu	pyMem	virtualMem	taskletsProcessed	taskletsQueued	watchdog time	spf	serviceCalls	callsFromClient	bytesReceived	bytesSent	packetsReceived	packetsSent	sessionCount	tidiFactor)")[0] && flagOn('parser')) {
         mountParser(phHtml, ParsePhLogs);
     }
 
-    else if ($("span[data-testid='code-block']:contains(Time	Method	Duration [ms])")[0] && savedVariables[1][1]) {
+    else if ($("span[data-testid='code-block']:contains(Time	Method	Duration [ms])")[0] && flagOn('parser')) {
         mountParser(McHtml, ParseMcLogs);
     }
 
-    else if (oc && savedVariables[1][1]) {
+    else if (oc && flagOn('parser')) {
         oc = false;
         mountParser(ocHtml, ParseOcLogs);
     }
 
-    else if (lc && savedVariables[1][1]) {
+    else if (lc && flagOn('parser')) {
         lc = false;
         mountParser(lcHtml, ParseOcLogs);
     }
 
-    else if (dx && savedVariables[1][1]) {
+    else if (dx && flagOn('parser')) {
         readCodeBlock();
         $("span[data-testid='code-block']").append(dxdiagHtml);
         // Parse the raw dxdiag text into a triage summary (crash history + GPU driver recency + system). Guarded.
@@ -1070,7 +1083,7 @@ function SwapUI() {
         dx = false;
     }
 
-    else if (pdm && savedVariables[1][1]) {
+    else if (pdm && flagOn('parser')) {
         readCodeBlock();
         $("span[data-testid='code-block']").append(pdmHtml);
         var pdmdata = convertTextToObject(rows);
@@ -7400,7 +7413,7 @@ JiTA.ui = {
     // "vanishes for a fraction of a second" flicker. Only fires in sidebar mode when our group is actually gone;
     // the follow-up scheduleRender() then swaps the placeholder rows for live, interactive ones.
     _reensureFast: function () {
-        if (!savedVariables[5][1] || !JiTA.ui.currentKey) { return; }
+        if (!flagOn('similarDefects') || !JiTA.ui.currentKey) { return; }
         if (JiTA.ui.mode() !== 'sidebar' || JiTA.ui._chromePresent()) { return; }
         try {
             if (JiTA.ui._ensureSidebar()) { JiTA.ui.scheduleRender(); }
@@ -7651,7 +7664,7 @@ JiTA.ui = {
     // Show/refresh the panel on EBR bug reports (similar defects) AND on EDR/EO/PLAT issues (matching
     // reports); re-query when the issue key changes. Any other issue type removes the panel.
     ensure: function () {
-        if (!savedVariables[5][1]) { return; }
+        if (!flagOn('similarDefects')) { return; }
         var $bc = $(issueItem);
         if (!$bc.length) { return; }
         var key = $.trim($bc.first().text());
@@ -7806,7 +7819,7 @@ JiTA.menu = {
         $feat.append(JiTA.menu._toggleRow('Extra Buttons', 4));
         // Triage Assistant needs extra work on change: mount its panel when enabled, tear it down when disabled.
         $feat.append(JiTA.menu._toggleRow('Triage Assistant', 5, function () {
-            if (!savedVariables[5][1]) {
+            if (!flagOn('similarDefects')) {
                 $('#jita-sd-panel').remove();
                 $('#jita-side-group').remove();
                 if (typeof JiTA !== 'undefined') { JiTA.ui.currentKey = null; }
@@ -7816,13 +7829,13 @@ JiTA.menu = {
         }));
         // ISD Credits: mount / tear down the corner badge (and start the scheduler) on toggle.
         $feat.append(JiTA.menu._toggleRow('ISD Credits', 3, function () {
-            if (!savedVariables[3][1]) { JiTA.credits.badge.remove(); }
+            if (!flagOn('credits')) { JiTA.credits.badge.remove(); }
             else { JiTA.credits.badge.mount(); JiTA.credits.sched.start(); }
         }));
         $p.append($feat);
 
         // ---- ISD Credits (only when enabled) ----
-        if (savedVariables[3][1]) {
+        if (flagOn('credits')) {
             JiTA.credits._injectCss();
             var $cr = $('<div class="jita-menu-sect"></div>');
             $('<h3>ISD Credits</h3>').appendTo($cr);
@@ -7854,7 +7867,7 @@ JiTA.menu = {
         $p.append($resp);
 
         // ---- Triage Assistant (only when enabled) ----
-        if (savedVariables[5][1]) {
+        if (flagOn('similarDefects')) {
             var $ta = $('<div class="jita-menu-sect"></div>');
             $('<h3>Triage Assistant</h3>').appendTo($ta);
 
@@ -8023,7 +8036,7 @@ JiTA.migrate = {
     run: function () {
         if (JiTA.migrate._done) { return; }            // once per session
         JiTA.migrate._done = true;
-        if (!savedVariables[5][1]) { return; }            // Triage Assistant off -> nothing to migrate
+        if (!flagOn('similarDefects')) { return; }            // Triage Assistant off -> nothing to migrate
         JiTA.db.countDefectsOnly().then(function (nDef) {
             return JiTA.db.getMeta('dataVersionDefects').then(function (dv) {
                 var defStale = nDef > 0 && (Number(dv) || 0) < JiTA.DATA_VERSION;
@@ -8094,7 +8107,7 @@ JiTA.sched = {
     },
 
     tick: function () {
-        if (!savedVariables[5][1]) { return; }            // feature disabled
+        if (!flagOn('similarDefects')) { return; }            // feature disabled
         if (JiTA.sched.recentlySynced()) { return; }    // a sync ran < INTERVAL_MS ago (persisted) - don't re-fetch on reload
         if (!JiTA.sched._acquireLease()) { return; }    // another tab is the syncer right now
         JiTA.sync.autoSync();
@@ -8503,7 +8516,7 @@ JiTA.credits = {
     // ---- always-on corner badge (your current-month total + rank; reads cache; click opens the view) -----
     badge: {
         mount: function () {
-            if (!savedVariables[3][1] || JITA_IS_FORGE_FRAME) { return; }
+            if (!flagOn('credits') || JITA_IS_FORGE_FRAME) { return; }
             var el = document.getElementById('jita-credits-badge');
             if (!el) {
                 el = document.createElement('div');
@@ -8574,7 +8587,7 @@ JiTA.credits = {
 
         tick: function () {
             var S = JiTA.credits.sched;
-            if (!savedVariables[3][1]) { return; }                 // feature off
+            if (!flagOn('credits')) { return; }                 // feature off
             try { JiTA.credits.badge.refresh(); } catch (e) { /* ignore */ }   // cheap: reflect the latest cache each poll
             if (JiTA.credits.running) { return; }                  // a job is already running in THIS tab -> never overlap
             var now = JiTA.credits._ymNow();
@@ -10057,7 +10070,7 @@ JiTA.declutter = {
     // Shared ranking worker: elect a leader + spawn the one worker all tabs share (additive; nothing routes to it yet).
     try { JiTA.worker.start(); } catch (e) { /* swallow */ }
     // ISD credit tracker: show the corner badge (from cache) and start the throttled background recompute.
-    if (savedVariables[3][1]) {
+    if (flagOn('credits')) {
         try { JiTA.credits.badge.mount(); } catch (e) { /* swallow */ }
         try { JiTA.credits.sched.start(); } catch (e) { /* swallow */ }
     }
