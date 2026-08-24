@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.5.0
+// @version     3.5.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -7352,7 +7352,8 @@ JiTA.ui = {
         var st = document.getElementById('jita-sd-status'),
             md = document.getElementById('jita-sd-mode'),
             ti = document.getElementById('jita-sd-title'),
-            ll = document.getElementById('jita-sd-loglink');
+            ll = document.getElementById('jita-sd-loglink'),
+            ex = document.getElementById('jita-sd-exccluster');
         JiTA.ui._snapshot = {
             key: key,
             list: list.innerHTML,
@@ -7360,7 +7361,9 @@ JiTA.ui = {
             mode: md ? md.textContent : '',
             title: ti ? ti.textContent : '',
             loglink: ll ? ll.innerHTML : '',
-            loglinkHits: !!(ll && ll.className.indexOf('has-hits') !== -1)
+            loglinkHits: !!(ll && ll.className.indexOf('has-hits') !== -1),
+            exccluster: ex ? ex.innerHTML : '',
+            exclusterHits: !!(ex && ex.className.indexOf('has-hits') !== -1)
         };
     },
     // Paint the cached content back into a freshly (re)built group. No-op unless the snapshot is for the issue
@@ -7385,6 +7388,11 @@ JiTA.ui = {
         if (ll) {
             ll.innerHTML = s.loglink || '';
             if (s.loglinkHits) { ll.classList.add('has-hits'); } else { ll.classList.remove('has-hits'); }
+        }
+        var ex = document.getElementById('jita-sd-exccluster');
+        if (ex) {
+            ex.innerHTML = s.exccluster || '';
+            if (s.exclusterHits) { ex.classList.add('has-hits'); } else { ex.classList.remove('has-hits'); }
         }
     },
     // Eager re-mount: called synchronously from the DOM observer so a wiped sidebar group goes back in the SAME
@@ -7456,7 +7464,7 @@ JiTA.ui = {
         $('#jita-sd-title').text('Matching bug reports');
         $('#jita-sd-loglink').removeClass('has-hits').empty();   // EBR-only section; unused on a defect
         if (!background) { $('#jita-sd-list').empty(); }   // background refresh keeps the list until new results are ready
-        JiTA.ui.renderExceptionCluster(key);   // list other defects that reported the same exception
+        JiTA.ui.renderExceptionCluster(key, background);   // list other defects that reported the same exception; background = don't blank it first
         if (!background) { JiTA.ui.setStatus('Finding matching bug reports…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countEbr().then(function (n) {
@@ -7566,15 +7574,18 @@ JiTA.ui = {
     // Populate the "Same exception" section: every OTHER defect that reported the same exception signature as
     // this one, each with its status (Open / Fixed). A sibling that is already FIXED while this defect is still
     // open is flagged "⚠ regression?". Hidden unless there are siblings. Reuses the shared cluster member rows.
-    renderExceptionCluster: function (key) {
+    renderExceptionCluster: function (key, background) {
         var $box = $('#jita-sd-exccluster');
         if (!$box.length) { return; }
-        $box.removeClass('has-hits').empty();
+        // Foreground (navigation): clear the previous issue's siblings immediately. Background (a data-driven
+        // refresh or a same-issue panel re-mount): keep what's shown until the new results are ready, then refill
+        // atomically (the $b.empty() right before repopulating), so the section doesn't blank and flash back.
+        if (!background) { $box.removeClass('has-hits').empty(); }
         // Exact stack siblings ("Same exception") AND looser crash-site peers ("Possibly related").
         Promise.all([JiTA.logsig.siblingsForKey(key), JiTA.logsig.relatedForKey(key)]).then(function (res) {
             if (JiTA.ui.currentKey !== key) { return; }       // navigated to another issue meanwhile
             var siblings = res[0] || [], related = res[1] || [];
-            if (!siblings.length && !related.length) { return; }
+            if (!siblings.length && !related.length) { $box.removeClass('has-hits').empty(); return; }   // genuinely none now -> clear (covers the background path that skipped the top empty)
             return JiTA.db.getDefect(key).then(function (rec) {
                 if (JiTA.ui.currentKey !== key) { return; }
                 var currentResolved = !!(rec && (rec.resolution || rec.resolutiondate));
