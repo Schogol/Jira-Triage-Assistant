@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.7.3
+// @version     3.8.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -2884,7 +2884,7 @@ var JiTA = {
         if (!isNaN(v) && v >= 1 && v <= 30) { return v; }
         return 8;
     })(),
-    MODEL_VERSION: 'gte-small-v3',                  // embedding model tag; bump to force a full re-embed
+    MODEL_VERSION: 'mMiniLM-ml-v4',                 // embedding model tag; bump to force a full re-embed (v4 = multilingual paraphrase-MiniLM swap)
                                                     // (v1 = NaN from fp16; v2 = fp32; v3 = boilerplate-stripped text)
     DATA_VERSION: 3                                 // stored-record SCHEMA version. Bump whenever a sync change
                                                     // adds/changes a FIELD on stored records - OR widens the crawl
@@ -5345,7 +5345,7 @@ JiTA.rank._bm25Score = function (idx, text, excludeKey, limit, filterTerms) {
  * fetch model weights directly. Any failure flips `unavailable` and the ranking layer falls back to BM25.
  */
 JiTA.embed = {
-    MODEL: 'Xenova/gte-small',   // English, retrieval-tuned, 384-dim (better recall than all-MiniLM for dup-finding)
+    MODEL: 'Xenova/paraphrase-multilingual-MiniLM-L12-v2',   // multilingual (50+ langs), symmetric, 384-dim: lets non-English bug reports match English defects cross-lingually (was English-only Xenova/gte-small)
     LIB_URL: 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.2/dist/transformers.min.js',
     BATCH: 16,
     MAX_CHARS: 1500,            // cap text per issue. Now that cleanForCompare strips the boilerplate, the
@@ -5385,10 +5385,11 @@ JiTA.embed = {
                     // Run the ONNX/WASM backend in a worker so embedding never blocks the page.
                     try { mod.env.backends.onnx.wasm.proxy = true; } catch (e) { /* older builds: ignore */ }
                 }
-                // Pick a backend that actually works. We deliberately do NOT use fp16 on WebGPU for this
-                // model: gte-small's intermediate activations exceed the tiny fp16 range and overflow to
-                // Inf/NaN, so embeddings come back as NaN (cosine -> NaN, "%" shows NaN, semantic ranking
-                // becomes noise). fp32 on WebGPU is reliable; the WASM/CPU fallback uses q8 (small + fine on
+                // Pick a backend that actually works. We deliberately do NOT use fp16 on WebGPU for these
+                // small sentence models: gte-small's intermediate activations famously overflowed the tiny
+                // fp16 range to Inf/NaN, so embeddings came back as NaN (cosine -> NaN, "%" shows NaN, semantic
+                // ranking becomes noise), and the current multilingual MiniLM is no safer a bet. fp32 on
+                // WebGPU is reliable; the WASM/CPU fallback uses q8 (small + fine on
                 // CPU). Each candidate is validated below, so any backend that yields bad numbers is rejected.
                 // After a GPU device loss we rebuild on WASM only; otherwise prefer WebGPU fp32 then WASM.
                 // WebGPU has proven unstable for this model: every dtype/batch size we tried eventually died
