@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.8.2
+// @version     3.8.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -9046,7 +9046,11 @@ function jitaWorkerBody(cfg) {
                 todo.push(r);
             }
             if (!todo.length) { return { embedded: 0 }; }
-            var idx = 0, retries = 0;
+            var idx = 0, retries = 0, lastPost = 0;
+            // Post re-embed progress to the tab(s) so a long pass (minutes on CPU) is visible. Throttled to
+            // ~every 50 records; the tab shows it in the panel status (see _applyEvent 'embedPassProgress').
+            function postProgress() { try { self.postMessage({ event: 'embedPassProgress', done: idx, total: todo.length }); } catch (e) { /* only meaningful in a worker */ } }
+            postProgress();   // 0 / total up front so the pass is visible immediately
             while (idx < todo.length) {
                 var slice = todo.slice(idx, idx + BATCH);
                 var texts = slice.map(function (x) { return 'passage: ' + cleanForCompare(x.summary, x.description); });   // e5 "passage: " prefix on stored docs (query side gets "query: " in qEmbed)
@@ -9061,6 +9065,7 @@ function jitaWorkerBody(cfg) {
                     for (var j = 0; j < slice.length; j++) { slice[j].embedding = vecs[j]; slice[j].embeddingModelVersion = cfg.MODEL_VERSION; }
                     await bulkPut(slice);
                     idx += slice.length; retries = 0;
+                    if (idx - lastPost >= 50 || idx >= todo.length) { lastPost = idx; postProgress(); }
                 } catch (e) {
                     pipe = null;                                  // drop the (possibly dead) pipeline and rebuild
                     if (++retries > 3) { throw e; }
@@ -10037,6 +10042,15 @@ JiTA.worker = {
         if (d.event === 'embedPassDone' && d.embedded > 0) {
             if (window.console) { console.log('[JiTA worker] embed pass finished: ' + d.embedded + ' embedded'); }
             try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // re-rank the open view now the new vectors exist
+            return;
+        }
+        // Live re-embed progress (worker embedPass posts this ~every 50 records). Show it in the panel status so a
+        // long pass is visible; embedPassDone's re-render replaces it with real results when the pass finishes.
+        if (d.event === 'embedPassProgress') {
+            try {
+                var pctDone = d.total ? Math.round(d.done / d.total * 100) : 0;
+                JiTA.ui.setStatus('Embedding ' + d.done + ' / ' + d.total + ' (' + pctDone + '%)…');
+            } catch (e) { /* panel may not be mounted */ }
             return;
         }
         // Credits crawl progress from the worker. Broadcast to every tab, but only the tab that started THIS
