@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.6.1
+// @version     3.6.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -945,7 +945,11 @@ waitForKeyElements(cmSelector, SwapUI);
             if (el.classList.contains('jita-log-hiding')) { continue; }
             if (el.querySelector && (el.querySelector('#gpanel') || el.querySelector('#tableContent'))) { continue; }   // already our parsed UI
             var t = el.textContent || '';
-            if (t && HIDE_SIG.test(t)) {
+            // Hide header-based logs (any layout, matched by header text) OR, while a header-less igbr.zip file is
+            // being loaded by a click (jitaParserPending === the current click generation), the code-block it lands
+            // in - so its raw text can't flash before SwapUI parses it, even if Jira swaps in a fresh code-block.
+            var isCode = el.getAttribute && el.getAttribute('data-testid') === 'code-block';
+            if ((t && HIDE_SIG.test(t)) || (jitaParserPending && jitaParserPending === jitaParserGen && isCode)) {
                 el.classList.add('jita-log-hiding');
                 (function (node) { setTimeout(function () { node.classList.remove('jita-log-hiding'); }, 2500); })(el);   // safety net
             }
@@ -998,6 +1002,13 @@ IGBR_FILES.forEach(function (f) {
 //      EVERY file-entry click, which kills any pending poller the moment you navigate away.
 // `setFlag` marks which parser branch SwapUI takes (oc / lc / pdm).
 var jitaParserGen = 0;
+var jitaParserPending = 0;   // generation of an in-flight header-less (igbr.zip file-button) parse, or 0; drives the observer's pending-hide
+function jitaRevealLogs() {   // reveal every container the flash suppressor hid (shared by SwapUI + the poller)
+    try {
+        var hid = document.querySelectorAll('.jita-log-hiding');
+        for (var i = 0; i < hid.length; i++) { hid[i].classList.remove('jita-log-hiding'); }
+    } catch (e) { /* ignore */ }
+}
 // Guard #5: clicking any file entry in the igbr.zip viewer cancels a pending poller. Capture phase, so it runs
 // BEFORE the tracked button's bubble handler - a tracked file then starts a fresh poller with the newer (winning)
 // generation, while an untracked file just leaves every poller cancelled. File entries are <button>s containing a
@@ -1010,18 +1021,20 @@ document.addEventListener('click', function (e) {
 function jitaRunParserWhenLoaded(setFlag) {
     var myGen = ++jitaParserGen;
     var CB = SELECTORS.CODE_BLOCK;
-    // Hide the code-block now so this file's incoming raw text does not flash before SwapUI parses it. These
-    // igbr.zip files have no header row, so the flash-suppressor observer can't catch them by signature - hide
-    // at click time instead. Revealed on parse (SwapUI's end) or on give-up (timeout below); an unconditional
-    // safety timer reveals it regardless, so a supersede by an untracked-file click can't leave the viewer blank.
+    // These igbr.zip files have no header row, so the signature observer can't catch them. Instead mark a parse as
+    // PENDING for this click's generation: the observer then hides the code-block the instant the header-less raw
+    // text lands - even if Jira swaps in a FRESH code-block element - and we hide the current one now too. Cleared
+    // + revealed on parse (SwapUI), give-up (timeout), or the safety timer; gen-scoped so a later click (tracked or
+    // not) can never leave the viewer stuck blank.
+    jitaParserPending = myGen;
     $(CB).addClass('jita-log-hiding');
-    setTimeout(function () { $(CB).removeClass('jita-log-hiding'); }, 2500);
+    setTimeout(function () { if (jitaParserPending === myGen) { jitaParserPending = 0; } jitaRevealLogs(); }, 2500);
     var HEADER_SIG = new RegExp(LOG_HDR + '|dateTime\tpyDateTime\tprocCpu|Time\tMethod\tDuration');
     var before = ($(CB).text() || '').trim();
     var start = Date.now(), MAX = 8000, POLL = 100;
     (function poll() {
         if (myGen !== jitaParserGen) { return; }                 // superseded by a newer click (its poller / the safety timer owns the reveal)
-        if (Date.now() - start > MAX) { $(CB).removeClass('jita-log-hiding'); return; }   // empty / never-loaded file -> reveal + don't parse
+        if (Date.now() - start > MAX) { if (jitaParserPending === myGen) { jitaParserPending = 0; } jitaRevealLogs(); return; }   // empty / never-loaded file -> reveal + don't parse
         var $cb = $(CB), now = ($cb.text() || '').trim();
         var ready = !document.getElementById('tableContent')    // no parser markup currently mounted
             && $cb.length && now && now !== before              // new, non-empty raw content
@@ -1153,12 +1166,10 @@ function SwapUI() {
         pdm = false;
     };
 
-    // The parsed view is now mounted (or this wasn't a parse branch) - reveal any log container the flash
-    // suppressor hid, so the parsed UI shows instead of staying invisible.
-    try {
-        var hid = document.querySelectorAll('.jita-log-hiding');
-        for (var hi = 0; hi < hid.length; hi++) { hid[hi].classList.remove('jita-log-hiding'); }
-    } catch (e) { /* ignore */ }
+    // The parsed view is now mounted (or this wasn't a parse branch) - clear any pending non-header parse and
+    // reveal every container the flash suppressor hid, so the parsed UI shows instead of staying invisible.
+    jitaParserPending = 0;
+    jitaRevealLogs();
 
 
     // Functionality for the buttons in the gpanel to toggle show / hide specific table rows
