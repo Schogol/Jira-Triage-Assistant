@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.6.3
+// @version     3.6.4
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -955,7 +955,19 @@ waitForKeyElements(cmSelector, SwapUI);
             }
         }
     }
-    try { new MutationObserver(hideLogs).observe(document.body, { childList: true, subtree: true, characterData: true }); } catch (e) { /* ignore */ }
+    try {
+        new MutationObserver(function (records) {
+            // Cheap gate before the full-document scan: a comment-typing keystroke is a characterData-only mutation
+            // with no parse pending - skip those. Scan only when a node was actually added (a log may have mounted)
+            // or a header-less parse is pending (its raw text streams in via characterData).
+            if (!jitaParserPending) {
+                var added = false;
+                for (var i = 0; i < records.length; i++) { if (records[i].addedNodes && records[i].addedNodes.length) { added = true; break; } }
+                if (!added) { return; }
+            }
+            hideLogs();
+        }).observe(document.body, { childList: true, subtree: true, characterData: true });
+    } catch (e) { /* ignore */ }
 })();
 
 
@@ -2937,7 +2949,7 @@ JiTA.logsig = {
         text = text.replace(/^[ \t]*\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/gm, '');
         var msg = '', mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text);
         if (mm) { msg = (mm[1] || '').replace(/\s+/g, ' ').trim(); }
-        var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.py)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;
+        var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.pyx?)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;   // .py OR .pyx (EVE's Cython frames)
         while ((fm = fre.exec(text))) {
             frames.push(fm[1].replace(/^.*[\/\\]/, '') + ':' + fm[3]);   // basename:function (no line number)
         }
@@ -6066,6 +6078,18 @@ JiTA.ui = {
 
     setStatus: function (msg) { $('#jita-sd-status').text(msg); },
 
+    // Status message with an inline action link (e.g. "Sync now" in an empty state, "Retry" after an error) - one
+    // click instead of "read a sentence, then go hunt the Tampermonkey menu".
+    setStatusAction: function (msg, label, fn) {
+        var $s = $('#jita-sd-status');
+        if (!$s.length) { return; }
+        $s.empty().append(document.createTextNode(msg + ' '));
+        $('<a href="#"></a>').text(label)
+            .css({ 'text-decoration': 'underline', cursor: 'pointer', color: '#4c9aff' })
+            .on('click', function (e) { e.preventDefault(); try { fn(); } catch (x) { /* ignore */ } })
+            .appendTo($s);
+    },
+
     // ---- live filter box + clickable ranking-mode badge (left of the Keyword/Hybrid label) ----
     // The filter re-QUERIES the whole local database (not just the rows already on screen): the typed word(s)
     // are pushed into the ranker as a hard pre-filter, so it picks the best TOP_N matches from EVERY stored
@@ -7506,7 +7530,7 @@ JiTA.ui = {
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countDefectsOnly().then(function (n) {
                 if (!n) {
-                    JiTA.ui.setStatus('No local data yet – open the Tampermonkey menu and click “Sync defects now”.');
+                    JiTA.ui.setStatusAction('No local data yet.', 'Sync defects now', function () { JiTA.sync.syncAllNow(); });
                     return;
                 }
                 if (!text) { JiTA.ui.setStatus('Could not read this issue’s text.'); return; }
@@ -7534,7 +7558,7 @@ JiTA.ui = {
                 });
                 });
             });
-        }).catch(function (e) { JiTA.ui.setStatus('Error: ' + (e && e.message || e)); });
+        }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
     },
 
     // EDR (defect) view: rank the OPEN bug reports that best match this defect's description (keyword BM25),
@@ -7551,7 +7575,7 @@ JiTA.ui = {
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countEbr().then(function (n) {
                 if (!n) {
-                    JiTA.ui.setStatus('No bug reports synced yet – open the Tampermonkey menu and click “Sync bug reports now”.');
+                    JiTA.ui.setStatusAction('No bug reports synced yet.', 'Sync bug reports now', function () { JiTA.sync.syncAllNow(); });
                     return;
                 }
                 if (!text) { JiTA.ui.setStatus('Could not read this defect’s text.'); return; }
@@ -7575,7 +7599,7 @@ JiTA.ui = {
                     });
                 });
             });
-        }).catch(function (e) { JiTA.ui.setStatus('Error: ' + (e && e.message || e)); });
+        }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
     },
 
     // EBR view, "reporter's other reports" mode (funnel toggle): list EVERY other bug report from the same
@@ -7622,7 +7646,7 @@ JiTA.ui = {
                 for (var j = 0; j < rows.length; j++) { $list.append(JiTA.ui._reporterRow(rows[j])); }
                 JiTA.ui._fitVertical();
             });
-        }).catch(function (e) { JiTA.ui.setStatus('Error: ' + (e && e.message || e)); });
+        }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
     },
 
     // Wrap a value as a JQL string literal (escape backslashes + double-quotes).
@@ -8750,7 +8774,7 @@ function jitaWorkerBody(cfg) {
         text = (text || '').replace(/^[ \t]*\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/gm, '');
         var msg = '', mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text);
         if (mm) { msg = (mm[1] || '').replace(/\s+/g, ' ').trim(); }
-        var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.py)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;
+        var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.pyx?)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;   // .py OR .pyx (EVE's Cython frames)
         while ((fm = fre.exec(text))) { frames.push(fm[1].replace(/^.*[\/\\]/, '') + ':' + fm[3]); }
         var nmsg = msg.replace(/0x[0-9a-fA-F]+/g, '0x#').replace(/\b\d+L\b/g, '#').replace(/([(\[{,]\s*)\d+/g, '$1#').replace(/\d+(\s*[)\]},])/g, '#$1').replace(/\b\d{4,}\b/g, '#');
         var sig = frames.length >= LG_MIN ? (nmsg + '|' + frames.join('>')).toLowerCase() : null;
