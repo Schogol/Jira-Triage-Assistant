@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.7.2
+// @version     3.7.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6136,6 +6136,7 @@ JiTA.ui = {
     // whenever the embedding model is available).
     modeOverride: null,        // null = automatic (prefer Hybrid); 'Hybrid' / 'Keyword' = user-forced this session
     reporterMode: false,       // EBR view: when on, the panel lists the reporter's OTHER reports instead of similar defects (session-only; reset on navigation)
+    _dupOnState: false,        // EBR view: "possible duplicate reports" section expanded? IN-MEMORY only, reset on navigation - each new issue starts collapsed and the state never persists (like reporterMode)
     _filterTimer: null,
     _wireFilter: function () {
         if (JiTA.ui._filterWired) { return; }   // one set of delegated handlers survives chrome re-mounts
@@ -6147,11 +6148,11 @@ JiTA.ui = {
             if (document.getElementById('jita-sd-filtermenu')) { JiTA.ui._closeFilterMenu(); }
             else { JiTA.ui._showFilterMenu(this); }
         });
-        // Duplicate-reports toggle: flip the persisted preference, reflect it on the button, and (on an EBR) show
-        // or clear the "possible duplicate reports" section right away.
+        // Duplicate-reports toggle: flip the in-memory per-issue state, reflect it on the button, and (on an EBR)
+        // show or clear the "possible duplicate reports" section right away. Not persisted - resets on navigation.
         $(document).on('click', '#jita-sd-dupbtn', function (e) {
             e.preventDefault(); e.stopPropagation();
-            gmSet('sdDupReports', !JiTA.ui._dupOn());
+            JiTA.ui._dupOnState = !JiTA.ui._dupOn();
             JiTA.ui._syncDupBtn(true);
             var k = JiTA.ui.currentKey;
             if (k && /^EBR-/.test(k)) { JiTA.ui.renderEbrDups(k); }   // recompute now, or clear if just turned off
@@ -6235,11 +6236,12 @@ JiTA.ui = {
         if ($b.length) { $b.toggleClass('active', JiTA.ui._filtersActive()); }
     },
 
-    // Duplicate-reports toggle (two-squares icon, EBR view only). OFF by default: the "possible duplicate reports"
-    // section is gated behind this button so it costs nothing and adds no clutter until the triager asks for it.
-    // Persisted in GM ('sdDupReports') so the preference sticks across reloads.
+    // Duplicate-reports toggle (two-squares icon, EBR view only). Collapsed by default on EVERY issue: the
+    // "possible duplicate reports" section is gated behind this button so it costs nothing and adds no clutter
+    // until the triager asks for it. State is IN-MEMORY and per-issue (see _dupOnState) - it is deliberately NOT
+    // persisted, so each new issue you open starts collapsed.
     _dupSvg: '<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M5 1a1 1 0 0 0-1 1v1H3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-1h1a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H5zm7 1v8h-1V4a1 1 0 0 0-1-1H5V2h7zM3 4h7v9H3V4z"/></svg>',
-    _dupOn: function () { return !!gmGet('sdDupReports', false); },
+    _dupOn: function () { return !!JiTA.ui._dupOnState; },
     _syncDupBtn: function (show) {
         var $b = $('#jita-sd-dupbtn');
         if (!$b.length) { return; }
@@ -7900,7 +7902,10 @@ JiTA.ui = {
         // snapshot (painted in _ensureSidebar) stays on screen and the ranking refreshes without a "Finding…"
         // flash. A genuinely new issue renders foreground (blank + "Finding…") as before.
         var remount = (JiTA.ui.currentKey === key);
-        if (JiTA.ui.currentKey !== key) { JiTA.ui.reporterMode = false; }   // new issue -> leave the reporter-reports view (its reporter is per-issue)
+        if (JiTA.ui.currentKey !== key) {
+            JiTA.ui.reporterMode = false;   // new issue -> leave the reporter-reports view (its reporter is per-issue)
+            JiTA.ui._dupOnState = false;    // new issue -> collapse the "possible duplicate reports" section (state is per-issue, never persisted)
+        }
         JiTA.ui.currentKey = key;
         if (isEbr) {
             JiTA.ui.render(key, remount);              // bug report -> similar defects
