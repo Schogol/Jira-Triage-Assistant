@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.8.4
+// @version     3.8.5
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8991,8 +8991,14 @@ function jitaWorkerBody(cfg) {
                 pipe = await mod.pipeline('feature-extraction', cfg.MODEL, attempts[i]);
                 backend = attempts[i].device + '/' + attempts[i].dtype;
                 BATCH = attempts[i].device === 'webgpu' ? 8 : 1;          // fp32 GPU batches; WASM one-at-a-time (batched hangs)
+                try { console.log('[JiTA worker] embedding backend: ' + backend); } catch (_e) { /* ignore */ }
                 return pipe;
-            } catch (e) { lastErr = e; }
+            } catch (e) {
+                lastErr = e;
+                // Surface WHY a backend was rejected - especially why WebGPU fell back to CPU. Otherwise the error
+                // is swallowed the moment WASM succeeds, leaving no signal that the GPU path ever failed.
+                try { console.warn('[JiTA worker] backend ' + attempts[i].device + '/' + attempts[i].dtype + ' unavailable: ' + ((e && e.stack) || (e && e.message) || e)); } catch (_e) { /* ignore */ }
+            }
         }
         throw lastErr || new Error('no backend loaded');
     }
