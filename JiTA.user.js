@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.5.2
+// @version     3.5.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -142,6 +142,30 @@ function setFlag(name, val) {
     GM_setValue(savedVariables[i][0], !!val);
 }
 
+// Central map of Jira-owned selectors that appear at 2+ sites (or are extra-fragile). Jira renames these under
+// us; keeping each literal in ONE place makes the inevitable break a one-line fix. JiTA-owned DOM (jita*,
+// #gpanel, #tableContent, tr.exception) is NOT listed - those are ours and do not move. The parser's tab-delimited
+// header strings stay inline (content, not selectors); CODE_BLOCK is spliced with ':contains(<header>)' there.
+// The one CSS-in-<style> copy of code-block (search "keep in sync with SELECTORS.CODE_BLOCK") and the worker
+// string's '.cm-content' are intentionally left inline - they run in contexts where this const isn't visible.
+var SELECTORS = {
+    FEEDBACK_BTN:      'button[data-testid="issue-navigator.common.ui.feedback.feedback-button"]',
+    QUICK_ADD_TRIGGER: 'button[data-testid="issue-view-foundation.quick-add.quick-add-items-compact.apps-button-dropdown--trigger"]',
+    STICKY_HEADER:     '[data-testid="issue-view-sticky-header-container.sticky-header"]',
+    HEADER_ACTIONS_ID: 'jira-issue-header-actions',   // element id: used bare (getElementById) and as '#' + id (closest)
+    ADD_COMMENT_BTN:   'button[data-testid="add-comment-button"]',
+    SUMMARY_HEADING:   "h1[data-testid='issue.views.issue-base.foundation.summary.heading']",
+    DESC_CONTAINER:    "div[data-component-selector='jira-issue-view-rich-text-inline-edit-view-container']",
+    STATUS_FIELD_WRAP: "div[data-testid='issue.views.issue-base.foundation.status.status-field-wrapper']",
+    CODE_BLOCK:        "span[data-testid='code-block']",   // also spliced as CODE_BLOCK + ':contains(<header>)' by the parser
+    CM_LINE:           '.cm-line',                          // CodeMirror line wrapper (igbr.zip / new editor layout)
+    GROUP_TITLE:       '[data-testid$="collapsible-group-factory.title"]',
+    FIELD_HEADING:     '[data-testid^="issue-field-heading-styled-field-heading"]',
+    VC_DETAILS_GROUP:  '[data-vc="issue-view-context-group-details-group"]',
+    ROLE_TAB:          '[role="tab"]',
+    RS_SINGLE_VALUE:   '[id$="-single-value"]'
+};
+
 
 // Custom-scrollbar CSS, injected on load (when enabled) and by the scrollbar change-listener below. The
 // removal path matches on the leading "*::-webkit-scrollbar { width: 11px…}" rule, so keep that first rule
@@ -264,13 +288,13 @@ function toggleFeature(i) {
 
 
 // waitForKeyElements waits until the it finds the "Give Feedback" element of the page and then removes it because we dont want that to take up space.
-var feedbackItem = 'button[data-testid="issue-navigator.common.ui.feedback.feedback-button"]';
+var feedbackItem = SELECTORS.FEEDBACK_BTN;
 waitForKeyElements (feedbackItem, removeFeedbackButton);
 
 
 // Remove the Feedback element
 function removeFeedbackButton() {
-    $('button[data-testid="issue-navigator.common.ui.feedback.feedback-button"]').parent().remove()
+    $(SELECTORS.FEEDBACK_BTN).parent().remove()
 };
 
 
@@ -305,7 +329,7 @@ function ensureButtonsPresent() {
     if (!flagOn('buttons')) { return; }                                    // user toggled the buttons off
     if ($('#translateButton').length) { return; }                            // already present, nothing to do
     if (!$(issueItem + ':contains("EBR")').length) { return; } // not a bug report
-    if (!$('button[data-testid="issue-view-foundation.quick-add.quick-add-items-compact.apps-button-dropdown--trigger"]').length) { return; } // action bar not ready yet
+    if (!$(SELECTORS.QUICK_ADD_TRIGGER).length) { return; } // action bar not ready yet
     addButtons();
 }
 
@@ -351,14 +375,14 @@ function jitaFmtDateShort(iso) {
 // breadcrumb is in a SEPARATE left structure, so it can't be used as a row anchor. Fallbacks probe the sticky-
 // header testid, then derive the bar from the watch button.
 function jitaDatesTarget() {
-    var bar = document.getElementById('jira-issue-header-actions')
-        || document.querySelector('[data-testid="issue-view-sticky-header-container.sticky-header"]');
+    var bar = document.getElementById(SELECTORS.HEADER_ACTIONS_ID)
+        || document.querySelector(SELECTORS.STICKY_HEADER);
     if (!bar) {
         var watch = document.querySelector('button[data-testid="issue.watchers.action-button.root"]')
             || document.querySelector('button[data-testid*="watch" i]')
             || document.querySelector('button[aria-label*="watch" i]');
         bar = (watch && watch.closest)
-            ? (watch.closest('#jira-issue-header-actions') || watch.closest('[data-testid="issue-view-sticky-header-container.sticky-header"]'))
+            ? (watch.closest('#' + SELECTORS.HEADER_ACTIONS_ID) || watch.closest(SELECTORS.STICKY_HEADER))
             : null;
     }
     if (!bar) { return null; }
@@ -604,7 +628,7 @@ function jitaZdTicketState() {
         return new Promise(function (resolve) {
             var t = 0;
             (function waitState() {
-                if (document.querySelector('button[data-testid="add-comment-button"]')) { resolve('ticket'); return; }
+                if (document.querySelector(SELECTORS.ADD_COMMENT_BTN)) { resolve('ticket'); return; }
                 if (jitaHasNoLinkedTicketsMsg()) { resolve('noticket'); return; }
                 if (t >= 25000) { resolve('unavailable'); return; }
                 t += 250; setTimeout(waitState, 250);
@@ -750,7 +774,7 @@ function jitaOpenGmModal(key) {
 function addButtons() {
     // The native quick-add trigger: we copy its (react-churned) classes to style our buttons like it, and
     // insert ours right after it.
-    var TRIGGER_SEL = 'button[data-testid="issue-view-foundation.quick-add.quick-add-items-compact.apps-button-dropdown--trigger"]';
+    var TRIGGER_SEL = SELECTORS.QUICK_ADD_TRIGGER;
     let buttonClass = $(TRIGGER_SEL).attr('class');
     let innerSpanClass = $(TRIGGER_SEL).find('span').eq(0).attr('class');
 
@@ -776,8 +800,8 @@ function addButtons() {
     // Google's FREE keyless gtx endpoint (jitaTranslateFree). One request per text, run in parallel, then we
     // replace the original Title / Description / Repro-Steps with the translation - same DOM mapping as before.
     $("#translateButton").off('click.jita').on('click.jita', function () {
-        var $title = $("h1[data-testid='issue.views.issue-base.foundation.summary.heading']");
-        var $desc = $("div[data-component-selector='jira-issue-view-rich-text-inline-edit-view-container']");
+        var $title = $(SELECTORS.SUMMARY_HEADING);
+        var $desc = $(SELECTORS.DESC_CONTAINER);
         // Read with innerText (NOT jQuery .text()/textContent): innerText reflects the RENDERED text and
         // inserts "\n" at <br> and paragraph/block boundaries, so the line structure survives into the
         // translation. textContent would jam every paragraph together and the linebreaks would be lost
@@ -871,24 +895,24 @@ function addButtons() {
     addActionButton('closeButton', 'Close');
     // When the Close button is clicked we change the status to Closed by simulating clicks on the relevant buttons. This is extremely janky right now because I cant figure out a better way to do this.
     $("#closeButton").off('click.jita').on('click.jita', function () {
-        $("div[data-testid='issue.views.issue-base.foundation.status.status-field-wrapper']").find("button").click();
+        $(SELECTORS.STATUS_FIELD_WRAP).find("button").click();
         setTimeout(function(){$("div[data-testid='issue.fields.status.common.ui.status-lozenge.3']").children().find("span:contains(Closed)").click();}, 100);
     });
 };
 
 
 // When we detect the "title row" of a log parser file then we swap out the content of the log file with a parsed, more readable version of it with some extra features like buttons which allow you to toggle the visibility of certain types of events
-var selector = "span[data-testid='code-block']:contains(" + LOG_HDR + ")";
+var selector = SELECTORS.CODE_BLOCK + ":contains(" + LOG_HDR + ")";
 waitForKeyElements(selector, SwapUI);
 
 
 // When we detect the "title row" of a processHealth file then we swap out the content of the log file with a parsed, more readable version of it with some extra features
-var phSelector = "span[data-testid='code-block']:contains(dateTime	pyDateTime	procCpu	threadCpu	pyMem	virtualMem	taskletsProcessed	taskletsQueued	watchdog time	spf	serviceCalls	callsFromClient	bytesReceived	bytesSent	packetsReceived	packetsSent	sessionCount	tidiFactor)";
+var phSelector = SELECTORS.CODE_BLOCK + ":contains(dateTime	pyDateTime	procCpu	threadCpu	pyMem	virtualMem	taskletsProcessed	taskletsQueued	watchdog time	spf	serviceCalls	callsFromClient	bytesReceived	bytesSent	packetsReceived	packetsSent	sessionCount	tidiFactor)";
 waitForKeyElements(phSelector, SwapUI);
 
 
 // When we detect the "title row" of a methodCalls file then we swap out the content of the log file with a parsed, more readable version of it with some extra features
-var McSelector = "span[data-testid='code-block']:contains(Time	Method	Duration [ms])";
+var McSelector = SELECTORS.CODE_BLOCK + ":contains(Time	Method	Duration [ms])";
 waitForKeyElements(McSelector, SwapUI);
 
 
@@ -897,7 +921,7 @@ waitForKeyElements(McSelector, SwapUI);
 // CodeMirror only keeps the visible lines in the DOM, so we detect the file by its (always-present) header
 // row and let SwapUI pull the full text out of CodeMirror's in-memory state. (processHealth / methodCalls
 // only ever appear inside the igbr.zip, which still uses the <span> layout, so they need no CodeMirror path.)
-var cmSelector = ".cm-line:contains(" + LOG_HDR + ")";
+var cmSelector = SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")";
 waitForKeyElements(cmSelector, SwapUI);
 
 
@@ -955,7 +979,7 @@ document.addEventListener('click', function (e) {
 }, true);
 function jitaRunParserWhenLoaded(setFlag) {
     var myGen = ++jitaParserGen;
-    var CB = "span[data-testid='code-block']";
+    var CB = SELECTORS.CODE_BLOCK;
     var HEADER_SIG = new RegExp(LOG_HDR + '|dateTime\tpyDateTime\tprocCpu|Time\tMethod\tDuration');
     var before = ($(CB).text() || '').trim();
     var start = Date.now(), MAX = 8000, POLL = 100;
@@ -1012,8 +1036,8 @@ function getCmDocText() {
 // + inline comment spans, then read the raw file text into the module-level `rows`. Returns `rows`.
 function readCodeBlock() {
     $('code > span:empty').remove();
-    $('span[data-testid="code-block"]').find('span > span.comment').remove();
-    rows = $("span[data-testid='code-block']").text();
+    $(SELECTORS.CODE_BLOCK).find('span > span.comment').remove();
+    rows = $(SELECTORS.CODE_BLOCK).text();
     return rows;
 }
 
@@ -1021,7 +1045,7 @@ function readCodeBlock() {
 // Used by the log / processHealth / methodCalls / outstandingCalls / lastCrashes branches of SwapUI.
 function mountParser(viewHtml, parseFn) {
     readCodeBlock();
-    $("span[data-testid='code-block']").html(viewHtml);
+    $(SELECTORS.CODE_BLOCK).html(viewHtml);
     setTimeout(parseFn, 250);
 }
 
@@ -1035,8 +1059,8 @@ function SwapUI() {
     // Scope everything to the ONE editor that holds the log header row: the page can contain OTHER CodeMirror
     // editors (a ``` code block in the comment box is also a .cm-editor / .cm-content), and operating on all of
     // them read the wrong (comment) text into `rows` AND injected the "Logfile Parser" UI into the comment box.
-    var $logEd = $(".cm-line:contains(" + LOG_HDR + ")").first().closest('.cm-editor');
-    if ($logEd.length && !$("span[data-testid='code-block']").length && flagOn('parser')) {
+    var $logEd = $(SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")").first().closest('.cm-editor');
+    if ($logEd.length && !$(SELECTORS.CODE_BLOCK).length && flagOn('parser')) {
         var $cm = $logEd.find('.cm-content').first().attr('data-jita-cmsrc', '1');   // mark the exact source editor
         rows = getCmDocText();                                                       // reads the marked .cm-content
         $cm.removeAttr('data-jita-cmsrc');
@@ -1053,15 +1077,15 @@ function SwapUI() {
         // Toggle Notice / Warnings / Errors / Exceptions filter buttons get wired up.
     }
 
-    else if ($("span[data-testid='code-block']:contains(" + LOG_HDR + ")")[0] && flagOn('parser')) {
+    else if ($(SELECTORS.CODE_BLOCK + ":contains(" + LOG_HDR + ")")[0] && flagOn('parser')) {
         mountParser(html, ParseLogs);
     }
 
-    else if ($("span[data-testid='code-block']:contains(dateTime	pyDateTime	procCpu	threadCpu	pyMem	virtualMem	taskletsProcessed	taskletsQueued	watchdog time	spf	serviceCalls	callsFromClient	bytesReceived	bytesSent	packetsReceived	packetsSent	sessionCount	tidiFactor)")[0] && flagOn('parser')) {
+    else if ($(SELECTORS.CODE_BLOCK + ":contains(dateTime	pyDateTime	procCpu	threadCpu	pyMem	virtualMem	taskletsProcessed	taskletsQueued	watchdog time	spf	serviceCalls	callsFromClient	bytesReceived	bytesSent	packetsReceived	packetsSent	sessionCount	tidiFactor)")[0] && flagOn('parser')) {
         mountParser(phHtml, ParsePhLogs);
     }
 
-    else if ($("span[data-testid='code-block']:contains(Time	Method	Duration [ms])")[0] && flagOn('parser')) {
+    else if ($(SELECTORS.CODE_BLOCK + ":contains(Time	Method	Duration [ms])")[0] && flagOn('parser')) {
         mountParser(McHtml, ParseMcLogs);
     }
 
@@ -1077,7 +1101,7 @@ function SwapUI() {
 
     else if (dx && flagOn('parser')) {
         readCodeBlock();
-        $("span[data-testid='code-block']").append(dxdiagHtml);
+        $(SELECTORS.CODE_BLOCK).append(dxdiagHtml);
         // Parse the raw dxdiag text into a triage summary (crash history + GPU driver recency + system). Guarded.
         try { renderDxdiag(rows); } catch (e) { $('#dxdiag').text('Could not evaluate dxdiag.'); }
         dx = false;
@@ -1085,7 +1109,7 @@ function SwapUI() {
 
     else if (pdm && flagOn('parser')) {
         readCodeBlock();
-        $("span[data-testid='code-block']").append(pdmHtml);
+        $(SELECTORS.CODE_BLOCK).append(pdmHtml);
         var pdmdata = convertTextToObject(rows);
         // Judge the machine against EVE's system requirements and render a per-component breakdown into the
         // Quick Info box (verdict + OS/CPU/RAM/GPU/DirectX rows + driver age). Guarded end-to-end.
@@ -1867,6 +1891,7 @@ var css = `
       background-color: #1D2125;
     }
 
+    /* selector literal - keep in sync with SELECTORS.CODE_BLOCK (this is CSS, not a query, so it stays inline) */
     span[data-testid="code-block"] {
     background-color: #1d2125d6;
     }
@@ -4323,7 +4348,7 @@ JiTA.responses = {
     // composer is an Atlassian Tabs widget; each tab is a role="tab" element whose text is the label. We match
     // the public-reply tab by text and click it unless it's already selected. Returns true if found.
     _selectPublicReply: function () {
-        var tabs = document.querySelectorAll('[role="tab"]');
+        var tabs = document.querySelectorAll(SELECTORS.ROLE_TAB);
         for (var i = 0; i < tabs.length; i++) {
             if ((tabs[i].textContent || '').trim().toLowerCase() === 'add public reply') {
                 if (tabs[i].getAttribute('aria-selected') !== 'true') { tabs[i].click(); }
@@ -4345,7 +4370,7 @@ JiTA.responses = {
     // Select the "Add internal note" composer tab (mirrors _selectPublicReply). Internal is the default tab, but
     // we select it explicitly in case the composer was last left on "Add public reply".
     _selectInternalNote: function () {
-        var tabs = document.querySelectorAll('[role="tab"]');
+        var tabs = document.querySelectorAll(SELECTORS.ROLE_TAB);
         for (var i = 0; i < tabs.length; i++) {
             if ((tabs[i].textContent || '').trim().toLowerCase() === 'add internal note') {
                 if (tabs[i].getAttribute('aria-selected') !== 'true') { tabs[i].click(); }
@@ -4360,7 +4385,7 @@ JiTA.responses = {
     // cleared - its success signal. Resolves { ok, error }. Runs in whichever frame holds the composer (the Forge
     // iframe normally). Errs toward FAILURE (so the caller aborts the conversion) rather than risk a lost note.
     postInternalNote: function (note) {
-        var ADD = 'button[data-testid="add-comment-button"]';
+        var ADD = SELECTORS.ADD_COMMENT_BTN;
         // Small poller: call onOk once test() is truthy, or onTimeout after `ms`.
         function poll(test, ms, onOk, onTimeout) {
             var t = 0;
@@ -4437,7 +4462,7 @@ JiTA.responses = {
     _ready: function (srcCol) {
         var control = srcCol.querySelector('[class*="-control"]');
         var indic = srcCol.querySelector('[class*="ndicator"]');   // -IndicatorsContainer / -indicatorContainer
-        var val = srcCol.querySelector('[id$="-single-value"]');
+        var val = srcCol.querySelector(SELECTORS.RS_SINGLE_VALUE);
         return !!(control && indic && val && (val.textContent || '').trim());
     },
 
@@ -4473,7 +4498,7 @@ JiTA.responses = {
             var lbl = col.querySelector('label');
             if (lbl) { lbl.textContent = 'Insert default response'; lbl.removeAttribute('for'); }
             // The react-select "single value" text element (tag it so _setDisplay can update it).
-            var valEl = col.querySelector('[id$="-single-value"]') || col.querySelector('[class*="-singleValue"]');
+            var valEl = col.querySelector(SELECTORS.RS_SINGLE_VALUE) || col.querySelector('[class*="-singleValue"]');
             // The control wrapper (react-select container) - we overlay the native <select> on top of it.
             var box = lbl ? lbl.nextElementSibling : col.querySelector('[class*="-container"]');
             if (!box) { throw new Error('no control box in clone'); }
@@ -6219,7 +6244,7 @@ JiTA.ui = {
     // the Linked Issues section on the next natural refresh.)
     softRefreshStatus: function (statusName) {
         if (!statusName) { return false; }
-        var $wrap = $("div[data-testid='issue.views.issue-base.foundation.status.status-field-wrapper']");
+        var $wrap = $(SELECTORS.STATUS_FIELD_WRAP);
         var $btn = $wrap.find('button').first();
         if (!$btn.length) { return false; }
         // The lozenge renders the status as a leaf text node inside the trigger button; replace it.
@@ -6641,7 +6666,7 @@ JiTA.ui = {
         // The Details slot is our anchor (data-vc is stable; the atomic class names are not). Fall back to the
         // details-group container if the slot wrapper isn't present.
         var anchor = document.querySelector('[data-vc="issue-view-context-items-details-panel-slot"]')
-            || document.querySelector('[data-vc="issue-view-context-group-details-group"]');
+            || document.querySelector(SELECTORS.VC_DETAILS_GROUP);
         if (!anchor || !anchor.parentNode) { return false; }
 
         // Drop a stale wrapper React may have left behind (body wiped but shell kept) before re-mounting.
@@ -6668,12 +6693,12 @@ JiTA.ui = {
         if (!tmpl) {
             // No other group present (rare) -> fall back to the Details group's inner, then its container.
             tmpl = document.querySelector('[data-vc="issue-view-context-group-details-group-inner"]')
-                || document.querySelector('[data-vc="issue-view-context-group-details-group"]');
+                || document.querySelector(SELECTORS.VC_DETAILS_GROUP);
         }
         if (tmpl) {
             try {
                 var clone = tmpl.cloneNode(true);
-                var titleEl = clone.querySelector('[data-testid$="collapsible-group-factory.title"]') || clone.querySelector('h2');
+                var titleEl = clone.querySelector(SELECTORS.GROUP_TITLE) || clone.querySelector('h2');
                 var bodyEl = clone.querySelector('[data-vc$="-body"]');
                 var chevronEl = clone.querySelector('[data-vc="issue-view-group-chevron"]');
                 var btnEl = clone.querySelector('[role="button"]');
@@ -7186,10 +7211,10 @@ JiTA.ui = {
 
     // Read the open issue's text from the DOM (reusing the Translate selectors); fall back to a REST GET.
     getIssueText: function (key) {
-        var title = $("h1[data-testid='issue.views.issue-base.foundation.summary.heading']").text() || '';
+        var title = $(SELECTORS.SUMMARY_HEADING).text() || '';
         // Grab the WHOLE rich-text description container (not just the first couple of paragraphs) so the
         // cleaner sees everything, then strip boilerplate. Same normalization as the stored side.
-        var descText = $("div[data-component-selector='jira-issue-view-rich-text-inline-edit-view-container']").text() || '';
+        var descText = $(SELECTORS.DESC_CONTAINER).text() || '';
         if (descText.replace(/\s+/g, '').length > 0) {
             return Promise.resolve(JiTA.util.cleanForCompare(title, descText));
         }
@@ -9886,7 +9911,7 @@ JiTA.declutter = {
     // the clean label from there and hide the whole ROW (the ancestor that also holds the value).
     _fieldRows: function () {
         var out = [], seen = [];
-        var heads = document.querySelectorAll('[data-testid^="issue-field-heading-styled-field-heading"]');
+        var heads = document.querySelectorAll(SELECTORS.FIELD_HEADING);
         for (var i = 0; i < heads.length; i++) {
             var h = heads[i];
             if (JiTA.declutter._mine(h)) { continue; }
@@ -9905,7 +9930,7 @@ JiTA.declutter = {
         // heading is what keeps us from grabbing the entire Details group.
         var el = h, up = 0;
         while (el.parentElement && up < 10) {
-            if (el.parentElement.querySelectorAll('[data-testid^="issue-field-heading-styled-field-heading"]').length > 1) { break; }
+            if (el.parentElement.querySelectorAll(SELECTORS.FIELD_HEADING).length > 1) { break; }
             el = el.parentElement; up++;
         }
         return el;
@@ -9917,7 +9942,7 @@ JiTA.declutter = {
     // <section>, not just the title, and read the name without its sub-title (e.g. "More fields" alone).
     _sections: function () {
         var out = [], seen = [];
-        var titles = document.querySelectorAll('[data-testid$="collapsible-group-factory.title"]');
+        var titles = document.querySelectorAll(SELECTORS.GROUP_TITLE);
         for (var i = 0; i < titles.length; i++) {
             var t = titles[i];
             if (JiTA.declutter._mine(t)) { continue; }
@@ -9934,7 +9959,7 @@ JiTA.declutter = {
         // title - that lands on the per-section container (header + content), not just the header.
         var el = t, up = 0;
         while (el.parentElement && up < 12) {
-            if (el.parentElement.querySelectorAll('[data-testid$="collapsible-group-factory.title"]').length > 1) { break; }
+            if (el.parentElement.querySelectorAll(SELECTORS.GROUP_TITLE).length > 1) { break; }
             el = el.parentElement; up++;
         }
         return el;
