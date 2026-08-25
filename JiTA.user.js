@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.10.5
+// @version     3.10.6
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -7616,7 +7616,20 @@ JiTA.ui = {
         // DOM text; fall back to live text until the translate pass has filled enText. Defects (English) untouched.
         if (/^EBR-/.test(key)) {
             return JiTA.db.getDefect(key).then(function (rec) {
-                return (rec && rec.enText) ? rec.enText : live();
+                if (rec && rec.enText) { return rec.enText; }                                  // stored translation (open + translated)
+                if (JiTA.ui._qtx && JiTA.ui._qtx.key === key) { return JiTA.ui._qtx.text; }     // cached on-demand translation
+                return live().then(function (t) {
+                    // No stored translation: a CLOSED report is not in the DB at all, and an OPEN one may not be
+                    // translated yet. If the live text is foreign, translate the QUERY on-demand so gte-small ranks
+                    // in English (and BM25 can match the defect's keywords). Cache per key so re-renders don't re-call;
+                    // fall back to the original text on any failure.
+                    if (JiTA.util.detectLang(t) !== 'foreign' || typeof jitaTranslateRR !== 'function') { return t; }
+                    return jitaTranslateRR(t.slice(0, 3000)).then(function (out) {
+                        var en = (out && out.en) ? out.en : t;
+                        JiTA.ui._qtx = { key: key, text: en };
+                        return en;
+                    });
+                });
             }, live);
         }
         return live();
