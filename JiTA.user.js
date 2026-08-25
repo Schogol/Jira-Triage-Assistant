@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.10.4
+// @version     3.10.5
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -562,10 +562,10 @@ function jitaTxHardFail(s) { return s === -1 || (s >= 400 && s < 500 && s !== 42
 // Round-robin translate for the bulk pass: ALTERNATE the two endpoints per request (not sticky), fail over to the
 // other on this request. Resolves { en, src } on success, or { fail:true, hard:bool } when both endpoints fail.
 var JITA_TX_RR = 0;
-function jitaTranslateRR(text) {
+function jitaTranslateRR(text, ep) {
     var t = (text || '').trim();
     if (!t) { return Promise.resolve({ en: '', src: '' }); }
-    var a = JITA_TX_RR++ % 2;
+    var a = (ep === 0 || ep === 1) ? ep : (JITA_TX_RR++ % 2);   // pinned endpoint (concurrent lanes) or round-robin
     return jitaTranslateViaLang(JITA_TX_ENDPOINTS[a], t).then(function (r) {
         if (r && r.text !== null) { return { en: r.text, src: r.lang }; }
         return jitaTranslateViaLang(JITA_TX_ENDPOINTS[1 - a], t).then(function (r2) {
@@ -5734,7 +5734,7 @@ JiTA.embed = {
 // the English text. Resumable: state lives on each record (lang == null = pending), so a reload just continues.
 JiTA.translate = {
     _running: null,
-    BATCH_DELAY: 1000,          // ms between successful calls (alternating endpoints halves each one's rate)
+    BATCH_DELAY: 500,           // ms between a lane's successful calls (2 concurrent lanes, one pinned per endpoint)
     BACKOFF0: 5000, BACKOFF_MAX: 180000,
     HARD_SKIP: 2,               // consecutive hard (per-content) failures on one record before we skip it
 
@@ -5784,40 +5784,49 @@ JiTA.translate = {
 
             // ---- PHASE 2: translate ONLY the foreign set, with a clean "i / total" count. ----
             function translateForeign() {
-                var total = foreign.length, i = 0, backoff = JiTA.translate.BACKOFF0, translated = 0, hardFails = 0;
+                var total = foreign.length, next = 0, done = 0, translated = 0;
                 function report(extra) {
-                    if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating foreign reports… ' + i + ' / ' + total + (extra || '')); }
-                    if (i % 10 === 0 || i >= total) { JiTA.db.setMeta('translateProgress', { done: i, total: total, translated: translated }); }
+                    if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating foreign reports… ' + done + ' / ' + total + (extra || '')); }
+                    if (done % 10 === 0 || done >= total) { JiTA.db.setMeta('translateProgress', { done: done, total: total, translated: translated }); }
                 }
-                function commit(key, apply) {
-                    return JiTA.db.updateRecord(key, apply).then(function () {
-                        i++; report();
-                        return JiTA.util.delay(JiTA.translate.BATCH_DELAY).then(step);
-                    });
-                }
-                function step() {
-                    if (i >= total) { return finish(); }
-                    var item = foreign[i];
-                    return jitaTranslateRR(item.text).then(function (out) {
-                        var src = ((out && out.src) || '').toLowerCase();
-                        var confirmedEnglish = !(out && out.fail) && src === 'en';   // local said foreign/unknown, but sl=auto says English
-                        var usable = confirmedEnglish || (out && !out.fail && out.en);
-                        if (!usable) {
-                            // Hard per-content failure OR persistently empty -> skip after HARD_SKIP tries (retried
-                            // next pass) so one poison record can't starve the backlog. A soft throttle just backs off.
-                            var poison = (out && out.fail) ? out.hard : true;
-                            if (poison && ++hardFails >= JiTA.translate.HARD_SKIP) { i++; hardFails = 0; backoff = JiTA.translate.BACKOFF0; return JiTA.util.delay(0).then(step); }
-                            var wait = backoff; backoff = Math.min(backoff * 2, JiTA.translate.BACKOFF_MAX);
-                            report(' (rate-limited, waiting…)');
-                            JiTA.db.setMeta('translateProgress', { done: i, total: total, translated: translated, throttledUntil: Date.now() + wait });
-                            return JiTA.util.delay(wait).then(step);
-                        }
-                        backoff = JiTA.translate.BACKOFF0; hardFails = 0;
-                        if (confirmedEnglish) { return commit(item.key, function (cc) { cc.lang = 'en'; cc.enText = null; }); }
-                        translated++;
-                        var en = out.en, lang = src || 'xx';
-                        return commit(item.key, function (cc) { cc.lang = lang; cc.enText = en; cc.embedding = null; cc.embeddingModelVersion = null; });
-                    });
+                // Two concurrent lanes, each PINNED to one endpoint (failover to the other per request), so both
+                // Google endpoints are in flight at once. Each lane waits BATCH_DELAY between its own calls, so each
+                // endpoint's rate stays bounded; combined throughput is ~2x. `next` is the shared work cursor;
+                // `done`/`translated` are shared counters (safe - single-threaded cooperative async). Per-lane backoff.
+                function lane(ep) {
+                    var backoff = JiTA.translate.BACKOFF0;
+                    function pull() {
+                        if (next >= total) { return; }                          // no work left -> this lane resolves
+                        return process(foreign[next++], 0);
+                    }
+                    function process(item, fails) {
+                        return jitaTranslateRR(item.text, ep).then(function (out) {
+                            var src = ((out && out.src) || '').toLowerCase();
+                            var confirmedEnglish = !(out && out.fail) && src === 'en';   // local said foreign/unknown, but sl=auto says English
+                            var usable = confirmedEnglish || (out && !out.fail && out.en);
+                            if (!usable) {
+                                // Hard per-content failure OR persistently empty -> give up after HARD_SKIP tries
+                                // (left lang=null, retried next pass). A soft throttle just backs off and retries SAME.
+                                var poison = (out && out.fail) ? out.hard : true;
+                                if (poison && fails + 1 >= JiTA.translate.HARD_SKIP) {
+                                    backoff = JiTA.translate.BACKOFF0; done++; report();
+                                    return JiTA.util.delay(0).then(pull);
+                                }
+                                var wait = backoff; backoff = Math.min(backoff * 2, JiTA.translate.BACKOFF_MAX);
+                                report(' (rate-limited, waiting…)');
+                                return JiTA.util.delay(wait).then(function () { return process(item, poison ? fails + 1 : fails); });
+                            }
+                            backoff = JiTA.translate.BACKOFF0;
+                            var apply;
+                            if (confirmedEnglish) { apply = function (cc) { cc.lang = 'en'; cc.enText = null; }; }
+                            else { translated++; var en = out.en, lang = src || 'xx'; apply = function (cc) { cc.lang = lang; cc.enText = en; cc.embedding = null; cc.embeddingModelVersion = null; }; }
+                            return JiTA.db.updateRecord(item.key, apply).then(function () {
+                                done++; report();
+                                return JiTA.util.delay(JiTA.translate.BATCH_DELAY).then(pull);   // per-lane rate-limit delay
+                            });
+                        });
+                    }
+                    return pull();
                 }
                 function finish() {
                     return JiTA.db.setMeta('translateProgress', { done: total, total: total, translated: translated, at: Date.now() }).then(function () {
@@ -5829,7 +5838,7 @@ JiTA.translate = {
                     });
                 }
                 report();   // 0 / total up front
-                return step();
+                return Promise.all([lane(0), lane(1)]).then(finish);   // both endpoints concurrently
             }
 
             return Promise.resolve(classify())
