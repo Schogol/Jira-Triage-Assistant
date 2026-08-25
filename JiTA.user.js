@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.8.5
+// @version     3.9.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -2884,10 +2884,10 @@ var JiTA = {
         if (!isNaN(v) && v >= 1 && v <= 30) { return v; }
         return 8;
     })(),
-    MODEL_VERSION: 'e5-small-ml-v5',                // embedding model tag; bump to force a full re-embed
-                                                    // (v1 = NaN from fp16; v2 = fp32; v3 = boilerplate-stripped text;
-                                                    //  v4 = paraphrase-MiniLM multilingual (poor retrieval cosine);
-                                                    //  v5 = multilingual-e5-small, retrieval-tuned, query:/passage: prefixes)
+    MODEL_VERSION: 'gte-small-v3',                  // embedding model tag; bump to force a full re-embed. Rolled back to v3
+                                                    // (gte-small): reuses existing v3 vectors, so anyone who never got e5 does NOT re-embed.
+                                                    // (v1 = NaN from fp16; v2 = fp32; v3 = gte-small, boilerplate-stripped text [CURRENT];
+                                                    //  v4 = paraphrase-MiniLM multilingual; v5 = e5-small multilingual - both reverted, disliked)
     DATA_VERSION: 3                                 // stored-record SCHEMA version. Bump whenever a sync change
                                                     // adds/changes a FIELD on stored records - OR widens the crawl
                                                     // SCOPE - that a plain incremental catch-up can't backfill (it
@@ -5347,7 +5347,7 @@ JiTA.rank._bm25Score = function (idx, text, excludeKey, limit, filterTerms) {
  * fetch model weights directly. Any failure flips `unavailable` and the ranking layer falls back to BM25.
  */
 JiTA.embed = {
-    MODEL: 'Xenova/multilingual-e5-small',   // multilingual + RETRIEVAL-tuned, 384-dim: cross-language EBR<->defect matching with sharp cosine like the old gte-small. REQUIRES the "query: " / "passage: " instruction prefixes - queries get "query: " (worker qEmbed), stored docs get "passage: " (embedPass, both tab + worker). Omitting them silently degrades recall.
+    MODEL: 'Xenova/gte-small',   // English, retrieval-tuned, 384-dim (rolled back from the multilingual e5/paraphrase experiment, which was disliked). English-only; cross-language matching is to be handled by translating foreign reports to English at ingest instead. No query:/passage: prefixes.
     LIB_URL: 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.2/dist/transformers.min.js',
     BATCH: 16,
     MAX_CHARS: 1500,            // cap text per issue. Now that cleanForCompare strips the boilerplate, the
@@ -5387,11 +5387,10 @@ JiTA.embed = {
                     // Run the ONNX/WASM backend in a worker so embedding never blocks the page.
                     try { mod.env.backends.onnx.wasm.proxy = true; } catch (e) { /* older builds: ignore */ }
                 }
-                // Pick a backend that actually works. We deliberately do NOT use fp16 on WebGPU for these
-                // small sentence models: gte-small's intermediate activations famously overflowed the tiny
-                // fp16 range to Inf/NaN, so embeddings came back as NaN (cosine -> NaN, "%" shows NaN, semantic
-                // ranking becomes noise), and the current multilingual MiniLM is no safer a bet. fp32 on
-                // WebGPU is reliable; the WASM/CPU fallback uses q8 (small + fine on
+                // Pick a backend that actually works. We deliberately do NOT use fp16 on WebGPU for this
+                // model: gte-small's intermediate activations exceed the tiny fp16 range and overflow to
+                // Inf/NaN, so embeddings come back as NaN (cosine -> NaN, "%" shows NaN, semantic ranking
+                // becomes noise). fp32 on WebGPU is reliable; the WASM/CPU fallback uses q8 (small + fine on
                 // CPU). Each candidate is validated below, so any backend that yields bad numbers is rejected.
                 // After a GPU device loss we rebuild on WASM only; otherwise prefer WebGPU fp32 then WASM.
                 // WebGPU has proven unstable for this model: every dtype/batch size we tried eventually died
@@ -5506,7 +5505,7 @@ JiTA.embed = {
                 if (idx >= todo.length) { console.log('[JiTA] embed pass complete (' + todo.length + ' embedded)'); JiTA.rank._dirtyVec = true; JiTA.rank._dirtyEbrVec = true; return Promise.resolve(); }
                 var size = JiTA.embed.BATCH;
                 var slice = todo.slice(idx, idx + size);
-                var texts = slice.map(function (r) { return 'passage: ' + JiTA.util.cleanForCompare(r.summary, r.description); });   // e5 "passage: " prefix on stored docs (query side gets "query: " in qEmbed)
+                var texts = slice.map(function (r) { return JiTA.util.cleanForCompare(r.summary, r.description); });
                 // Watchdog: a WebGPU device loss can HANG the worker so embedBatch never resolves OR rejects,
                 // which would silently stall the whole pass. Race it against a timeout so a hung batch is
                 // treated as a failure and handled by the catch below (retry on the same backend, then pause).
@@ -9009,7 +9008,6 @@ function jitaWorkerBody(cfg) {
     }
     var qText = null, qVec = null;
     async function qEmbed(text) {   // cache the last query vector so filter-box re-queries don't re-embed the same text
-        text = 'query: ' + (text || '');   // e5 REQUIRES the "query: " instruction prefix on the search side (docs get "passage: " in embedPass)
         if (qText === text && qVec) { return qVec; }
         qVec = await embed(text); qText = text; return qVec;
     }
@@ -9073,7 +9071,7 @@ function jitaWorkerBody(cfg) {
             postProgress();   // 0 / total up front so the pass is visible immediately
             while (idx < todo.length) {
                 var slice = todo.slice(idx, idx + BATCH);
-                var texts = slice.map(function (x) { return 'passage: ' + cleanForCompare(x.summary, x.description); });   // e5 "passage: " prefix on stored docs (query side gets "query: " in qEmbed)
+                var texts = slice.map(function (x) { return cleanForCompare(x.summary, x.description); });
                 try {
                     var vecs = await Promise.race([
                         embedBatch(texts),
@@ -9746,8 +9744,6 @@ function jitaWorkerBody(cfg) {
         try {
             var result;
             if (type === 'ping') { result = { pong: true, backend: backend, version: cfg.SCRIPT_VERSION }; }
-            // NOTE: currently unused (no tab caller). If revived, decide query vs passage and add the e5
-            // "query: "/"passage: " prefix - embed() is raw, unlike qEmbed()/embedPass() which prefix.
             else if (type === 'embed') { var v = await embed((payload && payload.text) || ''); result = { backend: backend, dim: v.length, vec: Array.from(v) }; }
             else if (type === 'rankSemantic') { result = await rankSemantic(payload); }
             else if (type === 'rankKeyword') { result = await rankKeyword(payload); }
