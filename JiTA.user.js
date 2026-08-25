@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.10.0
+// @version     3.10.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -3843,7 +3843,10 @@ JiTA.util = {
     },
 
     // High-frequency English function words; used by detectLang's stopword-ratio test.
-    EN_STOP: { 'the':1,'be':1,'to':1,'of':1,'and':1,'a':1,'in':1,'that':1,'have':1,'i':1,'it':1,'for':1,'not':1,'on':1,'with':1,'as':1,'you':1,'do':1,'at':1,'this':1,'but':1,'by':1,'from':1,'they':1,'we':1,'or':1,'an':1,'will':1,'all':1,'would':1,'there':1,'what':1,'so':1,'up':1,'out':1,'if':1,'about':1,'which':1,'when':1,'can':1,'is':1,'are':1,'was':1,'were':1,'been':1,'has':1,'had':1,'did':1,'then':1,'them':1,'my':1,'your':1,'me':1,'no':1,'just':1,'into':1,'some':1,'like':1,'get':1,'how':1,'now':1 },
+    // English-DISTINCTIVE function words. Deliberately EXCLUDES words that are also common in the main non-English
+    // languages in the corpus (Spanish/Portuguese/German/French) - a, no, me, as, do, so, in, on, an, i, if - so a
+    // foreign Latin report scores near zero here instead of being mistaken for English.
+    EN_STOP: { 'the':1,'be':1,'to':1,'of':1,'and':1,'that':1,'have':1,'it':1,'for':1,'not':1,'with':1,'you':1,'at':1,'this':1,'but':1,'by':1,'from':1,'they':1,'we':1,'or':1,'will':1,'all':1,'would':1,'there':1,'what':1,'which':1,'when':1,'can':1,'is':1,'are':1,'was':1,'were':1,'been':1,'has':1,'had':1,'did':1,'then':1,'them':1,'my':1,'your':1,'just':1,'how':1,'about':1,'over':1,'than':1,'only':1,'also':1,'these':1,'those':1,'our':1,'should':1,'could':1,'because':1,'while':1,'their':1,'who':1,'get':1,'like':1,'out':1,'up':1,'now':1,'into':1,'some':1 },
 
     // Cheap local language guess to skip English BEFORE any translate call: 'english' | 'foreign' | 'unknown'.
     // Non-Latin script -> foreign (reliable). Latin -> English stopword ratio. 'unknown' (very short/ambiguous
@@ -3855,11 +3858,18 @@ JiTA.util = {
         var nonLatin = (t.match(/[Ͱ-ϿЀ-ӿ֐-׿؀-ۿ฀-๿぀-ヿ㐀-鿿가-힯]/g) || []).length;
         var letters  = (t.match(/[A-Za-zÀ-ɏͰ-ϿЀ-ӿ֐-׿؀-ۿ฀-๿぀-ヿ㐀-鿿가-힯]/g) || []).length;
         if (letters && (nonLatin / letters) > 0.15) { return 'foreign'; }
+        // Latin script: only return 'english' when CONFIDENT. A wrong 'english' verdict suppresses the translate
+        // call and is UNCORRECTABLE (the report is indexed off foreign text forever); a wrong 'unknown' just costs
+        // one call that Google's sl=auto then corrects. So bias toward 'unknown' (= translate + verify).
         var words = t.toLowerCase().match(/[a-z']+/g) || [];
-        if (words.length < 5) { return 'unknown'; }
+        if (words.length < 8) { return 'unknown'; }
         var hits = 0;
         for (var i = 0; i < words.length; i++) { if (JiTA.util.EN_STOP[words[i]]) { hits++; } }
-        return (hits / words.length) >= 0.12 ? 'english' : 'foreign';
+        var ratio = hits / words.length;
+        // A high English-distinctive ratio, OR "the" (which Spanish/Portuguese/German/French/Italian do not use as
+        // a word) plus a moderate ratio, is confident English. A foreign Latin report hits neither.
+        if (ratio >= 0.25 || (words.indexOf('the') !== -1 && ratio >= 0.12)) { return 'english'; }
+        return 'unknown';
     },
 
     // Convert a Jira ISO `updated` timestamp into the JQL literal "yyyy/MM/dd HH:mm".
@@ -4788,6 +4798,22 @@ JiTA.db = {
 
     bulkPut: function (recs) { return JiTA.db._bulkTx(recs, function (store, rec) { store.put(rec); }); },
 
+    // Atomic read-modify-write of ONE record: get + applyFn + put in a single transaction. Used by the translate
+    // pass so it merges only its own fields (lang/enText) onto the CURRENT row instead of clobbering a concurrent
+    // sync/embed write with a stale snapshot; skips (resolves false) if the record was deleted meanwhile.
+    updateRecord: function (key, applyFn) {
+        return JiTA.db.open().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var tx = db.transaction('defects', 'readwrite'), store = tx.objectStore('defects'), existed = false;
+                var g = store.get(key);
+                g.onsuccess = function () { if (g.result) { existed = true; applyFn(g.result); store.put(g.result); } };
+                tx.oncomplete = function () { resolve(existed); };
+                tx.onerror = function () { reject(tx.error); };
+                tx.onabort = function () { reject(tx.error); };
+            });
+        });
+    },
+
     getDefect: function (key) { return JiTA.db._req('defects', 'readonly', function (s) { return s.get(key); }, function (v) { return v || null; }); },
 
     allDefects: function () { return JiTA.db._req('defects', 'readonly', function (s) { return s.getAll(); }, function (v) { return v || []; }); },
@@ -5689,9 +5715,18 @@ JiTA.translate = {
     BACKOFF0: 5000, BACKOFF_MAX: 180000,
     HARD_SKIP: 2,               // consecutive hard (per-content) failures on one record before we skip it
 
-    prepare: function () {      // idempotent, single-flight (mirrors JiTA.embed.prepare)
-        if (JiTA.translate._running) { return JiTA.translate._running; }
-        JiTA.translate._running = JiTA.translate.pass().then(function () { JiTA.translate._running = null; },
+    prepare: function () {      // idempotent within a tab; a Web Lock makes it single-flight ACROSS tabs too, so the
+        if (JiTA.translate._running) { return JiTA.translate._running; }   // foreign backlog is not translated N times (N tabs) against the same IP
+        var run;
+        if (navigator.locks && navigator.locks.request) {
+            run = navigator.locks.request('jita-translate-pass', { ifAvailable: true }, function (lock) {
+                if (!lock) { return; }   // another tab already owns the translate pass -> skip
+                return JiTA.translate.pass();
+            });
+        } else {
+            run = JiTA.translate.pass();
+        }
+        JiTA.translate._running = run.then(function () { JiTA.translate._running = null; },
             function (e) { JiTA.translate._running = null; console.log('[JiTA] translate pass skipped:', e && e.message || e); });
         return JiTA.translate._running;
     },
@@ -5710,39 +5745,48 @@ JiTA.translate = {
             if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating ' + todo.length + ' foreign reports…'); }
             var i = 0, backoff = JiTA.translate.BACKOFF0, translated = 0, hardFails = 0;
 
+            function commit(key, apply) {   // merge onto the CURRENT record, then advance
+                return JiTA.db.updateRecord(key, apply).then(function () {
+                    i++;
+                    if (i % 25 === 0) { JiTA.db.setMeta('translateProgress', { done: i, total: todo.length }); }
+                    return JiTA.util.delay(JiTA.translate.BATCH_DELAY).then(step);
+                });
+            }
+
             function step() {
                 if (i >= todo.length) { return finish(); }
                 var rec = todo[i];
                 var text = JiTA.util.cleanForCompare(rec.summary, rec.description);   // translate the CLEANED text
                 var local = JiTA.util.detectLang(text);
-                if (local === 'english') {                                            // locally English -> mark, no call
-                    rec.lang = 'en'; rec.enText = null;
-                    return JiTA.db.bulkPut([rec]).then(function () { i++; hardFails = 0; return step(); });
+                if (local === 'english') {                                            // confidently English -> mark, no call
+                    hardFails = 0;
+                    return commit(rec.key, function (c) { c.lang = 'en'; c.enText = null; });
                 }
                 return jitaTranslateRR(text.slice(0, 3000)).then(function (out) {
-                    if (out && out.fail) {
-                        if (out.hard && ++hardFails >= JiTA.translate.HARD_SKIP) {     // poison record -> skip, retry next pass
+                    var src = ((out && out.src) || '').toLowerCase();
+                    var confirmedEnglish = !(out && out.fail) && (src ? src === 'en' : local === 'english');   // sl=auto ground truth, else local
+                    var usable = confirmedEnglish || (out && !out.fail && out.en);
+                    if (!usable) {
+                        // A hard per-content failure OR a persistently empty translation on one record is skipped
+                        // after HARD_SKIP tries (left lang=null, retried next pass) so it can't starve the backlog.
+                        // A soft throttle (fail-but-not-hard) just backs off and retries the SAME record.
+                        var poison = (out && out.fail) ? out.hard : true;   // non-fail-but-unusable (empty) counts as poison-ish
+                        if (poison && ++hardFails >= JiTA.translate.HARD_SKIP) {
                             i++; hardFails = 0; backoff = JiTA.translate.BACKOFF0;
                             return JiTA.util.delay(0).then(step);
                         }
-                        var wait = backoff; backoff = Math.min(backoff * 2, JiTA.translate.BACKOFF_MAX);   // throttle -> back off, retry SAME
+                        var wait = backoff; backoff = Math.min(backoff * 2, JiTA.translate.BACKOFF_MAX);
                         JiTA.db.setMeta('translateProgress', { done: i, total: todo.length, throttledUntil: Date.now() + wait });
                         return JiTA.util.delay(wait).then(step);
                     }
                     backoff = JiTA.translate.BACKOFF0; hardFails = 0;
-                    var src = ((out && out.src) || '').toLowerCase();
-                    var isEnglish = src ? (src === 'en') : (local === 'english');      // sl=auto ground truth, else local guess
-                    if (isEnglish || !out.en) {
-                        rec.lang = 'en'; rec.enText = null;                            // English (or empty) -> store no translation
-                    } else {
-                        rec.lang = src || 'xx'; rec.enText = out.en;
-                        rec.embedding = null; rec.embeddingModelVersion = null;       // force re-embed off English
-                        translated++;
+                    if (confirmedEnglish) {
+                        return commit(rec.key, function (c) { c.lang = 'en'; c.enText = null; });       // English -> store no translation
                     }
-                    return JiTA.db.bulkPut([rec]).then(function () {
-                        i++;
-                        if (i % 25 === 0) { JiTA.db.setMeta('translateProgress', { done: i, total: todo.length }); }
-                        return JiTA.util.delay(JiTA.translate.BATCH_DELAY).then(step);
+                    translated++;
+                    var en = out.en, lang = src || 'xx';
+                    return commit(rec.key, function (c) {                                               // foreign -> store + force re-embed off English
+                        c.lang = lang; c.enText = en; c.embedding = null; c.embeddingModelVersion = null;
                     });
                 });
             }
@@ -9224,6 +9268,29 @@ function jitaWorkerBody(cfg) {
             });
         });
     }
+    // Write embeddings back by MERGING onto the current row (get-then-put in one tx) instead of putting the stale
+    // snapshot, so a concurrent tab translate-write (enText/lang) is not clobbered. Skips a record that was deleted
+    // meanwhile, or whose enText changed since we embedded (our vector is stale -> leave it for the next pass).
+    function putEmbeddingsMerged(slice, vecs) {
+        return openDb().then(function (d) {
+            return new Promise(function (resolve, reject) {
+                var tx = d.transaction('defects', 'readwrite'), store = tx.objectStore('defects');
+                slice.forEach(function (rec, j) {
+                    var g = store.get(rec.key);
+                    g.onsuccess = function () {
+                        var cur = g.result;
+                        if (!cur) { return; }                                             // deleted meanwhile -> skip
+                        if ((cur.enText || null) !== (rec.enText || null)) { return; }     // translated since we embedded -> stale vector, skip
+                        cur.embedding = vecs[j]; cur.embeddingModelVersion = cfg.MODEL_VERSION;
+                        store.put(cur);
+                    };
+                });
+                tx.oncomplete = function () { resolve(); };
+                tx.onerror = function () { reject(tx.error); };
+                tx.onabort = function () { reject(tx.error); };
+            });
+        });
+    }
     // Embed every stored record lacking a current-version embedding (defects + open non-GM EBRs), in batches,
     // writing as we go. Single-flight; resumable. On a bad/NaN batch, reset the model and retry a few times.
     async function embedPass() {
@@ -9256,8 +9323,7 @@ function jitaWorkerBody(cfg) {
                     var bad = false;
                     for (var g = 0; g < vecs.length; g++) { if (!vecs[g] || !vecs[g].length || !isFinite(vecs[g][0])) { bad = true; break; } }
                     if (bad) { throw new Error('NaN/empty embedding (likely GPU device loss)'); }
-                    for (var j = 0; j < slice.length; j++) { slice[j].embedding = vecs[j]; slice[j].embeddingModelVersion = cfg.MODEL_VERSION; }
-                    await bulkPut(slice);
+                    await putEmbeddingsMerged(slice, vecs);   // MERGE (not clobber): preserves a concurrent translate-write's enText/lang
                     idx += slice.length; retries = 0;
                     if (idx - lastPost >= 50 || idx >= todo.length) { lastPost = idx; postProgress(); }
                 } catch (e) {
