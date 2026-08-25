@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.10.2
+// @version     3.10.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5747,8 +5747,10 @@ JiTA.translate = {
             // update every step; the instant English-skip path throttles to every 25 so it does not spam. Also
             // persists to the translateProgress meta key every 25 for resumability/visibility.
             function report() {
-                if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating reports… ' + i + ' / ' + todo.length); }
-                if (i % 25 === 0 || i >= todo.length) { JiTA.db.setMeta('translateProgress', { done: i, total: todo.length }); }
+                // Honest status: `translated` is how many were actually FOREIGN and got translated; `i / total` is
+                // the scan progress over ALL untagged reports (English ones are checked + skipped, still counted).
+                if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating foreign reports… ' + translated + ' done (' + i + ' / ' + todo.length + ' scanned)'); }
+                if (i % 25 === 0 || i >= todo.length) { JiTA.db.setMeta('translateProgress', { done: i, total: todo.length, translated: translated }); }
             }
             report();   // 0 / N up front so the pass is visible immediately
 
