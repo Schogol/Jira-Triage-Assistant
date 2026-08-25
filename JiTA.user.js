@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.10.1
+// @version     3.10.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5742,14 +5742,23 @@ JiTA.translate = {
                 todo.push(r);
             }
             if (!todo.length) { return; }
-            if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating ' + todo.length + ' foreign reports…'); }
             var i = 0, backoff = JiTA.translate.BACKOFF0, translated = 0, hardFails = 0;
+            // Live progress in the panel status (mirrors the embed pass). Foreign records (an API call, ~1s apart)
+            // update every step; the instant English-skip path throttles to every 25 so it does not spam. Also
+            // persists to the translateProgress meta key every 25 for resumability/visibility.
+            function report() {
+                if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating reports… ' + i + ' / ' + todo.length); }
+                if (i % 25 === 0 || i >= todo.length) { JiTA.db.setMeta('translateProgress', { done: i, total: todo.length }); }
+            }
+            report();   // 0 / N up front so the pass is visible immediately
 
-            function commit(key, apply) {   // merge onto the CURRENT record, then advance
+            // fast = a local English skip (no API call) -> no rate-limit delay and throttled status. A record that
+            // actually hit the endpoints (foreign, or English-per-sl=auto) passes fast=false so it keeps the delay.
+            function commit(key, apply, fast) {
                 return JiTA.db.updateRecord(key, apply).then(function () {
                     i++;
-                    if (i % 25 === 0) { JiTA.db.setMeta('translateProgress', { done: i, total: todo.length }); }
-                    return JiTA.util.delay(JiTA.translate.BATCH_DELAY).then(step);
+                    if (!fast || i % 25 === 0 || i >= todo.length) { report(); }
+                    return JiTA.util.delay(fast ? 0 : JiTA.translate.BATCH_DELAY).then(step);
                 });
             }
 
@@ -5758,9 +5767,9 @@ JiTA.translate = {
                 var rec = todo[i];
                 var text = JiTA.util.cleanForCompare(rec.summary, rec.description);   // translate the CLEANED text
                 var local = JiTA.util.detectLang(text);
-                if (local === 'english') {                                            // confidently English -> mark, no call
+                if (local === 'english') {                                            // confidently English -> mark, no call, no delay
                     hardFails = 0;
-                    return commit(rec.key, function (c) { c.lang = 'en'; c.enText = null; });
+                    return commit(rec.key, function (c) { c.lang = 'en'; c.enText = null; }, true);
                 }
                 return jitaTranslateRR(text.slice(0, 3000)).then(function (out) {
                     var src = ((out && out.src) || '').toLowerCase();
