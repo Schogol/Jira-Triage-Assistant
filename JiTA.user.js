@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.9.0
+// @version     3.10.6
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -484,12 +484,14 @@ var JITA_TX_ENDPOINTS = [
     {   // classic gtx endpoint. Response: arr[0] = list of sentence chunks, each chunk[0] = translated text.
         name: 'gtx',
         url: 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t',
-        parse: function (arr) { return (arr && arr[0]) ? arr[0].map(function (c) { return (c && c[0]) ? c[0] : ''; }).join('') : ''; }
+        parse: function (arr) { return (arr && arr[0]) ? arr[0].map(function (c) { return (c && c[0]) ? c[0] : ''; }).join('') : ''; },
+        detect: function (arr) { return (arr && arr[2]) ? String(arr[2]) : ''; }   // gtx: detected source lang at arr[2] (empty -> caller falls back to local detect)
     },
     {   // Chrome dictionary endpoint. Response: arr[0] = [translatedText, detectedLang]; newlines preserved.
         name: 'dict-chrome-ex',
         url: 'https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=en',
-        parse: function (arr) { return (arr && arr[0] && arr[0][0]) ? arr[0][0] : ''; }
+        parse: function (arr) { return (arr && arr[0] && arr[0][0]) ? arr[0][0] : ''; },
+        detect: function (arr) { return (arr && arr[0] && arr[0][1]) ? String(arr[0][1]) : ''; }   // arr[0] = [text, detectedLang]
     }
 ];
 
@@ -527,6 +529,48 @@ function jitaTranslateFree(text) {
             if (out2 !== null) { return out2; }                // fallback worked -> it's now the sticky preference
             gmSet('sdTxPref', a);                              // both failed this call -> flip back for next time
             return null;
+        });
+    });
+}
+
+// Lang-aware variant used by the bulk translate pass: returns { text, lang, status }. text is null on failure;
+// status is the HTTP status, 0 for network/timeout, -1 for a parse error on a 2xx body (a per-content failure).
+function jitaTranslateViaLang(ep, text) {
+    return new Promise(function (resolve) {
+        GM_xmlhttpRequest({
+            method: 'POST', url: ep.url,
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+            data: 'q=' + encodeURIComponent(text),
+            onload: function (resp) {
+                if (resp.status < 200 || resp.status >= 300) { resolve({ text: null, lang: '', status: resp.status }); return; }
+                try {
+                    var arr = JSON.parse(resp.responseText);
+                    resolve({ text: ep.parse(arr), lang: ep.detect ? ep.detect(arr) : '', status: resp.status });
+                } catch (e) { resolve({ text: null, lang: '', status: -1 }); }
+            },
+            onerror: function () { resolve({ text: null, lang: '', status: 0 }); },
+            ontimeout: function () { resolve({ text: null, lang: '', status: 0 }); }
+        });
+    });
+}
+
+// A HARD (per-content) failure is a parse error or a 4xx that is not throttle/block-related. Throttle-like
+// statuses (0 network, 408, 429, 403 block, 5xx) mean "back off and retry the SAME record"; a hard failure on
+// BOTH endpoints means "skip this record" so one poison report can't freeze the whole backlog.
+function jitaTxHardFail(s) { return s === -1 || (s >= 400 && s < 500 && s !== 429 && s !== 403 && s !== 408); }
+
+// Round-robin translate for the bulk pass: ALTERNATE the two endpoints per request (not sticky), fail over to the
+// other on this request. Resolves { en, src } on success, or { fail:true, hard:bool } when both endpoints fail.
+var JITA_TX_RR = 0;
+function jitaTranslateRR(text, ep) {
+    var t = (text || '').trim();
+    if (!t) { return Promise.resolve({ en: '', src: '' }); }
+    var a = (ep === 0 || ep === 1) ? ep : (JITA_TX_RR++ % 2);   // pinned endpoint (concurrent lanes) or round-robin
+    return jitaTranslateViaLang(JITA_TX_ENDPOINTS[a], t).then(function (r) {
+        if (r && r.text !== null) { return { en: r.text, src: r.lang }; }
+        return jitaTranslateViaLang(JITA_TX_ENDPOINTS[1 - a], t).then(function (r2) {
+            if (r2 && r2.text !== null) { return { en: r2.text, src: r2.lang }; }
+            return { fail: true, hard: jitaTxHardFail(r.status) && jitaTxHardFail(r2.status) };
         });
     });
 }
@@ -2884,10 +2928,14 @@ var JiTA = {
         if (!isNaN(v) && v >= 1 && v <= 30) { return v; }
         return 8;
     })(),
-    MODEL_VERSION: 'gte-small-v3',                  // embedding model tag; bump to force a full re-embed. Rolled back to v3
-                                                    // (gte-small): reuses existing v3 vectors, so anyone who never got e5 does NOT re-embed.
-                                                    // (v1 = NaN from fp16; v2 = fp32; v3 = gte-small, boilerplate-stripped text [CURRENT];
-                                                    //  v4 = paraphrase-MiniLM multilingual; v5 = e5-small multilingual - both reverted, disliked)
+    MODEL_VERSION: 'gte-small-v6-tx',               // embedding model tag; bump to force a full re-embed. Bumped for the
+                                                    // foreign-report translation feature so EVERY record re-embeds off
+                                                    // effectiveText (English for foreign reports). MANDATORY, not optional:
+                                                    // it closes the stale-leader-worker window where an old worker would
+                                                    // otherwise re-embed cleared records off foreign text and the new worker
+                                                    // would then skip them, leaving foreign vectors permanently.
+                                                    // (v1 = NaN fp16; v2 = fp32; v3 = gte-small; v4 = paraphrase-MiniLM;
+                                                    //  v5 = e5-small [v4/v5 reverted]; v6-tx = gte-small + foreign-report translation)
     DATA_VERSION: 3                                 // stored-record SCHEMA version. Bump whenever a sync change
                                                     // adds/changes a FIELD on stored records - OR widens the crawl
                                                     // SCOPE - that a plain incremental catch-up can't backfill (it
@@ -3785,6 +3833,43 @@ JiTA.util = {
         d = d.replace(/\s+/g, ' ').trim();
         // Weight the summary by repeating it twice so it dominates the pooled embedding / keyword stats.
         return (s ? (s + '. ' + s + '. ') : '') + d;
+    },
+
+    // Which text to index/query for a record: the stored English translation for a foreign report, else the
+    // cleaned original. enText is ALREADY the cleanForCompare output, so this is a drop-in at every corpus site
+    // and the query path (no double-cleaning). Foreign reports with no translation yet fall back to the original.
+    effectiveText: function (rec) {
+        return (rec && rec.enText) ? rec.enText : JiTA.util.cleanForCompare(rec.summary, rec.description);
+    },
+
+    // High-frequency English function words; used by detectLang's stopword-ratio test.
+    // English-DISTINCTIVE function words. Deliberately EXCLUDES words that are also common in the main non-English
+    // languages in the corpus (Spanish/Portuguese/German/French) - a, no, me, as, do, so, in, on, an, i, if - so a
+    // foreign Latin report scores near zero here instead of being mistaken for English.
+    EN_STOP: { 'the':1,'be':1,'to':1,'of':1,'and':1,'that':1,'have':1,'it':1,'for':1,'not':1,'with':1,'you':1,'at':1,'this':1,'but':1,'by':1,'from':1,'they':1,'we':1,'or':1,'will':1,'all':1,'would':1,'there':1,'what':1,'which':1,'when':1,'can':1,'is':1,'are':1,'was':1,'were':1,'been':1,'has':1,'had':1,'did':1,'then':1,'them':1,'my':1,'your':1,'just':1,'how':1,'about':1,'over':1,'than':1,'only':1,'also':1,'these':1,'those':1,'our':1,'should':1,'could':1,'because':1,'while':1,'their':1,'who':1,'get':1,'like':1,'out':1,'up':1,'now':1,'into':1,'some':1 },
+
+    // Cheap local language guess to skip English BEFORE any translate call: 'english' | 'foreign' | 'unknown'.
+    // Non-Latin script -> foreign (reliable). Latin -> English stopword ratio. 'unknown' (very short/ambiguous
+    // Latin) is treated as foreign by the pass; Google's sl=auto is the authoritative safety net, so a wrong
+    // guess costs at most one wasted call, never a wrong result.
+    detectLang: function (text) {
+        var t = (text || '').trim();
+        if (t.length < 12) { return 'unknown'; }
+        var nonLatin = (t.match(/[Ͱ-ϿЀ-ӿ֐-׿؀-ۿ฀-๿぀-ヿ㐀-鿿가-힯]/g) || []).length;
+        var letters  = (t.match(/[A-Za-zÀ-ɏͰ-ϿЀ-ӿ֐-׿؀-ۿ฀-๿぀-ヿ㐀-鿿가-힯]/g) || []).length;
+        if (letters && (nonLatin / letters) > 0.15) { return 'foreign'; }
+        // Latin script: only return 'english' when CONFIDENT. A wrong 'english' verdict suppresses the translate
+        // call and is UNCORRECTABLE (the report is indexed off foreign text forever); a wrong 'unknown' just costs
+        // one call that Google's sl=auto then corrects. So bias toward 'unknown' (= translate + verify).
+        var words = t.toLowerCase().match(/[a-z']+/g) || [];
+        if (words.length < 8) { return 'unknown'; }
+        var hits = 0;
+        for (var i = 0; i < words.length; i++) { if (JiTA.util.EN_STOP[words[i]]) { hits++; } }
+        var ratio = hits / words.length;
+        // A high English-distinctive ratio, OR "the" (which Spanish/Portuguese/German/French/Italian do not use as
+        // a word) plus a moderate ratio, is confident English. A foreign Latin report hits neither.
+        if (ratio >= 0.25 || (words.indexOf('the') !== -1 && ratio >= 0.12)) { return 'english'; }
+        return 'unknown';
     },
 
     // Convert a Jira ISO `updated` timestamp into the JQL literal "yyyy/MM/dd HH:mm".
@@ -4713,6 +4798,45 @@ JiTA.db = {
 
     bulkPut: function (recs) { return JiTA.db._bulkTx(recs, function (store, rec) { store.put(rec); }); },
 
+    // Atomic read-modify-write of ONE record: get + applyFn + put in a single transaction. Used by the translate
+    // pass so it merges only its own fields (lang/enText) onto the CURRENT row instead of clobbering a concurrent
+    // sync/embed write with a stale snapshot; skips (resolves false) if the record was deleted meanwhile.
+    updateRecord: function (key, applyFn) {
+        return JiTA.db.open().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                var tx = db.transaction('defects', 'readwrite'), store = tx.objectStore('defects'), existed = false;
+                var g = store.get(key);
+                g.onsuccess = function () { if (g.result) { existed = true; applyFn(g.result); store.put(g.result); } };
+                tx.oncomplete = function () { resolve(existed); };
+                tx.onerror = function () { reject(tx.error); };
+                tx.onabort = function () { reject(tx.error); };
+            });
+        });
+    },
+
+    // Merge-safe bulk tag: atomic get-modify-put over many keys, chunked into transactions (skips deleted rows).
+    // Used to mark all the locally-detected English reports at once in the translate pass's classification phase.
+    mergeEach: function (keys, applyFn) {
+        var CHUNK = 300;
+        function doChunk(start) {
+            if (start >= keys.length) { return Promise.resolve(); }
+            var slice = keys.slice(start, start + CHUNK);
+            return JiTA.db.open().then(function (db) {
+                return new Promise(function (resolve, reject) {
+                    var tx = db.transaction('defects', 'readwrite'), store = tx.objectStore('defects');
+                    slice.forEach(function (key) {
+                        var g = store.get(key);
+                        g.onsuccess = function () { if (g.result) { applyFn(g.result); store.put(g.result); } };
+                    });
+                    tx.oncomplete = function () { resolve(); };
+                    tx.onerror = function () { reject(tx.error); };
+                    tx.onabort = function () { reject(tx.error); };
+                });
+            }).then(function () { return doChunk(start + CHUNK); });
+        }
+        return doChunk(0);
+    },
+
     getDefect: function (key) { return JiTA.db._req('defects', 'readonly', function (s) { return s.get(key); }, function (v) { return v || null; }); },
 
     allDefects: function () { return JiTA.db._req('defects', 'readonly', function (s) { return s.getAll(); }, function (v) { return v || []; }); },
@@ -4819,6 +4943,8 @@ JiTA.sync = {
             team: JiTA.util.teamId(f.customfield_10001),   // Team field; used to exclude GM-team bug reports
             embedding: null,
             embeddingModelVersion: null,
+            lang: null,          // detected source language ('en','de','ru',...); null = translate pass hasn't seen it yet
+            enText: null,        // English, already-cleaned ranking text; set only when the report is foreign
             textHash: JiTA.util.hash(summary + '\n' + description)
         };
     },
@@ -4856,9 +4982,9 @@ JiTA.sync = {
                 // (For an initial full sync the DB is empty, so these lookups all return null and are cheap.)
                 return Promise.all(recs.map(function (rec) {
                     return JiTA.db.getDefect(rec.key).then(function (old) {
-                        if (old && old.embedding && old.textHash === rec.textHash) {
-                            rec.embedding = old.embedding;
-                            rec.embeddingModelVersion = old.embeddingModelVersion;
+                        if (old && old.textHash === rec.textHash) {   // SOURCE text unchanged -> keep derived work
+                            if (old.embedding) { rec.embedding = old.embedding; rec.embeddingModelVersion = old.embeddingModelVersion; }
+                            if (old.lang)      { rec.lang = old.lang; rec.enText = old.enText; }   // keep the stored translation
                         }
                         return rec;
                     });
@@ -5111,6 +5237,7 @@ JiTA.sync = {
                 JiTA.sched.markSynced();   // a manual sync also resets the auto-sync 30-min clock
                 if (JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
                 JiTA.embed.prepare(true);   // embed the new/changed bug reports in the background (for hybrid)
+                JiTA.translate.prepare();   // translate any new foreign reports to English in the background
             });
         }).catch(function (e) {
             JiTA.sync.running = false;
@@ -5151,6 +5278,7 @@ JiTA.sync = {
             return JiTA.db.setMeta('lastAutoSyncAt', new Date().toISOString()).then(function () {
                 JiTA.sched.markSynced();   // start the 30-min clock so reloads don't re-fetch
                 if (defectStored > 0 || ebrChanged) { JiTA.embed.prepare(true); }   // embed any new/changed defects AND bug reports
+                if (ebrChanged) { JiTA.translate.prepare(); }                        // translate any new foreign reports
                 if (defectStored > 0 && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
                 if (ebrChanged && JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
             });
@@ -5286,7 +5414,7 @@ JiTA.rank._buildKeywordIndex = function (records, keep) {
     for (var i = 0; i < records.length; i++) {
         var rec = records[i];
         if (!keep(rec)) { continue; }
-        var toks = JiTA.rank._tokenize(JiTA.util.cleanForCompare(rec.summary, rec.description));
+        var toks = JiTA.rank._tokenize(JiTA.util.effectiveText(rec));   // English translation for foreign reports, else cleaned original
         var tf = {}, seen = {};
         for (var j = 0; j < toks.length; j++) {
             var tk = toks[j];
@@ -5294,7 +5422,7 @@ JiTA.rank._buildKeywordIndex = function (records, keep) {
             if (!seen[tk]) { df[tk] = (df[tk] || 0) + 1; seen[tk] = true; }
         }
         totalLen += toks.length;
-        docs.push({ key: rec.key, project: rec.project, summary: rec.summary, status: rec.status, resolution: rec.resolution, resolutiondate: rec.resolutiondate, created: rec.created, tf: tf, len: toks.length, hay: ((rec.key || '') + ' ' + (rec.summary || '') + ' ' + (rec.description || '')).toLowerCase() });
+        docs.push({ key: rec.key, project: rec.project, summary: rec.summary, status: rec.status, resolution: rec.resolution, resolutiondate: rec.resolutiondate, created: rec.created, tf: tf, len: toks.length, hay: ((rec.key || '') + ' ' + (rec.summary || '') + ' ' + (rec.description || '') + ' ' + (rec.enText || '')).toLowerCase() });
     }
     return { N: docs.length, avgdl: docs.length ? (totalLen / docs.length) : 0, df: df, docs: docs };
 };
@@ -5505,7 +5633,7 @@ JiTA.embed = {
                 if (idx >= todo.length) { console.log('[JiTA] embed pass complete (' + todo.length + ' embedded)'); JiTA.rank._dirtyVec = true; JiTA.rank._dirtyEbrVec = true; return Promise.resolve(); }
                 var size = JiTA.embed.BATCH;
                 var slice = todo.slice(idx, idx + size);
-                var texts = slice.map(function (r) { return JiTA.util.cleanForCompare(r.summary, r.description); });
+                var texts = slice.map(function (r) { return JiTA.util.effectiveText(r); });   // English translation for foreign reports, else cleaned original
                 // Watchdog: a WebGPU device loss can HANG the worker so embedBatch never resolves OR rejects,
                 // which would silently stall the whole pass. Race it against a timeout so a hung batch is
                 // treated as a failure and handled by the catch below (retry on the same backend, then pause).
@@ -5595,6 +5723,128 @@ JiTA.embed = {
             console.log('[JiTA] embed prepare skipped:', e && e.message || e);
         });
         return JiTA.embed._preparing;
+    }
+};
+
+
+/* ---- foreign bug-report translation: translate non-English EBRs to English at ingest, store enText, index it ---- */
+// Runs TAB-side (GM_xmlhttpRequest is unavailable in the worker). Single-flight background pass over open, non-GM
+// EBRs not yet language-tagged: skip English locally (no call), translate foreign/unknown via round-robin
+// endpoints, store { lang, enText }. Foreign records get their embedding cleared so the embed pass re-embeds off
+// the English text. Resumable: state lives on each record (lang == null = pending), so a reload just continues.
+JiTA.translate = {
+    _running: null,
+    BATCH_DELAY: 500,           // ms between a lane's successful calls (2 concurrent lanes, one pinned per endpoint)
+    BACKOFF0: 5000, BACKOFF_MAX: 180000,
+    HARD_SKIP: 2,               // consecutive hard (per-content) failures on one record before we skip it
+
+    prepare: function () {      // idempotent within a tab; a Web Lock makes it single-flight ACROSS tabs too, so the
+        if (JiTA.translate._running) { return JiTA.translate._running; }   // foreign backlog is not translated N times (N tabs) against the same IP
+        var run;
+        if (navigator.locks && navigator.locks.request) {
+            run = navigator.locks.request('jita-translate-pass', { ifAvailable: true }, function (lock) {
+                if (!lock) { return; }   // another tab already owns the translate pass -> skip
+                return JiTA.translate.pass();
+            });
+        } else {
+            run = JiTA.translate.pass();
+        }
+        JiTA.translate._running = run.then(function () { JiTA.translate._running = null; },
+            function (e) { JiTA.translate._running = null; console.log('[JiTA] translate pass skipped:', e && e.message || e); });
+        return JiTA.translate._running;
+    },
+
+    pass: function () {
+        return JiTA.db.allDefects().then(function (recs) {
+            var candidates = [];
+            for (var k = 0; k < recs.length; k++) {
+                var r = recs[k];
+                if (r.project !== 'EBR') { continue; }                                              // never translate defects
+                if (JiTA.util.isClosedStatus(r.status) || JiTA.util.isGmTeam(r.team)) { continue; }  // not ranked -> skip
+                if (r.lang) { continue; }                                                            // already language-tagged
+                candidates.push(r);
+            }
+            if (!candidates.length) { return; }
+
+            // ---- PHASE 1: classify LOCALLY (no API), in chunks so the UI stays responsive. English -> tagged in
+            // bulk; foreign/unknown -> collected (with the cleaned text cached) so PHASE 2 shows a TRUE foreign
+            // count instead of the whole-corpus scan count. ----
+            var foreign = [], enKeys = [], c = 0;
+            function classify() {
+                var end = Math.min(c + 100, candidates.length);
+                for (; c < end; c++) {
+                    var rec = candidates[c];
+                    var text = JiTA.util.cleanForCompare(rec.summary, rec.description);
+                    if (JiTA.util.detectLang(text) === 'english') { enKeys.push(rec.key); }
+                    else { foreign.push({ key: rec.key, text: text.slice(0, 3000) }); }   // cap now; translation only uses the head anyway
+                }
+                if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Checking reports for translation… ' + c + ' / ' + candidates.length); }
+                return (c < candidates.length) ? JiTA.util.delay(0).then(classify) : null;
+            }
+
+            // ---- PHASE 2: translate ONLY the foreign set, with a clean "i / total" count. ----
+            function translateForeign() {
+                var total = foreign.length, next = 0, done = 0, translated = 0;
+                function report(extra) {
+                    if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating foreign reports… ' + done + ' / ' + total + (extra || '')); }
+                    if (done % 10 === 0 || done >= total) { JiTA.db.setMeta('translateProgress', { done: done, total: total, translated: translated }); }
+                }
+                // Two concurrent lanes, each PINNED to one endpoint (failover to the other per request), so both
+                // Google endpoints are in flight at once. Each lane waits BATCH_DELAY between its own calls, so each
+                // endpoint's rate stays bounded; combined throughput is ~2x. `next` is the shared work cursor;
+                // `done`/`translated` are shared counters (safe - single-threaded cooperative async). Per-lane backoff.
+                function lane(ep) {
+                    var backoff = JiTA.translate.BACKOFF0;
+                    function pull() {
+                        if (next >= total) { return; }                          // no work left -> this lane resolves
+                        return process(foreign[next++], 0);
+                    }
+                    function process(item, fails) {
+                        return jitaTranslateRR(item.text, ep).then(function (out) {
+                            var src = ((out && out.src) || '').toLowerCase();
+                            var confirmedEnglish = !(out && out.fail) && src === 'en';   // local said foreign/unknown, but sl=auto says English
+                            var usable = confirmedEnglish || (out && !out.fail && out.en);
+                            if (!usable) {
+                                // Hard per-content failure OR persistently empty -> give up after HARD_SKIP tries
+                                // (left lang=null, retried next pass). A soft throttle just backs off and retries SAME.
+                                var poison = (out && out.fail) ? out.hard : true;
+                                if (poison && fails + 1 >= JiTA.translate.HARD_SKIP) {
+                                    backoff = JiTA.translate.BACKOFF0; done++; report();
+                                    return JiTA.util.delay(0).then(pull);
+                                }
+                                var wait = backoff; backoff = Math.min(backoff * 2, JiTA.translate.BACKOFF_MAX);
+                                report(' (rate-limited, waiting…)');
+                                return JiTA.util.delay(wait).then(function () { return process(item, poison ? fails + 1 : fails); });
+                            }
+                            backoff = JiTA.translate.BACKOFF0;
+                            var apply;
+                            if (confirmedEnglish) { apply = function (cc) { cc.lang = 'en'; cc.enText = null; }; }
+                            else { translated++; var en = out.en, lang = src || 'xx'; apply = function (cc) { cc.lang = lang; cc.enText = en; cc.embedding = null; cc.embeddingModelVersion = null; }; }
+                            return JiTA.db.updateRecord(item.key, apply).then(function () {
+                                done++; report();
+                                return JiTA.util.delay(JiTA.translate.BATCH_DELAY).then(pull);   // per-lane rate-limit delay
+                            });
+                        });
+                    }
+                    return pull();
+                }
+                function finish() {
+                    return JiTA.db.setMeta('translateProgress', { done: total, total: total, translated: translated, at: Date.now() }).then(function () {
+                        if (translated > 0) {
+                            JiTA.rank._dirtyEbr = true; JiTA.rank._dirtyEbrVec = true;    // tab-side BM25/vec rebuild off English
+                            JiTA.embed.prepare(true);                                     // re-embed the cleared records, off English
+                            if (JiTA.ui && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
+                        }
+                    });
+                }
+                report();   // 0 / total up front
+                return Promise.all([lane(0), lane(1)]).then(finish);   // both endpoints concurrently
+            }
+
+            return Promise.resolve(classify())
+                .then(function () { return JiTA.db.mergeEach(enKeys, function (cc) { cc.lang = 'en'; cc.enText = null; }); })   // bulk-tag English (merge-safe)
+                .then(function () { return foreign.length ? translateForeign() : undefined; });
+        });
     }
 };
 
@@ -7344,22 +7594,45 @@ JiTA.ui = {
 
     // Read the open issue's text from the DOM (reusing the Translate selectors); fall back to a REST GET.
     getIssueText: function (key) {
-        var title = $(SELECTORS.SUMMARY_HEADING).text() || '';
-        // Grab the WHOLE rich-text description container (not just the first couple of paragraphs) so the
-        // cleaner sees everything, then strip boilerplate. Same normalization as the stored side.
-        var descText = $(SELECTORS.DESC_CONTAINER).text() || '';
-        if (descText.replace(/\s+/g, '').length > 0) {
-            return Promise.resolve(JiTA.util.cleanForCompare(title, descText));
+        var live = function () {
+            var title = $(SELECTORS.SUMMARY_HEADING).text() || '';
+            // Grab the WHOLE rich-text description container (not just the first couple of paragraphs) so the
+            // cleaner sees everything, then strip boilerplate. Same normalization as the stored side.
+            var descText = $(SELECTORS.DESC_CONTAINER).text() || '';
+            if (descText.replace(/\s+/g, '').length > 0) {
+                return Promise.resolve(JiTA.util.cleanForCompare(title, descText));
+            }
+            // DOM not ready / empty body - fall back to the REST API.
+            return new Promise(function (resolve) {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=summary,description', dataType: 'json' })
+                    .done(function (d) {
+                        var f = d.fields || {};
+                        resolve(JiTA.util.cleanForCompare(f.summary || title, JiTA.util.toPlainText(f.description)));
+                    })
+                    .fail(function () { resolve(JiTA.util.cleanForCompare(title, descText)); });
+            });
+        };
+        // On a foreign EBR, rank using the stored English translation (already cleaned) instead of the live foreign
+        // DOM text; fall back to live text until the translate pass has filled enText. Defects (English) untouched.
+        if (/^EBR-/.test(key)) {
+            return JiTA.db.getDefect(key).then(function (rec) {
+                if (rec && rec.enText) { return rec.enText; }                                  // stored translation (open + translated)
+                if (JiTA.ui._qtx && JiTA.ui._qtx.key === key) { return JiTA.ui._qtx.text; }     // cached on-demand translation
+                return live().then(function (t) {
+                    // No stored translation: a CLOSED report is not in the DB at all, and an OPEN one may not be
+                    // translated yet. If the live text is foreign, translate the QUERY on-demand so gte-small ranks
+                    // in English (and BM25 can match the defect's keywords). Cache per key so re-renders don't re-call;
+                    // fall back to the original text on any failure.
+                    if (JiTA.util.detectLang(t) !== 'foreign' || typeof jitaTranslateRR !== 'function') { return t; }
+                    return jitaTranslateRR(t.slice(0, 3000)).then(function (out) {
+                        var en = (out && out.en) ? out.en : t;
+                        JiTA.ui._qtx = { key: key, text: en };
+                        return en;
+                    });
+                });
+            }, live);
         }
-        // DOM not ready / empty body - fall back to the REST API.
-        return new Promise(function (resolve) {
-            $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=summary,description', dataType: 'json' })
-                .done(function (d) {
-                    var f = d.fields || {};
-                    resolve(JiTA.util.cleanForCompare(f.summary || title, JiTA.util.toPlainText(f.description)));
-                })
-                .fail(function () { resolve(JiTA.util.cleanForCompare(title, descText)); });
-        });
+        return live();
     },
 
     // Fetch (and cache per key) the open bug report's creation date, used by the stale-match demotion to
@@ -9035,6 +9308,9 @@ function jitaWorkerBody(cfg) {
         d = d.replace(/\s+/g, ' ').trim();
         return (s ? (s + '. ' + s + '. ') : '') + d;
     }
+    // Mirror of JiTA.util.effectiveText: index the stored English translation for a foreign report, else the
+    // cleaned original. The worker only READS the stored enText field; it never translates (no GM_xmlhttpRequest).
+    function effectiveText(rec) { return (rec && rec.enText) ? rec.enText : cleanForCompare(rec.summary, rec.description); }
     function isClosedStatus(status) { return /closed|done|resolved|rejected|cancel|attached/i.test(status || ''); }
     function teamId(v) { if (v == null) { return ''; } if (typeof v === 'string' || typeof v === 'number') { return String(v); } if (typeof v === 'object') { return String(v.id || v.value || v.teamId || v.name || ''); } return ''; }
     function isGmTeam(v) { var id = teamId(v); if (!id) { return false; } var short = String(cfg.GM_TEAM_ID).split('-').pop(); return id === cfg.GM_TEAM_ID || id === short || id.split('-').pop() === short; }
@@ -9045,6 +9321,29 @@ function jitaWorkerBody(cfg) {
                 for (var i = 0; i < records.length; i++) { store.put(records[i]); }
                 tx.oncomplete = function () { resolve(records.length); };
                 tx.onerror = function () { reject(tx.error); };
+            });
+        });
+    }
+    // Write embeddings back by MERGING onto the current row (get-then-put in one tx) instead of putting the stale
+    // snapshot, so a concurrent tab translate-write (enText/lang) is not clobbered. Skips a record that was deleted
+    // meanwhile, or whose enText changed since we embedded (our vector is stale -> leave it for the next pass).
+    function putEmbeddingsMerged(slice, vecs) {
+        return openDb().then(function (d) {
+            return new Promise(function (resolve, reject) {
+                var tx = d.transaction('defects', 'readwrite'), store = tx.objectStore('defects');
+                slice.forEach(function (rec, j) {
+                    var g = store.get(rec.key);
+                    g.onsuccess = function () {
+                        var cur = g.result;
+                        if (!cur) { return; }                                             // deleted meanwhile -> skip
+                        if ((cur.enText || null) !== (rec.enText || null)) { return; }     // translated since we embedded -> stale vector, skip
+                        cur.embedding = vecs[j]; cur.embeddingModelVersion = cfg.MODEL_VERSION;
+                        store.put(cur);
+                    };
+                });
+                tx.oncomplete = function () { resolve(); };
+                tx.onerror = function () { reject(tx.error); };
+                tx.onabort = function () { reject(tx.error); };
             });
         });
     }
@@ -9071,7 +9370,7 @@ function jitaWorkerBody(cfg) {
             postProgress();   // 0 / total up front so the pass is visible immediately
             while (idx < todo.length) {
                 var slice = todo.slice(idx, idx + BATCH);
-                var texts = slice.map(function (x) { return cleanForCompare(x.summary, x.description); });
+                var texts = slice.map(function (x) { return effectiveText(x); });   // English translation for foreign reports, else cleaned original
                 try {
                     var vecs = await Promise.race([
                         embedBatch(texts),
@@ -9080,8 +9379,7 @@ function jitaWorkerBody(cfg) {
                     var bad = false;
                     for (var g = 0; g < vecs.length; g++) { if (!vecs[g] || !vecs[g].length || !isFinite(vecs[g][0])) { bad = true; break; } }
                     if (bad) { throw new Error('NaN/empty embedding (likely GPU device loss)'); }
-                    for (var j = 0; j < slice.length; j++) { slice[j].embedding = vecs[j]; slice[j].embeddingModelVersion = cfg.MODEL_VERSION; }
-                    await bulkPut(slice);
+                    await putEmbeddingsMerged(slice, vecs);   // MERGE (not clobber): preserves a concurrent translate-write's enText/lang
                     idx += slice.length; retries = 0;
                     if (idx - lastPost >= 50 || idx >= todo.length) { lastPost = idx; postProgress(); }
                 } catch (e) {
@@ -9150,13 +9448,13 @@ function jitaWorkerBody(cfg) {
         for (var i = 0; i < recs.length; i++) {
             var r = recs[i], isEbr = r.project === 'EBR';
             if (isEbr && (isClosedStatus(r.status) || isGmTeam(r.team))) { continue; }   // not ranked in the reports view
-            var hay = ((r.key || '') + ' ' + (r.summary || '') + ' ' + (r.description || '')).toLowerCase();
+            var hay = ((r.key || '') + ' ' + (r.summary || '') + ' ' + (r.description || '') + ' ' + (r.enText || '')).toLowerCase();
             var meta = { key: r.key, project: r.project, summary: r.summary, status: r.status, resolution: r.resolution, resolutiondate: r.resolutiondate, created: r.created, team: r.team };
             if (r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION) {
                 var ve = { key: meta.key, project: meta.project, summary: meta.summary, status: meta.status, resolution: meta.resolution, resolutiondate: meta.resolutiondate, created: meta.created, team: meta.team, vec: r.embedding, hay: hay };
                 (isEbr ? vE : vD).push(ve);
             }
-            var toks = tokenize(cleanForCompare(r.summary, r.description)), tf = {}, seen = {}, df = isEbr ? dfE : dfD;
+            var toks = tokenize(effectiveText(r)), tf = {}, seen = {}, df = isEbr ? dfE : dfD;
             for (var j = 0; j < toks.length; j++) { var tk = toks[j]; tf[tk] = (tf[tk] || 0) + 1; if (!seen[tk]) { df[tk] = (df[tk] || 0) + 1; seen[tk] = true; } }
             var kd = { key: meta.key, project: meta.project, summary: meta.summary, status: meta.status, resolution: meta.resolution, resolutiondate: meta.resolutiondate, created: meta.created, team: meta.team, tf: tf, len: toks.length, hay: hay };
             if (isEbr) { kE.push(kd); lenE += toks.length; } else { kD.push(kd); lenD += toks.length; }
@@ -10346,6 +10644,7 @@ JiTA.declutter = {
     // one-time data-schema migration: re-fetch a local DB that predates a stored-field change. Runs before
     // the scheduler's startup tick (below) so its full re-fetch grabs the single-flight lock first.
     setTimeout(function () { try { JiTA.migrate.run(); } catch (e) { /* swallow */ } }, 4000);
+    setTimeout(function () { try { JiTA.translate.prepare(); } catch (e) { /* swallow */ } }, 6000);   // background-translate the foreign-report backlog
     // Keep the hidden set in sync across tabs: another tab hiding/unhiding an issue invalidates our cached map
     // and re-renders the open view so a just-hidden suggestion drops out (and an unhidden one comes back).
     if (typeof GM_addValueChangeListener === 'function') {
