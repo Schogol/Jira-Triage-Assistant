@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.10.6
+// @version     3.10.7
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5734,7 +5734,7 @@ JiTA.embed = {
 // the English text. Resumable: state lives on each record (lang == null = pending), so a reload just continues.
 JiTA.translate = {
     _running: null,
-    BATCH_DELAY: 500,           // ms between a lane's successful calls (2 concurrent lanes, one pinned per endpoint)
+    BATCH_DELAY: 1000,          // ms between a lane's successful calls (2 concurrent lanes, one pinned per endpoint); 1s was steadier than 500ms against the rate limit
     BACKOFF0: 5000, BACKOFF_MAX: 180000,
     HARD_SKIP: 2,               // consecutive hard (per-content) failures on one record before we skip it
 
