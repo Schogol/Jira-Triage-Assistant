@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.10.7
+// @version     3.10.8
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8890,50 +8890,6 @@ JiTA.credits = {
             });
         });
 
-        // The viewer's line, preferring the fresher self cache (current month) over the full-leaderboard row.
-        // `computed` distinguishes "this month was computed but you're not an ECAID member" from "not computed yet".
-        function cardInfo(fullRes, selfRes, me) {
-            var computed = !!(fullRes || selfRes);
-            if (selfRes && selfRes.me === me && selfRes.credits != null) {
-                return { computed: computed, myName: selfRes.myName, created: selfRes.created, resolved: selfRes.resolved, attached: selfRes.attached,
-                    trashed: selfRes.trashed, reassigned: selfRes.reassigned, actioned: selfRes.actioned, extra: selfRes.extra,
-                    credits: selfRes.credits, rank: selfRes.rank, total: selfRes.total };
-            }
-            if (fullRes) {
-                var d = C._derive(fullRes, me);
-                if (d.myRow) {
-                    return { computed: computed, myName: d.myName, created: d.myRow[1], resolved: d.myRow[2], attached: d.myRow[3], trashed: d.myRow[4],
-                        reassigned: d.myRow[5], actioned: d.myRow[6], extra: d.myRow[7], credits: d.myRow[8], rank: d.myRank, total: d.total };
-                }
-            }
-            return { computed: computed, myName: null };
-        }
-
-        function card(info) {
-            var $c = $('<div style="background:#22272b;border:1px solid #2c333a;border-radius:8px;padding:12px 14px;"></div>');
-            // Not computed -> a neutral title (the status line below explains + offers Refresh); computed but no
-            // match -> the account genuinely isn't an ECAID member.
-            var title = info.myName ? ('You - ' + info.myName)
-                : (info.computed ? 'Your account was not matched to an ECAID member' : 'Your credits for ' + sel);
-            $('<div style="font-weight:700;font-size:13px;margin-bottom:8px;"></div>').text(title).appendTo($c);
-            if (info.myName && info.credits != null) {
-                // Two labelled groups so it's clear Created/Resolved are DEFECTS and Attached/Trashed/Reassigned are BUG REPORTS.
-                function group(label, parts) {
-                    var $l = $('<div style="font-size:12px;line-height:1.9;"></div>');
-                    $('<span style="color:#8a94a0;font-weight:700;"></span>').text(label).appendTo($l);
-                    parts.forEach(function (p) { $('<span style="color:#c7cdd4;margin-left:14px;"></span>').text(p).appendTo($l); });
-                    return $l;
-                }
-                $c.append(group('Defects', [info.created + ' created', info.resolved + ' resolved']));
-                $c.append(group('Bug reports', [info.attached + ' attached', info.trashed + ' trashed', info.reassigned + ' reassigned']));
-                var $big = $('<div style="margin-top:10px;font-size:16px;font-weight:800;color:#fff;"></div>').text(info.credits + ' credits');
-                if (info.rank != null) { $('<span style="color:#9aa6b2;font-weight:600;font-size:12px;margin-left:12px;"></span>').text('rank #' + info.rank + ' of ' + info.total).appendTo($big); }
-                $('<span style="color:#7a8694;font-weight:500;font-size:11px;margin-left:12px;"></span>').text(info.actioned + ' total actioned').appendTo($big);
-                $c.append($big);
-            }
-            return $c;
-        }
-
         function table(res, d) {
             // Short column labels (the grouping row above clarifies defects vs bug reports; keeps columns narrow).
             var short = res.header.map(function (c) { return c.replace(/^Defects |^Reports |^Total /, '').replace(/ Credits$| Earned$/, ''); });
@@ -8988,22 +8944,13 @@ JiTA.credits = {
             return $wrap.append($tbl);
         }
 
-        function fillCard() {
-            return Promise.all([C.getCached(sel), C.getSelf(sel), JiTA.link.currentUser()]).then(function (arr) {
-                var slot = document.getElementById('jita-cred-card-slot');
-                if (slot) { $(slot).empty().append(card(cardInfo(arr[0], arr[1], arr[2]))); }
-                return arr;
-            });
-        }
-
         function render() {
             $scroll.empty();
             $msel.val(sel);
             $scroll.append($('<div class="jita-menu-status">Loading…</div>'));
-            Promise.all([C.getCached(sel), C.getSelf(sel), JiTA.link.currentUser()]).then(function (arr) {
-                var fullRes = arr[0], selfRes = arr[1], me = arr[2];
+            Promise.all([C.getCached(sel), JiTA.link.currentUser()]).then(function (arr) {
+                var fullRes = arr[0], me = arr[1];
                 $scroll.empty();
-                $scroll.append($('<div id="jita-cred-card-slot"></div>').append(card(cardInfo(fullRes, selfRes, me))));
                 // Only the current month auto-refreshes (the scheduler computes _ymNow()); past months are on-demand.
                 var isCurrentMonth = (sel === C._ymNow().ym);
                 if (!fullRes) {
@@ -9019,12 +8966,6 @@ JiTA.credits = {
                     .text('Leaderboard computed ' + String(fullRes.computedAt || '').replace('T', ' ').slice(0, 16) + ' - ' + d.total + ' members. Your own total updates every ~2 min.'));
             });
         }
-
-        // Keep the "You" card fresh while the overlay is open (the self compute writes creditsSelf every ~2 min).
-        var cardTimer = setInterval(function () {
-            if (!document.getElementById('jita-menu')) { clearInterval(cardTimer); return; }
-            fillCard();
-        }, 30 * 1000);
 
         render();
     },
