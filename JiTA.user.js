@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.11.0
+// @version     3.12.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6227,9 +6227,6 @@ JiTA.ui = {
 #jita-sd-filterbtn:hover { color: #e6e6e6; background: #3a434d; }\
 #jita-sd-filterbtn.active { color: #4c9aff; }\
 #jita-sd-filterbtn.active::after { content: ""; position: absolute; top: 1px; right: 1px; width: 5px; height: 5px; border-radius: 50%; background: #4c9aff; }\
-#jita-sd-dupbtn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px; color: #9aa6b2; cursor: pointer; user-select: none; position: relative; flex: 0 0 auto; }\
-#jita-sd-dupbtn:hover { color: #e6e6e6; background: #3a434d; }\
-#jita-sd-dupbtn.active { color: #6bd0dc; }\
 #jita-sd-filtermenu { position: fixed; z-index: 10002; background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.55); padding: 10px; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; font-size: 12px; min-width: 190px; }\
 #jita-sd-filtermenu .jita-fm-label { color: #9aa6b2; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; margin: 2px 0 5px; }\
 #jita-sd-filtermenu .jita-fm-seg { display: flex; margin-bottom: 10px; border: 1px solid #3a434d; border-radius: 6px; overflow: hidden; }\
@@ -6261,18 +6258,10 @@ JiTA.ui = {
 #jita-sd-loglink a:hover { text-decoration: underline; }\
 #jita-sd-loglink .count { color: #cfd6dd; background: #3a434d; border-radius: 8px; padding: 0 7px; font-size: 10px; font-weight: 700; margin-left: 6px; }\
 .jita-sd-loose { font-size: 10px; color: #9aa6b2; margin-left: 6px; }\
-#jita-sd-ebrdups { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; }\
-#jita-sd-ebrdups.has-hits { display: block; }\
-#jita-sd-ebrdups .jita-sd-ebrdups-head { font-weight: 700; color: #6bd0dc; font-size: 11px; margin-bottom: 4px; }\
-#jita-sd-ebrdups ul { list-style: none; margin: 0; padding: 0; }\
-#jita-sd-ebrdups li { padding: 3px 0; cursor: default; }\
-#jita-sd-ebrdups a { color: #4c9aff; font-weight: 700; text-decoration: none; }\
-#jita-sd-ebrdups a:hover { text-decoration: underline; }\
-#jita-sd-ebrdups .jita-sd-ebrdups-sum { color: #cfd6dd; font-size: 11px; margin-left: 6px; }\
 #jita-sd-exccluster { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; }\
 #jita-sd-exccluster.has-hits { display: block; }\
 #jita-sd-exccluster .jita-sd-exccluster-head { font-weight: 700; color: #cfd6dd; font-size: 11px; margin-bottom: 4px; }\
-#jita-sd-panel.collapsed #jita-sd-status, #jita-sd-panel.collapsed #jita-sd-loglink, #jita-sd-panel.collapsed #jita-sd-ebrdups, #jita-sd-panel.collapsed #jita-sd-exccluster, #jita-sd-panel.collapsed #jita-sd-list { display: none; }\
+#jita-sd-panel.collapsed #jita-sd-status, #jita-sd-panel.collapsed #jita-sd-loglink, #jita-sd-panel.collapsed #jita-sd-exccluster, #jita-sd-panel.collapsed #jita-sd-list { display: none; }\
 #jita-sd-panel.jita-sd-up { flex-direction: column-reverse; }\
 #jita-sd-toast { position: fixed; right: 18px; bottom: 18px; z-index: 9001; background: #333; color: #eee; padding: 8px 14px;\
   border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.45); font-family: -apple-system,Arial,sans-serif; font-size: 12px; max-width: 320px; }\
@@ -6327,20 +6316,12 @@ JiTA.ui = {
 #jita-side-group #jita-sd-filterbtn:hover { color: var(--ds-text, #172b4d); background: var(--ds-background-neutral, #091e420f); }\
 #jita-side-group #jita-sd-filterbtn.active { color: var(--ds-link, #0c66e4); }\
 #jita-side-group #jita-sd-filterbtn.active::after { background: var(--ds-link, #0c66e4); }\
-#jita-side-group #jita-sd-dupbtn { color: var(--ds-text-subtle, #44546f); }\
-#jita-side-group #jita-sd-dupbtn:hover { color: var(--ds-text, #172b4d); background: var(--ds-background-neutral, #091e420f); }\
-#jita-side-group #jita-sd-dupbtn.active { color: var(--ds-link, #0c66e4); }\
 #jita-side-group #jita-sd-filter { background: var(--ds-surface, #fff); color: var(--ds-text, #172b4d); border-color: var(--ds-border-input, #8590a2); }\
 #jita-side-group #jita-sd-filter:focus { border-color: var(--ds-border-focused, #388bff); }\
 #jita-side-group #jita-sd-status { padding: 4px 0; border-bottom: none; color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group #jita-sd-loglink { display: none; padding: 6px 0; border-bottom: 1px solid var(--ds-border, #091e4224); background: transparent; }\
 #jita-side-group #jita-sd-loglink.has-hits { display: block; }\
 #jita-side-group #jita-sd-loglink .jita-sd-loglink-head { color: var(--ds-text-warning, #974f0c); }\
-#jita-side-group #jita-sd-ebrdups { display: none; padding: 6px 0; border-bottom: 1px solid var(--ds-border, #091e4224); background: transparent; }\
-#jita-side-group #jita-sd-ebrdups.has-hits { display: block; }\
-#jita-side-group #jita-sd-ebrdups .jita-sd-ebrdups-head { color: var(--ds-text, #172b4d); }\
-#jita-side-group #jita-sd-ebrdups .jita-sd-ebrdups-sum { color: var(--ds-text-subtle, #44546f); }\
-#jita-side-group #jita-sd-ebrdups a { color: var(--ds-link, #0c66e4); }\
 #jita-side-group #jita-sd-exccluster { display: none; padding: 6px 0; border-bottom: 1px solid var(--ds-border, #091e4224); background: transparent; }\
 #jita-side-group #jita-sd-exccluster.has-hits { display: block; }\
 #jita-side-group #jita-sd-exccluster .jita-sd-exccluster-head { color: var(--ds-text, #172b4d); }\
@@ -6404,7 +6385,7 @@ JiTA.ui = {
     // whenever the embedding model is available).
     modeOverride: null,        // null = automatic (prefer Hybrid); 'Hybrid' / 'Keyword' = user-forced this session
     reporterMode: false,       // EBR view: when on, the panel lists the reporter's OTHER reports instead of similar defects (session-only; reset on navigation)
-    _dupOnState: false,        // EBR view: "possible duplicate reports" section expanded? IN-MEMORY only, reset on navigation - each new issue starts collapsed and the state never persists (like reporterMode)
+    simReportsMode: false,     // EBR view: when on, the panel lists OTHER open reports semantically similar to this one (report<->report) instead of similar defects (session-only; reset on navigation; mutually exclusive with reporterMode)
     _filterTimer: null,
     _wireFilter: function () {
         if (JiTA.ui._filterWired) { return; }   // one set of delegated handlers survives chrome re-mounts
@@ -6415,15 +6396,6 @@ JiTA.ui = {
             e.preventDefault(); e.stopPropagation();
             if (document.getElementById('jita-sd-filtermenu')) { JiTA.ui._closeFilterMenu(); }
             else { JiTA.ui._showFilterMenu(this); }
-        });
-        // Duplicate-reports toggle: flip the in-memory per-issue state, reflect it on the button, and (on an EBR)
-        // show or clear the "possible duplicate reports" section right away. Not persisted - resets on navigation.
-        $(document).on('click', '#jita-sd-dupbtn', function (e) {
-            e.preventDefault(); e.stopPropagation();
-            JiTA.ui._dupOnState = !JiTA.ui._dupOn();
-            JiTA.ui._syncDupBtn(true);
-            var k = JiTA.ui.currentKey;
-            if (k && /^EBR-/.test(k)) { JiTA.ui.renderEbrDups(k); }   // recompute now, or clear if just turned off
         });
         // Debounced re-query as the user types. (We previously tried to keep Jira from flagging the page as
         // having "unsubmitted changes" - it warns on reload because the filter input lives inside its issue
@@ -6492,7 +6464,7 @@ JiTA.ui = {
         var f = JiTA.ui.filters;
         if (!f) { return false; }
         var onEbr = /^EBR-/.test(JiTA.ui.currentKey || '');
-        if (onEbr && JiTA.ui.reporterMode) { return true; }   // reporter's-other-reports view is active
+        if (onEbr && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode)) { return true; }   // a report<->report view (reporter's reports / similar reports) is active
         return !!((onEbr && f.status && f.status !== 'all') || f.createdDays > 0);
     },
 
@@ -6502,19 +6474,6 @@ JiTA.ui = {
     _syncFilterBtn: function () {
         var $b = $('#jita-sd-filterbtn');
         if ($b.length) { $b.toggleClass('active', JiTA.ui._filtersActive()); }
-    },
-
-    // Duplicate-reports toggle (two-squares icon, EBR view only). Collapsed by default on EVERY issue: the
-    // "possible duplicate reports" section is gated behind this button so it costs nothing and adds no clutter
-    // until the triager asks for it. State is IN-MEMORY and per-issue (see _dupOnState) - it is deliberately NOT
-    // persisted, so each new issue you open starts collapsed.
-    _dupSvg: '<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M5 1a1 1 0 0 0-1 1v1H3a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-1h1a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H5zm7 1v8h-1V4a1 1 0 0 0-1-1H5V2h7zM3 4h7v9H3V4z"/></svg>',
-    _dupOn: function () { return !!JiTA.ui._dupOnState; },
-    _syncDupBtn: function (show) {
-        var $b = $('#jita-sd-dupbtn');
-        if (!$b.length) { return; }
-        $b.css('display', show ? '' : 'none');   // EBR-only control
-        $b.toggleClass('active', JiTA.ui._dupOn());
     },
 
     // Build + show the filter popover under the funnel button. Rebuilt each open so it can be view-aware
@@ -6527,23 +6486,40 @@ JiTA.ui = {
         var menu = document.createElement('div');
         menu.id = 'jita-sd-filtermenu';
 
-        // Reporter's-other-reports toggle (EBR view only): swaps the similar-defects list for this reporter's
-        // other synced reports, and back. In reporter mode the ranking filters below don't apply, so they're hidden.
+        // EBR-view view-switches (both swap the similar-defects list for a report<->report view, and back). They
+        // are mutually exclusive, and while either is active the ranking filters below don't apply, so they're hidden.
         if (onEbr) {
+            // Reporter's-other-reports (a LIVE Jira search for every other report by the same Original Reporter).
             var vb = document.createElement('button');
             vb.type = 'button';
             vb.className = 'jita-fm-view' + (JiTA.ui.reporterMode ? ' on' : '');
             vb.textContent = JiTA.ui.reporterMode ? '← Back to similar defects' : '⚑ This reporter’s other reports';
             vb.addEventListener('click', function () {
                 JiTA.ui.reporterMode = !JiTA.ui.reporterMode;
+                if (JiTA.ui.reporterMode) { JiTA.ui.simReportsMode = false; }   // the two report views are mutually exclusive
                 JiTA.ui._closeFilterMenu();
                 JiTA.ui._syncFilterBtn();
                 JiTA.ui._rerenderCurrent();
             });
             menu.appendChild(vb);
+
+            // Similar open reports (semantic report<->report match over the local open-EBR index - other players
+            // filing the same bug). Reuses the defect view's matching-reports engine, excluding this report.
+            var sb = document.createElement('button');
+            sb.type = 'button';
+            sb.className = 'jita-fm-view' + (JiTA.ui.simReportsMode ? ' on' : '');
+            sb.textContent = JiTA.ui.simReportsMode ? '← Back to similar defects' : '⧉ Similar open reports';
+            sb.addEventListener('click', function () {
+                JiTA.ui.simReportsMode = !JiTA.ui.simReportsMode;
+                if (JiTA.ui.simReportsMode) { JiTA.ui.reporterMode = false; }   // mutually exclusive with the reporter view
+                JiTA.ui._closeFilterMenu();
+                JiTA.ui._syncFilterBtn();
+                JiTA.ui._rerenderCurrent();
+            });
+            menu.appendChild(sb);
         }
 
-        if (!(onEbr && JiTA.ui.reporterMode)) {
+        if (!(onEbr && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode))) {
         if (onEbr) {
             var sl = document.createElement('div'); sl.className = 'jita-fm-label'; sl.textContent = 'Status'; menu.appendChild(sl);
             var seg = document.createElement('div'); seg.className = 'jita-fm-seg';
@@ -6921,7 +6897,7 @@ JiTA.ui = {
             if (e.which && e.which !== 1) { return; }                 // left button only
             if ($(e.target).closest('#jita-sd-collapse').length) { return; }  // let the collapse toggle work
             if ($(e.target).closest('#jita-sd-filter').length) { return; }    // let the filter input take focus / select text
-            if ($(e.target).closest('#jita-sd-filterbtn, #jita-sd-dupbtn').length) { return; } // let the funnel / dup toggle handle their own clicks
+            if ($(e.target).closest('#jita-sd-filterbtn').length) { return; } // let the funnel handle its own clicks
             if ($(e.target).closest('#jita-sd-mode').length) { return; }      // let the mode badge toggle ranking
             // Drag relative to the HEADER's current top (works whether we're top-anchored or in drop-up),
             // so the header tracks the cursor and _fitVertical re-evaluates up/down on every move.
@@ -6998,12 +6974,10 @@ JiTA.ui = {
             '  <div id="jita-sd-head"><span id="jita-sd-title">Similar defects</span>' +
             '    <input id="jita-sd-filter" type="text" placeholder="Filter…" autocomplete="off" title="Filter the whole database by this text (key / title / description) and show the best matches">' +
             '    <span id="jita-sd-filterbtn" title="Filter results (status / recency)">' + JiTA.ui._funnelSvg + '</span>' +
-            '    <span id="jita-sd-dupbtn" style="display:none" title="Show possible duplicate reports">' + JiTA.ui._dupSvg + '</span>' +
             '    <span id="jita-sd-mode" title="Click to switch ranking mode (resets to automatic on reload)">Keyword</span>' +
             '    <span id="jita-sd-collapse" title="Collapse / expand">–</span></div>' +
             '  <div id="jita-sd-status"></div>' +
             '  <div id="jita-sd-loglink"></div>' +
-            '  <div id="jita-sd-ebrdups"></div>' +
             '  <div id="jita-sd-exccluster"></div>' +
             '  <ul id="jita-sd-list"></ul>' +
             '</div>'
@@ -7036,11 +7010,9 @@ JiTA.ui = {
         return '<div class="jita-side-subhead"><span id="jita-sd-title">Similar defects</span>' +
                '<input id="jita-sd-filter" type="text" placeholder="Filter…" autocomplete="off" title="Filter the whole database by this text (key / title / description) and show the best matches">' +
                '<span id="jita-sd-filterbtn" title="Filter results (status / recency)">' + JiTA.ui._funnelSvg + '</span>' +
-               '<span id="jita-sd-dupbtn" style="display:none" title="Show possible duplicate reports">' + JiTA.ui._dupSvg + '</span>' +
                '<span id="jita-sd-mode" title="Click to switch ranking mode (resets to automatic on reload)">Keyword</span></div>' +
                '<div id="jita-sd-status"></div>' +
                '<div id="jita-sd-loglink"></div>' +
-               '<div id="jita-sd-ebrdups"></div>' +
                '<div id="jita-sd-exccluster"></div>' +
                '<ul id="jita-sd-list"></ul>';
     },
@@ -7606,6 +7578,12 @@ JiTA.ui = {
         return JiTA.ui._row(r, '_blank', function (k) { return JiTA.ui._attachReportButton(k); });
     },
 
+    // EBR "similar open reports" row (report<->report view): link opens the other report in a new tab; NO trailing
+    // control, since you can't attach one report to another (both sides are reports).
+    _simReportItem: function (r) {
+        return JiTA.ui._row(r, '_blank', function () { return $(); });
+    },
+
     // Read the open issue's text from the DOM (reusing the Translate selectors); fall back to a REST GET.
     getIssueText: function (key) {
         var live = function () {
@@ -7778,54 +7756,6 @@ JiTA.ui = {
         });
     },
 
-    // EBR view extra section: OTHER open bug reports that closely match THIS report - likely a player filing the
-    // same bug again. Same engine as the defect view's "matching reports" (suggestEbrBest over the EBR index),
-    // excluding self, filtered to strong matches, top few, in its own #jita-sd-ebrdups box above the similar-
-    // defects list. Rows open in a new tab and share the suggestions' hover preview; no attach control (both sides
-    // are reports). Mirrors renderLogLink's background/atomic-refill so it never flashes on a data-driven refresh.
-    EBR_DUP_LIMIT: 5,
-    EBR_DUP_MIN_PCT: 40,   // drop weak matches so an unrelated report doesn't show phantom "duplicates"
-    renderEbrDups: function (key, background) {
-        var $box = $('#jita-sd-ebrdups');
-        if (!$box.length) { return; }
-        if (!JiTA.ui._dupOn()) { $box.removeClass('has-hits').empty(); return; }   // gated behind the dup-reports toggle (off by default)
-        if (!background) { $box.removeClass('has-hits').empty(); }
-        JiTA.db.countEbr().then(function (n) {
-            if (!n) { $box.removeClass('has-hits').empty(); return; }
-            return JiTA.ui.getIssueText(key).then(function (text) {
-                if (JiTA.ui.currentKey !== key) { return; }
-                if (!text) { $box.removeClass('has-hits').empty(); return; }
-                return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, JiTA.ui._filterTerms()).then(function (out) {
-                    if (JiTA.ui.currentKey !== key) { return; }
-                    var results = (out.results || []).filter(function (r) { return (r.pct || 0) >= JiTA.ui.EBR_DUP_MIN_PCT; }).slice(0, JiTA.ui.EBR_DUP_LIMIT);
-                    var $b = $('#jita-sd-ebrdups');
-                    if (!results.length) { $b.removeClass('has-hits').empty(); return; }   // genuinely no strong dup now -> clear (covers the background path that skipped the top empty)
-                    return Promise.all(results.map(function (r) {
-                        return JiTA.db.getDefect(r.key).then(function (rec) {
-                            if (rec) { r.description = rec.description; r.created = rec.created; }
-                            return r;
-                        }, function () { return r; });
-                    })).then(function () {
-                        if (JiTA.ui.currentKey !== key) { return; }
-                        $b.empty();
-                        $('<div class="jita-sd-ebrdups-head"></div>').text('⧉ Possible duplicate reports (' + results.length + ')').appendTo($b);
-                        var $ul = $('<ul></ul>').appendTo($b);
-                        results.forEach(function (r) {
-                            var $li = $('<li></li>').attr('data-jita-key', r.key);
-                            $('<a></a>').attr('href', '/browse/' + r.key).attr('target', '_blank').text(r.key).appendTo($li);
-                            if (typeof r.pct === 'number') { $('<span class="jita-sd-score"></span>').text(r.pct + '%').appendTo($li); }
-                            $('<span class="jita-sd-ebrdups-sum"></span>').text(r.summary || '').attr('title', r.summary || '').appendTo($li);
-                            $li.on('mouseenter', function () { JiTA.ui._showTip(r, this, r.status || ''); });
-                            $li.on('mouseleave', function () { JiTA.ui._hideTip(); });
-                            $ul.append($li);
-                        });
-                        $b.addClass('has-hits');
-                        JiTA.ui._fitVertical();
-                    });
-                });
-            });
-        }).catch(function () { /* leave the section as-is on error */ });
-    },
 
     // Coalesce re-render requests. A single sync drives several "refresh the list" triggers in quick
     // succession - the sync's own completion, then embed.prepare()'s completion after the embed pass, and
@@ -7860,7 +7790,6 @@ JiTA.ui = {
             md = document.getElementById('jita-sd-mode'),
             ti = document.getElementById('jita-sd-title'),
             ll = document.getElementById('jita-sd-loglink'),
-            eb = document.getElementById('jita-sd-ebrdups'),
             ex = document.getElementById('jita-sd-exccluster');
         JiTA.ui._snapshot = {
             key: key,
@@ -7870,8 +7799,6 @@ JiTA.ui = {
             title: ti ? ti.textContent : '',
             loglink: ll ? ll.innerHTML : '',
             loglinkHits: !!(ll && ll.className.indexOf('has-hits') !== -1),
-            ebrdups: eb ? eb.innerHTML : '',
-            ebrdupsHits: !!(eb && eb.className.indexOf('has-hits') !== -1),
             exccluster: ex ? ex.innerHTML : '',
             exclusterHits: !!(ex && ex.className.indexOf('has-hits') !== -1)
         };
@@ -7882,9 +7809,9 @@ JiTA.ui = {
     // in the real, interactive rows a moment later.
     _restoreSnapshot: function () {
         var s = JiTA.ui._snapshot;
-        // Skip in reporter-reports mode: that view is a live search we never snapshot, so a stale similar-defects
-        // snapshot would flash the wrong list before the search clears it. Let it rebuild clean instead.
-        if (!s || s.key !== JiTA.ui.currentKey || JiTA.ui.reporterMode) { return; }
+        // Skip in the report<->report view modes: those views are computed/searched fresh (never snapshotted), so a
+        // stale similar-defects snapshot would flash the wrong list before they clear it. Let them rebuild clean instead.
+        if (!s || s.key !== JiTA.ui.currentKey || JiTA.ui.reporterMode || JiTA.ui.simReportsMode) { return; }
         var list = document.getElementById('jita-sd-list');
         if (!list) { return; }
         list.innerHTML = s.list;
@@ -7898,11 +7825,6 @@ JiTA.ui = {
         if (ll) {
             ll.innerHTML = s.loglink || '';
             if (s.loglinkHits) { ll.classList.add('has-hits'); } else { ll.classList.remove('has-hits'); }
-        }
-        var eb = document.getElementById('jita-sd-ebrdups');
-        if (eb) {
-            eb.innerHTML = s.ebrdups || '';
-            if (s.ebrdupsHits) { eb.classList.add('has-hits'); } else { eb.classList.remove('has-hits'); }
         }
         var ex = document.getElementById('jita-sd-exccluster');
         if (ex) {
@@ -7925,18 +7847,17 @@ JiTA.ui = {
     // `background` (set only by scheduleRender, i.e. a data-driven refresh): keep the current list on screen
     // and only swap in the new results when they're ready, instead of emptying to a "Finding…" state first.
     render: function (key, background) {
-        // View-mode switch: when the funnel's "this reporter's other reports" toggle is on, the EBR panel lists
-        // the reporter's OTHER reports instead of similar defects. Every re-render path funnels through here, so
-        // the branch lives here (one chokepoint) rather than at each caller.
+        // View-mode switches (both EBR-only funnel toggles): swap the similar-defects list for a report<->report
+        // view - the reporter's OTHER reports, or OPEN reports similar to this one. Every re-render path funnels
+        // through here, so the branches live here (one chokepoint) rather than at each caller.
         if (JiTA.ui.reporterMode) { return JiTA.ui.renderReporterReports(key); }
+        if (JiTA.ui.simReportsMode) { return JiTA.ui.renderSimilarReports(key, background); }
         JiTA.ui._ensurePanel();
         JiTA.ui._syncFilterBtn();   // reflect any active session filters on the funnel
-        JiTA.ui._syncDupBtn(true);  // dup-reports toggle is EBR-only -> show it here
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Similar defects');   // reset title (the panel is shared with the EDR reports view)
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section; clear it on the EBR view
         JiTA.ui.renderLogLink(key, background);   // scan the attached log for known defects (no need to open it); background = don't blank it first
-        JiTA.ui.renderEbrDups(key, background);    // OTHER open reports that look like duplicates of this one
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar defects…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             return JiTA.db.countDefectsOnly().then(function (n) {
@@ -7977,11 +7898,9 @@ JiTA.ui = {
     renderReports: function (key, background) {
         JiTA.ui._ensurePanel();
         JiTA.ui._syncFilterBtn();   // reflect any active session filters on the funnel
-        JiTA.ui._syncDupBtn(false);  // dup-reports toggle is EBR-only -> hide it on the defect view
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Matching bug reports');
         $('#jita-sd-loglink').removeClass('has-hits').empty();   // EBR-only section; unused on a defect
-        $('#jita-sd-ebrdups').removeClass('has-hits').empty();   // EBR-only section; unused on a defect
         if (!background) { $('#jita-sd-list').empty(); }   // background refresh keeps the list until new results are ready
         JiTA.ui.renderExceptionCluster(key, background);   // list other defects that reported the same exception; background = don't blank it first
         if (!background) { JiTA.ui.setStatus('Finding matching bug reports…'); }
@@ -8026,8 +7945,6 @@ JiTA.ui = {
         $('#jita-sd-mode').text('');                                  // no ranking mode in this view
         $('#jita-sd-exccluster').removeClass('has-hits').empty();     // defect-only section
         $('#jita-sd-loglink').removeClass('has-hits').empty();        // similar-defects-only section
-        $('#jita-sd-ebrdups').removeClass('has-hits').empty();        // dup-reports section, not shown in this view
-        JiTA.ui._syncDupBtn(false);                                   // hide the EBR-only dup toggle in the reporter view
         $('#jita-sd-list').empty();
         JiTA.ui.setStatus('Finding this reporter’s other reports…');
         JiTA.ui._getReporterId(key).then(function (rid) {
@@ -8060,6 +7977,52 @@ JiTA.ui = {
                 $list.empty();
                 for (var j = 0; j < rows.length; j++) { $list.append(JiTA.ui._reporterRow(rows[j])); }
                 JiTA.ui._fitVertical();
+            });
+        }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
+    },
+
+    // EBR view, "similar open reports" mode (funnel toggle): rank the OTHER open bug reports whose text best
+    // matches THIS report (report<->report - likely another player filing the same bug), excluding self, and list
+    // them in the same panel. Same engine as the defect view's matching-reports (suggestEbrBest over the open-EBR
+    // index), so a foreign report ranks via its stored English translation. No attach control (both sides are
+    // reports). Mirrors renderReports' background/atomic refill so it never flashes on a data-driven refresh, and
+    // - like renderReporterReports - is never snapshotted (a computed view, not the default similar-defects list).
+    renderSimilarReports: function (key, background) {
+        JiTA.ui._ensurePanel();
+        JiTA.ui._syncFilterBtn();
+        var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms
+        $('#jita-sd-title').text('Similar open reports');
+        $('#jita-sd-loglink').removeClass('has-hits').empty();      // similar-defects-only section, unused here
+        $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section, unused here
+        if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar open reports…'); }
+        JiTA.ui.getIssueText(key).then(function (text) {
+            if (JiTA.ui.currentKey !== key || !JiTA.ui.simReportsMode) { return; }   // navigated / toggled off meanwhile
+            return JiTA.db.countEbr().then(function (n) {
+                if (!n) {
+                    JiTA.ui.setStatusAction('No bug reports synced yet.', 'Sync bug reports now', function () { JiTA.sync.syncAllNow(); });
+                    return;
+                }
+                if (!text) { JiTA.ui.setStatus('Could not read this report’s text.'); return; }
+                return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms).then(function (out) {
+                    if (JiTA.ui.currentKey !== key || !JiTA.ui.simReportsMode) { return; }
+                    var results = out.results || [];
+                    $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
+                    if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar open reports found (' + n + ' open).'); return; }
+                    JiTA.ui.setStatus(results.length + ' similar · ' + out.mode + ' · ' + n + ' open reports');
+                    // Enrich with each report's full description for the hover preview (a handful of reads).
+                    return Promise.all(results.map(function (r) {
+                        return JiTA.db.getDefect(r.key).then(function (rec) {
+                            if (rec) { r.description = rec.description; r.created = rec.created; }
+                            return r;
+                        }, function () { return r; });
+                    })).then(function () {
+                        if (JiTA.ui.currentKey !== key || !JiTA.ui.simReportsMode) { return; }
+                        var $list = $('#jita-sd-list');
+                        $list.empty();   // clear atomically right before filling (see render() - avoids doubled rows from a concurrent re-render)
+                        for (var i = 0; i < results.length; i++) { $list.append(JiTA.ui._simReportItem(results[i])); }
+                        JiTA.ui._fitVertical();
+                    });
+                });
             });
         }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
     },
@@ -8192,8 +8155,8 @@ JiTA.ui = {
         // flash. A genuinely new issue renders foreground (blank + "Finding…") as before.
         var remount = (JiTA.ui.currentKey === key);
         if (JiTA.ui.currentKey !== key) {
-            JiTA.ui.reporterMode = false;   // new issue -> leave the reporter-reports view (its reporter is per-issue)
-            JiTA.ui._dupOnState = false;    // new issue -> collapse the "possible duplicate reports" section (state is per-issue, never persisted)
+            JiTA.ui.reporterMode = false;    // new issue -> leave the reporter-reports view (its reporter is per-issue)
+            JiTA.ui.simReportsMode = false;  // new issue -> leave the similar-open-reports view (session-only, per-issue)
         }
         JiTA.ui.currentKey = key;
         if (isEbr) {
