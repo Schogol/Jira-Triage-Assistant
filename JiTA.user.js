@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.13.0
+// @version     3.14.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -9435,6 +9435,42 @@ function jitaWorkerBody(cfg) {
         var q = await qEmbed(payload.text || '');
         return { backend: backend, indexed: entries.length, results: cosineTopN(q, entries, payload.topN || 10, payload.excludeKey, payload.filterTerms) };
     }
+    // Duplicate-defect finder (lead tool): pairwise cosine over the OPEN defects' stored vectors (normalized,
+    // so dot == cosine). Returns every unordered pair scoring >= minCos, plus a key->meta map for rendering.
+    // O(n^2/2) dot products - a few seconds for a few thousand open defects; the loop YIELDS every CHUNK rows
+    // so rank calls from other tabs interleave instead of stalling behind the scan. The tab side drops pairs
+    // that are already issue-linked (a human already related those) and clusters the rest.
+    async function dupDefects(payload) {
+        payload = payload || {};
+        var minCos = typeof payload.minCos === 'number' ? payload.minCos : 0.8;
+        await ensureIndexes();
+        var all = vecCache.defects, open = [];
+        for (var i = 0; i < all.length; i++) {
+            var e = all[i];
+            if (e.resolution || isClosedStatus(e.status)) { continue; }   // merge suggestions only make sense among OPEN defects
+            open.push(e);
+        }
+        var pairs = [], CHUNK = 100;
+        for (var a = 0; a < open.length; a++) {
+            var va = open[a].vec, ka = open[a].key;
+            for (var b = a + 1; b < open.length; b++) {
+                var vb = open[b].vec, s = 0;
+                for (var d = 0; d < va.length; d++) { s += va[d] * vb[d]; }
+                if (s >= minCos) { pairs.push({ a: ka, b: open[b].key, cos: Math.round(s * 1000) / 1000 }); }
+            }
+            if (a % CHUNK === CHUNK - 1) { await new Promise(function (r) { setTimeout(r, 0); }); }
+        }
+        pairs.sort(function (x, y) { return y.cos - x.cos; });
+        if (pairs.length > 800) { pairs = pairs.slice(0, 800); }   // sanity cap - beyond this the floor is too low to be useful
+        var need = {};
+        for (var p = 0; p < pairs.length; p++) { need[pairs[p].a] = true; need[pairs[p].b] = true; }
+        var meta = {};
+        for (var o = 0; o < open.length; o++) {
+            var k = open[o].key;
+            if (need[k]) { meta[k] = { summary: open[o].summary, status: open[o].status, resolution: open[o].resolution, project: open[o].project, created: open[o].created }; }
+        }
+        return { pairs: pairs, meta: meta, scanned: open.length, indexed: all.length };
+    }
     async function rankKeyword(payload) {
         payload = payload || {};
         await ensureIndexes();
@@ -9969,6 +10005,7 @@ function jitaWorkerBody(cfg) {
             if (type === 'ping') { result = { pong: true, backend: backend, version: cfg.SCRIPT_VERSION }; }
             else if (type === 'embed') { var v = await embed((payload && payload.text) || ''); result = { backend: backend, dim: v.length, vec: Array.from(v) }; }
             else if (type === 'rankSemantic') { result = await rankSemantic(payload); }
+            else if (type === 'dupDefects') { result = await dupDefects(payload); }
             else if (type === 'rankKeyword') { result = await rankKeyword(payload); }
             else if (type === 'logsig') {
                 await ensureIndexes();
@@ -10922,6 +10959,349 @@ JiTA.triage = {
 };
 
 
+/* ---- Duplicate-defect finder (lead tool): unlinked look-alike OPEN defects, clustered -------------------
+ * Hidden sibling of Triage mode: double-tap '>' is the only entry point. TWO evidence channels feed the
+ * candidate pairs (per Schogol - this combines the finder with the exception-clusters signal):
+ *   1. TEXT: the worker scans all OPEN defects' stored vectors pairwise (op 'dupDefects', >= 0.80 cosine);
+ *      the threshold select (default 90%) filters this channel's DISPLAY without rescanning.
+ *   2. EXCEPTION: logsig clusters (defects sharing a mined exception signature) contribute every pair of
+ *      OPEN members - discrete evidence, always shown regardless of the text threshold.
+ * The tab then drops every pair whose two defects are ALREADY issue-linked (a human has related those -
+ * nothing to find), union-finds the remainder into clusters and renders them read-only, best-first, each
+ * card badged with its evidence ("93% text", "same exception", or both). The cosine scan is cached in the
+ * meta store ('dupDefectsLast') so reopening is instant; Recompute re-runs it. The standalone Exception
+ * clusters overview is untouched (it browses ALL defects incl. closed/linked - a different job). NEVER
+ * merges/links anything itself - it only points. */
+JiTA.dupfind = {
+    META_KEY: 'dupDefectsLast',
+    PCT_KEY: 'jitaDupMinPct',       // persisted display threshold (percent)
+    IGN_KEY: 'jitaDupIgnored',      // persisted ignore list: { "A|B": epoch-ms } (unordered pair -> when dismissed)
+    PCT_OPTIONS: [95, 93, 90, 88, 85, 82, 80],
+    LINK_CONCURRENCY: 5,
+    _last: null,      // { computedAt, pairs: [{a,b,cos}], meta: {key:{summary,...}}, scanned }
+    _links: {},       // key -> { otherKey: true } - live issuelink cache (session)
+    _moved: {},       // oldKey -> currentKey: MOVED issues (Jira resolves the alias; detected free in _fetchLinks).
+                      // A moved key's local record is a GHOST (pre-move copy the sync can never refresh or prune) -
+                      // it pairs at ~100% with its own current-key twin. Pairs touching one are dropped and the
+                      // ghost row is deleted from the local DB (it also polluted the similar-defects ranking).
+    _cleaned: {},     // ghost keys already deleted this session (don't re-delete on every render)
+    _running: false,
+    _showIgnored: false,   // session-only: also render the dismissed cards (dimmed, with Unignore)
+
+    // ---- per-PAIR ignore list. The pair is the stable unit: clusters are derived (union-find) and reshape
+    // as data changes, so dismissing a card dismisses its PAIRS - a brand-new pair between other defects
+    // still surfaces, while the judged-and-rejected evidence stays gone across sessions (GM storage).
+    _pk: function (a, b) { return a < b ? a + '|' + b : b + '|' + a; },
+    _ignored: function () { return gmGet(JiTA.dupfind.IGN_KEY, {}) || {}; },
+    _ignorePairs: function (pairs) {
+        var m = JiTA.dupfind._ignored(), now = Date.now();
+        for (var i = 0; i < pairs.length; i++) { m[JiTA.dupfind._pk(pairs[i].a, pairs[i].b)] = now; }
+        gmSet(JiTA.dupfind.IGN_KEY, m);
+    },
+    _unignorePairs: function (pairs) {
+        var m = JiTA.dupfind._ignored();
+        for (var i = 0; i < pairs.length; i++) { delete m[JiTA.dupfind._pk(pairs[i].a, pairs[i].b)]; }
+        gmSet(JiTA.dupfind.IGN_KEY, m);
+    },
+
+    minPct: function () {
+        var v = parseInt(gmGet(JiTA.dupfind.PCT_KEY, 90), 10);
+        return (!isNaN(v) && v >= 50 && v <= 99) ? v : 90;
+    },
+
+    openView: function () {
+        var D = JiTA.dupfind;
+        if (JITA_IS_FORGE_FRAME) { return; }
+        if (!flagOn('similarDefects')) {
+            try { JiTA.ui.toast('The duplicate finder needs the Triage Assistant feature (local DB + embeddings) - enable it in Settings first.'); } catch (e) { /* ignore */ }
+            return;
+        }
+        D._injectCss();
+        var ov = JiTA.menu._openOverlay({ title: 'Duplicate defects - unlinked look-alikes (text + shared exception)', wide: false });
+        ov.$menu.addClass('jita-dup-view');
+        $('<div class="jd-scroll" id="jd-body"></div>').appendTo(ov.$menu);
+        var $foot = $('<div class="jd-foot"></div>').appendTo(ov.$menu);
+        $('<span class="jd-muted" title="Applies to the TEXT-similarity channel only - defects sharing an exception are always shown">Min text similarity</span>').appendTo($foot);
+        var $sel = $('<select class="jita-cred-input" id="jd-pct"></select>').appendTo($foot);
+        D.PCT_OPTIONS.forEach(function (p) { $('<option></option>').val(p).text(p + '%').appendTo($sel); });
+        $sel.val(String(D.minPct())).on('change', function () {
+            gmSet(D.PCT_KEY, parseInt($sel.val(), 10));
+            D.render();
+        });
+        $('<button class="jita-btn" id="jd-recompute">Recompute</button>').on('click', function () { D.compute(); }).appendTo($foot);
+        var $ign = $('<label class="jd-muted jd-showign"><input type="checkbox" id="jd-showign"> Show ignored</label>').appendTo($foot);
+        $ign.find('input').prop('checked', D._showIgnored).on('change', function () {
+            D._showIgnored = this.checked;
+            D.render();
+        });
+        $('<span class="jd-muted" id="jd-status"></span>').appendTo($foot);
+        JiTA.db.getMeta(D.META_KEY).then(function (last) {
+            if (!document.getElementById('jd-body')) { return; }   // closed meanwhile
+            if (last && last.pairs) { D._last = last; D.render(); }
+            else { D.compute(); }   // first ever open: scan right away
+        }).catch(function () { D.compute(); });
+    },
+
+    _status: function (msg) {
+        var el = document.getElementById('jd-status');
+        if (el) { el.textContent = msg || ''; }
+    },
+
+    compute: function () {
+        var D = JiTA.dupfind;
+        if (D._running) { return; }
+        if (!(JiTA.worker && JiTA.worker._started)) { D._status('Ranking worker unavailable - reload the tab and retry.'); return; }
+        D._running = true;
+        $('#jd-recompute').prop('disabled', true);
+        $('#jd-body').empty().append($('<div class="jd-empty"></div>').text('Scanning all open defects pairwise - this can take a little while on the first run…'));
+        D._status('Scanning…');
+        JiTA.worker.call('dupDefects', { minCos: 0.8 }, { timeoutMs: 180000 }).then(function (res) {
+            D._running = false;
+            $('#jd-recompute').prop('disabled', false);
+            D._last = { computedAt: new Date().toISOString(), pairs: (res && res.pairs) || [], meta: (res && res.meta) || {}, scanned: (res && res.scanned) || 0 };
+            JiTA.db.setMeta(D.META_KEY, D._last).catch(function () { /* cache only */ });
+            D.render();
+        }).catch(function (e) {
+            D._running = false;
+            $('#jd-recompute').prop('disabled', false);
+            D._status('Scan failed: ' + (e && e.message || e));
+        });
+    },
+
+    // Fetch (and cache) the direct issuelink partners for each key; used to drop already-linked pairs.
+    _fetchLinks: function (keys) {
+        var D = JiTA.dupfind;
+        var todo = [];
+        for (var i = 0; i < keys.length; i++) { if (!D._links[keys[i]]) { todo.push(keys[i]); } }
+        if (!todo.length) { return Promise.resolve(); }
+        var idx = 0;
+        function worker() {
+            if (idx >= todo.length) { return Promise.resolve(); }
+            var key = todo[idx++];
+            return new Promise(function (resolve) {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=issuelinks', dataType: 'json' })
+                    .done(function (d) {
+                        // Jira resolves MOVED keys: requesting EDR-20 returns the issue as its current key
+                        // (e.g. EO-29241). That marks our local record for the old key as a stale ghost.
+                        if (d && d.key && d.key !== key) { D._moved[key] = d.key; }
+                        var map = {}, linked = jitaLinkedKeys(d && d.fields && d.fields.issuelinks);
+                        for (var l = 0; l < linked.length; l++) { map[linked[l]] = true; }
+                        D._links[key] = map;
+                        resolve();
+                    })
+                    .fail(function () { D._links[key] = {}; resolve(); });   // treat as unlinked; worst case we suggest a known pair
+            }).then(worker);
+        }
+        var lanes = [];
+        for (var w = 0; w < D.LINK_CONCURRENCY; w++) { lanes.push(worker()); }
+        return Promise.all(lanes);
+    },
+
+    // Union-find the surviving pairs into clusters; each cluster carries its members + its best pair score.
+    _clusters: function (pairs) {
+        var parent = {};
+        function find(x) { if (parent[x] === undefined) { parent[x] = x; } while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+        function union(a, b) { var ra = find(a), rb = find(b); if (ra !== rb) { parent[ra] = rb; } }
+        var i;
+        for (i = 0; i < pairs.length; i++) { union(pairs[i].a, pairs[i].b); }
+        var byRoot = {};
+        for (i = 0; i < pairs.length; i++) {
+            var r = find(pairs[i].a);
+            var c = byRoot[r] = byRoot[r] || { keys: {}, top: 0, pairs: [] };
+            c.keys[pairs[i].a] = true; c.keys[pairs[i].b] = true;
+            c.pairs.push(pairs[i]);
+            if (pairs[i].cos > c.top) { c.top = pairs[i].cos; }
+        }
+        var out = [];
+        Object.keys(byRoot).forEach(function (r2) {
+            var c2 = byRoot[r2];
+            out.push({ keys: Object.keys(c2.keys).sort(), top: c2.top, pairs: c2.pairs });
+        });
+        out.sort(function (x, y) { return y.top - x.top; });
+        return out;
+    },
+
+    // Every pair of OPEN defects sharing a mined exception signature (channel 2). logsig cluster members
+    // carry status/resolution but no summary - the meta backfill in render() fills those from the local DB.
+    _excPairs: function () {
+        return JiTA.logsig.clusters().then(function (clusters) {
+            var pairs = [];
+            for (var c = 0; c < (clusters || []).length; c++) {
+                var open = [];
+                for (var m = 0; m < clusters[c].members.length; m++) {
+                    var mem = clusters[c].members[m];
+                    if (!JiTA.util.isResolved(mem.status, mem.resolution)) { open.push(mem.key); }
+                }
+                for (var i = 0; i < open.length; i++) {
+                    for (var j = i + 1; j < open.length; j++) {
+                        pairs.push({ a: open[i], b: open[j], exc: clusters[c].label || 'same exception' });
+                    }
+                }
+            }
+            return pairs;
+        }).catch(function () { return []; });   // logsig unavailable -> text channel only
+    },
+
+    render: function () {
+        var D = JiTA.dupfind;
+        var $body = $('#jd-body');
+        if (!$body.length || !D._last) { return; }
+        var floor = D.minPct() / 100;
+        var when = String(D._last.computedAt || '').replace('T', ' ').slice(0, 16);
+        $body.empty().append($('<div class="jd-empty"></div>').text('Gathering candidates…'));
+        D._excPairs().then(function (excPairs) {
+            if (!document.getElementById('jd-body')) { return; }
+            // Merge the two channels on the unordered pair key: text pairs above the display floor, plus
+            // every open exception pair (discrete evidence - not subject to the cosine threshold).
+            var byPair = {};
+            function pk(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
+            for (var i = 0; i < D._last.pairs.length; i++) {
+                var tp = D._last.pairs[i];
+                if (tp.cos >= floor) { byPair[pk(tp.a, tp.b)] = { a: tp.a, b: tp.b, cos: tp.cos }; }
+            }
+            for (var e = 0; e < excPairs.length; e++) {
+                var ep = excPairs[e], id = pk(ep.a, ep.b);
+                if (byPair[id]) { byPair[id].exc = ep.exc; }
+                else { byPair[id] = { a: ep.a, b: ep.b, exc: ep.exc }; }
+            }
+            var pool = Object.keys(byPair).map(function (k) { return byPair[k]; });
+            if (!pool.length) {
+                $body.empty().append($('<div class="jd-empty"></div>').text('No look-alike pairs at ≥ ' + D.minPct() + '% and no open defects sharing an exception (scanned ' + D._last.scanned + ' open defects). Lower the threshold, or Recompute for fresh data.'));
+                D._status('Scanned ' + D._last.scanned + ' open defects · ' + when);
+                return;
+            }
+            var keys = {};
+            pool.forEach(function (p) { keys[p.a] = true; keys[p.b] = true; });
+            $body.empty().append($('<div class="jd-empty"></div>').text('Checking existing links on ' + Object.keys(keys).length + ' defects…'));
+            // Backfill summaries/statuses missing from the cosine meta (exception-channel keys) from the DB.
+            var fill = Object.keys(keys).filter(function (k) { return !D._last.meta[k]; });
+            Promise.all([
+                D._fetchLinks(Object.keys(keys)),
+                Promise.all(fill.map(function (k) {
+                    return JiTA.db.getDefect(k).then(function (rec) {
+                        if (rec) { D._last.meta[k] = { summary: rec.summary, status: rec.status, resolution: rec.resolution, project: rec.project, created: rec.created }; }
+                    }, function () { /* leave missing */ });
+                }))
+            ]).then(function () {
+                if (!document.getElementById('jd-body')) { return; }   // closed meanwhile
+                var fresh = [], known = 0, ghosts = 0, ignoredPairs = [], ignMap = D._ignored();
+                for (var j = 0; j < pool.length; j++) {
+                    var p = pool[j];
+                    // MOVED-key ghosts: the old key redirects to the current one - the pair is the same issue
+                    // (or a duplicate of the twin's own pair), never a real finding.
+                    if (D._moved[p.a] || D._moved[p.b]) { ghosts++; continue; }
+                    var linked = (D._links[p.a] && D._links[p.a][p.b]) || (D._links[p.b] && D._links[p.b][p.a]);
+                    if (linked) { known++; continue; }
+                    if (ignMap[D._pk(p.a, p.b)]) { ignoredPairs.push(p); } else { fresh.push(p); }
+                }
+                // Delete the ghost rows from the local DB (once per key per session): the sync can never
+                // refresh or prune them (search only ever returns the current key), and they pollute the
+                // similar-defects ranking too. The current-key twin stays, so nothing is lost.
+                var ghostKeys = [];
+                Object.keys(D._moved).forEach(function (gk) { if (!D._cleaned[gk]) { D._cleaned[gk] = true; ghostKeys.push(gk); } });
+                if (ghostKeys.length) {
+                    JiTA.db.deleteDefects(ghostKeys).then(function () {
+                        JiTA.rank._dirty = true; JiTA.rank._dirtyVec = true;   // defect keyword + vector indexes
+                        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+                        if (window.console) { console.log('[JiTA] dupfind: deleted ' + ghostKeys.length + ' moved-key ghost record(s): ' + ghostKeys.join(', ')); }
+                    }).catch(function () { /* best effort - the next full rebuild drops them anyway */ });
+                }
+                var clusters = D._clusters(fresh);
+                $body.empty();
+                if (!clusters.length) {
+                    var why = ignoredPairs.length
+                        ? 'No new suggestions - ' + ignoredPairs.length + ' pair(s) are ignored' + (known ? ' and ' + known + ' already linked' : '') + '. Tick "Show ignored" to review them.'
+                        : 'All ' + pool.length + ' candidate pair(s) are already linked to each other. Nothing new to relate. 🎉';
+                    $body.append($('<div class="jd-empty"></div>').text(why));
+                }
+                function pairLabel(p2) {
+                    var bits = [];
+                    if (typeof p2.cos === 'number') { bits.push(Math.round(p2.cos * 100) + '% text'); }
+                    if (p2.exc) { bits.push('same exception'); }
+                    return bits.join(' + ');
+                }
+                function card(cl, isIgnored) {
+                    var $card = $('<div class="jd-card' + (isIgnored ? ' ignored' : '') + '"></div>').appendTo($body);
+                    var $head = $('<div class="jd-card-head"></div>').appendTo($card);
+                    var hasCos = cl.top > 0, hasExc = false, x;
+                    for (x = 0; x < cl.pairs.length; x++) { if (cl.pairs[x].exc) { hasExc = true; break; } }
+                    var head = (cl.keys.length === 2 ? '' : cl.keys.length + ' defects · ')
+                        + (hasCos ? (Math.round(cl.top * 100) + '% text similarity') : '')
+                        + (hasCos && hasExc ? ' + ' : '')
+                        + (hasExc ? 'same exception' : '');
+                    $('<span></span>').text(head).appendTo($head);
+                    $('<button class="jita-btn jd-ign-btn"></button>').text(isIgnored ? 'Unignore' : 'Ignore')
+                        .attr('title', isIgnored
+                            ? 'Bring this suggestion back'
+                            : 'Dismiss this suggestion for good (per pair - fresh evidence between OTHER defects still shows)')
+                        .on('click', function () {
+                            if (isIgnored) { D._unignorePairs(cl.pairs); } else { D._ignorePairs(cl.pairs); }
+                            try { JiTA.ui._hideTip(true); } catch (e) { /* ignore */ }
+                            D.render();
+                        }).appendTo($head);
+                    cl.keys.forEach(function (k) {
+                        var m = D._last.meta[k] || {};
+                        var $row = $('<div class="jd-row"></div>').attr('data-key', k);
+                        $('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + k).text(k).appendTo($row);
+                        var st = m.status || '';
+                        if (st) { $('<span class="jd-st"></span>').text(st).appendTo($row); }
+                        $('<span class="jd-sum"></span>').text(m.summary || '').appendTo($row);
+                        // Feature C hover preview (full description from the local DB, fetched lazily per hover).
+                        $row.on('mouseenter', function () {
+                            var self = this;
+                            JiTA.db.getDefect(k).then(function (rec) {
+                                var r = { key: k, summary: m.summary || (rec && rec.summary) || '', description: (rec && rec.description) || '', created: (rec && rec.created) || null };
+                                JiTA.ui._showTip(r, self, st);
+                            }).catch(function () { /* no tip */ });
+                        });
+                        $row.on('mouseleave', function () { JiTA.ui._hideTip(); });
+                        $card.append($row);
+                    });
+                    if (cl.keys.length > 2) {
+                        var ptxt = cl.pairs.map(function (p3) { return p3.a + '↔' + p3.b + ' (' + pairLabel(p3) + ')'; }).join(' · ');
+                        $('<div class="jd-pairs"></div>').text(ptxt).appendTo($card);
+                    }
+                }
+                for (var c = 0; c < clusters.length; c++) { card(clusters[c], false); }
+                if (D._showIgnored && ignoredPairs.length) {
+                    $('<div class="jd-sub"></div>').text('Ignored (' + ignoredPairs.length + ' pair' + (ignoredPairs.length === 1 ? '' : 's') + ')').appendTo($body);
+                    var ignClusters = D._clusters(ignoredPairs);
+                    for (var g = 0; g < ignClusters.length; g++) { card(ignClusters[g], true); }
+                }
+                D._status('Scanned ' + D._last.scanned + ' open defects · ' + clusters.length + ' suggestion(s), ' + known + ' already linked, ' + ignoredPairs.length + ' ignored' + (ghosts ? ', ' + ghosts + ' moved-key ghost(s) dropped' : '') + ' · ' + when);
+            });
+        });
+    },
+
+    _cssInjected: false,
+    _injectCss: function () {
+        if (JiTA.dupfind._cssInjected) { return; }
+        JiTA.dupfind._cssInjected = true;
+        try {
+            GM_addStyle(
+                '#jita-menu.jita-dup-view { width: 1180px; max-width: 96vw; display: flex; flex-direction: column; overflow: hidden; }' +
+                '.jita-dup-view .jd-scroll { flex: 1 1 auto; min-height: 0; max-height: 70vh; overflow-y: auto; padding: 10px 16px; }' +
+                '.jita-dup-view .jd-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #3a434d; background: #282d33; }' +
+                '.jita-dup-view .jd-muted { color: #9aa6b2; font-size: 12px; }' +
+                '.jita-dup-view .jd-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
+                '.jita-dup-view .jd-card { border: 1px solid #2c333a; border-radius: 8px; background: #22272b; padding: 10px 12px; margin-bottom: 10px; }' +
+                '.jita-dup-view .jd-card.ignored { opacity: .55; }' +
+                '.jita-dup-view .jd-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #6bd0dc; font-weight: 700; font-size: 11px; margin-bottom: 6px; }' +
+                '.jita-dup-view .jd-ign-btn { font-size: 10px; padding: 2px 8px; flex: 0 0 auto; }' +
+                '.jita-dup-view .jd-sub { color: #7a8694; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 14px 0 6px; }' +
+                '.jita-dup-view .jd-showign { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }' +
+                '.jita-dup-view .jd-row { padding: 3px 0; font-size: 12px; }' +
+                '.jita-dup-view .jd-row a { color: #4c9aff; font-weight: 700; text-decoration: none; }' +
+                '.jita-dup-view .jd-row a:hover { text-decoration: underline; }' +
+                '.jita-dup-view .jd-st { background: #3a434d; color: #cfd6dd; border-radius: 8px; padding: 0 7px; font-size: 10px; margin-left: 8px; }' +
+                '.jita-dup-view .jd-sum { color: #e6e6e6; margin-left: 8px; overflow-wrap: anywhere; }' +
+                '.jita-dup-view .jd-pairs { color: #7a8694; font-size: 10px; margin-top: 6px; }'
+            );
+        } catch (e) { /* ignore */ }
+    }
+};
+
+
 /* ---- shared ranking worker: one model+index for ALL tabs instead of one per tab -----------------------
  * A userscript can't host a same-origin SharedWorker script (blob/data-URL SharedWorkers don't share across
  * tabs), so we get the same "one instance for everyone" outcome from primitives that DO work: one tab is
@@ -11512,15 +11892,24 @@ JiTA.declutter = {
     // the disabled-feature / already-open cases.
     if (!JITA_IS_FORGE_FRAME) {
         (function () {
-            var lastLt = 0;
+            var lastLt = 0, lastGt = 0;
             document.addEventListener('keydown', function (e) {
-                if (e.key !== '<' || e.ctrlKey || e.metaKey || e.altKey) { return; }
+                if (e.ctrlKey || e.metaKey || e.altKey) { return; }
+                if (e.key !== '<' && e.key !== '>') { return; }
                 var t = e.target;
                 if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
-                if (typeof JiTA === 'undefined' || !JiTA.triage || JiTA.triage._open) { return; }
+                if (typeof JiTA === 'undefined') { return; }
                 var now = Date.now();
-                if (now - lastLt < 400) { lastLt = 0; try { JiTA.triage.open(); } catch (e2) { /* ignore */ } }
-                else { lastLt = now; }
+                if (e.key === '<') {   // double-tap '<' -> Triage mode
+                    if (!JiTA.triage || JiTA.triage._open) { return; }
+                    if (now - lastLt < 400) { lastLt = 0; try { JiTA.triage.open(); } catch (e2) { /* ignore */ } }
+                    else { lastLt = now; }
+                    return;
+                }
+                // double-tap '>' -> Duplicate-defect finder (Shift+'<' on QWERTZ - the hidden siblings share a key)
+                if (!JiTA.dupfind || document.querySelector('#jita-menu.jita-dup-view')) { return; }
+                if (now - lastGt < 400) { lastGt = 0; try { JiTA.dupfind.openView(); } catch (e3) { /* ignore */ } }
+                else { lastGt = now; }
             });
         })();
     }
