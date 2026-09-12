@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.12.0
+// @version     3.13.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -235,11 +235,6 @@ if (flagOn('scrollbar')) {
 if (!JITA_IS_FORGE_FRAME) {
     GM_registerMenuCommand("⚙ Jira Triage Assistant - Settings…", function () {
         if (typeof JiTA !== 'undefined' && JiTA.menu) { JiTA.menu.open(); }
-    });
-    // Open the ISD Credits overlay (your live monthly total + the leads-only leaderboard). The overlay's
-    // Refresh recomputes the selected month's full leaderboard on demand.
-    GM_registerMenuCommand("ISD Credits leaderboard…", function () {
-        if (typeof JiTA !== 'undefined' && JiTA.credits) { JiTA.credits.openView(); }
     });
     // Declutter: choose which Details fields / collapsible sections to hide (per issue-type). Built from the
     // issue you're viewing, so open a bug report or defect first.
@@ -1228,6 +1223,16 @@ function SwapUI() {
     jitaRevealLogs();
 
 
+    // Wire the gpanel toggle buttons + search box on the freshly-mounted chrome. Shared with the Triage-mode
+    // attachment viewer, which mounts the same parser chrome inside its own full-screen layer.
+    jitaWireLogControls();
+};
+
+// Wire the parser chrome's controls: the gpanel type-toggle buttons and the live search box. Extracted from
+// SwapUI verbatim so the Triage-mode attachment viewer (which mounts the same #gpanel/#tableContent chrome
+// inside its own layer) gets the identical filter/search/Group-Repeats behavior. Bind once per fresh mount -
+// the chrome is rebuilt on every mount, so handlers never stack.
+function jitaWireLogControls() {
     // Functionality for the buttons in the gpanel to toggle show / hide specific table rows
     $("#gpanel a").click(function() {
         switch ($(this).hasClass('toggle')) {
@@ -1294,7 +1299,7 @@ function SwapUI() {
         // Re-apply the text filter after any toggle / Only-Exceptions / Show-All click so the two compose.
         $('#gpanel a').on('click', function () { setTimeout(jitaApplyLogFilter, 0); });
     }
-};
+}
 
 
 // Normalize the raw log text (collapse tab runs + blank lines, flatten "***…***" logging errors, escape <)
@@ -6267,7 +6272,7 @@ JiTA.ui = {
   border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.45); font-family: -apple-system,Arial,sans-serif; font-size: 12px; max-width: 320px; }\
 #jita-sd-tip { position: fixed; z-index: 10001; display: none; width: 420px; max-height: 60vh; overflow-y: auto;\
   background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.55);\
-  padding: 10px 12px; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; font-size: 12px; line-height: 1.45; pointer-events: none; }\
+  padding: 10px 12px; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; font-size: 12px; line-height: 1.45; }\
 #jita-sd-tip .jita-sd-tip-title { font-weight: 700; color: #fff; margin-bottom: 4px; }\
 #jita-sd-tip .jita-sd-tip-meta { color: #9fb4cc; font-size: 10px; margin-bottom: 6px; }\
 #jita-sd-tip .jita-sd-tip-desc { color: #cfd6dd; white-space: pre-wrap; word-break: break-word; }\
@@ -6671,8 +6676,15 @@ JiTA.ui = {
     _showTip: function (r, anchor, meta) {
         JiTA.ui.injectCss();
         JiTA.ui._tipKey = r.key;
+        if (JiTA.ui._tipHideTimer) { clearTimeout(JiTA.ui._tipHideTimer); JiTA.ui._tipHideTimer = null; }   // row-to-row / row-to-card moves keep the card alive
         var $tip = $('#jita-sd-tip');
-        if (!$tip.length) { $tip = $('<div id="jita-sd-tip"></div>').appendTo(document.body); }
+        if (!$tip.length) {
+            $tip = $('<div id="jita-sd-tip"></div>').appendTo(document.body);
+            // The card is interactive (long descriptions scroll): entering it cancels the grace-delayed hide
+            // from the row's mouseleave; leaving it hides for real. Wired ONCE - the element is reused.
+            $tip.on('mouseenter', function () { if (JiTA.ui._tipHideTimer) { clearTimeout(JiTA.ui._tipHideTimer); JiTA.ui._tipHideTimer = null; } });
+            $tip.on('mouseleave', function () { JiTA.ui._hideTip(true); });
+        }
         $tip.empty();
         JiTA.ui._watchMedia($tip[0]);   // arm the media killer for this tip (catches Jira's async hydration)
         $('<div class="jita-sd-tip-title"></div>').text(r.key + ' - ' + (r.summary || '')).appendTo($tip);
@@ -6720,7 +6732,16 @@ JiTA.ui = {
         });
     },
 
-    _hideTip: function () {
+    // Hide the hover card. DEFAULT is a short grace delay so the pointer can travel from the row INTO the
+    // card (long descriptions scroll there); entering the card cancels the pending hide. Pass true to hide
+    // immediately (navigation, teardown, action clicks).
+    _tipHideTimer: null,
+    _hideTip: function (now) {
+        if (JiTA.ui._tipHideTimer) { clearTimeout(JiTA.ui._tipHideTimer); JiTA.ui._tipHideTimer = null; }
+        if (now === true) { JiTA.ui._hideTipNow(); return; }
+        JiTA.ui._tipHideTimer = setTimeout(function () { JiTA.ui._tipHideTimer = null; JiTA.ui._hideTipNow(); }, 250);
+    },
+    _hideTipNow: function () {
         JiTA.ui._tipKey = null;
         if (JiTA.ui._tipMediaObs) { try { JiTA.ui._tipMediaObs.disconnect(); } catch (e) { /* ignore */ } JiTA.ui._tipMediaObs = null; }
         $('#jita-sd-tip').css('display', 'none');
@@ -6729,8 +6750,8 @@ JiTA.ui = {
     // Strip any playing / hydratable media from the hover card, replacing each with a static placeholder.
     // Covers actual players (<video>/<audio>/<iframe>) AND Atlassian's media PLACEHOLDER nodes (data-media-*
     // / data-node-type="media"): the page's media SDK observes document.body and hydrates those placeholders
-    // into autoplaying players AFTER we inject - so removing the placeholder is what actually stops it. The
-    // tooltip is pointer-events:none, so an interactive player there is useless anyway. Returns nothing.
+    // into autoplaying players AFTER we inject - so removing the placeholder is what actually stops it. A
+    // player has no place in a transient hover card anyway - the placeholder points at the issue. Returns nothing.
     _killMedia: function (root) {
         if (!root) { return; }
         // Recognize a media element broadly. The exact selector kept missing it: Jira wraps an embedded
@@ -8254,8 +8275,12 @@ JiTA.menu = {
 
     // Open (toggle): a second click of the menu command closes it again.
     open: function () {
-        if (JiTA.menu.isOpen()) { JiTA.menu.close(); return; }
+        // Toggle-close only when the SETTINGS overlay itself is showing. Every overlay shares
+        // #jita-menu-overlay, so a bare isOpen() check made the Settings command close whatever was up
+        // (e.g. Triage mode) and then STOP - looking dead. Now it replaces a foreign overlay instead.
+        if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.close(); return; }
         JiTA.menu._openOverlay({});   // no title - render() builds the head on every refresh
+        $('#jita-menu').addClass('jita-settings-view');   // marks it as the settings overlay for the toggle above
         JiTA.menu.render();
     },
 
@@ -8308,24 +8333,6 @@ JiTA.menu = {
         }));
         $p.append($feat);
 
-        // ---- ISD Credits (only when enabled) ----
-        if (flagOn('credits')) {
-            JiTA.credits._injectCss();
-            var $cr = $('<div class="jita-menu-sect"></div>');
-            $('<h3>ISD Credits</h3>').appendTo($cr);
-            $('<div class="jita-menu-status">Your live monthly defect-credit total, plus the leads-only leaderboard, computed from Jira.</div>').appendTo($cr);
-            var $crAct = $('<div class="jita-menu-actions"></div>').appendTo($cr);
-            $('<button class="jita-btn">Open leaderboard</button>')
-                .on('click', function () { JiTA.menu.close(); JiTA.credits.openView(); }).appendTo($crAct);
-            $('<button class="jita-btn">Refresh now</button>').on('click', function () {
-                JiTA.menu.close();
-                var now = JiTA.credits._ymNow();
-                JiTA.credits._quiet = false;
-                JiTA.credits.refresh(now.y, now.m).then(function () { JiTA.credits.badge.refresh(); }).catch(function () { /* ignore */ });
-            }).appendTo($crAct);
-            $('<div class="jita-menu-status" style="margin-top:6px;color:#7a8694;">Your own total refreshes automatically every ~2 min; the full leaderboard every ~15 min.</div>').appendTo($cr);
-            $p.append($cr);
-        }
 
         // ---- Canned responses (Zendesk Support panel) ----
         // A repository of reusable replies, shown as a dropdown in the Zendesk Support activity panel (picking
@@ -10001,6 +10008,920 @@ function jitaWorkerBody(cfg) {
 }
 
 
+/* ---- Triage mode: full-screen keyboard-driven queue over the open + unassigned bug-report backlog ------
+ * Entered ONLY by double-tapping '<' (a deliberately hidden power-user entry; no menu items) - NEVER
+ * always-on, so JiTA's hotkeys can't fight
+ * Jira's own single-key shortcuts (c / . / i / m / a / e / l / j / k / g-prefix) outside the mode. While the
+ * overlay is open a capture-phase keydown handler swallows plain keys before Jira sees them (total key
+ * capture, per design); typing into an input/textarea/contenteditable is never intercepted, and modifier
+ * combos (Ctrl/Alt/Meta) pass through so browser shortcuts keep working.
+ *
+ * The queue is a LIVE JQL fetch using the bug hunters' standard backlog filter (open EVE Bug Reports,
+ * unassigned or mine, minus the Vanguard/Launcher lanes), oldest-first by default - the local DB stores no
+ * assignee, and live results can't be stale on the one field the queue is defined by. Each report's TEXT and
+ * its ranked defect matches come from the local DB + shared worker (effectiveText -> suggestBest, same engine
+ * as the sidebar panel), so stepping through the queue does no per-issue Jira navigation; the NEXT report's
+ * matches are prefetched while you act on the current one, making J effectively instant.
+ *
+ * Actions (per Schogol): 1-9 attach to a ranked defect match (number row or numpad), T close as Won't Do, G convert to GM
+ * support (category picked with 1-4; the optional internal GM note is page-DOM-bound and deliberately not
+ * part of triage). No Convert-to-Defect hotkey. Every action is DOUBLE-CONFIRMED (press again / Enter) so a
+ * stray keystroke can't close a report, and re-verified server-side (still open + still unassigned-or-mine)
+ * right before executing, since the backlog moves under a long-running session. A successful action deletes
+ * the report from the local open-report DB and broadcasts sdEbrRemoved (JiTA.sync._ebrRemoved), exactly like
+ * the panel attach buttons, then advances the queue. */
+JiTA.triage = {
+    ORDER_KEY: 'jitaTriageOrder',   // persisted queue-order preference: 'oldest' (default) | 'newest'
+    QUEUE_MAX: 4000,                // queue safety cap (metadata-only: 1 API call per 100; ranking stays lazy)
+    PAGE_SIZE: 100,
+    ARM_MS: 3500,                   // an armed (once-pressed) action disarms itself after this long
+    MATCH_KEYS: 9,                  // matches addressable by digit hotkeys (1-9); the LIST shows the user's full TOP_N (sdTopN setting)
+
+    _open: false,
+    _busy: false,      // an action is executing - swallow keys so a double-press can't fire twice
+    _queue: [],        // [{ key, summary, created, status }] from the live JQL
+    _idx: 0,
+    _done: 0,          // reports actioned this session
+    _cache: {},        // key -> Promise of { rec, text, mode, results } (also the prefetch store)
+    _armed: null,      // { type: 'attach'|'trash', n, matchKey, label } - first press of a destructive key
+    _armTimer: null,
+    _gmPick: false,    // GM category picker active (digits 1-4 pick, Esc cancels)
+    _keyHandler: null,
+    _mo: null,         // MutationObserver: tears the mode down however the overlay closes (Esc / x / backdrop)
+    _queueError: null, // last queue-fetch failure, shown by _render's empty state
+    _qGen: 0,          // pagination generation: an order-toggle refetch invalidates the previous background crawl
+    _queueDone: true,  // false while background pages are still appending (drives the "…" on the counter)
+    LAST_KEY: 'jitaTriageLast',   // persisted { key, created } of the last VIEWED report - the resume point
+    _resume: null,     // pending resume target (consumed once positioned, or dropped when the user navigates)
+    _txCache: {},      // key -> { text, note }: on-demand display translation (E hotkey), cached per report
+    _txShown: false,   // is the desc box currently showing the translation? (reset per report)
+    _txBusy: false,
+    _curRec: null,     // the record backing the CURRENT desc box (original text for the E toggle)
+
+    order: function () { return gmGet(JiTA.triage.ORDER_KEY, 'oldest') === 'newest' ? 'newest' : 'oldest'; },
+
+    // ---- lifecycle -----------------------------------------------------------------------------------------
+    open: function () {
+        var T = JiTA.triage;
+        if (JITA_IS_FORGE_FRAME || T._open) { return; }
+        if (!flagOn('similarDefects')) {
+            try { JiTA.ui.toast('Triage mode needs the Triage Assistant feature (local DB + ranking) - enable it in Settings first.'); } catch (e) { alert('Enable the Triage Assistant feature first.'); }
+            return;
+        }
+        T._injectCss();
+        var ov = JiTA.menu._openOverlay({ title: 'Triage mode', wide: false });
+        ov.$menu.addClass('jita-triage-view');
+        var $m = ov.$menu;
+        var $bar = $('<div class="jt-bar"></div>').appendTo($m);
+        $('<span id="jt-progress" class="jt-muted">Loading queue…</span>').appendTo($bar);
+        $('<button class="jita-btn" id="jt-order"></button>').text(T.order() === 'newest' ? 'Newest first' : 'Oldest first')
+            .attr('title', 'Toggle queue order (reloads the queue)')
+            .on('click', function () {
+                gmSet(T.ORDER_KEY, T.order() === 'newest' ? 'oldest' : 'newest');
+                $(this).text(T.order() === 'newest' ? 'Newest first' : 'Oldest first');
+                T._idx = 0; T._queue = [];
+                T._setMsg('Reloading queue…');
+                T._renderShell();
+                T._fetchQueue().then(function () { T._render(); T._prefetch(); });
+            }).appendTo($bar);
+        $('<span id="jt-done" class="jt-muted"></span>').appendTo($bar);
+        $('<div class="jt-main"><div class="jt-report" id="jt-report"></div><div class="jt-matches" id="jt-matches"></div></div>').appendTo($m);
+        $('<div class="jt-msg" id="jt-msg"></div>').appendTo($m);
+        $('<div class="jt-keys">' +
+            '<span><b>1-9</b> Attach match #n (number row or numpad)</span><span><b>T</b> Trash (Won\'t Do)</span>' +
+            '<span><b>G</b> To GM</span><span><b>E</b> Translate</span><span><b>←</b>/<b>→</b> Prev/next (or K/J)</span><span><b>O</b> Open in Jira</span><span><b>Esc</b> Exit</span>' +
+          '</div>').appendTo($m);
+
+        T._open = true; T._busy = false; T._queue = []; T._idx = 0; T._done = 0; T._cache = {}; T._armed = null; T._gmPick = false;
+        T._txCache = {}; T._txShown = false; T._txBusy = false; T._curRec = null;
+        var last = gmGet(T.LAST_KEY, null);
+        T._resume = (last && last.key) ? last : null;   // seek back to the last viewed report once the queue holds it
+
+        // Capture-phase key layer: ours before Jira's. Installed only while the overlay lives.
+        T._keyHandler = function (e) { T._onKey(e); };
+        document.addEventListener('keydown', T._keyHandler, true);
+
+        // Teardown no matter HOW the overlay goes away (Esc via menu._esc, the x button, backdrop click, or
+        // another JiTA overlay replacing this one). Watch for OUR overlay NODE leaving the DOM - every JiTA
+        // overlay reuses the #jita-menu-overlay id, so an id-existence check would miss "settings replaced us".
+        var ovNode = ov.$overlay[0];
+        T._mo = new MutationObserver(function () {
+            if (!document.body.contains(ovNode)) { T._teardown(); }
+        });
+        try { T._mo.observe(document.body, { childList: true }); } catch (e) { /* ignore */ }
+
+        T._fetchQueue().then(function () {
+            if (!T._trySeekResume()) { T._render(); T._prefetch(); }   // resume positions + renders itself when it can
+        });
+    },
+
+    close: function () { JiTA.menu.close(); },   // observer does the teardown
+
+    _teardown: function () {
+        var T = JiTA.triage;
+        if (!T._open) { return; }
+        T._open = false;
+        T._closeViewer();   // the viewer lives on document.body, not inside the overlay - close it explicitly
+        try { JiTA.ui._hideTip(true); } catch (e) { /* ignore */ }   // a hover card outlives its removed row otherwise
+        if (T._keyHandler) { document.removeEventListener('keydown', T._keyHandler, true); T._keyHandler = null; }
+        if (T._mo) { try { T._mo.disconnect(); } catch (e) { /* ignore */ } T._mo = null; }
+        if (T._armTimer) { clearTimeout(T._armTimer); T._armTimer = null; }
+        T._queue = []; T._cache = {}; T._armed = null; T._gmPick = false; T._busy = false;
+    },
+
+    // ---- queue (live JQL: the local DB has no assignee, and "unassigned" must be fresh) ---------------------
+    // Scope: unassigned OR already assigned to me (my own picked-up reports belong in my queue too - and the
+    // per-action verify allows exactly the same set). Attachment METADATA rides along in the same search call
+    // (one request per 100 issues instead of a GET per report) so the overlay can list / open attachments.
+    // Streamed: the returned promise resolves after the FIRST page so the first report renders in one round
+    // trip; the remaining pages keep appending in the background (progress counter grows live, with a trailing
+    // "…" until done). A generation token cancels a stale pagination when the order toggle refetches mid-crawl.
+    _fetchQueue: function () {
+        var T = JiTA.triage;
+        var gen = ++T._qGen;
+        // The bug hunters' standard backlog filter (per Schogol), verbatim + our order clause: open EVE Bug
+        // Reports, unassigned or mine, minus the Vanguard/Launcher lanes.
+        var jql = 'project = EBR AND issuetype = "EVE Bug Report" AND status = Open AND assignee in (currentUser(), EMPTY) AND labels not in ("Vanguard", "Launcher") AND component not in (Launcher) ORDER BY created ' + (T.order() === 'newest' ? 'DESC' : 'ASC');
+        function mapAtt(list) {
+            var att = [];
+            for (var i = 0; i < (list || []).length; i++) {
+                var a = list[i] || {};
+                att.push({ name: a.filename || 'file', size: a.size || 0, mime: a.mimeType || '', url: a.content || '', thumb: a.thumbnail || '' });
+            }
+            return att;
+        }
+        T._queueError = null;
+        T._queueDone = false;
+        T._queue = [];
+        return new Promise(function (resolve) {
+            var first = true;
+            function finishPage() { if (first) { first = false; resolve(); } else { T._queueProgress(); } }
+            function page(token) {
+                var body = { jql: jql, fields: ['summary', 'created', 'status', 'attachment'], maxResults: T.PAGE_SIZE };
+                if (token) { body.nextPageToken = token; }
+                JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
+                    if (!T._open || gen !== T._qGen) { if (first) { first = false; resolve(); } return; }   // reloaded / closed mid-crawl
+                    var data = r.data || {}, issues = data.issues || [];
+                    for (var i = 0; i < issues.length; i++) {
+                        var f = issues[i].fields || {};
+                        T._queue.push({ key: issues[i].key, summary: f.summary || '', created: f.created || null, status: (f.status && f.status.name) || '', att: mapAtt(f.attachment) });
+                    }
+                    var wasFirst = first;   // finishPage() flips `first` - the open() chain seeks after page 1 itself
+                    if (data.nextPageToken && T._queue.length < T.QUEUE_MAX) {
+                        finishPage();
+                        if (!wasFirst && T._resume) { T._trySeekResume(); }   // a deeper page may hold the resume target
+                        page(data.nextPageToken);   // keep crawling in the background
+                    } else {
+                        T._queueDone = true;
+                        finishPage();
+                        if (!wasFirst && T._resume) { T._trySeekResume(); }   // last chance: position "after" or give up
+                        T._queueProgress();
+                    }
+                }, function (e) {
+                    if (!T._open || gen !== T._qGen) { if (first) { first = false; resolve(); } return; }
+                    T._queueDone = true;   // background failure: keep what we have, stop the "…"
+                    if (first) { T._queueError = String(e && e.message || e); }   // surfaced by _render's empty state
+                    finishPage();
+                    T._queueProgress();
+                });
+            }
+            page(null);
+        });
+    },
+
+    // Reflect background queue growth without a full re-render: bump the "n / m…" counter, and if the user was
+    // parked on the end-of-queue state, re-render so the newly-arrived reports appear under the cursor.
+    _queueProgress: function () {
+        var T = JiTA.triage;
+        if (!T._open) { return; }
+        if (T._idx >= T._queue.length) {   // parked on the end-of-queue state: new arrivals belong under the cursor
+            if (T._queue.length) { T._render(); T._prefetch(); }
+            return;
+        }
+        var el = document.getElementById('jt-progress');
+        if (el) { el.textContent = (T._idx + 1) + ' / ' + T._queue.length + (T._queueDone ? '' : '…'); }
+    },
+
+    // Resume: jump to the last VIEWED report (persisted across sessions). If it left the backlog meanwhile
+    // (attached / closed / assigned), continue from the first report AFTER it in the current walk direction,
+    // compared by created time. Returns true when it positioned (and rendered); false when the caller should
+    // render normally. Called again as background pages append, until the target region is in the queue; any
+    // manual navigation or action drops the pending resume (the user took over).
+    _trySeekResume: function () {
+        var T = JiTA.triage, R = T._resume;
+        if (!R || !T._open) { return false; }
+        var newest = T.order() === 'newest';
+        function isAfter(c) {   // strictly after the target in the current walk direction
+            if (!c || !R.created) { return false; }
+            return newest ? c < R.created : c > R.created;
+        }
+        for (var i = 0; i < T._queue.length; i++) {
+            if (T._queue[i].key === R.key) {   // still in the backlog - land exactly on it
+                T._resume = null;
+                T._idx = i;
+                T._render(); T._prefetch();
+                T._setMsg('Resumed at ' + R.key + '.');
+                return true;
+            }
+        }
+        // Not in the queue (yet): wait for deeper pages unless the crawl already walked past its creation
+        // time - or finished. Then the report is gone; continue from the first one after it.
+        var passed = T._queue.length && isAfter(T._queue[T._queue.length - 1].created);
+        if (!passed && !T._queueDone) { return false; }
+        for (var j = 0; j < T._queue.length; j++) {
+            if (isAfter(T._queue[j].created)) {
+                T._resume = null;
+                T._idx = j;
+                T._render(); T._prefetch();
+                T._setMsg(R.key + ' left the queue (actioned meanwhile) - resumed at the next report after it.');
+                return true;
+            }
+        }
+        T._resume = null;   // nothing after it (or no created stored) - start from the top
+        return false;
+    },
+
+    // ---- per-report resolution: text (translated for foreign reports) + ranked defect matches ---------------
+    // Cached as a promise per key so the prefetch and the render share one computation. On failure the cache
+    // entry is dropped so revisiting the report retries.
+    _resolve: function (item) {
+        var T = JiTA.triage, key = item.key;
+        if (T._cache[key]) { return T._cache[key]; }
+        var p = JiTA.db.getDefect(key).then(function (rec) {
+            if (rec) { return { rec: rec, text: JiTA.util.effectiveText(rec) }; }
+            // Not in the local DB (sync lag / brand-new report): fetch live, clean, translate on demand.
+            return new Promise(function (resolve, reject) {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=summary,description', dataType: 'json' })
+                    .done(function (d) { resolve(d); }).fail(function (xhr) { reject(new Error('HTTP ' + xhr.status)); });
+            }).then(function (d) {
+                var f = (d && d.fields) || {};
+                var summary = f.summary || item.summary || '', desc = JiTA.util.toPlainText(f.description);
+                var text = JiTA.util.cleanForCompare(summary, desc);
+                var live = { summary: summary, description: desc, created: item.created, status: item.status };
+                if (JiTA.util.detectLang(text) !== 'foreign' || typeof jitaTranslateRR !== 'function') { return { rec: live, text: text }; }
+                return jitaTranslateRR(text.slice(0, 3000)).then(function (o) {
+                    if (o && o.en) { live.lang = o.lang || 'foreign'; live.enText = o.en; return { rec: live, text: o.en }; }
+                    return { rec: live, text: text };
+                }, function () { return { rec: live, text: text }; });
+            });
+        }).then(function (base) {
+            return JiTA.rank.suggestBest(base.text, key, (base.rec && base.rec.created) || item.created || null, JiTA.ui.modeOverride, []).then(function (out) {
+                var results = out.results || [];   // already capped at the user's TOP_N (sdTopN); digits address the first MATCH_KEYS
+                return Promise.all(results.map(function (r) {   // enrich for the row title-peek (a handful of DB reads)
+                    return JiTA.db.getDefect(r.key).then(function (rec2) {
+                        if (rec2) { r.description = rec2.description; r.created = rec2.created; }
+                        return r;
+                    }, function () { return r; });
+                })).then(function () { return { rec: base.rec, text: base.text, mode: out.mode, results: results }; });
+            });
+        });
+        p.catch(function () { delete T._cache[key]; });   // allow a retry on revisit
+        T._cache[key] = p;
+        return p;
+    },
+
+    // Rank the reports around the cursor in advance (PREFETCH_SPAN each way - K/← walks backward too) so
+    // stepping in either direction lands on already-ranked matches. _resolve caches per key, so re-prefetching
+    // an already-ranked neighbour is a no-op.
+    PREFETCH_SPAN: 3,
+    _prefetch: function () {
+        var T = JiTA.triage;
+        function grab(it) { if (it) { T._resolve(it).catch(function () { /* surfaced when rendered */ }); } }
+        for (var d = 1; d <= T.PREFETCH_SPAN; d++) {
+            grab(T._queue[T._idx + d]);
+            grab(T._queue[T._idx - d]);
+        }
+    },
+
+    // ---- rendering -------------------------------------------------------------------------------------------
+    _renderShell: function () {
+        $('#jt-report').empty(); $('#jt-matches').empty();
+        $('#jt-progress').text('Loading queue…'); $('#jt-done').text('');
+    },
+
+    _fmtSize: function (b) {
+        if (!b && b !== 0) { return ''; }
+        if (b < 1024) { return b + ' B'; }
+        if (b < 1048576) { return Math.round(b / 1024) + ' KB'; }
+        return (Math.round(b / 104857.6) / 10) + ' MB';
+    },
+
+    _isTextAtt: function (a) {
+        return (a.mime || '').indexOf('text/') === 0 || /\.(txt|log|json|xml|csv|md)$/i.test(a.name || '');
+    },
+
+    // Viewable in the in-overlay viewer: images render via <img>, text-ish files via fetch+print/parse.
+    // Everything else (zips etc.) stays a plain download link and is skipped when cycling with ←/→.
+    _isViewableAtt: function (a) {
+        return !!a.url && ((a.mime || '').indexOf('image/') === 0 || JiTA.triage._isTextAtt(a));
+    },
+
+    // ---- full-screen attachment viewer (in-overlay) ------------------------------------------------------------
+    // Jira's attachment URLs redirect to a signed media URL served with Content-Disposition: attachment, so a
+    // plain click DOWNLOADS. Content-Disposition only applies to top-level navigation though: an <img> renders
+    // the same URL fine, and the raw text can be fetched with GM_xmlhttpRequest (redirect + CORS proof; the
+    // atlassian.net/.com @connect grants already cover the media hosts). A fetched log carrying the EVE log
+    // header is mounted through the REGULAR Logfile Parser (same rows/html/ParseLogs machinery as the issue
+    // page + jitaWireLogControls for its buttons) - unless an on-page parse is already mounted, since the
+    // chrome's ids (#gpanel/#tableContent) must stay unique; then we fall back to raw text.
+    TEXT_VIEW_MAX: 2000000,   // chars of raw text shown in the fallback <pre> (parser mounts get the full text)
+    _viewerNode: null,
+    _viewerList: [],   // the current report's viewable attachments (←/→ cycles these while maximized)
+    _viewerIdx: 0,
+    _openViewer: function (a) {
+        var T = JiTA.triage;
+        T._closeViewer();
+        // Gather the current report's viewable attachments so ←/→ can flip between them (wrap-around).
+        var item = T._queue[T._idx], list = [];
+        if (item && item.att) { for (var li = 0; li < item.att.length; li++) { if (T._isViewableAtt(item.att[li])) { list.push(item.att[li]); } } }
+        var at = list.indexOf(a);
+        T._viewerList = at === -1 ? [a] : list;
+        T._viewerIdx = at === -1 ? 0 : at;
+        var v = document.createElement('div');
+        v.id = 'jt-viewer';
+        T._viewerNode = v;
+        var $v = $(v);
+        var $head = $('<div id="jt-viewer-head"></div>').appendTo($v);
+        $('<span class="jt-viewer-name"></span>').text(a.name + (a.size ? ' · ' + T._fmtSize(a.size) : '')).appendTo($head);
+        if (T._viewerList.length > 1) {
+            $('<span class="jt-viewer-pos"></span>').text((T._viewerIdx + 1) + ' / ' + T._viewerList.length).appendTo($head);
+            $('<span class="jt-viewer-hint">←/→ switch attachment</span>').appendTo($head);
+        }
+        $('<a class="jt-viewer-raw" target="_blank" rel="noopener">Open raw ↗</a>').attr('href', a.url).appendTo($head);
+        $('<span class="jt-viewer-x" title="Close (Esc)">×</span>').on('click', function () { T._closeViewer(); }).appendTo($head);
+        var $body = $('<div id="jt-viewer-body"></div>').appendTo($v);
+        document.body.appendChild(v);
+
+        if ((a.mime || '').indexOf('image/') === 0) {
+            // Spinner until the full-size image arrives (the signed media URL can take a moment); the img fades
+            // in on load. Handlers are wired BEFORE src is set so a cache-instant load can't slip past them.
+            var $spin = $('<div class="jt-viewer-spin" aria-hidden="true"></div>').appendTo($body);
+            $('<img class="jt-viewer-img" alt="">')
+                .on('load', function () { $spin.remove(); $(this).addClass('loaded'); })
+                .on('error', function () {
+                    $spin.remove(); $(this).remove();
+                    $('<div class="jt-viewer-note"></div>').text('Could not load the image - use Open raw.').appendTo($body);
+                })
+                .attr('src', a.url)
+                .appendTo($body);
+            return;
+        }
+        // Text-ish: fetch the bytes, then parse-or-print. Same spinner while fetching ($body.empty() clears it).
+        $('<div class="jt-viewer-spin" aria-hidden="true"></div>').appendTo($body);
+        T._fetchText(a.url).then(function (text) {
+            if (T._viewerNode !== v) { return; }   // closed / replaced meanwhile
+            $body.empty();
+            var pageParsed = $('#tableContent').not($body.find('#tableContent')).length > 0;   // an on-page parse owns the chrome ids
+            if (!pageParsed && text.indexOf(LOG_HDR) !== -1 && typeof ParseLogs === 'function') {
+                rows = text;                      // module-global input of the Parse* family (same as SwapUI)
+                $body.html(html);                 // the Logfile Parser chrome (#gheader + #gpanel + #table)
+                jitaWireLogControls();            // type toggles + Group Repeats + live search
+                setTimeout(function () { try { ParseLogs(); } catch (e) { $body.text('Parse failed: ' + (e && e.message || e)); } }, 250);
+                return;
+            }
+            var slice = text.length > T.TEXT_VIEW_MAX ? text.slice(0, T.TEXT_VIEW_MAX) : text;
+            if (pageParsed && text.indexOf(LOG_HDR) !== -1) {
+                $('<div class="jt-viewer-note">Raw view - a parsed log is already open on the page behind, so the parser can\'t mount twice.</div>').appendTo($body);
+            } else if (slice.length < text.length) {
+                $('<div class="jt-viewer-note">Showing the first ' + T._fmtSize(slice.length) + ' of ' + T._fmtSize(text.length) + ' - Open raw for the full file.</div>').appendTo($body);
+            }
+            $('<pre class="jt-viewer-pre"></pre>').text(slice).appendTo($body);
+        }).catch(function (e) {
+            if (T._viewerNode !== v) { return; }
+            $body.empty();
+            $('<div class="jt-viewer-note"></div>').text('Could not load the attachment (' + (e && e.message || e) + ') - use Open raw.').appendTo($body);
+        });
+    },
+
+    _closeViewer: function () {
+        var T = JiTA.triage;
+        if (T._viewerNode && T._viewerNode.parentNode) { T._viewerNode.parentNode.removeChild(T._viewerNode); }
+        T._viewerNode = null;
+        T._viewerList = []; T._viewerIdx = 0;   // _openViewer re-seeds these right after its _closeViewer call
+    },
+
+    // ←/→ while maximized: flip to the prev/next viewable attachment of the SAME report, wrapping around.
+    _viewerNav: function (delta) {
+        var T = JiTA.triage, L = T._viewerList;
+        if (!T._viewerNode || !L || L.length < 2) { return; }
+        var next = L[(T._viewerIdx + delta + L.length) % L.length];
+        T._openViewer(next);
+    },
+
+    // GET an attachment's text. GM_xmlhttpRequest follows the redirect to the media host without CORS pain and
+    // sends the session cookies on the first (same-origin) hop; plain $.ajax is the fallback when the grant is
+    // unavailable for some reason.
+    _fetchText: function (url) {
+        return new Promise(function (resolve, reject) {
+            if (typeof GM_xmlhttpRequest === 'function') {
+                GM_xmlhttpRequest({
+                    method: 'GET', url: url, timeout: 60000,
+                    onload: function (r) {
+                        if (r.status >= 200 && r.status < 300) { resolve(r.responseText || ''); }
+                        else { reject(new Error('HTTP ' + r.status)); }
+                    },
+                    onerror: function () { reject(new Error('network error')); },
+                    ontimeout: function () { reject(new Error('timeout')); }
+                });
+                return;
+            }
+            $.ajax({ url: url, dataType: 'text' })
+                .done(function (t) { resolve(t || ''); })
+                .fail(function (xhr) { reject(new Error('HTTP ' + xhr.status)); });
+        });
+    },
+
+    _setMsg: function (msg, warn) {
+        var el = document.getElementById('jt-msg');
+        if (el) { el.textContent = msg || ''; el.className = 'jt-msg' + (warn ? ' warn' : ''); }
+    },
+
+    _render: function () {
+        var T = JiTA.triage;
+        if (!T._open) { return; }
+        T._disarm(); T._gmPick = false;
+        T._txShown = false; T._curRec = null;   // fresh report -> desc box shows the original again (E re-toggles)
+        try { JiTA.ui._hideTip(true); } catch (e) { /* a removed row never fires mouseleave - drop its tip here */ }
+        var $rep = $('#jt-report'), $mat = $('#jt-matches');
+        $('#jt-done').text(T._done ? (T._done + ' actioned') : '');
+        if (!T._queue.length || T._idx >= T._queue.length) {
+            $('#jt-progress').text(T._queue.length ? (T._queue.length + ' in queue') : '');
+            $rep.empty(); $mat.empty();
+            var emptyMsg = !T._queueDone
+                ? 'More of the queue is still loading…'
+                : (T._queue.length
+                    ? 'End of queue - ' + T._done + ' actioned this session. K goes back.'
+                    : (T._queueError ? 'Queue fetch failed: ' + T._queueError
+                        : (T._done ? 'Queue clear - ' + T._done + ' actioned this session. 🎉' : 'Queue is empty - no open unassigned reports. 🎉')));
+            $('<div class="jt-empty"></div>').text(emptyMsg).appendTo($rep);
+            T._setMsg('', !!(!T._queue.length && T._queueError));   // the legend row below is the standing key reference
+            return;
+        }
+        var item = T._queue[T._idx], key = item.key;
+        gmSet(T.LAST_KEY, { key: item.key, created: item.created || null });   // resume point for the next session
+        $('#jt-progress').text((T._idx + 1) + ' / ' + T._queue.length + (T._queueDone ? '' : '…'));   // "…" = background pages still arriving
+        $rep.empty(); $mat.empty();
+        var $h = $('<div class="jt-rephead"></div>').appendTo($rep);
+        $('<a class="jt-key" target="_blank" rel="noopener"></a>').attr('href', '/browse/' + key).text(key).appendTo($h);
+        var created = JiTA.util.fmtDate(item.created);
+        if (created) { $('<span class="jt-muted"></span>').text('Created ' + created).appendTo($h); }
+        if (item.status) { $('<span class="jt-status"></span>').text(item.status).appendTo($h); }
+        var $desc = $('<div id="jt-desc" class="jt-desc jt-muted"></div>').text('Loading report…').appendTo($rep);
+        // Attachments (metadata rode along in the queue fetch), below the description. Images and text-ish
+        // files (logs.txt & co) open in the full-screen in-overlay viewer - a log with the EVE header is even
+        // run through the regular Logfile Parser. Other types stay plain links (browser download), and a
+        // Ctrl/Shift/middle click on anything keeps the raw browser behavior. O still opens the full issue.
+        if (item.att && item.att.length) {
+            var $att = $('<div class="jt-att"></div>').appendTo($rep);
+            var shown = item.att.slice(0, 12);
+            for (var ai = 0; ai < shown.length; ai++) {
+                (function (a) {
+                    var isImg = a.mime.indexOf('image/') === 0;
+                    var viewable = JiTA.triage._isViewableAtt(a);
+                    var $lnk = $('<a target="_blank" rel="noopener"></a>').attr('href', a.url || '#').attr('title', a.name + (a.size ? ' (' + JiTA.triage._fmtSize(a.size) + ')' : ''));
+                    if (isImg && a.thumb) {
+                        // Mini spinner in a placeholder box until the thumbnail arrives; the img fades in on
+                        // load. A failed thumb degrades to the plain chip (handlers wired before src, as in the viewer).
+                        $lnk.addClass('jt-att-thumb');
+                        var $tspin = $('<span class="jt-att-spin" aria-hidden="true"></span>').appendTo($lnk);
+                        $('<img alt="">')
+                            .on('load', function () { $tspin.remove(); $lnk.addClass('loaded'); })
+                            .on('error', function () {
+                                $tspin.remove(); $(this).remove();
+                                $lnk.removeClass('jt-att-thumb').addClass('jt-att-chip').text('📎 ' + a.name + (a.size ? ' · ' + JiTA.triage._fmtSize(a.size) : ''));
+                            })
+                            .attr('src', a.thumb)
+                            .appendTo($lnk);
+                    } else {
+                        $lnk.addClass('jt-att-chip').text('📎 ' + a.name + (a.size ? ' · ' + JiTA.triage._fmtSize(a.size) : ''));
+                    }
+                    if (viewable && a.url) {
+                        $lnk.on('click', function (ev) {
+                            if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.which === 2) { return; }   // let the browser open raw
+                            ev.preventDefault();
+                            JiTA.triage._openViewer(a);
+                        });
+                    }
+                    $att.append($lnk);
+                })(shown[ai]);
+            }
+            if (item.att.length > shown.length) { $('<span class="jt-muted"></span>').text('+' + (item.att.length - shown.length) + ' more (O opens the report)').appendTo($att); }
+        }
+        $mat.append($('<div class="jt-empty"></div>').text('Ranking…'));
+        T._setMsg('');
+        // Paint the report TEXT the moment its DB read lands - never behind the ranking. _resolve chains the
+        // description after suggestBest, and the FIRST rank of a session can sit behind BM25 index builds /
+        // model warm-up for seconds; the report itself must not wait for that. _curRec doubles as the
+        // painted-once flag (reset per render), so whichever path lands first wins and the other no-ops.
+        function paintRec(rec) {
+            if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== key) { return; }   // navigated meanwhile
+            if (T._curRec) { return; }    // the other path already painted
+            T._curRec = rec;              // the E toggle restores / translates from this
+            if (T._txShown) { return; }   // E-translation already on screen - don't clobber it
+            $desc.removeClass('jt-muted').text(rec.description || '(no description)');
+            if (rec.lang && rec.enText) {
+                $('<div class="jt-lang"></div>').text('🌐 Foreign report (' + rec.lang + ') - ranked via its English translation').insertBefore($desc);
+            }
+        }
+        JiTA.db.getDefect(key).then(function (rec) { if (rec) { paintRec(rec); } }, function () { /* not in the local DB - _resolve's live fetch paints below */ });
+        T._resolve(item).then(function (res) {
+            if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== key) { return; }   // navigated meanwhile
+            paintRec(res.rec || {});
+            $mat.empty();
+            var $mh = $('<div class="jt-mathead"></div>').appendTo($mat);
+            $('<span></span>').text('Defect matches').appendTo($mh);
+            $('<span class="jt-mode"></span>').text(res.mode || '').appendTo($mh);
+            if (!res.results.length) {
+                $('<div class="jt-empty"></div>').text('No similar defects found.').appendTo($mat);
+                return;
+            }
+            var $ul = $('<ul class="jt-list"></ul>').appendTo($mat);
+            for (var i = 0; i < res.results.length; i++) {
+                (function (r, n) {
+                    var $li = $('<li></li>').attr('data-jt-n', n);
+                    var $n = $('<span class="jt-n"></span>').text(n).appendTo($li);
+                    if (n > T.MATCH_KEYS) { $n.addClass('jt-n-nokey').attr('title', 'No hotkey - only matches 1-' + T.MATCH_KEYS + ' are digit-addressable'); }
+                    $('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + r.key).text(r.key).appendTo($li);
+                    $('<span class="jt-pct"></span>').text((typeof r.pct === 'number' ? r.pct : 0) + '%').appendTo($li);
+                    var meta = r.status || ''; if (r.resolution) { meta += (meta ? ' · ' : '') + r.resolution; }
+                    $('<span class="jt-msum"></span>').text(r.summary || '').appendTo($li);
+                    if (meta) { $('<span class="jt-mmeta"></span>').text(meta).appendTo($li); }
+                    // Feature C hover preview, same as the panel rows: the styled card with the defect's summary,
+                    // full (rendered) description and status - r already carries description/created from the
+                    // enrichment reads above. The tip is fixed-position at z 10001, above the overlay's 10000.
+                    $li.on('mouseenter', function () { JiTA.ui._showTip(r, this, meta); });
+                    $li.on('mouseleave', function () { JiTA.ui._hideTip(); });
+                    $ul.append($li);
+                })(res.results[i], i + 1);
+            }
+        }).catch(function (e) {
+            if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== key) { return; }
+            $desc.text('Could not load this report.');
+            $mat.empty().append($('<div class="jt-empty"></div>').text('Ranking failed: ' + (e && e.message || e)));
+        });
+    },
+
+    _go: function (delta) {
+        var T = JiTA.triage;
+        T._resume = null;   // manual navigation - the user took over, drop any pending session-resume seek
+        var to = T._idx + delta;
+        if (to < 0 || to > T._queue.length) { return; }   // allow stepping to the end-of-queue state (== length)
+        T._idx = to;
+        T._render();
+        T._prefetch();   // keep +-PREFETCH_SPAN ranked in both directions
+    },
+
+    // E hotkey: toggle the desc box between the original text and an on-demand English translation of
+    // summary + description (the same keyless endpoints as the page's Translate button; jitaTranslateRR).
+    // The stored enText is deliberately NOT shown - it is cleanForCompare output (doubled summary, sections
+    // stripped), ranking material rather than reading material. Cached per report for the session.
+    _toggleTranslate: function () {
+        var T = JiTA.triage, item = T._queue[T._idx];
+        if (!item) { return; }
+        var $d = $('#jt-desc');
+        if (!$d.length) { return; }
+        if (T._txShown) {   // back to the original
+            T._txShown = false;
+            $('#jt-txbadge').remove();
+            $d.text((T._curRec && T._curRec.description) || '(no description)');
+            T._setMsg('');
+            return;
+        }
+        function show(tx, note) {
+            if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== item.key) { return; }   // navigated meanwhile
+            var $d2 = $('#jt-desc');
+            if (!$d2.length) { return; }
+            T._txShown = true;
+            $('#jt-txbadge').remove();
+            $('<div id="jt-txbadge" class="jt-lang"></div>').text('🌐 ' + note + ' - E toggles back to the original').insertBefore($d2);
+            $d2.removeClass('jt-muted').text(tx);
+            T._setMsg('');
+        }
+        var c = T._txCache[item.key];
+        if (c) { show(c.text, c.note); return; }
+        if (!T._curRec) { T._setMsg('Report still loading - try E again in a second.', true); return; }
+        if (typeof jitaTranslateRR !== 'function') { T._setMsg('Translator unavailable.', true); return; }
+        if (T._txBusy) { return; }
+        T._txBusy = true;
+        T._setMsg('Translating ' + item.key + '…');
+        var src = ((item.summary || '') + '\n\n' + (T._curRec.description || '')).slice(0, 4500);
+        jitaTranslateRR(src).then(function (o) {
+            T._txBusy = false;
+            var en = o && o.en;
+            if (!en) { T._setMsg('Translation came back empty - try E again.', true); return; }
+            var note = 'English translation' + (o.lang ? ' (from ' + o.lang + ')' : '');
+            T._txCache[item.key] = { text: en, note: note };
+            show(en, note);
+        }, function (e) {
+            T._txBusy = false;
+            T._setMsg('Translation failed: ' + (e && e.message || e), true);
+        });
+    },
+
+    // ---- key layer --------------------------------------------------------------------------------------------
+    _onKey: function (e) {
+        var T = JiTA.triage;
+        if (!T._open) { return; }
+        var t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }   // typing stays typing
+        if (e.ctrlKey || e.metaKey || e.altKey) { return; }                                                // browser combos pass through
+        var k = e.key;
+        function eat() { e.preventDefault(); e.stopImmediatePropagation(); }
+        // Attachment viewer on top: Esc closes IT (never the whole mode), ←/→ flips between the report's
+        // viewable attachments; every other plain key is inert while it's up - the parser chrome is
+        // mouse/search-driven, and the input guard above keeps typing working.
+        if (T._viewerNode) {
+            if (k === 'Escape') { eat(); T._closeViewer(); return; }
+            if (k === 'ArrowRight') { eat(); T._viewerNav(1); return; }
+            if (k === 'ArrowLeft') { eat(); T._viewerNav(-1); return; }
+            if (k === 'Tab' || (k && k.length > 1 && k.indexOf('F') === 0 && !isNaN(parseInt(k.slice(1), 10)))) { return; }
+            eat();
+            return;
+        }
+        if (k === 'Escape') {
+            // Cancel a sub-state ourselves; a PLAIN Esc falls through to menu._esc, which closes the overlay
+            // (and the MutationObserver tears the mode down).
+            if (T._gmPick || T._armed) { eat(); T._gmPick = false; T._disarm(); T._setMsg(''); }
+            return;
+        }
+        if (k === 'F5' || (k && k.length > 1 && k.indexOf('F') === 0 && !isNaN(parseInt(k.slice(1), 10)))) { return; }   // F-keys pass through
+        if (k === 'Tab') { return; }
+        eat();   // total key capture while the mode is open (per design) - Jira must never see plain keys
+        if (T._busy) { return; }
+        var item = T._queue[T._idx] || null;
+
+        if (T._gmPick) {   // GM category sub-pick: 1-4 chooses, anything else is swallowed (Esc cancels above)
+            if (item && k >= '1' && k <= String(JITA_GM_CATEGORIES.length)) {
+                var cat = JITA_GM_CATEGORIES[parseInt(k, 10) - 1];
+                T._gmPick = false;
+                T._exec('gm', { category: cat, label: 'Convert ' + item.key + ' to GM support (' + cat + ')' });
+            }
+            return;
+        }
+
+        if (k === 'j' || k === 'J' || k === 'ArrowRight') { T._go(1); return; }
+        if (k === 'k' || k === 'K' || k === 'ArrowLeft') { T._go(-1); return; }
+        if (!item) { return; }   // end-of-queue: only navigation applies
+        if (k === 'o' || k === 'O') { try { window.open('/browse/' + item.key, '_blank'); } catch (e2) { /* ignore */ } return; }
+        if (k === 'e' || k === 'E') { T._toggleTranslate(); return; }
+        if (k === 'Enter') { if (T._armed) { T._execArmed(); } return; }
+        if (k === 't' || k === 'T') { T._arm({ type: 'trash', label: 'Close ' + item.key + ' as Won\'t Do', again: 'T' }); return; }
+        if (k === 'g' || k === 'G') { T._gmKey(item); return; }   // ZD pre-gate first; the picker follows when it clears
+        if (k >= '1' && k <= '9') { T._armAttach(parseInt(k, 10), k); return; }   // number row AND numpad both yield '1'-'9' in e.key
+    },
+
+    // ---- armed two-step confirm (same key again / Enter executes; Esc or ARM_MS disarms) ----------------------
+    _armAttach: function (n, pressedKey) {
+        var T = JiTA.triage, item = T._queue[T._idx];
+        var res = T._cache[item.key];
+        if (!res) { T._setMsg('Still ranking - try again in a moment.', true); return; }
+        res.then(function (r) {
+            if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== item.key) { return; }
+            var m = r.results[n - 1];
+            if (!m) { T._setMsg('No match #' + n + '.', true); return; }
+            T._arm({ type: 'attach', n: n, matchKey: m.key, label: 'Attach ' + item.key + ' to ' + m.key + ' (#' + n + ', ' + (m.pct || 0) + '%)', again: pressedKey.toUpperCase() });
+        }).catch(function () { T._setMsg('Ranking failed for this report - O opens it in Jira.', true); });
+    },
+
+    _arm: function (a) {
+        var T = JiTA.triage;
+        // Second press of the SAME action -> execute.
+        if (T._armed && T._armed.type === a.type && T._armed.n === a.n) { T._execArmed(); return; }
+        T._disarm();
+        T._armed = a;
+        $('#jt-matches li').removeClass('armed');
+        if (a.type === 'attach') { $('#jt-matches li[data-jt-n="' + a.n + '"]').addClass('armed'); }
+        T._setMsg('⚠ ' + a.label + ' - press ' + a.again + ' again (or Enter) to confirm · Esc cancels', true);
+        T._armTimer = setTimeout(function () { T._disarm(); T._setMsg(''); }, T.ARM_MS);
+    },
+
+    _disarm: function () {
+        var T = JiTA.triage;
+        T._armed = null;
+        if (T._armTimer) { clearTimeout(T._armTimer); T._armTimer = null; }
+        $('#jt-matches li').removeClass('armed');
+    },
+
+    _execArmed: function () {
+        var T = JiTA.triage, a = T._armed;
+        if (!a) { return; }
+        T._disarm();
+        T._exec(a.type, a);
+    },
+
+    // ---- action execution: re-verify server-side, run, then remove from DB + queue ----------------------------
+    // The backlog moves under a long session: someone else may have assigned or closed the report since the
+    // queue was fetched, so every action re-checks status + assignee live right before executing.
+    _verifyActionable: function (key) {
+        return JiTA.link.currentUser().then(function (me) {
+            return new Promise(function (resolve, reject) {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status,assignee', dataType: 'json' })
+                    .done(function (d) { resolve({ d: d, me: me }); })
+                    .fail(function (xhr) { reject(new Error('verify failed (HTTP ' + xhr.status + ')')); });
+            });
+        }).then(function (x) {
+            var f = (x.d && x.d.fields) || {};
+            var status = (f.status && f.status.name) || '';
+            if (JiTA.util.isClosedStatus(status)) { return { ok: false, reason: 'already ' + (status || 'closed') }; }
+            var as = f.assignee || null;
+            if (as && (!x.me || as.accountId !== x.me)) { return { ok: false, reason: 'now assigned to ' + (as.displayName || 'someone else') }; }
+            return { ok: true };
+        });
+    },
+
+    // G pressed: open the GM category picker. NOTE, verified empirically (2026-09, temp API token): the linked
+    // Zendesk ticket is NOT visible anywhere in the issue's REST representation - remote links, issue
+    // properties and custom fields are all empty/identical whether or not a ticket is linked (the link lives
+    // app-side, in the Forge app / Zendesk). So a pre-gate ("this report has no ticket, G will fail") is
+    // impossible from triage; the _waitClosed post-verify below is the ONLY guard against the rule's
+    // no-ticket bail-out, and the category picker opens unconditionally.
+    _gmKey: function (item) {
+        var T = JiTA.triage;
+        void item;
+        T._disarm();
+        T._gmPick = true;
+        T._setMsg('GM category: 1 ' + JITA_GM_CATEGORIES[0] + ' · 2 ' + JITA_GM_CATEGORIES[1] + ' · 3 ' + JITA_GM_CATEGORIES[2] + ' · 4 ' + JITA_GM_CATEGORIES[3] + ' · Esc cancel', true);
+    },
+
+    // Poll a report's status until it reads closed (resolves true) or the tries run out (false). First check
+    // after 1.5s (gives the automation a head start), then every 2s - ~10s worst case. Network blips just
+    // consume a try, so a flaky connection degrades to "not confirmed" rather than hanging forever.
+    _waitClosed: function (key, tries) {
+        return new Promise(function (resolve) {
+            (function step(n) {
+                setTimeout(function () {
+                    $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status', dataType: 'json' })
+                        .done(function (d) {
+                            var st = (d && d.fields && d.fields.status && d.fields.status.name) || '';
+                            if (JiTA.util.isClosedStatus(st)) { resolve(true); return; }
+                            if (n <= 0) { resolve(false); return; }
+                            step(n - 1);
+                        })
+                        .fail(function () {
+                            if (n <= 0) { resolve(false); return; }
+                            step(n - 1);
+                        });
+                }, n === tries ? 1500 : 2000);
+            })(tries);
+        });
+    },
+
+    _exec: function (type, a) {
+        var T = JiTA.triage, item = T._queue[T._idx];
+        if (!item || T._busy) { return; }
+        var key = item.key;
+        T._resume = null;   // acting on a report - the user took over, drop any pending session-resume seek
+        T._busy = true;
+        T._setMsg('Working - ' + a.label + '…');
+        T._verifyActionable(key).then(function (v) {
+            if (!v.ok) {
+                T._busy = false;
+                T._setMsg(key + ' changed server-side (' + v.reason + ') - J skips it.', true);
+                return null;
+            }
+            if (type === 'attach') {
+                return JiTA.link.currentUser().then(function (me) {
+                    return JiTA.link.attachDuplicate(key, a.matchKey, 'Attached', 'Duplicate', me);
+                }).then(function (res) {
+                    if (!res.attached && !res.linked) { throw new Error('attach did not apply'); }
+                    if (!res.attached) { throw new Error('linked to ' + a.matchKey + ' but could not set Attached - finish it in Jira (O)'); }
+                    return 'Attached ' + key + ' to ' + a.matchKey + (res.linked ? '' : ' (link failed - add it in Jira)');
+                });
+            }
+            if (type === 'trash') {
+                return Promise.resolve(jitaCloseAsWontDo(key)).then(function () { return 'Closed ' + key + ' as Won\'t Do'; });
+            }
+            if (type === 'gm') {
+                // The invocation reporting SUCCESS only means the rule STARTED - with no (or multiple) linked
+                // Zendesk ticket it bails server-side, posts a "Manual processing" comment and leaves the report
+                // OPEN. The page flow pre-checks the Zendesk panel DOM; triage has no page, so verify by the
+                // ground truth instead: a real conversion auto-closes the report. Poll until it closes; if it
+                // stays open, fail WITHOUT removing it from the queue/DB.
+                return jitaInvokeGmAutomation(key, a.category).then(function () {
+                    T._setMsg('Automation invoked - waiting for ' + key + ' to close…');
+                    return T._waitClosed(key, 4).then(function (closed) {   // 1.5s + 4x2s = ~10s worst case
+                        if (!closed) { throw new Error(key + ' is still open - the rule likely found no (or multiple) linked Zendesk ticket and only left a comment. O opens it for manual processing'); }
+                        return 'Converted ' + key + ' to GM support (' + a.category + ')';
+                    });
+                });
+            }
+            throw new Error('unknown action');
+        }).then(function (okMsg) {
+            if (okMsg == null) { return; }   // verify said no - stay on the report
+            return T._afterAction(key, okMsg);
+        }).catch(function (e) {
+            T._busy = false;
+            T._setMsg('Failed: ' + (e && e.message || e), true);
+        });
+    },
+
+    _afterAction: function (key, okMsg) {
+        var T = JiTA.triage;
+        T._done++;
+        // Mirror the panel attach buttons: the report just left the open set - drop it from the local DB and
+        // tell the indexes/tabs (worker invalidate + cross-tab broadcast).
+        return JiTA.db.deleteDefects([key]).then(function () {
+            try { JiTA.sync._ebrRemoved([key]); } catch (e) { /* ignore */ }
+        }).catch(function () { /* DB cleanup is best-effort; the next sync prunes it anyway */ }).then(function () {
+            delete T._cache[key];
+            var i = -1;
+            for (var q = 0; q < T._queue.length; q++) { if (T._queue[q].key === key) { i = q; break; } }
+            if (i !== -1) { T._queue.splice(i, 1); if (T._idx > i) { T._idx--; } }
+            T._busy = false;
+            if (!T._open) { return; }
+            T._render();
+            T._prefetch();
+            T._setMsg('✓ ' + okMsg);
+        });
+    },
+
+    // ---- styles -----------------------------------------------------------------------------------------------
+    _cssInjected: false,
+    _injectCss: function () {
+        if (JiTA.triage._cssInjected) { return; }
+        JiTA.triage._cssInjected = true;
+        try {
+            GM_addStyle(
+                // Full-screen sheet: the shared overlay chrome centers a 360px/82vh rounded box - stretch it to
+                // the whole viewport instead (Schogol prefers triage edge-to-edge; the backdrop never shows).
+                '#jita-menu.jita-triage-view { width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh; border: none; border-radius: 0; display: flex; flex-direction: column; overflow: hidden; }' +
+                '#jita-menu.jita-triage-view .jita-menu-head { flex: 0 0 auto; border-radius: 0; }' +
+                '.jita-triage-view .jt-bar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid #3a434d; }' +
+                '.jita-triage-view #jt-progress { font-weight: 700; color: #e6e6e6; }' +
+                '.jita-triage-view .jt-muted { color: #9aa6b2; font-size: 12px; }' +
+                '.jita-triage-view #jt-done { margin-left: auto; }' +
+                '.jita-triage-view .jt-main { display: flex; gap: 16px; padding: 10px 16px; flex: 1 1 auto; min-height: 0; overflow: hidden; }' +
+                '.jita-triage-view .jt-report { flex: 1.15; min-width: 0; display: flex; flex-direction: column; }' +
+                '.jita-triage-view .jt-matches { flex: 1; min-width: 0; overflow-y: auto; }' +   // height comes from the flex row (full-screen sheet), not a vh cap
+                '.jita-triage-view .jt-rephead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }' +
+                '.jita-triage-view .jt-key { color: #4c9aff; font-weight: 800; font-size: 15px; text-decoration: none; }' +
+                '.jita-triage-view .jt-key:hover { text-decoration: underline; }' +
+                '.jita-triage-view .jt-status { background: #3a434d; color: #cfd6dd; border-radius: 8px; padding: 1px 8px; font-size: 10px; }' +
+                '.jita-triage-view .jt-sum { font-weight: 700; color: #fff; margin: 6px 0; font-size: 13px; }' +
+                '.jita-triage-view .jt-att { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 8px; }' +
+                '.jita-triage-view .jt-att-chip { color: #cfd6dd; background: #2c333a; border: 1px solid #3a434d; border-radius: 10px; padding: 2px 9px; font-size: 11px; text-decoration: none; white-space: nowrap; }' +
+                '.jita-triage-view .jt-att-chip:hover { border-color: #4c9aff; color: #fff; }' +
+                '.jita-triage-view .jt-att-thumb { display: inline-flex; align-items: center; justify-content: center; position: relative; border: 1px solid #3a434d; border-radius: 5px; overflow: hidden; }' +
+                '.jita-triage-view .jt-att-thumb:hover { border-color: #4c9aff; }' +
+                '.jita-triage-view .jt-att-thumb:not(.loaded) { min-width: 64px; min-height: 44px; background: #1b2025; }' +   // placeholder box while the thumb loads
+                '.jita-triage-view .jt-att-thumb img { display: block; height: 44px; width: auto; opacity: 0; transition: opacity .15s ease; }' +
+                '.jita-triage-view .jt-att-thumb.loaded img { opacity: 1; }' +
+                '.jita-triage-view .jt-att-spin { position: absolute; top: 50%; left: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; border: 2px solid #3a434d; border-top-color: #4c9aff; border-radius: 50%; animation: jt-spin .8s linear infinite; }' +   // reuses @keyframes jt-spin (viewer)
+                '.jita-triage-view .jt-lang { color: #6bd0dc; font-size: 11px; margin-bottom: 4px; }' +
+                '.jita-triage-view .jt-desc { background: #1b2025; border: 1px solid #2c333a; border-radius: 6px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; overflow-y: auto; flex: 1 1 auto; min-height: 0; font-size: 12px; line-height: 1.5; color: #cfd6dd; }' +   // fills the report column (full-screen sheet), no vh cap
+                '.jita-triage-view .jt-mathead { display: flex; align-items: center; justify-content: space-between; font-weight: 700; color: #e6e6e6; font-size: 12px; margin-bottom: 6px; }' +
+                '.jita-triage-view .jt-mode { color: #9aa6b2; font-weight: 600; font-size: 10px; }' +
+                // Responsive match grid: as many ~340px-min card columns as the pane's width fits (1 on narrow,
+                // 2 on a typical scaled desktop, 3+ on genuinely wide CSS viewports); the gap replaces margins.
+                // 340 not 420: OS/browser scaling shrinks the CSS viewport (150% -> pane ~780 CSS px), and the
+                // two-column layout must survive that.
+                '.jita-triage-view .jt-list { list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 8px; align-content: start; }' +
+                '.jita-triage-view .jt-list li { padding: 6px 8px; border: 1px solid #2c333a; border-radius: 6px; background: #22272b; }' +
+                '.jita-triage-view .jt-list li.armed { border-color: #ffb547; background: #2e2a1e; }' +
+                '.jita-triage-view .jt-n { display: inline-block; min-width: 16px; text-align: center; background: #3a434d; color: #cfd6dd; border-radius: 4px; font-size: 10px; font-weight: 700; margin-right: 8px; }' +
+                '.jita-triage-view .jt-n-nokey { opacity: .45; }' +
+                '.jita-triage-view .jt-list a { color: #4c9aff; font-weight: 700; text-decoration: none; }' +
+                '.jita-triage-view .jt-list a:hover { text-decoration: underline; }' +
+                '.jita-triage-view .jt-pct { color: #fff; font-weight: 800; margin-left: 8px; font-size: 11px; }' +
+                '.jita-triage-view .jt-msum { display: block; color: #e6e6e6; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }' +
+                '.jita-triage-view .jt-mmeta { display: block; color: #7a8694; font-size: 10px; margin-top: 2px; }' +
+                '.jita-triage-view .jt-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
+                '.jita-triage-view .jt-msg { flex: 0 0 auto; padding: 8px 16px; border-top: 1px solid #3a434d; color: #9aa6b2; font-size: 12px; min-height: 31px; }' +
+                '.jita-triage-view .jt-msg.warn { color: #ffb547; font-weight: 600; }' +
+                '.jita-triage-view .jt-keys { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 16px 12px; color: #7a8694; font-size: 11px; }' +
+                '.jita-triage-view .jt-keys b { color: #cfd6dd; background: #2c333a; border: 1px solid #3a434d; border-radius: 4px; padding: 0 5px; font-family: inherit; }' +
+                // Full-screen attachment viewer (sits above the triage overlay; z 10000 = the menu overlay).
+                '#jt-viewer { position: fixed; inset: 0; z-index: 10020; background: #101316; }' +
+                '#jt-viewer-head { position: absolute; top: 0; left: 0; right: 0; height: 44px; display: flex; align-items: center; gap: 14px; padding: 0 16px; background: #1b2025; border-bottom: 1px solid #3a434d; box-sizing: border-box; }' +
+                '#jt-viewer-head .jt-viewer-name { color: #e6e6e6; font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '#jt-viewer-head .jt-viewer-pos { color: #9aa6b2; font-size: 12px; font-weight: 700; white-space: nowrap; }' +
+                '#jt-viewer-head .jt-viewer-hint { color: #7a8694; font-size: 11px; white-space: nowrap; }' +
+                '#jt-viewer-head .jt-viewer-raw { color: #4c9aff; font-size: 12px; text-decoration: none; white-space: nowrap; }' +
+                '#jt-viewer-head .jt-viewer-raw:hover { text-decoration: underline; }' +
+                '#jt-viewer-head .jt-viewer-x { margin-left: auto; color: #9aa6b2; font-size: 22px; line-height: 1; cursor: pointer; padding: 2px 6px; }' +
+                '#jt-viewer-head .jt-viewer-x:hover { color: #fff; }' +
+                '#jt-viewer-body { position: absolute; top: 44px; left: 0; right: 0; bottom: 0; overflow: auto; }' +   // positioned ancestor: the parser\'s absolute #table (top:85px/bottom:0) sizes against THIS box
+                '#jt-viewer-body .jt-viewer-img { display: block; max-width: 96%; max-height: 94%; margin: 2vh auto; object-fit: contain; opacity: 0; transition: opacity .15s ease; }' +
+                '#jt-viewer-body .jt-viewer-img.loaded { opacity: 1; }' +
+                '#jt-viewer-body .jt-viewer-pre { margin: 0; padding: 14px 18px; color: #cfd6dd; font: 11px/1.5 Consolas, "Courier New", monospace; white-space: pre-wrap; word-break: break-word; }' +
+                '#jt-viewer-body .jt-viewer-note { color: #ffb547; font-size: 12px; padding: 12px 18px; }' +
+                '#jt-viewer-body .jt-viewer-spin { position: absolute; top: 50%; left: 50%; width: 40px; height: 40px; margin: -20px 0 0 -20px; border: 3px solid #3a434d; border-top-color: #4c9aff; border-radius: 50%; animation: jt-spin .8s linear infinite; }' +
+                '@keyframes jt-spin { to { transform: rotate(360deg); } }' +
+                // Parser chrome inside the viewer: its #gpanel nav is VIEWPORT-fixed at top:15px/left:175px
+                // (tuned to sit beside the on-page "Logfile Parser" title), which collides with the viewer's own
+                // 44px head bar / title. In the viewer the chrome title is redundant (the head bar already names
+                // the file), so hide it, give the button row the freed line from the left edge, and pull #table
+                // up under the buttons (its absolute top sizes against #jt-viewer-body, +28px own margin).
+                // Two-id selectors outweigh the chrome's single-id rules regardless of style-tag order.
+                '#jt-viewer #body h1 { display: none; }' +
+                '#jt-viewer #gpanel { top: 50px; left: 16px; }' +
+                '#jt-viewer #table { top: 30px; }'
+            );
+        } catch (e) { /* ignore */ }
+    }
+};
+
+
 /* ---- shared ranking worker: one model+index for ALL tabs instead of one per tab -----------------------
  * A userscript can't host a same-origin SharedWorker script (blob/data-URL SharedWorkers don't share across
  * tabs), so we get the same "one instance for everyone" outcome from primitives that DO work: one tab is
@@ -10585,6 +11506,23 @@ JiTA.declutter = {
                 try { JiTA.ui._rerenderCurrent(); } catch (e) { /* ignore */ }
             });
         } catch (e) { /* ignore */ }
+    }
+    // Quick launcher: double-tap '<' (within 400ms, outside any text field) opens Triage mode from anywhere -
+    // no menu round-trip. A single '<' stays inert, so it can't misfire while reading. open() itself guards
+    // the disabled-feature / already-open cases.
+    if (!JITA_IS_FORGE_FRAME) {
+        (function () {
+            var lastLt = 0;
+            document.addEventListener('keydown', function (e) {
+                if (e.key !== '<' || e.ctrlKey || e.metaKey || e.altKey) { return; }
+                var t = e.target;
+                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
+                if (typeof JiTA === 'undefined' || !JiTA.triage || JiTA.triage._open) { return; }
+                var now = Date.now();
+                if (now - lastLt < 400) { lastLt = 0; try { JiTA.triage.open(); } catch (e2) { /* ignore */ } }
+                else { lastLt = now; }
+            });
+        })();
     }
     // start the periodic background catch-up sync
     JiTA.sched.start();
