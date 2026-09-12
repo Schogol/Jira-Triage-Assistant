@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.10.8
+// @version     3.11.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5247,6 +5247,22 @@ JiTA.sync = {
         });
     },
 
+    // An EBR just left the OPEN set locally (attached / closed) and was deleted from the DB. Make every open
+    // tab drop it from the defect "matching reports" view WITHOUT a manual refresh. Removing the DB row is not
+    // enough: the shared ranking worker keeps the report in its in-memory kwCache/vecCache (its vector still
+    // ranks in on the semantic channel), and a plain reload won't fix it - the worker survives the reload and
+    // the 30-min sync throttle (recentlySynced) skips the catch-up that would re-prune + re-index. So we (a)
+    // mark THIS tab's EBR keyword/vector indexes dirty, (b) drop the shared worker's indexes via 'invalidate'
+    // (it rebuilds from the current DB, minus the removed report, on the next query), and (c) unless this is a
+    // cross-tab echo, tell the other tabs (the listener near startup re-renders them). The acting tab handles
+    // its own row UI (softRefreshStatus / _fadeOutAndReplace), so we deliberately don't re-render it here.
+    _ebrRemoved: function (keys, fromRemote) {
+        JiTA.rank._dirtyEbr = true;
+        JiTA.rank._dirtyEbrVec = true;
+        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+        if (!fromRemote) { gmSet('sdEbrRemoved', { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId }); }
+    },
+
     // Menu entry point for the single "Sync now" button: sync the defect dataset, then the bug-report
     // dataset, sequentially (each is single-flight via `running`, so we chain them). Each leg shows its own
     // toast / status as before. Guarded up front so a click while a sync is running is a no-op + toast.
@@ -7342,8 +7358,7 @@ JiTA.ui = {
                     // Drop the now-Attached report from the local open-report DB immediately so it no longer
                     // shows up as an open match on defects before the next EBR sync prunes it.
                     JiTA.db.deleteDefects([ebr]).then(function () {
-                        JiTA.rank._dirtyEbr = true;
-                        JiTA.rank._dirtyEbrVec = true;
+                        JiTA.sync._ebrRemoved([ebr]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
                     });
                 }
                 JiTA.ui.toast(msg);
@@ -7417,8 +7432,7 @@ JiTA.ui = {
                         // open), leave the row in place - the report is still an open match.
                         if (res.attached) {
                             return JiTA.db.deleteDefects([reportKey]).then(function () {
-                                JiTA.rank._dirtyEbr = true;
-                                JiTA.rank._dirtyEbrVec = true;
+                                JiTA.sync._ebrRemoved([reportKey]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
                                 JiTA.ui._fadeOutAndReplace($b.closest('li'), defectKey);
                             });
                         }
@@ -10593,6 +10607,19 @@ JiTA.declutter = {
             GM_addValueChangeListener('sdHidden', function (name, oldV, newV, remote) {
                 JiTA.hidden._map = null;   // force a reload from storage on the next read
                 if (remote) { try { JiTA.ui._rerenderCurrent(); } catch (e) { /* ignore */ } }
+            });
+        } catch (e) { /* ignore */ }
+    }
+    // Another tab attached / closed a bug report (JiTA.sync._ebrRemoved deleted it from the shared open-report
+    // DB): drop it from OUR defect "matching reports" view live. Rebuild our tab-side EBR indexes, invalidate
+    // the shared worker's EBR index, then re-render the current view so the now-attached report disappears
+    // without a manual refresh. Mirrors the hidden-set listener above.
+    if (typeof GM_addValueChangeListener === 'function') {
+        try {
+            GM_addValueChangeListener('sdEbrRemoved', function (name, oldV, newV, remote) {
+                if (!remote) { return; }
+                JiTA.sync._ebrRemoved((newV && newV.keys) || [], true);
+                try { JiTA.ui._rerenderCurrent(); } catch (e) { /* ignore */ }
             });
         } catch (e) { /* ignore */ }
     }
