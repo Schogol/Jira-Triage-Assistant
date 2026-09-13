@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.14.0
+// @version     3.14.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8220,6 +8220,7 @@ JiTA.menu = {
 #jita-menu .jita-sw.on .knob { left: 20px; }\
 #jita-menu .jita-menu-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 0 2px; }\
 #jita-menu .jita-btn { background: #2c333a; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 6px 10px; cursor: pointer; font-size: 12px; }\
+#jita-menu .jita-cred-input { background: #0f1316; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 4px 8px; font-size: 12px; }\
 #jita-menu .jita-btn:hover { background: #343c44; border-color: #4c9aff; }\
 #jita-menu .jita-btn:disabled { opacity: .5; cursor: default; }\
 #jita-menu .jita-btn:disabled:hover { background: #2c333a; border-color: #3a434d; }\
@@ -8829,8 +8830,7 @@ JiTA.credits = {
                 '#jita-menu.jita-credits-view .jita-menu-head { flex: 0 0 auto; }' +
                 '#jita-menu.jita-credits-view .jita-cred-scroll { flex: 1 1 auto; min-height: 0; max-height: 68vh; overflow-y: auto; padding: 8px 16px 12px; }' +
                 '#jita-menu.jita-credits-view .jita-cred-foot { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 16px; border-top: 1px solid #3a434d; background: #282d33; }' +
-                '#jita-menu.jita-credits-view .jita-cred-sub { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #7a8694; margin: 14px 0 6px; }' +
-                '.jita-cred-input { background: #0f1316; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 4px 8px; font-size: 12px; }'
+                '#jita-menu.jita-credits-view .jita-cred-sub { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #7a8694; margin: 14px 0 6px; }'
             );
         } catch (e) { /* ignore */ }
     },
@@ -10703,7 +10703,7 @@ JiTA.triage = {
         if (k === 'e' || k === 'E') { T._toggleTranslate(); return; }
         if (k === 'Enter') { if (T._armed) { T._execArmed(); } return; }
         if (k === 't' || k === 'T') { T._arm({ type: 'trash', label: 'Close ' + item.key + ' as Won\'t Do', again: 'T' }); return; }
-        if (k === 'g' || k === 'G') { T._gmKey(item); return; }   // ZD pre-gate first; the picker follows when it clears
+        if (k === 'g' || k === 'G') { T._gmKey(); return; }   // category picker (no pre-gate is possible - see _gmKey)
         if (k >= '1' && k <= '9') { T._armAttach(parseInt(k, 10), k); return; }   // number row AND numpad both yield '1'-'9' in e.key
     },
 
@@ -10772,9 +10772,8 @@ JiTA.triage = {
     // app-side, in the Forge app / Zendesk). So a pre-gate ("this report has no ticket, G will fail") is
     // impossible from triage; the _waitClosed post-verify below is the ONLY guard against the rule's
     // no-ticket bail-out, and the category picker opens unconditionally.
-    _gmKey: function (item) {
+    _gmKey: function () {
         var T = JiTA.triage;
-        void item;
         T._disarm();
         T._gmPick = true;
         T._setMsg('GM category: 1 ' + JITA_GM_CATEGORIES[0] + ' · 2 ' + JITA_GM_CATEGORIES[1] + ' · 3 ' + JITA_GM_CATEGORIES[2] + ' · 4 ' + JITA_GM_CATEGORIES[3] + ' · Esc cancel', true);
