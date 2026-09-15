@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.14.1
+// @version     3.14.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -10503,6 +10503,8 @@ JiTA.triage = {
         var created = JiTA.util.fmtDate(item.created);
         if (created) { $('<span class="jt-muted"></span>').text('Created ' + created).appendTo($h); }
         if (item.status) { $('<span class="jt-status"></span>').text(item.status).appendTo($h); }
+        // The report's TITLE (summary) - lost once in a strip-reorder edit; it belongs between the head row and the description.
+        $('<div class="jt-sum"></div>').text(item.summary || '').appendTo($rep);
         var $desc = $('<div id="jt-desc" class="jt-desc jt-muted"></div>').text('Loading report…').appendTo($rep);
         // Attachments (metadata rode along in the queue fetch), below the description. Images and text-ish
         // files (logs.txt & co) open in the full-screen in-overlay viewer - a log with the EVE header is even
@@ -10832,12 +10834,17 @@ JiTA.triage = {
                 // Zendesk ticket it bails server-side, posts a "Manual processing" comment and leaves the report
                 // OPEN. The page flow pre-checks the Zendesk panel DOM; triage has no page, so verify by the
                 // ground truth instead: a real conversion auto-closes the report. Poll until it closes; if it
-                // stays open, fail WITHOUT removing it from the queue/DB.
+                // is still open after the 10s foreground window, verification continues in the background (_pendingGm).
                 return jitaInvokeGmAutomation(key, a.category).then(function () {
                     T._setMsg('Automation invoked - waiting for ' + key + ' to close…');
-                    return T._waitClosed(key, 4).then(function (closed) {   // 1.5s + 4x2s = ~10s worst case
-                        if (!closed) { throw new Error(key + ' is still open - the rule likely found no (or multiple) linked Zendesk ticket and only left a comment. O opens it for manual processing'); }
-                        return 'Converted ' + key + ' to GM support (' + a.category + ')';
+                    return T._waitClosed(key, 4).then(function (closed) {   // 1.5s + 4x2s = ~10s foreground window
+                        if (closed) { return 'Converted ' + key + ' to GM support (' + a.category + ')'; }
+                        // Still open after 10s: seen in the wild as a merely SLOW rule (EBR-68974 closed later), so
+                        // this is NOT a failure verdict. Release the keys and keep verifying in the background
+                        // (_pendingGm, up to ~60s more); the cleanup runs the moment it closes, wherever the user
+                        // is in the queue by then. Only if it never closes does a warning follow.
+                        T._pendingGm(key, a.category);
+                        return null;   // handled asynchronously - neither an error nor a completion yet
                     });
                 });
             }
@@ -10849,6 +10856,37 @@ JiTA.triage = {
             T._busy = false;
             T._setMsg('Failed: ' + (e && e.message || e), true);
         });
+    },
+
+    // A GM conversion whose auto-close hadn't landed within the foreground window. Keep the UI usable (keys
+    // released) and poll in the background every 5s for up to ~60s; on close, run the normal after-action
+    // cleanup by KEY (DB row, queue entry wherever it now sits, counter) - never while another action is
+    // executing (it would reset _busy under it; re-check on the next tick instead). If it never closes, warn -
+    // but only if that report is still the one on screen.
+    PENDING_TRIES: 10,
+    PENDING_EVERY_MS: 5000,
+    _pendingGm: function (key, category) {
+        var T = JiTA.triage, started = Date.now();
+        T._busy = false;
+        T._setMsg(key + ' is still open after 10s - the GM rule may just be slow. Verifying in the background for up to a minute; ←/→ to move on meanwhile.', true);
+        (function poll(n) {
+            setTimeout(function () {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status', dataType: 'json' })
+                    .done(function (d) {
+                        var st = (d && d.fields && d.fields.status && d.fields.status.name) || '';
+                        if (JiTA.util.isClosedStatus(st)) {
+                            if (T._busy) { poll(n); return; }   // another action is mid-flight - complete on the next tick
+                            T._afterAction(key, 'Converted ' + key + ' to GM support (' + category + ') - the rule took ~' + Math.round((Date.now() - started) / 1000 + 10) + 's');
+                            return;
+                        }
+                        if (n > 0) { poll(n - 1); return; }
+                        if (T._open && T._queue[T._idx] && T._queue[T._idx].key === key) {
+                            T._setMsg(key + ' is still open after ~60s - the rule likely found no (or multiple) linked Zendesk ticket and only left a comment. O opens it for manual processing.', true);
+                        }
+                    })
+                    .fail(function () { if (n > 0) { poll(n - 1); } });
+            }, T.PENDING_EVERY_MS);
+        })(T.PENDING_TRIES);
     },
 
     _afterAction: function (key, okMsg) {
