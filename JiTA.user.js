@@ -11923,12 +11923,12 @@ JiTA.leadduty = {
         '199756496': 'Training Session Reports',
         '199762273': 'ECAID - Lead Section'
     },
-    COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
+    COVERAGE_MONTHS: 18,         // read the whole section at least this often; drives the derived per-Lead count
     // The four-eyes rule: how many DIFFERENT Leads must read each page inside the coverage window. One pair
-    // of eyes misses things - the reader who wrote a page, or who read it last year, skims what they already
-    // believe is there. Two independent readings a year is the point of the whole rotation. It doubles the
-    // monthly reading: at 232 pages and 3 Leads that is 13 pages each rather than 7, and COVERAGE_MONTHS is
-    // the dial if that turns out to be too much.
+    // of eyes misses things - the reader who wrote a page, or who read it last time, skims what they already
+    // believe is there. Two independent readings is the point of the whole rotation. It doubles the monthly
+    // reading, which is what COVERAGE_MONTHS is set against: at 232 pages and 3 Leads, 18 months puts it at
+    // 9 pages each per month rather than the 5 a single pass would need.
     EYES: 2,
     QC_COUNT: 10,                // QC items sampled per Lead per month
     // ISD handles far more bug reports than it creates defects, so a proportional sample is almost all
@@ -12316,8 +12316,9 @@ JiTA.leadduty = {
         },
 
         // How many of a page's reviews fall INSIDE the current coverage window: 0, 1 or 2. This is what the
-        // four-eyes rule is measured against - a page two Leads read last year is not covered this year, so
-        // it goes back to needing a fresh pair. (lastReviewed >= prevReviewed always, so the count is honest.)
+        // four-eyes rule is measured against - a pair of readings that has aged out of the window no longer
+        // counts, so the page goes back to needing a fresh pair. (lastReviewed >= prevReviewed always, so
+        // the count is honest.)
         eyesIn: function (ledgerValue, id) {
             var L = JiTA.leadduty, win = L.coverageMonths();
             var last = (ledgerValue && ledgerValue.lastReviewed && ledgerValue.lastReviewed[id]) || '';
@@ -13277,7 +13278,7 @@ JiTA.leadduty = {
             return h + R._table(['Measure', 'Value'], [
                 [R._txt('Pages in rotation'), R._txt(String(st.total))],
                 [R._txt('Excluded from rotation'), R._txt(String(pool.excludedCount || 0) + ' of ' + (pool.rawCount || st.total) + ' crawled')],
-                [R._txt('Read by ' + st.eyes + ' different Leads this year'), R._txt(String(st.covered))],
+                [R._txt('Read by ' + st.eyes + ' different Leads in the last ' + st.coverage + ' months'), R._txt(String(st.covered))],
                 [R._txt('Waiting on a second reader'), R._txt(String(st.single))],
                 [R._txt('Never reviewed'), R._txt(String(st.never))],
                 [R._txt('Overdue (older than ' + st.coverage + ' months)'), R._txt(String(st.overdue))],
@@ -13473,12 +13474,6 @@ JiTA.leadduty.ui = {
             var age = L._monthsSince(last[id]);
             var meta = !last[id] ? 'never reviewed'
                 : ('last reviewed ' + last[id] + (by[id] ? (' by ' + by[id]) : '') + (age != null ? (' · ' + age + ' month' + (age === 1 ? '' : 's') + ' ago') : ''));
-            // Which pass this is matters to how it should be read: a second reader is there to catch what the
-            // first one's assumptions let through, and saying so is the difference between two readings and
-            // one reading done twice.
-            var eyes = L.wiki.eyesIn(res.ledgerValue, id);
-            if (eyes === 1 && by[id]) { meta += ' · you are the second pair of eyes'; }
-            else if (!last[id] || eyes === 0) { meta += ' · first of ' + L.eyes() + ' readings this year'; }
             $('<span class="ld-meta"></span>').text(meta).appendTo($row);
             var $act = $('<span class="ld-act"></span>').appendTo($row);
             if (!done) {
