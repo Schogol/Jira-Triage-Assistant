@@ -251,15 +251,20 @@ if (!JITA_NO_JIRA_UI && flagOn('scrollbar')) {
 // Single Tampermonkey menu entry. All feature toggles and Triage Assistant actions (sync / rebuild /
 // embedding backend) live in an in-page settings overlay (JiTA.menu) instead of a long flat list of GM
 // menu commands. The callback references JiTA lazily, so it's fine that the namespace is defined later.
-if (!JITA_NO_JIRA_UI) {
+if (!JITA_IS_FORGE_FRAME) {
+    // Available on Confluence too: the Lead-duties diagnostics (Test Confluence access, Show ledger) are
+    // exactly what you want to hand a Lead who is standing on the wiki wondering why nothing happened.
+    // render() hides the Jira-only sections there.
     GM_registerMenuCommand("⚙ Jira Triage Assistant - Settings…", function () {
         if (typeof JiTA !== 'undefined' && JiTA.menu) { JiTA.menu.open(); }
     });
     // Declutter: choose which Details fields / collapsible sections to hide (per issue-type). Built from the
-    // issue you're viewing, so open a bug report or defect first.
-    GM_registerMenuCommand("Declutter Jira fields…", function () {
-        if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.openConfig(); }
-    });
+    // issue you're viewing, so open a bug report or defect first - hence Jira-only.
+    if (!JITA_IS_WIKI) {
+        GM_registerMenuCommand("Declutter Jira fields…", function () {
+            if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.openConfig(); }
+        });
+    }
 }
 
 
@@ -8348,10 +8353,11 @@ JiTA.menu = {
                 JiTA.ui.ensure();
             }
         }));
-        // ISD Credits: mount / tear down the corner badge (and start the scheduler) on toggle.
+        // ISD Credits: mount / tear down the corner badge (and start the scheduler) on toggle. The badge and
+        // its crawl belong to Jira tabs only - toggling from Confluence still persists the flag for them.
         $feat.append(JiTA.menu._toggleRow('ISD Credits', 3, function () {
             if (!flagOn('credits')) { JiTA.credits.badge.remove(); }
-            else { JiTA.credits.badge.mount(); JiTA.credits.sched.start(); }
+            else if (!JITA_NO_JIRA_UI) { JiTA.credits.badge.mount(); JiTA.credits.sched.start(); }
         }));
         $p.append($feat);
 
@@ -8369,8 +8375,8 @@ JiTA.menu = {
             .on('click', function () { JiTA.responses.openEditor(); }).appendTo($respActions);
         $p.append($resp);
 
-        // ---- Triage Assistant (only when enabled) ----
-        if (flagOn('similarDefects')) {
+        // ---- Triage Assistant (only when enabled, and only on Jira - its actions are all Jira-tab machinery) ----
+        if (flagOn('similarDefects') && !JITA_IS_WIKI) {
             var $ta = $('<div class="jita-menu-sect"></div>');
             $('<h3>Triage Assistant</h3>').appendTo($ta);
 
@@ -8510,6 +8516,44 @@ JiTA.menu = {
                     if (!document.getElementById('jita-menu')) { return; }
                     $test.prop('disabled', false);
                     $ldStatus.text('Ledger page ' + page + ': ' + (out.length ? (out.join(' · ') + ' · ') : '') + String(e && e.message || e));
+                });
+            });
+
+            // The ledger is a content PROPERTY, so it is invisible in the page body - this is the only way to
+            // see it. Summary in the status line, full JSON to the console.
+            var $show = $('<button class="jita-btn" title="Read the shared ledger and print the full JSON to the console (F12)">Show ledger</button>').appendTo($ldAct);
+            $show.on('click', function () {
+                var page = JiTA.leadduty.ledgerPage();
+                $show.prop('disabled', true);
+                $ldStatus.text('Reading the ledger…');
+                Promise.all([
+                    JiTA.conf.getProperty(page, JiTA.leadduty.LEDGER_KEY),
+                    JiTA.conf.getProperty(page, JiTA.leadduty.QC_LEDGER_KEY)
+                ]).then(function (r) {
+                    if (!document.getElementById('jita-menu')) { return; }
+                    $show.prop('disabled', false);
+                    var wiki = r[0], qc = r[1], bits = [];
+                    if (window.console) {
+                        console.log('[JiTA.leadduty] page ' + page + ' property ' + JiTA.leadduty.LEDGER_KEY + ':', wiki ? wiki.value : '(does not exist yet)');
+                        console.log('[JiTA.leadduty] page ' + page + ' property ' + JiTA.leadduty.QC_LEDGER_KEY + ':', qc ? qc.value : '(does not exist yet)');
+                    }
+                    if (!wiki) {
+                        bits.push('wiki ledger: not created yet - open Lead duties once to freeze this month');
+                    } else {
+                        var v = wiki.value || {};
+                        var months = Object.keys(v.months || {}).sort();
+                        bits.push('wiki ledger v' + wiki.version + ': ' + Object.keys(v.lastReviewed || {}).length +
+                            ' page(s) reviewed, month(s) ' + (months.join(', ') || 'none'));
+                    }
+                    bits.push(qc
+                        ? ('QC ledger v' + qc.version + ': month(s) ' + (Object.keys((qc.value || {}).months || {}).sort().join(', ') || 'none'))
+                        : 'QC ledger: not created yet');
+                    bits.push('full JSON in the console (F12)');
+                    $ldStatus.text(bits.join(' · '));
+                }, function (e) {
+                    if (!document.getElementById('jita-menu')) { return; }
+                    $show.prop('disabled', false);
+                    $ldStatus.text(String(e && e.message || e));
                 });
             });
 
@@ -9053,7 +9097,7 @@ JiTA.credits = {
     // ---- always-on corner badge (your current-month total + rank; reads cache; click opens the view) -----
     badge: {
         mount: function () {
-            if (!flagOn('credits') || JITA_IS_FORGE_FRAME) { return; }
+            if (!flagOn('credits') || JITA_NO_JIRA_UI) { return; }   // Jira tabs only (never the Forge iframe or Confluence)
             var el = document.getElementById('jita-credits-badge');
             if (!el) {
                 el = document.createElement('div');
