@@ -12076,6 +12076,24 @@ JiTA.leadduty = {
         }
         return page(null);
     },
+    // An issue's full changelog, oldest first. Mirrors the worker's crAllHistories: the endpoint pages, and
+    // a long-lived bug report carries more history than one page holds.
+    _changelog: function (key) {
+        var L = JiTA.leadduty, out = [];
+        function page(start) {
+            return L._get('/rest/api/3/issue/' + encodeURIComponent(key) + '/changelog?startAt=' + start + '&maxResults=100')
+                .then(function (res) {
+                    var vals = (res && res.values) || [];
+                    out = out.concat(vals);
+                    if (!vals.length || (start + vals.length) >= ((res && res.total) || 0)) {
+                        out.sort(function (a, b) { return (a.created || '') < (b.created || '') ? -1 : 1; });
+                        return out;
+                    }
+                    return page(start + vals.length);
+                });
+        }
+        return page(0);
+    },
 
     // ---- ledger: read-modify-write with optimistic concurrency ---------------------------------------
     ledger: {
@@ -12471,6 +12489,72 @@ JiTA.leadduty = {
             }, Promise.resolve()).then(function () { return excl; });
         },
 
+        // ---- who actually handled the item ------------------------------------------------------------
+        // Grading a decision is far easier when you can see whose decision it was. For a DEFECT that is its
+        // reporter, which the pool already carries for free. For a REPORT it is whoever moved it to Attached
+        // or Closed, which only the changelog knows - so that is one small GET per sampled report, cached for
+        // the session, and written into the ledger with the verdict so the Follow-ups tab and the published
+        // page never have to fetch it again.
+        _actorCache: {},
+
+        // Mirrors the worker's crIsAutomation. CCP's convert-to-support and convert-to-defect rules act AS the
+        // automation app account, so taking the changelog author at face value would name a robot instead of
+        // the Bug Hunter who triggered it.
+        _isAutomation: function (author) {
+            if (!author) { return false; }
+            if (JiTA.credits.AUTOMATION_ID && author.accountId === JiTA.credits.AUTOMATION_ID) { return true; }
+            if (String(author.emailAddress || '').toLowerCase() === String(JiTA.credits.AUTOMATION_EMAIL).toLowerCase()) { return true; }
+            return String(author.displayName || '').toLowerCase().indexOf('automation for jira') !== -1;
+        },
+
+        // Who the report was assigned to as of `ts`, read from the changelog's own assignee items - their
+        // `toString` carries the display name, so this costs no extra user lookup.
+        _assigneeAt: function (histories, ts) {
+            var who = null;
+            for (var i = 0; i < histories.length; i++) {
+                if ((histories[i].created || '') > ts) { break; }
+                var items = histories[i].items || [];
+                for (var j = 0; j < items.length; j++) {
+                    if (items[j].field === 'assignee') { who = items[j].toString || null; }
+                }
+            }
+            return who;
+        },
+
+        // Resolves a display name, or '' when it can't be determined. Deliberately never rejects: not knowing
+        // who handled something must not stop a Lead from grading it.
+        actor: function (item) {
+            var L = JiTA.leadduty, Q = L.qc;
+            if (!item || !item.key) { return Promise.resolve(''); }
+            if (item.actor) { return Promise.resolve(item.actor); }
+            if (Object.prototype.hasOwnProperty.call(Q._actorCache, item.key)) { return Promise.resolve(Q._actorCache[item.key]); }
+            if (item.kind !== 'report') {
+                Q._actorCache[item.key] = item.reporterName || '';
+                return Promise.resolve(Q._actorCache[item.key]);
+            }
+            return L._changelog(item.key).then(function (hist) {
+                var want = {}, last = null;
+                L.QC_EBR_STATUSES.forEach(function (s) { want[String(s).toLowerCase()] = true; });
+                // The LAST transition into Attached / Closed, not the first: a report that was re-opened and
+                // then handled again is being graded on the decision that stuck.
+                for (var i = 0; i < hist.length; i++) {
+                    var items = hist[i].items || [];
+                    for (var j = 0; j < items.length; j++) {
+                        if (items[j].field === 'status' && want[String(items[j].toString || '').toLowerCase()]) { last = hist[i]; }
+                    }
+                }
+                var name = '';
+                if (last) {
+                    var author = last.author || {};
+                    name = Q._isAutomation(author)
+                        ? (Q._assigneeAt(hist, last.created || '') || 'automation')
+                        : (author.displayName || '');
+                }
+                Q._actorCache[item.key] = name;
+                return name;
+            }, function () { return ''; });   // no changelog access / a network blip: just show nothing
+        },
+
         // Seeded shuffle, then eligibility-aware greedy. The inner rotation loop matters: Leads are the most
         // active actioners, so "take the first N of my slice that I didn't author" under-fills badly. Here a
         // second Lead picks up an item its primary claimant authored, and everyone reaches quota.
@@ -12579,23 +12663,26 @@ JiTA.leadduty = {
         // Record a QC verdict. 'flag' additionally raises a FOLLOW-UP: a flag used to be nothing but a
         // one-Lead-visible amber row, so it is now lifted out of the month into a top-level `flags` map that
         // survives month pruning, carries a reason, shows on the ledger page, and has to be resolved by hand.
-        // `item` is the row being judged; its kind + summary are copied in so the Flags tab and the published
-        // page can render a flag long after the issue has dropped out of the sampled month.
+        // `item` is the row being judged; its kind, summary and resolved actor are copied in so the Flags tab
+        // and the published page can render a flag long after the issue has dropped out of the sampled month -
+        // and so nothing ever re-walks a changelog to name the person who handled it.
         markChecked: function (key, verdict, ym, note, item) {
             var L = JiTA.leadduty;
             ym = ym || L._prevYm();
             var handle = (L.me() && L.me().handle) || '?';
             var nowIso = new Date().toISOString();
             var txt = String(note == null ? '' : note).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').slice(0, 300);
+            var actor = String((item && item.actor) || '').slice(0, 80);
             return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
                 v = v || { v: 1, months: {}, done: {}, flags: {} };
                 v.done = v.done || {};
                 v.done[ym] = v.done[ym] || {};
                 v.done[ym][key] = { by: handle, at: nowIso, verdict: verdict || 'ok' };
+                if (actor) { v.done[ym][key].actor = actor; }
                 if (verdict === 'flag') {
                     v.flags = v.flags || {};
                     v.flags[key] = {
-                        by: handle, at: nowIso, ym: ym, note: txt,
+                        by: handle, at: nowIso, ym: ym, note: txt, actor: actor,
                         kind: (item && item.kind) || (/^EBR-/.test(key) ? 'report' : 'defect'),
                         summary: String((item && item.summary) || '').slice(0, 140)
                     };
@@ -12910,11 +12997,12 @@ JiTA.leadduty = {
             }
             var rows = open.map(function (o) {
                 return [R._issue(o.key), R._txt(o.flag.kind || ''), R._txt(o.flag.summary || ''),
-                    R._txt(o.flag.by || ''), R._when(o.flag.at), R._txt(o.flag.ym || ''),
-                    R._txt(o.flag.note || '')];
+                    R._txt(o.flag.actor || ''), R._txt(o.flag.by || ''), R._when(o.flag.at),
+                    R._txt(o.flag.ym || ''), R._txt(o.flag.note || '')];
             });
-            return h + '<p><strong>' + open.length + '</strong> open.</p>' +
-                R._table(['Issue', 'Type', 'Summary', 'Flagged by', 'Flagged', 'From month', 'Reason'], rows);
+            return h + '<p><strong>' + open.length + '</strong> open. "Handled by" is whoever moved the report ' +
+                'to Attached or Closed, or created the defect.</p>' +
+                R._table(['Issue', 'Type', 'Summary', 'Handled by', 'Flagged by', 'Flagged', 'From month', 'Reason'], rows);
         },
 
         _wikiSection: function (wiki, ym, byId) {
@@ -12962,7 +13050,7 @@ JiTA.leadduty = {
                     n++; total++;
                     if (d) { c++; checked++; }
                     if (d && d.verdict === 'flag') { f++; flagged++; }
-                    rows.push([R._issue(key), R._txt(lead),
+                    rows.push([R._issue(key), R._txt(lead), R._txt((d && d.actor) || ''),
                         R._txt(!d ? 'Outstanding' : (d.verdict === 'flag' ? 'Flagged' : 'Checked')),
                         R._when(d && d.at)]);
                 });
@@ -12974,7 +13062,9 @@ JiTA.leadduty = {
                 ' reports and defects, ' + R._txt(String(rec.quota || '?')) + ' per Lead.</p>' +
                 R._table(['Lead', 'Sampled', 'Checked', 'Flagged'], sum) +
                 '<h3>Items</h3>' +
-                R._table(['Issue', 'Assigned to', 'Verdict', 'When'], rows);
+                '<p>"Handled by" is whoever moved the report to Attached or Closed, or created the defect. ' +
+                'It is recorded with the verdict, so an item nobody has checked yet does not carry one.</p>' +
+                R._table(['Issue', 'Assigned to', 'Handled by', 'Verdict', 'When'], rows);
         },
 
         _coverageSection: function (wiki, pool) {
@@ -13243,6 +13333,21 @@ JiTA.leadduty.ui = {
             $('<span class="ld-kind"></span>').text(it.kind === 'report' ? 'report' : 'defect').appendTo($row);
             $('<span class="ld-sum"></span>').text(it.summary || '').appendTo($row);
             if (it.status) { $('<span class="ld-st"></span>').text(it.status).appendTo($row); }
+            // Whose decision is being graded: for a report, whoever moved it to Attached / Closed; for a
+            // defect, whoever created it. A verdict already recorded carries the name in the ledger, so only
+            // an unjudged report costs a changelog read - and it fills in behind the row rather than delaying it.
+            var label = it.kind === 'report' ? 'handled by ' : 'created by ';
+            var $who = $('<span class="ld-meta"></span>').text('…').appendTo($row);
+            if (done && done.actor) {
+                it.actor = done.actor;
+                $who.text(label + done.actor);
+            } else {
+                L.qc.actor(it).then(function (name) {
+                    if (!U.isOpen()) { return; }
+                    it.actor = name;
+                    $who.text(name ? (label + name) : '');
+                });
+            }
             // Free hover preview for defects: EO/PLAT/EDR are already in the local DB.
             if (it.kind === 'defect') {
                 $row.on('mouseenter', function () {
@@ -13261,7 +13366,7 @@ JiTA.leadduty.ui = {
                 // ledger plus one targeted key lookup - it never re-crawls the pool).
                 var reload = function () { U._qc = null; U._loadQc(false); };
                 $('<button class="jita-btn ld-mini">Checked</button>').on('click', function () {
-                    U._act(this, L.qc.markChecked(it.key, 'ok', ym), L.qc.localKey(ym), it.key, reload);
+                    U._act(this, L.qc.markChecked(it.key, 'ok', ym, null, it), L.qc.localKey(ym), it.key, reload);
                 }).appendTo($act);
                 $('<button class="jita-btn ld-mini" title="Raise a follow-up: the other Leads see it under Follow-ups and on the ledger page until someone resolves it">Flag</button>').on('click', function () {
                     // A flag without a reason is nearly useless to whoever picks it up, so ask for one. An
@@ -13316,8 +13421,14 @@ JiTA.leadduty.ui = {
                 .attr('href', JiTA.HOST + '/browse/' + o.key).text(o.key).appendTo($row);
             $('<span class="ld-kind"></span>').text(f.kind === 'report' ? 'report' : 'defect').appendTo($row);
             $('<span class="ld-sum"></span>').text(f.note || f.summary || '(no reason given)').appendTo($row);
-            $('<span class="ld-meta"></span>')
-                .text('flagged by ' + (f.by || '?') + ' · ' + String(f.at || '').slice(0, 10) + ' · from ' + (f.ym || '?')).appendTo($row);
+            // Who handled the issue is the first thing anyone picking this up needs; it was resolved when the
+            // flag was raised, so it is read straight out of the ledger here.
+            var meta = [];
+            if (f.actor) { meta.push((f.kind === 'report' ? 'handled by ' : 'created by ') + f.actor); }
+            meta.push('flagged by ' + (f.by || '?'));
+            meta.push(String(f.at || '').slice(0, 10));
+            meta.push('from ' + (f.ym || '?'));
+            $('<span class="ld-meta"></span>').text(meta.join(' · ')).appendTo($row);
             var $act = $('<span class="ld-act"></span>').appendTo($row);
             $('<button class="jita-btn ld-mini" title="Close this follow-up out - it leaves the list and the ledger page">Resolve</button>')
                 .on('click', function () {
