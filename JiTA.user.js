@@ -11885,6 +11885,11 @@ JiTA.leadduty = {
     },
     COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
     QC_COUNT: 10,                // QC items sampled per Lead per month
+    // ISD handles far more bug reports than it creates defects, so a proportional sample is almost all
+    // reports and a Lead can go months without grading a single defect. This is the floor: fill this many
+    // defect slots first, then make up the rest from reports. It is a floor, not a quota - if the month
+    // produced fewer defects than the roster can absorb, everyone simply gets what there is.
+    QC_MIN_DEFECTS: 2,
 
     // ---- GM keys (state, not configuration) ----
     ME_KEY: 'leadDutyMe',
@@ -11956,6 +11961,7 @@ JiTA.leadduty = {
     ledgerPage: function () { return JiTA.leadduty.LEDGER_PAGE; },
     coverageMonths: function () { return JiTA.leadduty.COVERAGE_MONTHS; },
     qcCount: function () { return JiTA.leadduty.QC_COUNT; },
+    qcMinDefects: function () { return JiTA.leadduty.QC_MIN_DEFECTS; },
 
     // ---- deterministic PRNG (xmur3 seed + mulberry32 stream) -----------------------------------------
     // Tiny, dependency-free and identical across browsers, which is what makes every Lead shuffle the QC
@@ -12555,29 +12561,50 @@ JiTA.leadduty = {
             }, function () { return ''; });   // no changelog access / a network blip: just show nothing
         },
 
-        // Seeded shuffle, then eligibility-aware greedy. The inner rotation loop matters: Leads are the most
-        // active actioners, so "take the first N of my slice that I didn't author" under-fills badly. Here a
-        // second Lead picks up an item its primary claimant authored, and everyone reaches quota.
-        // Returns the assignment map, disjoint across Leads.
+        // Seeded shuffle, then eligibility-aware greedy in three passes. The inner rotation loop matters:
+        // Leads are the most active actioners, so "take the first N of my slice that I didn't author"
+        // under-fills badly. Here a second Lead picks up an item its primary claimant authored, and everyone
+        // reaches quota.
+        //
+        // The passes are what guarantee defects get looked at. Drawing straight from the shuffled pool would
+        // mirror its composition, and the pool is overwhelmingly bug reports, so a Lead could go a whole
+        // quarter without grading one defect. So: fill the defect floor first, make the rest up from reports,
+        // then let any leftover defect top up a Lead the reports could not fill. Disjoint across Leads.
         computeAssign: function (poolKeys, roster, quota, excl, ym) {
             var L = JiTA.leadduty;
             var shuffled = L._shuffle(poolKeys, 'jita-leadduty-qc|v1|' + ym);
             var offset = L._monthIndex(ym) % roster.length;
-            var assign = {}, counts = {};
-            roster.forEach(function (h) { assign[h] = []; counts[h] = 0; });
-            for (var i = 0; i < shuffled.length; i++) {
-                var full = true;
-                for (var c = 0; c < roster.length; c++) { if (counts[roster[c]] < quota) { full = false; break; } }
-                if (full) { break; }
-                for (var r = 0; r < roster.length; r++) {
-                    var h = roster[(i + r + offset) % roster.length];
-                    if (counts[h] >= quota) { continue; }
-                    if (excl[h] && excl[h][shuffled[i]]) { continue; }
-                    assign[h].push(shuffled[i]);
-                    counts[h]++;
-                    break;
+            var assign = {}, counts = {}, defects = {}, taken = {};
+            roster.forEach(function (h) { assign[h] = []; counts[h] = 0; defects[h] = 0; });
+            var floor = Math.min(L.qcMinDefects(), quota);
+
+            // Hand each key in `list` to the first Lead (in the month's rotating order) who is under quota,
+            // still has room under `cap`, and did not action that item themselves.
+            function pass(list, cap) {
+                for (var i = 0; i < list.length; i++) {
+                    var key = list[i];
+                    if (taken[key]) { continue; }
+                    var full = true;
+                    for (var c = 0; c < roster.length; c++) { if (counts[roster[c]] < quota && cap(roster[c]) > 0) { full = false; break; } }
+                    if (full) { return; }
+                    for (var r = 0; r < roster.length; r++) {
+                        var h = roster[(i + r + offset) % roster.length];
+                        if (counts[h] >= quota || cap(h) <= 0) { continue; }
+                        if (excl[h] && excl[h][key]) { continue; }
+                        assign[h].push(key);
+                        counts[h]++;
+                        taken[key] = true;
+                        if (!/^EBR-/.test(key)) { defects[h]++; }
+                        break;
+                    }
                 }
             }
+            var defList = [], repList = [];
+            for (var s = 0; s < shuffled.length; s++) { (/^EBR-/.test(shuffled[s]) ? repList : defList).push(shuffled[s]); }
+            var room = function (h) { return quota - counts[h]; };
+            pass(defList, function (h) { return floor - defects[h]; });   // the defect floor
+            pass(repList, room);                                          // the bulk of the work: reports
+            pass(defList, room);                                          // short only because reports ran out
             return assign;
         },
 
@@ -12601,8 +12628,11 @@ JiTA.leadduty = {
                     return L.roster.resolve(false).then(function (rr) {
                         return Q.fetchExclusions(ym, roster, rr.accByHandle, pool).then(function (excl) {
                             var quota = Math.min(L.qcCount(), Math.max(1, Math.floor(pool.keys.length / roster.length)));
+                            var defectsInPool = 0;
+                            for (var d = 0; d < pool.keys.length; d++) { if (!/^EBR-/.test(pool.keys[d])) { defectsInPool++; } }
                             var rec = {
                                 roster: roster, quota: quota, poolSize: pool.keys.length,
+                                minDefects: Math.min(L.qcMinDefects(), quota), poolDefects: defectsInPool,
                                 assign: Q.computeAssign(pool.keys, roster, quota, excl, ym),
                                 createdAt: new Date().toISOString(),
                                 createdBy: (L.me() && L.me().handle) || '?'
@@ -12718,6 +12748,56 @@ JiTA.leadduty = {
             });
             out.sort(function (a, b) { return (a.flag.at || '') < (b.flag.at || '') ? 1 : -1; });
             return out;
+        },
+
+        // Open follow-ups grouped by the Bug Hunter whose decision was flagged. Three separate pings about
+        // three reports is nagging; one note listing them is feedback - so the tab is organised the way the
+        // conversation actually happens. A flag raised before the handler was recorded has no name to group
+        // under and collects in its own bucket rather than being dropped.
+        UNKNOWN_ACTOR: '(handler not recorded)',
+        groupFlags: function (ledgerValue) {
+            var L = JiTA.leadduty;
+            var open = L.qc.openFlags(ledgerValue), byName = {};
+            open.forEach(function (o) {
+                var name = o.flag.actor || L.qc.UNKNOWN_ACTOR;
+                (byName[name] = byName[name] || []).push(o);
+            });
+            return Object.keys(byName).map(function (name) {
+                return { name: name, known: name !== L.qc.UNKNOWN_ACTOR, entries: byName[name] };
+            }).sort(function (a, b) {
+                if (a.entries.length !== b.entries.length) { return b.entries.length - a.entries.length; }
+                return a.name < b.name ? -1 : 1;
+            });
+        },
+
+        // The message a Lead pastes to that Bug Hunter. Written to be sent as-is, so it names each issue,
+        // says what was wrong with it in the flagger's own words, and frames the whole thing as the routine
+        // monthly pass it is rather than a reprimand. The Lead can edit it before copying.
+        followUpText: function (group) {
+            var L = JiTA.leadduty, me = L.me() || {};
+            var entries = (group && group.entries) || [];
+            var reports = 0, defects = 0;
+            entries.forEach(function (e) { if ((e.flag.kind || 'report') === 'report') { reports++; } else { defects++; } });
+            // A report is HANDLED, a defect is CREATED - a Bug Hunter told they mishandled a defect they
+            // filed would rightly be confused about what they are being asked to look at.
+            var what = (reports && defects) ? 'the bug reports you handled and the defects you created'
+                : (defects ? 'the defects you created' : 'the bug reports you handled');
+            var out = ['Hey ' + ((group && group.known && group.name) || 'there') + ',', ''];
+            out.push('As part of this month\'s quality control I went back over some of ' + what +
+                ', and ' + (entries.length === 1 ? 'one of them needs' : 'these ones need') + ' another look:');
+            out.push('');
+            entries.forEach(function (e) {
+                var f = e.flag;
+                out.push('* ' + e.key + (f.summary ? (' - ' + f.summary) : ''));
+                out.push('  ' + (f.note || '(no reason was recorded)'));
+            });
+            out.push('');
+            out.push('This is not a telling-off - we sample everyone every month to keep our handling ' +
+                'consistent. If you think any of these calls were right, say so and we will go through it together.');
+            out.push('');
+            out.push('Thanks,');
+            out.push(me.displayName || me.handle || '');
+            return out.join('\n');
         }
     },
 
@@ -12995,7 +13075,13 @@ JiTA.leadduty = {
                 return h + '<p>Nothing flagged is waiting on anyone. A flag raised during quality control ' +
                     'appears here until a Lead resolves it in the overlay.</p>';
             }
-            var rows = open.map(function (o) {
+            // Ordered by the person who handled them, so the page reads the same way the Follow-ups tab does:
+            // everything one Bug Hunter needs telling about sits together.
+            var rows = open.slice().sort(function (a, b) {
+                var an = a.flag.actor || '', bn = b.flag.actor || '';
+                if (an !== bn) { return an < bn ? -1 : 1; }
+                return (a.flag.at || '') < (b.flag.at || '') ? 1 : -1;
+            }).map(function (o) {
                 return [R._issue(o.key), R._txt(o.flag.kind || ''), R._txt(o.flag.summary || ''),
                     R._txt(o.flag.actor || ''), R._txt(o.flag.by || ''), R._when(o.flag.at),
                     R._txt(o.flag.ym || ''), R._txt(o.flag.note || '')];
@@ -13059,7 +13145,11 @@ JiTA.leadduty = {
             return h +
                 '<p><strong>' + checked + ' of ' + total + '</strong> sampled items checked, ' + flagged +
                 ' flagged. Drawn from a pool of ' + R._txt(String(rec.poolSize || '?')) +
-                ' reports and defects, ' + R._txt(String(rec.quota || '?')) + ' per Lead.</p>' +
+                ' reports and defects' +
+                (rec.poolDefects != null ? (' (' + R._txt(String(rec.poolDefects)) + ' of them defects)') : '') +
+                ', ' + R._txt(String(rec.quota || '?')) + ' per Lead' +
+                (rec.minDefects ? (', at least ' + R._txt(String(rec.minDefects)) + ' of them defects where the month produced enough') : '') +
+                '.</p>' +
                 R._table(['Lead', 'Sampled', 'Checked', 'Flagged'], sum) +
                 '<h3>Items</h3>' +
                 '<p>"Handled by" is whoever moved the report to Attached or Closed, or created the defect. ' +
@@ -13378,7 +13468,16 @@ JiTA.leadduty.ui = {
             }
         });
 
-        var bits = [doneCount + ' of ' + res.items.length + ' checked', 'pool ' + res.record.poolSize + ' items'];
+        var nDef = 0;
+        res.items.forEach(function (it) { if (it.kind !== 'report') { nDef++; } });
+        var bits = [doneCount + ' of ' + res.items.length + ' checked',
+            nDef + ' defect' + (nDef === 1 ? '' : 's') + ', ' + (res.items.length - nDef) + ' report' + (res.items.length - nDef === 1 ? '' : 's'),
+            'pool ' + res.record.poolSize + ' items'];
+        // The floor is a target, not a promise: say so when the month simply had too few defects to go round.
+        if (res.record.minDefects && nDef < res.record.minDefects) {
+            bits.push('only ' + (res.record.poolDefects != null ? res.record.poolDefects : 'a few') +
+                ' defect(s) created that month, so the floor of ' + res.record.minDefects + ' could not be met');
+        }
         if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
         U._status(bits.join(' · '));
         U._tabCount(res.ledgerValue);
@@ -13408,36 +13507,58 @@ JiTA.leadduty.ui = {
         var open = L.qc.openFlags(ledgerValue);
         U._tabCount(ledgerValue);
 
-        $('<div class="ld-sub"></div>').text('Open follow-ups').appendTo($b);
+        $('<div class="ld-sub"></div>').text('Open follow-ups, by the person who handled them').appendTo($b);
         if (!open.length) {
             $b.append($('<div class="ld-empty">Nothing is waiting on anyone. Flagging an item during quality control puts it here until a Lead resolves it.</div>'));
         }
 
-        open.forEach(function (o) {
-            var f = o.flag;
-            var $row = $('<div class="ld-row flagged"></div>').appendTo($b);
-            $('<span class="ld-tick"></span>').text('!').appendTo($row);
-            $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
-                .attr('href', JiTA.HOST + '/browse/' + o.key).text(o.key).appendTo($row);
-            $('<span class="ld-kind"></span>').text(f.kind === 'report' ? 'report' : 'defect').appendTo($row);
-            $('<span class="ld-sum"></span>').text(f.note || f.summary || '(no reason given)').appendTo($row);
-            // Who handled the issue is the first thing anyone picking this up needs; it was resolved when the
-            // flag was raised, so it is read straight out of the ledger here.
-            var meta = [];
-            if (f.actor) { meta.push((f.kind === 'report' ? 'handled by ' : 'created by ') + f.actor); }
-            meta.push('flagged by ' + (f.by || '?'));
-            meta.push(String(f.at || '').slice(0, 10));
-            meta.push('from ' + (f.ym || '?'));
-            $('<span class="ld-meta"></span>').text(meta.join(' · ')).appendTo($row);
-            var $act = $('<span class="ld-act"></span>').appendTo($row);
-            $('<button class="jita-btn ld-mini" title="Close this follow-up out - it leaves the list and the ledger page">Resolve</button>')
+        // Grouped per Bug Hunter, because the output of this tab is a conversation with a person, not a list
+        // of issues: one note covering everything they got wrong this month, ready to paste.
+        L.qc.groupFlags(ledgerValue).forEach(function (g) {
+            var $g = $('<div class="ld-group"></div>').appendTo($b);
+            var $head = $('<div class="ld-ghead"></div>').appendTo($g);
+            $('<span class="ld-gname"></span>').text(g.name).appendTo($head);
+            $('<span class="ld-gcount"></span>')
+                .text(g.entries.length + ' open follow-up' + (g.entries.length === 1 ? '' : 's')).appendTo($head);
+            var $gact = $('<span class="ld-act"></span>').appendTo($head);
+
+            // The message: hidden until asked for, editable once shown, and copied from whatever is in the
+            // box at the time - so a Lead can soften or sharpen it before it reaches anyone.
+            var $msg = $('<textarea class="ld-msg" spellcheck="false"></textarea>')
+                .val(L.qc.followUpText(g)).hide().appendTo($g);
+            var $toggle = $('<button class="jita-btn ld-mini" title="Show the message so you can edit it before copying">Edit text</button>')
                 .on('click', function () {
-                    var note = prompt('What was done about ' + o.key + '? (optional)', '');
-                    if (note === null) { return; }
-                    var $btn = $(this).prop('disabled', true);
-                    L.qc.resolveFlag(o.key, note).then(function () { U._loadFlags(false); },
-                        function (e) { $btn.prop('disabled', false); U._status('Could not resolve: ' + String(e && e.message || e)); });
-                }).appendTo($act);
+                    $msg.toggle();
+                    $toggle.text($msg.is(':visible') ? 'Hide text' : 'Edit text');
+                    if ($msg.is(':visible')) { $msg[0].style.height = Math.min(420, $msg[0].scrollHeight + 8) + 'px'; }
+                }).appendTo($gact);
+            $('<button class="jita-btn ld-mini" title="Copy a message listing every open follow-up for this person">Copy message</button>')
+                .on('click', function () {
+                    var $btn = $(this);
+                    U._copy($msg.val()).then(function () { U._flashBtn($btn, 'Copied'); },
+                        function () { $msg.show(); $toggle.text('Hide text'); $msg.trigger('select'); U._status('Could not reach the clipboard - the text is selected, copy it with Ctrl+C.'); });
+                }).appendTo($gact);
+
+            g.entries.forEach(function (o) {
+                var f = o.flag;
+                var $row = $('<div class="ld-row flagged"></div>').appendTo($g);
+                $('<span class="ld-tick"></span>').text('!').appendTo($row);
+                $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
+                    .attr('href', JiTA.HOST + '/browse/' + o.key).text(o.key).appendTo($row);
+                $('<span class="ld-kind"></span>').text(f.kind === 'report' ? 'report' : 'defect').appendTo($row);
+                $('<span class="ld-sum"></span>').text(f.note || f.summary || '(no reason given)').appendTo($row);
+                $('<span class="ld-meta"></span>')
+                    .text('flagged by ' + (f.by || '?') + ' · ' + String(f.at || '').slice(0, 10) + ' · from ' + (f.ym || '?')).appendTo($row);
+                var $act = $('<span class="ld-act"></span>').appendTo($row);
+                $('<button class="jita-btn ld-mini" title="Close this follow-up out - it leaves the list and the ledger page">Resolve</button>')
+                    .on('click', function () {
+                        var note = prompt('What was done about ' + o.key + '? (optional)', '');
+                        if (note === null) { return; }
+                        var $btn = $(this).prop('disabled', true);
+                        L.qc.resolveFlag(o.key, note).then(function () { U._loadFlags(false); },
+                            function (e) { $btn.prop('disabled', false); U._status('Could not resolve: ' + String(e && e.message || e)); });
+                    }).appendTo($act);
+            });
         });
 
         // A short tail of what was recently closed out, so "did anyone deal with that?" has an answer here
@@ -13459,7 +13580,38 @@ JiTA.leadduty.ui = {
             });
         }
 
-        U._status(open.length + ' open · ' + done.length + ' recently resolved' + (L._dry() ? ' · DRY RUN - nothing is written' : ''));
+        var people = L.qc.groupFlags(ledgerValue).length;
+        U._status(open.length + ' open across ' + people + ' ' + (people === 1 ? 'person' : 'people') +
+            ' · ' + done.length + ' recently resolved' + (L._dry() ? ' · DRY RUN - nothing is written' : ''));
+    },
+
+    // Copy to the clipboard, falling back to the old selection + execCommand path where the async API is
+    // unavailable or refused (it needs a secure context and a user gesture; a button click is one, but a
+    // browser policy can still say no). Rejects so the caller can show the text and let Ctrl+C finish it.
+    _copy: function (text) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); }
+        } catch (e) { /* fall through */ }
+        return new Promise(function (resolve, reject) {
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                var ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (ok) { resolve(); } else { reject(new Error('copy refused')); }
+            } catch (e2) { reject(e2); }
+        });
+    },
+
+    // Brief "it worked" on a button, then back to its own label. Cheaper to read than a status line that
+    // the eye is nowhere near when the button is clicked.
+    _flashBtn: function ($btn, msg) {
+        var was = $btn.text();
+        $btn.text(msg).prop('disabled', true);
+        setTimeout(function () { $btn.text(was).prop('disabled', false); }, 1400);
     },
 
     // Run a ledger write from a row button: disable it, and on failure keep the mark locally so
@@ -13520,7 +13672,13 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-kind { background: #2c333a; color: #9aa6b2; border-radius: 8px; padding: 0 7px; font-size: 10px; flex: 0 0 auto; }' +
                 '.jita-leadduty-view .ld-st { background: #3a434d; color: #cfd6dd; border-radius: 8px; padding: 0 7px; font-size: 10px; flex: 0 0 auto; }' +
                 '.jita-leadduty-view .ld-act { display: flex; gap: 6px; flex: 0 0 auto; }' +
-                '.jita-leadduty-view .ld-mini { font-size: 10px; padding: 3px 8px; }'
+                '.jita-leadduty-view .ld-mini { font-size: 10px; padding: 3px 8px; }' +
+                '.jita-leadduty-view .ld-group { border: 1px solid #2c333a; border-radius: 6px; padding: 4px 10px 6px; margin-bottom: 10px; }' +
+                '.jita-leadduty-view .ld-ghead { display: flex; align-items: center; gap: 10px; padding: 7px 0; }' +
+                '.jita-leadduty-view .ld-gname { color: #e6e6e6; font-weight: 700; font-size: 13px; }' +
+                '.jita-leadduty-view .ld-gcount { color: #7a8694; font-size: 11px; flex: 1 1 auto; }' +
+                '.jita-leadduty-view .ld-msg { width: 100%; box-sizing: border-box; min-height: 120px; margin: 2px 0 8px; padding: 8px 10px; background: #14181b; color: #cfd6dd; border: 1px solid #3a434d; border-radius: 5px; font: 12px/1.5 Consolas, "Courier New", monospace; resize: vertical; }' +
+                '.jita-leadduty-view .ld-msg:focus { outline: none; border-color: #4c9aff; }'
             );
         } catch (e) { /* ignore */ }
     }
