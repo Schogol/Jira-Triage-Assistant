@@ -8,6 +8,7 @@
 // @match       https://fenriscreations.atlassian.net/jira*
 // @match       https://fenriscreations.atlassian.net/browse*
 // @match       https://fenriscreations.atlassian.net/issues*
+// @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
 // @grant       GM_addStyle
@@ -34,6 +35,10 @@
 // dependency that gated this script's ENTIRE init. Inlining it makes the script self-contained. Requires jQuery.
 function waitForKeyElements(selectorTxt, actionFunction, bWaitOnce, iframeSelector) {
     var targetNodes, btargetsFound;
+
+    // Every caller polls for JIRA DOM. Off a Jira page (Confluence, the Forge iframe) that node can never
+    // appear, so the poller would just burn a timer forever - one guard here neutralises all eight call sites.
+    if (typeof JITA_NO_JIRA_UI !== 'undefined' && JITA_NO_JIRA_UI) { return; }
 
     if (typeof iframeSelector == "undefined")
         targetNodes = $(selectorTxt);
@@ -107,6 +112,20 @@ var LOG_HDR = "Time\tFacility\tType\tMessage";
 var JITA_IS_FORGE_FRAME = (function () {
     try { return /(^|\.)atlassian-dev\.net$/i.test(location.hostname); } catch (e) { return false; }
 })();
+
+// True on a CONFLUENCE page (same host as Jira, under /wiki). The script is matched there for ONE reason:
+// the Lead-duties chip and overlay belong where the documentation is actually read, so a page can be marked
+// proof-read on the page itself. Nothing else applies - there is no Jira DOM to decorate, no issue to parse,
+// and a wiki tab has no business electing the embedding-worker leader or driving the defect sync.
+var JITA_IS_WIKI = (function () {
+    try { return /^\/wiki(\/|$)/i.test(location.pathname) && !/(^|\.)atlassian-dev\.net$/i.test(location.hostname); } catch (e) { return false; }
+})();
+
+// The two contexts where the JIRA feature set must stay switched off: the Zendesk Forge iframe (which runs
+// only the canned-response dropdown) and Confluence (which runs only Lead duties). Guards that used to read
+// JITA_IS_FORGE_FRAME for "am I on a real Jira page?" read this instead; the ones that are genuinely about
+// the Forge frame still read JITA_IS_FORGE_FRAME.
+var JITA_NO_JIRA_UI = JITA_IS_FORGE_FRAME || JITA_IS_WIKI;
 
 
 // Safe GM storage wrappers. Return `dflt` when the API isn't granted (some frames / managers) or on any
@@ -223,8 +242,8 @@ if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') {
 }
 
 
-// Activate a custom scrollbar if the scrollbar value is set to true
-if (flagOn('scrollbar')) {
+// Activate a custom scrollbar if the scrollbar value is set to true (Jira pages only)
+if (!JITA_NO_JIRA_UI && flagOn('scrollbar')) {
     GM_addStyle(SCROLLBAR_CSS);
 };
 
@@ -232,7 +251,7 @@ if (flagOn('scrollbar')) {
 // Single Tampermonkey menu entry. All feature toggles and Triage Assistant actions (sync / rebuild /
 // embedding backend) live in an in-page settings overlay (JiTA.menu) instead of a long flat list of GM
 // menu commands. The callback references JiTA lazily, so it's fine that the namespace is defined later.
-if (!JITA_IS_FORGE_FRAME) {
+if (!JITA_NO_JIRA_UI) {
     GM_registerMenuCommand("⚙ Jira Triage Assistant - Settings…", function () {
         if (typeof JiTA !== 'undefined' && JiTA.menu) { JiTA.menu.open(); }
     });
@@ -345,7 +364,7 @@ var jitaButtonObserver = new MutationObserver(function () {
         try { if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.apply(); } } catch (e) { /* ignore */ }   // re-apply the user's field/section hides
     }, 200);
 });
-if (!JITA_IS_FORGE_FRAME) { jitaButtonObserver.observe(document.body, { childList: true, subtree: true }); }
+if (!JITA_NO_JIRA_UI) { jitaButtonObserver.observe(document.body, { childList: true, subtree: true }); }
 
 
 // ---- Surface the issue's Created / Updated dates at the TOP of the header ----
@@ -973,7 +992,7 @@ waitForKeyElements(cmSelector, SwapUI);
 // code-blocks and the comment editor are never touched, and a per-element fallback timer reveals anything that
 // somehow never gets parsed, so content can't get stuck invisible.
 (function () {
-    if (JITA_IS_FORGE_FRAME || !window.MutationObserver) { return; }
+    if (JITA_NO_JIRA_UI || !window.MutationObserver) { return; }
     try { GM_addStyle('.jita-log-hiding { visibility: hidden !important; }'); } catch (e) { /* ignore */ }
     var HIDE_SIG = new RegExp(LOG_HDR + '|dateTime\tpyDateTime\tprocCpu|Time\tMethod\tDuration');
     function hideLogs() {
@@ -1065,10 +1084,12 @@ function jitaRevealLogs() {   // reveal every container the flash suppressor hid
 // generation, while an untracked file just leaves every poller cancelled. File entries are <button>s containing a
 // [data-item-title] element (the same markers waitForKeyElements uses above); other buttons (download, toggles)
 // have no such child and are ignored.
-document.addEventListener('click', function (e) {
-    var btn = e.target && e.target.closest ? e.target.closest('button') : null;
-    if (btn && btn.querySelector('[data-item-title]')) { jitaParserGen++; }
-}, true);
+if (!JITA_NO_JIRA_UI) {
+    document.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('button') : null;
+        if (btn && btn.querySelector('[data-item-title]')) { jitaParserGen++; }
+    }, true);
+}
 function jitaRunParserWhenLoaded(setFlag) {
     var myGen = ++jitaParserGen;
     var CB = SELECTORS.CODE_BLOCK;
@@ -8451,108 +8472,24 @@ JiTA.menu = {
             $p.append($ta);
         }
 
-        // ---- Lead duties (Leads only; there is no feature flag - roster membership IS the gate, so a
-        // non-Lead never sees this section at all). ----
+        // ---- Lead duties (Leads only; roster membership IS the gate, so a non-Lead never sees this) ----
+        // No configuration lives here: the root page, ledger page, excluded subtrees, coverage window and QC
+        // sample size are all constants on JiTA.leadduty, so every Lead resolves identical values. What is
+        // left is diagnostics.
         if (JiTA.leadduty.isLead()) {
             var $ld = $('<div class="jita-menu-sect"></div>');
             $('<h3>Lead duties</h3>').appendTo($ld);
-
-            // Confluence page ids. Both accept a pasted page URL; changing either drops the cached page list.
-            function pageRow(label, sub, key, onSet) {
-                var $row = $('<div class="jita-menu-row"></div>');
-                $('<span class="lbl"></span>').text(label).append($('<span class="sub"></span>').text(sub)).appendTo($row);
-                var $in = $('<input type="text" class="jita-cred-input" style="width:120px" placeholder="page id or URL">').val(gmGet(key, ''));
-                function commit() {
-                    var id = JiTA.leadduty._pageId($in.val());
-                    if (!id && String($in.val()).replace(/^\s+|\s+$/g, '')) { $in.val(gmGet(key, '')); return; }
-                    gmSet(key, id);
-                    $in.val(id);
-                    JiTA.db.setMeta(JiTA.leadduty.pool.CACHE_KEY, null).catch(function () { /* ignore */ });
-                    if (onSet) { onSet(); }
-                    refreshMenu();
-                }
-                $in.on('change', commit).on('keydown', function (e) { if (e.key === 'Enter') { commit(); } });
-                $row.append($in);
-                return $row;
-            }
-            $ld.append(pageRow('Wiki root page', 'Every page below this one is in the review rotation', JiTA.leadduty.ROOT_KEY));
-            $ld.append(pageRow('Ledger page', 'Holds the shared queue; every Lead needs edit rights on it', JiTA.leadduty.LEDGER_PAGE_KEY));
-
-            // Coverage, not a page count: the per-Lead number is derived from the live pool size so the whole
-            // section is read at least once every N months without anyone maintaining a setting.
-            var $covRow = $('<div class="jita-menu-row"></div>');
-            var $covSub = $('<span class="sub"></span>');
-            $('<span class="lbl">Full coverage every</span>').append($covSub).appendTo($covRow);
-            var $cov = $('<input type="number" min="' + JiTA.leadduty.COVERAGE_MIN + '" max="' + JiTA.leadduty.COVERAGE_MAX + '" class="jita-num">')
-                .val(JiTA.leadduty.coverageMonths());
-            function paintCoverage() {
-                var months = JiTA.leadduty.coverageMonths(), roster = JiTA.leadduty.ROSTER().length;
-                JiTA.db.getMeta(JiTA.leadduty.pool.CACHE_KEY).then(function (pool) {
-                    if (!document.getElementById('jita-menu')) { return; }
-                    var n = (pool && pool.pages && pool.pages.length) || 0;
-                    $covSub.text(n
-                        ? (months + ' months → ' + JiTA.leadduty.wiki.perLead(n, roster) + ' pages each per month (pool of ' + n + ', ' + roster + ' Leads)')
-                        : (months + ' months · scan the pool to see the resulting page count'));
-                }).catch(function () { $covSub.text(months + ' months'); });
-            }
-            function commitCoverage() {
-                var v = parseInt($cov.val(), 10);
-                if (isNaN(v)) { v = JiTA.leadduty.coverageMonths(); }
-                v = Math.max(JiTA.leadduty.COVERAGE_MIN, Math.min(JiTA.leadduty.COVERAGE_MAX, v));
-                $cov.val(v);
-                gmSet(JiTA.leadduty.COVERAGE_KEY, v);
-                paintCoverage();
-            }
-            $cov.on('change', commitCoverage).on('keydown', function (e) { if (e.key === 'Enter') { commitCoverage(); } });
-            $covRow.append($cov);
-            $ld.append($covRow);
-            paintCoverage();
-
-            var $qcRow = $('<div class="jita-menu-row"></div>');
-            $('<span class="lbl">QC items per Lead</span>')
-                .append($('<span class="sub"></span>').text('Sampled from last month’s handled reports and new defects (' +
-                    JiTA.leadduty.QC_COUNT_MIN + '–' + JiTA.leadduty.QC_COUNT_MAX + ')'))
-                .appendTo($qcRow);
-            var $qcn = $('<input type="number" min="' + JiTA.leadduty.QC_COUNT_MIN + '" max="' + JiTA.leadduty.QC_COUNT_MAX + '" class="jita-num">')
-                .val(JiTA.leadduty.qcCount());
-            function commitQc() {
-                var v = parseInt($qcn.val(), 10);
-                if (isNaN(v)) { v = JiTA.leadduty.qcCount(); }
-                v = Math.max(JiTA.leadduty.QC_COUNT_MIN, Math.min(JiTA.leadduty.QC_COUNT_MAX, v));
-                $qcn.val(v);
-                gmSet(JiTA.leadduty.QC_COUNT_KEY, v);
-            }
-            $qcn.on('change', commitQc).on('keydown', function (e) { if (e.key === 'Enter') { commitQc(); } });
-            $qcRow.append($qcn);
-            $ld.append($qcRow);
-
             var $ldAct = $('<div class="jita-menu-actions"></div>').appendTo($ld);
-            $('<button class="jita-btn">Open lead duties</button>')
-                .on('click', function () { JiTA.menu.close(); JiTA.leadduty.ui.open(); }).appendTo($ldAct);
-            var $rescan = $('<button class="jita-btn">Re-scan wiki pool</button>').appendTo($ldAct);
-            var $test = $('<button class="jita-btn" title="Read the ledger, then write and delete a probe property - proves both halves of the permission">Test Confluence access</button>').appendTo($ldAct);
             var $ldStatus = $('<div class="jita-menu-status"></div>').appendTo($ld);
 
-            $rescan.on('click', function () {
-                $rescan.prop('disabled', true);
-                $ldStatus.text('Scanning the wiki tree…');
-                JiTA.leadduty.pool.ensureFresh(true).then(function (pool) {
-                    if (!document.getElementById('jita-menu')) { return; }
-                    $rescan.prop('disabled', false);
-                    $ldStatus.text(pool.pages.length + ' pages found' + (pool.truncated ? ' (tree deeper than ' + JiTA.conf.MAX_DEPTH + ' levels - some may be missing)' : '') + '.');
-                    paintCoverage();
-                }, function (e) {
-                    if (!document.getElementById('jita-menu')) { return; }
-                    $rescan.prop('disabled', false);
-                    $ldStatus.text(String(e && e.message || e));
-                });
-            });
+            $('<button class="jita-btn">Open lead duties</button>')
+                .on('click', function () { JiTA.menu.close(); JiTA.leadduty.ui.open(); }).appendTo($ldAct);
 
-            // The whole feature rests on "can this Lead write a content property on the ledger page?" - turn
-            // that into a five-second check rather than a three-weeks-later mystery.
+            // The whole feature rests on "can this Lead write a content property on the ledger page?" - worth
+            // keeping permanently, since it is how another Lead diagnoses a permission problem in five seconds.
+            var $test = $('<button class="jita-btn" title="Read the ledger, then write and delete a probe property - proves both halves of the permission">Test Confluence access</button>').appendTo($ldAct);
             $test.on('click', function () {
                 var page = JiTA.leadduty.ledgerPage();
-                if (!page) { $ldStatus.text('Set a ledger page first.'); return; }
                 $test.prop('disabled', true);
                 $ldStatus.text('Testing Confluence access…');
                 var out = [];
@@ -8561,32 +8498,50 @@ JiTA.menu = {
                     return JiTA.conf.getProperty(page, JiTA.leadduty.PROBE_KEY);
                 }).then(function (existing) {
                     return JiTA.conf.saveProperty(page, JiTA.leadduty.PROBE_KEY, { at: Date.now() }, existing);
-                }).then(function (p) {
+                }).then(function (pr) {
                     out.push('write ok');
-                    return JiTA.conf.deleteProperty(page, p.id).then(function () { out.push('cleanup ok'); }, function () { out.push('cleanup failed (a jita_leadduty_probe property was left behind)'); });
+                    return JiTA.conf.deleteProperty(page, pr.id).then(function () { out.push('cleanup ok'); },
+                        function () { out.push('cleanup failed (a jita_leadduty_probe property was left behind)'); });
                 }).then(function () {
                     if (!document.getElementById('jita-menu')) { return; }
                     $test.prop('disabled', false);
-                    $ldStatus.text('Confluence page ' + page + ': ' + out.join(' · '));
+                    $ldStatus.text('Ledger page ' + page + ': ' + out.join(' · '));
                 }, function (e) {
                     if (!document.getElementById('jita-menu')) { return; }
                     $test.prop('disabled', false);
-                    $ldStatus.text('Confluence page ' + page + ': ' + (out.length ? (out.join(' · ') + ' · ') : '') + String(e && e.message || e));
+                    $ldStatus.text('Ledger page ' + page + ': ' + (out.length ? (out.join(' · ') + ' · ') : '') + String(e && e.message || e));
                 });
             });
 
-            // Live status: pool size, who I am, and who cut this month's rotation.
+            // TEMPORARY - REMOVE BEFORE GOING LIVE. Manual pool re-crawl, for shaking the tree out during
+            // testing. Not needed in normal use: the pool refreshes itself every 24h, and the overlay's
+            // Refresh button already forces a crawl. Delete this one block and nothing else depends on it.
+            var $rescan = $('<button class="jita-btn">Re-scan wiki pool</button>').appendTo($ldAct);
+            $rescan.on('click', function () {
+                $rescan.prop('disabled', true);
+                $ldStatus.text('Scanning the wiki tree…');
+                JiTA.leadduty.pool.ensureFresh(true).then(function (pool) {
+                    if (!document.getElementById('jita-menu')) { return; }
+                    $rescan.prop('disabled', false);
+                    $ldStatus.text(JiTA.leadduty._poolLine(pool));
+                }, function (e) {
+                    if (!document.getElementById('jita-menu')) { return; }
+                    $rescan.prop('disabled', false);
+                    $ldStatus.text(String(e && e.message || e));
+                });
+            });
+            // END TEMPORARY
+
             (function () {
                 var me = JiTA.leadduty.me();
-                var line = 'You are ' + ((me && me.handle) || '?') + ' · roster: ' + JiTA.leadduty.ROSTER().join(', ');
-                JiTA.db.getMeta(JiTA.leadduty.pool.CACHE_KEY).then(function (pool) {
+                var who = 'You are ' + ((me && me.handle) || '?') + ' · roster: ' + JiTA.leadduty.ROSTER().join(', ');
+                JiTA.db.getMeta(JiTA.leadduty.pool.CACHE_KEY).then(function (raw) {
                     if (!document.getElementById('jita-menu') || $ldStatus.text()) { return; }
-                    if (pool && pool.pages) {
-                        line = pool.pages.length + ' pages in pool (scanned ' + String(new Date(pool.fetchedAt).toISOString()).slice(0, 10) + ') · ' + line;
-                    }
+                    var line = who;
+                    if (raw && raw.pages) { line = JiTA.leadduty._poolLine(JiTA.leadduty.pool._applyExclusions(raw)) + ' · ' + who; }
                     if (JiTA.leadduty._dry()) { line += ' · DRY RUN is on'; }
                     $ldStatus.text(line);
-                }).catch(function () { $ldStatus.text(line); });
+                }).catch(function () { $ldStatus.text(who); });
             })();
 
             $p.append($ld);
@@ -11830,22 +11785,26 @@ JiTA.leadduty = {
     QC_LEDGER_KEY: 'jita_leadduty_qc_v1',
     PROBE_KEY: 'jita_leadduty_probe',
 
-    // ---- GM config keys ----
+    // ---- fixed configuration -------------------------------------------------------------------------
+    // Hardcoded on purpose: these are properties of the ISD space, not of the person running the script, and
+    // every Lead must resolve the SAME values or the shared ledger splits in two. Change them here.
+    ROOT_PAGE: '199758317',      // root of the documentation section the Leads own
+    LEDGER_PAGE: '3214901257',   // "ECAID Lead Ledger" - holds the shared JSON; every Lead needs EDIT on it
+    // Subtrees that need no maintenance review. Each id and EVERY page beneath it is dropped from the pool
+    // (ancestry is walked through parentId, so a page added under one of these later is excluded too).
+    EXCLUDE_PAGES: {
+        '199756496': 'Training Session Reports',
+        '199762273': 'ECAID - Lead Section'
+    },
+    COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
+    QC_COUNT: 10,                // QC items sampled per Lead per month
+
+    // ---- GM keys (state, not configuration) ----
     ME_KEY: 'leadDutyMe',
-    ROOT_KEY: 'leadDutyRootPage',
-    LEDGER_PAGE_KEY: 'leadDutyLedgerPage',
-    COVERAGE_KEY: 'leadDutyCoverageMonths',
-    QC_COUNT_KEY: 'leadDutyQcCount',
     SELF_EXCL_KEY: 'leadDutySelfExcl',
     SNOOZE_KEY: 'leadDutySnoozeTs',
     DRY_KEY: 'leadDutyDryRun',
 
-    COVERAGE_DEFAULT: 12,        // cover the whole section at least once a year
-    COVERAGE_MIN: 3,
-    COVERAGE_MAX: 24,
-    QC_COUNT_DEFAULT: 10,
-    QC_COUNT_MIN: 1,
-    QC_COUNT_MAX: 50,
     KEEP_MONTHS: 6,              // how many months of `months` / `done` history the ledger retains
     MAX_PROP_BYTES: 28000,       // stay under Confluence's 32KB per-property cap, with headroom
     POOL_TTL_MS: 24 * 60 * 60 * 1000,
@@ -11905,24 +11864,12 @@ JiTA.leadduty = {
         var m = /[?&]pageId=(\d+)/.exec(s) || /\/pages\/(\d+)/.exec(s);
         return m ? m[1] : '';
     },
-    rootPage: function () { return JiTA.leadduty._pageId(gmGet(JiTA.leadduty.ROOT_KEY, '')); },
-    // The ledger deliberately defaults to the root page but is configurable separately, so the documentation
-    // root can stay locked while a dedicated (possibly hidden) page carries the Lead-writable state.
-    ledgerPage: function () {
-        return JiTA.leadduty._pageId(gmGet(JiTA.leadduty.LEDGER_PAGE_KEY, '')) || JiTA.leadduty.rootPage();
-    },
-    coverageMonths: function () {
-        var L = JiTA.leadduty;
-        var v = parseInt(gmGet(L.COVERAGE_KEY, L.COVERAGE_DEFAULT), 10);
-        if (isNaN(v)) { return L.COVERAGE_DEFAULT; }
-        return Math.max(L.COVERAGE_MIN, Math.min(L.COVERAGE_MAX, v));
-    },
-    qcCount: function () {
-        var L = JiTA.leadduty;
-        var v = parseInt(gmGet(L.QC_COUNT_KEY, L.QC_COUNT_DEFAULT), 10);
-        if (isNaN(v)) { return L.QC_COUNT_DEFAULT; }
-        return Math.max(L.QC_COUNT_MIN, Math.min(L.QC_COUNT_MAX, v));
-    },
+    rootPage: function () { return JiTA.leadduty.ROOT_PAGE; },
+    // Deliberately a SEPARATE page from the root: the documentation root can stay locked while this one
+    // carries the Lead-writable state.
+    ledgerPage: function () { return JiTA.leadduty.LEDGER_PAGE; },
+    coverageMonths: function () { return JiTA.leadduty.COVERAGE_MONTHS; },
+    qcCount: function () { return JiTA.leadduty.QC_COUNT; },
 
     // ---- deterministic PRNG (xmur3 seed + mulberry32 stream) -----------------------------------------
     // Tiny, dependency-free and identical across browsers, which is what makes every Lead shuffle the QC
@@ -12093,7 +12040,18 @@ JiTA.leadduty = {
     },
 
     _notConfigured: function () {
-        return new Error('No Confluence ledger page is configured. Set it in Settings -> Lead duties.');
+        return new Error('No Confluence ledger page is set (JiTA.leadduty.LEDGER_PAGE).');
+    },
+
+    // One line describing the pool, shared by the settings status and the overlay footer.
+    _poolLine: function (pool) {
+        var L = JiTA.leadduty;
+        var bits = [pool.pages.length + ' pages in rotation'];
+        if (pool.excludedCount) { bits.push(pool.excludedCount + ' excluded of ' + pool.rawCount + ' crawled'); }
+        bits.push(L.wiki.perLead(pool.pages.length, L.ROSTER().length) + ' per Lead per month (full coverage every ' + L.coverageMonths() + ')');
+        if (pool.fetchedAt) { bits.push('scanned ' + new Date(pool.fetchedAt).toISOString().slice(0, 10)); }
+        if (pool.truncated) { bits.push('tree deeper than ' + JiTA.conf.MAX_DEPTH + ' levels - some pages may be missing'); }
+        return bits.join(' · ');
     },
 
     // Keep only the newest KEEP_MONTHS entries of the month-keyed maps, so the ledger cannot grow without
@@ -12113,29 +12071,57 @@ JiTA.leadduty = {
     pool: {
         CACHE_KEY: 'leadduty:pool',
 
-        // Resolves the cached pool, re-crawling when stale / forced / the root changed. A crawl that fails or
-        // comes back EMPTY never overwrites a good cache: a transient permission or network problem must not
-        // be able to wipe the page list that the prune guard measures against.
+        // Resolves the pool, re-crawling when stale / forced / the root changed. A crawl that fails or comes
+        // back EMPTY never overwrites a good cache: a transient permission or network problem must not be able
+        // to wipe the page list that the prune guard measures against.
+        //
+        // The cache holds the RAW crawl; exclusions are applied on the way out (see _applyExclusions), so
+        // editing EXCLUDE_PAGES takes effect on the next call without waiting for a re-crawl.
         ensureFresh: function (force) {
             var L = JiTA.leadduty, root = L.rootPage();
-            if (!root) {
-                return Promise.reject(new Error('No wiki root page is configured. Set it in Settings -> Lead duties.'));
-            }
+            if (!root) { return Promise.reject(new Error('No wiki root page is set (JiTA.leadduty.ROOT_PAGE).')); }
             return JiTA.db.getMeta(L.pool.CACHE_KEY).catch(function () { return null; }).then(function (cached) {
                 var usable = cached && cached.rootId === root && cached.pages && cached.pages.length;
-                if (!force && usable && (Date.now() - (cached.fetchedAt || 0)) < L.POOL_TTL_MS) { return cached; }
+                if (!force && usable && (Date.now() - (cached.fetchedAt || 0)) < L.POOL_TTL_MS) {
+                    return L.pool._applyExclusions(cached);
+                }
                 return JiTA.conf.descendants(root).then(function (r) {
                     if (!r.pages.length) {
-                        if (usable) { return cached; }
+                        if (usable) { return L.pool._applyExclusions(cached); }
                         throw new Error('Root page ' + root + ' has no page descendants. Wrong id, or it is a folder / whiteboard rather than a page.');
                     }
                     var rec = { fetchedAt: Date.now(), rootId: root, truncated: r.truncated, pages: r.pages };
-                    return JiTA.db.setMeta(L.pool.CACHE_KEY, rec).then(function () { return rec; }, function () { return rec; });
+                    return JiTA.db.setMeta(L.pool.CACHE_KEY, rec)
+                        .then(function () { return L.pool._applyExclusions(rec); }, function () { return L.pool._applyExclusions(rec); });
                 }, function (e) {
-                    if (usable) { return cached; }   // keep serving the last good list through an outage
+                    if (usable) { return L.pool._applyExclusions(cached); }   // keep serving the last good list through an outage
                     throw e;
                 });
             });
+        },
+
+        // Drop every page that IS an excluded subtree root or sits anywhere beneath one. Ancestry is walked
+        // through parentId rather than matched on depth or title, so a page moved or created under an excluded
+        // branch later is excluded automatically, with no list to maintain.
+        _applyExclusions: function (rec) {
+            var L = JiTA.leadduty, ex = L.EXCLUDE_PAGES || {};
+            var byId = {}, i;
+            for (i = 0; i < rec.pages.length; i++) { byId[rec.pages[i].id] = rec.pages[i]; }
+            function excluded(page) {
+                var cur = page, hops = 0;
+                while (cur && hops++ < 64) {          // hop cap: a malformed parent chain can't spin forever
+                    if (ex[cur.id]) { return true; }
+                    if (!cur.parentId) { return false; }
+                    cur = byId[cur.parentId];         // undefined once we walk past the root: not excluded
+                }
+                return false;
+            }
+            var kept = [];
+            for (i = 0; i < rec.pages.length; i++) { if (!excluded(rec.pages[i])) { kept.push(rec.pages[i]); } }
+            return {
+                fetchedAt: rec.fetchedAt, rootId: rec.rootId, truncated: rec.truncated,
+                pages: kept, rawCount: rec.pages.length, excludedCount: rec.pages.length - kept.length
+            };
         },
 
         byId: function (pool) {
@@ -12810,13 +12796,9 @@ JiTA.leadduty.ui = {
         });
 
         var st = L.wiki.stats(res.pool, res.ledgerValue);
-        var bits = [doneCount + ' of ' + ids.length + ' done',
-            'pool ' + st.total + ' pages',
-            st.never + ' never reviewed'];
+        var bits = [doneCount + ' of ' + ids.length + ' done', L._poolLine(res.pool), st.never + ' never reviewed'];
         if (st.oldestMonths != null) { bits.push('oldest ' + st.oldestMonths + ' month' + (st.oldestMonths === 1 ? '' : 's')); }
         if (st.overdue) { bits.push(st.overdue + ' overdue (>' + st.coverage + ' months)'); }
-        bits.push('full coverage every ' + st.coverage + ' months');
-        if (res.pool.truncated) { bits.push('tree deeper than ' + JiTA.conf.MAX_DEPTH + ' levels - some pages may be missing'); }
         if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
         U._status(bits.join(' · '));
     },
@@ -13656,8 +13638,42 @@ JiTA.declutter = {
 
 
 /* ---- init: watch the DOM and (re)inject the panel across Atlassian's React re-renders / SPA nav ---- */
+// Mount the Lead-duties chip + menu command for a Lead. Shared by the Jira boot below and the Confluence
+// boot: the cached verdict (leadDutyMe) arms it synchronously on every load after the first, and resolveMe()
+// re-checks it against Jira shortly after so a first-ever load (or a changed account) lights up a moment later.
+function jitaArmLeadDuties() {
+    var mounted = false;
+    function arm() {
+        if (mounted || !JiTA.leadduty.isLead()) { return; }
+        mounted = true;
+        try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }
+        try { JiTA.leadduty.sched.start(); } catch (e) { /* swallow */ }
+        try {
+            if (typeof GM_registerMenuCommand === 'function') {
+                GM_registerMenuCommand('📋 Lead duties…', function () { JiTA.leadduty.ui.open(); });
+            }
+        } catch (e) { /* swallow */ }
+        // If Settings happens to be open on a first-ever load, redraw it so the section appears at once.
+        try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { /* swallow */ }
+    }
+    arm();
+    setTimeout(function () { JiTA.leadduty.resolveMe().then(arm, function () { /* ignore */ }); }, 3000);
+}
+
+
+// ---- Confluence boot: Lead duties and nothing else -------------------------------------------------------
+// No Jira DOM to observe, no issue to parse, no defect sync, and deliberately no worker leader election - a
+// wiki tab must never become the tab that owns the embedding model for everyone.
+if (JITA_IS_WIKI) {
+    (function () {
+        if (!window.indexedDB) { return; }
+        setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { /* swallow */ } }, 1200);
+    })();
+}
+
+
 (function () {
-    if (JITA_IS_FORGE_FRAME) { return; }  // inside the Zendesk Forge iframe we only run the responses dropdown
+    if (JITA_NO_JIRA_UI) { return; }      // Forge iframe runs only the responses dropdown; Confluence only Lead duties (above)
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
     var scheduled = false;
     var observer = new MutationObserver(function () {
@@ -13738,28 +13754,8 @@ JiTA.declutter = {
         try { JiTA.credits.badge.mount(); } catch (e) { /* swallow */ }
         try { JiTA.credits.sched.start(); } catch (e) { /* swallow */ }
     }
-    // ISD Lead duties: Leads only, and there is no feature flag - roster membership IS the gate. The cached
-    // verdict (leadDutyMe) mounts the chip and the menu command synchronously; resolveMe() then re-checks it
-    // against Jira in the background, so a first-ever load (or a changed account) lights up a moment later.
-    (function () {
-        var mounted = false;
-        function arm() {
-            if (mounted || !JiTA.leadduty.isLead()) { return; }
-            mounted = true;
-            try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }
-            try { JiTA.leadduty.sched.start(); } catch (e) { /* swallow */ }
-            try {
-                if (typeof GM_registerMenuCommand === 'function') {
-                    GM_registerMenuCommand('📋 Lead duties…', function () { JiTA.leadduty.ui.open(); });
-                }
-            } catch (e) { /* swallow */ }
-            // If Settings happens to be open on a first-ever load, redraw it so the section appears at once
-            // instead of only on the next open.
-            try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { /* swallow */ }
-        }
-        arm();   // cached verdict: mounts synchronously on every load after the first
-        setTimeout(function () { JiTA.leadduty.resolveMe().then(arm, function () { /* ignore */ }); }, 3000);
-    })();
+    // ISD Lead duties: Leads only, and there is no feature flag - roster membership IS the gate.
+    jitaArmLeadDuties();
 })();
 
 
@@ -13769,6 +13765,7 @@ JiTA.declutter = {
 // we don't assume which, so the injector simply feature-detects the ticket selector wherever it lives. It's
 // cheap: inject() early-exits unless #ticket-select is present, so it's a no-op in frames without the panel.
 (function () {
+    if (JITA_IS_WIKI) { return; }   // Confluence has no Zendesk panel; don't observe a big wiki page for nothing
     var scheduled = false;
     function tick() { try { JiTA.responses.inject(); } catch (e) { /* ignore */ } }
     // Re-inject across the panel's React re-renders / lazy tab load / ticket switches. The Zendesk tab isn't
