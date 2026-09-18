@@ -8606,12 +8606,20 @@ JiTA.menu = {
                         JiTA.db.setMeta(L.pool.CACHE_KEY, null)
                     ]).catch(function () { /* best effort */ });
                 }).then(function () {
+                    // Reset the scheduler's own clocks too. Without this the wipe is followed by up to six
+                    // hours of nothing: the tick that rebuilds both months is gated on leadDutyLastTs, so a
+                    // dev run would sit on an empty ledger and look broken. Cleared, the next poll (within a
+                    // minute) re-freezes the month - which is the whole point of the button.
+                    var S = JiTA.leadduty.sched;
+                    gmSet(S.LAST_KEY, 0);
+                    gmSet(S.FAIL_KEY, 0);
+                    gmSet(JiTA.leadduty.SNOOZE_KEY, 0);   // let the chip come straight back with the fresh counts
                     JiTA.leadduty.ui._wiki = null;
                     JiTA.leadduty.ui._qc = null;
                     JiTA.leadduty.qc._actorCache = {};
                     if (!document.getElementById('jita-menu')) { return; }
                     $wipe.prop('disabled', false);
-                    $ldStatus.text(out.join(' · ') + ' · local mirror and pool cache cleared');
+                    $ldStatus.text(out.join(' · ') + ' · local mirror and pool cache cleared · rebuild starts within a minute');
                 });
             });
             // END TEMPORARY
@@ -13926,7 +13934,32 @@ JiTA.leadduty.sched = {
             var done = {};
             ids.forEach(function (id) { if (ledgerDone[id]) { done[id] = ledgerDone[id].at; } });
             return L.local.get(L.wiki.localKey(ym)).then(function (prev) {
+                // Carry any local-only marks across: a mark made while Confluence was unreachable is not in
+                // the ledger yet, and dropping it here would make the chip count work that is already done.
+                if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!done[k]) { done[k] = prev.done[k]; } }); }
                 return L.local.put(L.wiki.localKey(ym), { ym: ym, perLead: res.record.perLead, pageIds: ids, done: done, pending: (prev && prev.pending) || [] });
+            });
+        }).then(function () {
+            // Freeze the QC month here too. Leaving it to the overlay meant the sample was only ever drawn
+            // when a Lead happened to click the Quality control TAB - so the month could go unsampled well
+            // into the next one, the chip could not count the checks (nothing wrote the local mirror), and
+            // whoever opened that tab first silently decided the split for everyone. Once the month is
+            // frozen this costs one small key lookup per tick; the crawl happens once a month.
+            return L.qc.claimMonth(L._prevYm()).then(function (q) {
+                var qdone = {};
+                Object.keys(q.done || {}).forEach(function (k) { qdone[k] = q.done[k].at; });
+                return L.local.get(L.qc.localKey(q.ym)).then(function (prev) {
+                    if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!qdone[k]) { qdone[k] = prev.done[k]; } }); }
+                    return L.local.put(L.qc.localKey(q.ym), {
+                        ym: q.ym, quota: q.record.quota,
+                        items: q.items.map(function (i) { return i.key; }),
+                        done: qdone, pending: (prev && prev.pending) || []
+                    });
+                });
+            }, function (e) {
+                // A QC failure must not cost the wiki half its refresh: the wiki month is already frozen and
+                // mirrored by this point, so swallow it and let the next tick retry the sample.
+                JiTA.dlog('[JiTA] leadduty: QC month not claimed this tick: ' + (e && e.message || e));
             });
         }).then(function () {
             // Keep the readable page in step with the ledger even when nobody opens the overlay. publish()
