@@ -8574,6 +8574,46 @@ JiTA.menu = {
                     $ldStatus.text(String(e && e.message || e));
                 });
             });
+
+            // TEMPORARY - REMOVE BEFORE GOING LIVE, with the block above. Wipes BOTH shared ledgers plus this
+            // browser's local mirror, so a dev run starts from a clean month instead of inheriting whatever
+            // the last test left behind. It deletes the Confluence properties outright rather than writing an
+            // empty value, so the next open re-creates them exactly as a first-ever run would. This destroys
+            // real shared state for every Lead, which is precisely why it must not survive to live.
+            var $wipe = $('<button class="jita-btn" title="Dev only: delete both shared ledgers and the local mirror">Clear ledger</button>').appendTo($ldAct);
+            $wipe.on('click', function () {
+                var page = JiTA.leadduty.ledgerPage();
+                if (!confirm('Delete BOTH lead-duty ledgers on page ' + page + ' (wiki review history AND quality control, ' +
+                    'including every open follow-up), for every Lead?\n\nThis cannot be undone.')) { return; }
+                $wipe.prop('disabled', true);
+                $ldStatus.text('Clearing the ledgers…');
+                var out = [];
+                function drop(key) {
+                    return JiTA.conf.getProperty(page, key).then(function (prop) {
+                        if (!prop) { out.push(key + ': already absent'); return; }
+                        return JiTA.conf.deleteProperty(page, prop.id).then(function () { out.push(key + ': deleted'); });
+                    }, function (e) { out.push(key + ': ' + String(e && e.message || e)); });
+                }
+                drop(JiTA.leadduty.LEDGER_KEY).then(function () {
+                    return drop(JiTA.leadduty.QC_LEDGER_KEY);
+                }).then(function () {
+                    // The local mirror drives the chip's outstanding count, so leaving it behind would show
+                    // work against a ledger that no longer exists.
+                    var L = JiTA.leadduty;
+                    return Promise.all([
+                        JiTA.db.setMeta(L.wiki.localKey(L._ym()), null),
+                        JiTA.db.setMeta(L.qc.localKey(L._prevYm()), null),
+                        JiTA.db.setMeta(L.pool.CACHE_KEY, null)
+                    ]).catch(function () { /* best effort */ });
+                }).then(function () {
+                    JiTA.leadduty.ui._wiki = null;
+                    JiTA.leadduty.ui._qc = null;
+                    JiTA.leadduty.qc._actorCache = {};
+                    if (!document.getElementById('jita-menu')) { return; }
+                    $wipe.prop('disabled', false);
+                    $ldStatus.text(out.join(' · ') + ' · local mirror and pool cache cleared');
+                });
+            });
             // END TEMPORARY
 
             (function () {
@@ -11884,6 +11924,12 @@ JiTA.leadduty = {
         '199762273': 'ECAID - Lead Section'
     },
     COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
+    // The four-eyes rule: how many DIFFERENT Leads must read each page inside the coverage window. One pair
+    // of eyes misses things - the reader who wrote a page, or who read it last year, skims what they already
+    // believe is there. Two independent readings a year is the point of the whole rotation. It doubles the
+    // monthly reading: at 232 pages and 3 Leads that is 13 pages each rather than 7, and COVERAGE_MONTHS is
+    // the dial if that turns out to be too much.
+    EYES: 2,
     QC_COUNT: 10,                // QC items sampled per Lead per month
     // ISD handles far more bug reports than it creates defects, so a proportional sample is almost all
     // reports and a Lead can go months without grading a single defect. This is the floor: fill this many
@@ -11897,7 +11943,11 @@ JiTA.leadduty = {
     DRY_KEY: 'leadDutyDryRun',
 
     KEEP_MONTHS: 6,              // how many months of `months` / `done` history the ledger retains
-    MAX_PROP_BYTES: 28000,       // stay under Confluence's 32KB per-property cap, with headroom
+    // Stay under Confluence's 32KB per-property cap, with headroom. The per-page maps dominate: roughly 48
+    // bytes a page now that four eyes needs the previous review date alongside the last one, so the ceiling
+    // is somewhere near 550 pages. Well clear of the ~230 in rotation, but worth knowing before the section
+    // doubles in size - _prune trims month history first and the write then refuses rather than truncating.
+    MAX_PROP_BYTES: 28000,
     POOL_TTL_MS: 24 * 60 * 60 * 1000,
     SNOOZE_MS: 24 * 60 * 60 * 1000,
     CAS_TRIES: 4,
@@ -11960,6 +12010,7 @@ JiTA.leadduty = {
     // carries the Lead-writable state.
     ledgerPage: function () { return JiTA.leadduty.LEDGER_PAGE; },
     coverageMonths: function () { return JiTA.leadduty.COVERAGE_MONTHS; },
+    eyes: function () { return JiTA.leadduty.EYES; },
     qcCount: function () { return JiTA.leadduty.QC_COUNT; },
     qcMinDefects: function () { return JiTA.leadduty.QC_MIN_DEFECTS; },
 
@@ -12158,7 +12209,8 @@ JiTA.leadduty = {
         var L = JiTA.leadduty;
         var bits = [pool.pages.length + ' pages in rotation'];
         if (pool.excludedCount) { bits.push(pool.excludedCount + ' excluded of ' + pool.rawCount + ' crawled'); }
-        bits.push(L.wiki.perLead(pool.pages.length, L.ROSTER().length) + ' per Lead per month (full coverage every ' + L.coverageMonths() + ')');
+        bits.push(L.wiki.perLead(pool.pages.length, L.ROSTER().length) + ' per Lead per month (' + L.eyes() +
+            ' different Leads on every page every ' + L.coverageMonths() + ' months)');
         if (pool.fetchedAt) { bits.push('scanned ' + new Date(pool.fetchedAt).toISOString().slice(0, 10)); }
         if (pool.truncated) { bits.push('tree deeper than ' + JiTA.conf.MAX_DEPTH + ' levels - some pages may be missing'); }
         return bits.join(' · ');
@@ -12255,32 +12307,72 @@ JiTA.leadduty = {
     wiki: {
         localKey: function (ym) { return 'leadduty:wiki:' + ym; },
 
-        // Pages per Lead is DERIVED, never configured: sustain pool/COVERAGE_MONTHS reviews a month and no
-        // page can go longer than that unread. The pool grows, the number grows with it.
+        // Pages per Lead is DERIVED, never configured: sustain enough reviews a month that every page is read
+        // EYES times within COVERAGE_MONTHS. The pool grows, the number grows with it. Four eyes doubles this
+        // outright - that is the price of the rule, and COVERAGE_MONTHS is the dial if it turns out too steep.
         perLead: function (poolCount, leadCount) {
-            var months = JiTA.leadduty.coverageMonths();
-            return Math.max(1, Math.ceil(poolCount / (months * Math.max(1, leadCount))));
+            var L = JiTA.leadduty;
+            return Math.max(1, Math.ceil(poolCount * L.eyes() / (L.coverageMonths() * Math.max(1, leadCount))));
         },
 
-        // Oldest-first, never-reviewed at the very front ('' sorts before any YYYY-MM-DD). Tie-break on the
-        // id as a STRING, so the order is total and identical for every Lead.
+        // How many of a page's reviews fall INSIDE the current coverage window: 0, 1 or 2. This is what the
+        // four-eyes rule is measured against - a page two Leads read last year is not covered this year, so
+        // it goes back to needing a fresh pair. (lastReviewed >= prevReviewed always, so the count is honest.)
+        eyesIn: function (ledgerValue, id) {
+            var L = JiTA.leadduty, win = L.coverageMonths();
+            var last = (ledgerValue && ledgerValue.lastReviewed && ledgerValue.lastReviewed[id]) || '';
+            var prev = (ledgerValue && ledgerValue.prevReviewed && ledgerValue.prevReviewed[id]) || '';
+            function inside(d) { var a = L._monthsSince(d); return a != null && a < win; }
+            return (inside(last) ? 1 : 0) + (inside(prev) ? 1 : 0);
+        },
+
+        // Fewest eyes first, then oldest-first within a tier ('' sorts before any YYYY-MM-DD, so a page nobody
+        // has ever opened leads). Tie-break on the id as a STRING, so the order is total and identical for
+        // every Lead. The eyes tier is what makes a page waiting on its SECOND reader outrank a page that two
+        // Leads have already signed off - without it, the second pass would never get priority over a stale
+        // first pass and half the section would sit on one pair of eyes indefinitely.
         buildQueue: function (pool, ledgerValue) {
+            var W = JiTA.leadduty.wiki;
             var last = (ledgerValue && ledgerValue.lastReviewed) || {};
+            var eyes = {};
+            pool.pages.forEach(function (p) { eyes[p.id] = W.eyesIn(ledgerValue, p.id); });
             return pool.pages.slice().sort(function (a, b) {
+                if (eyes[a.id] !== eyes[b.id]) { return eyes[a.id] - eyes[b.id]; }
                 var la = last[a.id] || '', lb = last[b.id] || '';
                 if (la !== lb) { return la < lb ? -1 : 1; }
                 return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
             });
         },
 
-        // Round-robin over the slate with a monthly rotation, so each Lead gets one page from each staleness
+        // Round-robin over the queue with a monthly rotation, so each Lead gets one page from each staleness
         // tier and the tiers rotate. Disjoint by construction - no claims, no coordination.
-        computeAssign: function (queue, roster, perLead, ym) {
-            var n = Math.min(queue.length, roster.length * perLead);
+        //
+        // The four-eyes rule lives here: a page is never handed to the Lead who read it LAST. With the queue
+        // ordering above, a page on one pair of eyes comes round again quickly and necessarily lands on
+        // somebody else, which is what makes the second reading a genuinely independent one. A page whose
+        // only eligible Leads are already full is simply left for next month - it keeps its place at the head
+        // of the queue, so nothing is lost. (With a single-Lead roster the rule is unsatisfiable and is
+        // waived, since a rotation that assigns nothing at all would be worse than one pair of eyes.)
+        computeAssign: function (queue, roster, perLead, ym, reviewedBy) {
             var offset = JiTA.leadduty._monthIndex(ym) % roster.length;
-            var assign = {};
-            roster.forEach(function (h) { assign[h] = []; });
-            for (var i = 0; i < n; i++) { assign[roster[(i + offset) % roster.length]].push(queue[i].id); }
+            var by = reviewedBy || {};
+            var fourEyes = roster.length > 1;
+            var assign = {}, counts = {};
+            roster.forEach(function (h) { assign[h] = []; counts[h] = 0; });
+            for (var i = 0; i < queue.length; i++) {
+                var full = true;
+                for (var c = 0; c < roster.length; c++) { if (counts[roster[c]] < perLead) { full = false; break; } }
+                if (full) { break; }
+                var id = queue[i].id;
+                for (var r = 0; r < roster.length; r++) {
+                    var h = roster[(i + r + offset) % roster.length];
+                    if (counts[h] >= perLead) { continue; }
+                    if (fourEyes && by[id] === h) { continue; }   // you never proof-read the same page twice running
+                    assign[h].push(id);
+                    counts[h]++;
+                    break;
+                }
+            }
             return assign;
         },
 
@@ -12300,8 +12392,9 @@ JiTA.leadduty = {
                     var perLead = W.perLead(pool.pages.length, roster.length);
                     var created = null;
                     return L.ledger.mutate(L.LEDGER_KEY, function (v) {
-                        v = v || { v: 1, lastReviewed: {}, reviewedBy: {}, months: {}, done: {} };
+                        v = v || { v: 1, lastReviewed: {}, prevReviewed: {}, reviewedBy: {}, months: {}, done: {} };
                         v.lastReviewed = v.lastReviewed || {};
+                        v.prevReviewed = v.prevReviewed || {};
                         v.reviewedBy = v.reviewedBy || {};
                         v.months = v.months || {};
                         v.done = v.done || {};
@@ -12311,7 +12404,8 @@ JiTA.leadduty = {
                         created = {
                             roster: roster,
                             perLead: perLead,
-                            assign: W.computeAssign(queue, roster, perLead, ym),
+                            eyes: L.eyes(),
+                            assign: W.computeAssign(queue, roster, perLead, ym, v.reviewedBy),
                             createdAt: new Date().toISOString(),
                             createdBy: (L.me() && L.me().handle) || '?'
                         };
@@ -12334,7 +12428,11 @@ JiTA.leadduty = {
             if (!tracked.length) { return; }
             if (pool.pages.length < 0.5 * tracked.length) { return; }   // suspiciously small crawl: leave it alone
             for (var i = 0; i < tracked.length; i++) {
-                if (!ids[tracked[i]]) { delete val.lastReviewed[tracked[i]]; delete val.reviewedBy[tracked[i]]; }
+                if (!ids[tracked[i]]) {
+                    delete val.lastReviewed[tracked[i]];
+                    delete val.reviewedBy[tracked[i]];
+                    if (val.prevReviewed) { delete val.prevReviewed[tracked[i]]; }
+                }
             }
         },
 
@@ -12345,10 +12443,17 @@ JiTA.leadduty = {
             var handle = (L.me() && L.me().handle) || '?';
             var today = L._today(), nowIso = new Date().toISOString();
             return L.ledger.mutate(L.LEDGER_KEY, function (v) {
-                v = v || { v: 1, lastReviewed: {}, reviewedBy: {}, months: {}, done: {} };
+                v = v || { v: 1, lastReviewed: {}, prevReviewed: {}, reviewedBy: {}, months: {}, done: {} };
                 v.lastReviewed = v.lastReviewed || {};
+                v.prevReviewed = v.prevReviewed || {};
                 v.reviewedBy = v.reviewedBy || {};
                 v.done = v.done || {};
+                // Keep the previous review's date so eyesIn() can see TWO readings. A repeat by the SAME Lead
+                // is not a second pair of eyes, so it overwrites their own stamp instead of shifting it down -
+                // otherwise one Lead reading a page twice would mark it fully covered on their own.
+                if (v.lastReviewed[pageId] && v.reviewedBy[pageId] !== handle) {
+                    v.prevReviewed[pageId] = v.lastReviewed[pageId];
+                }
                 v.lastReviewed[pageId] = today;
                 v.reviewedBy[pageId] = handle;
                 v.done[ym] = v.done[ym] || {};
@@ -12365,7 +12470,7 @@ JiTA.leadduty = {
             var handle = (L.me() && L.me().handle) || '?';
             var nowIso = new Date().toISOString();
             return L.ledger.mutate(L.LEDGER_KEY, function (v) {
-                v = v || { v: 1, lastReviewed: {}, reviewedBy: {}, months: {}, done: {} };
+                v = v || { v: 1, lastReviewed: {}, prevReviewed: {}, reviewedBy: {}, months: {}, done: {} };
                 v.done = v.done || {};
                 v.done[ym] = v.done[ym] || {};
                 v.done[ym][pageId] = { by: handle, at: nowIso, skipped: true };
@@ -12373,13 +12478,17 @@ JiTA.leadduty = {
             }).then(L.report.tap);
         },
 
-        // Queue health for the footer: how many pages have never been read, and how stale the oldest is.
+        // Queue health for the footer: how the section stands against the four-eyes target. `single` is the
+        // number waiting on their second reader - the measure that says whether the rule is actually being
+        // met, as opposed to `never`, which only says whether anyone has looked at all.
         stats: function (pool, ledgerValue) {
-            var L = JiTA.leadduty;
+            var L = JiTA.leadduty, W = L.wiki;
             var last = (ledgerValue && ledgerValue.lastReviewed) || {};
-            var never = 0, oldest = null, overdue = 0, months = L.coverageMonths();
+            var never = 0, oldest = null, overdue = 0, single = 0, covered = 0, months = L.coverageMonths();
             for (var i = 0; i < pool.pages.length; i++) {
-                var stamp = last[pool.pages[i].id] || '';
+                var id = pool.pages[i].id, stamp = last[id] || '';
+                var eyes = W.eyesIn(ledgerValue, id);
+                if (eyes >= L.eyes()) { covered++; } else if (eyes === 1) { single++; }
                 if (!stamp) { never++; continue; }
                 var age = L._monthsSince(stamp);
                 if (age != null) {
@@ -12387,7 +12496,8 @@ JiTA.leadduty = {
                     if (age > months) { overdue++; }
                 }
             }
-            return { total: pool.pages.length, never: never, oldestMonths: oldest, overdue: overdue, coverage: months };
+            return { total: pool.pages.length, never: never, oldestMonths: oldest, overdue: overdue,
+                single: single, covered: covered, eyes: L.eyes(), coverage: months };
         }
     },
 
@@ -13116,7 +13226,9 @@ JiTA.leadduty = {
             });
             return h +
                 '<p><strong>' + doneCount + ' of ' + total + '</strong> pages proof-read this month. ' +
-                'Cut by ' + R._txt(rec.createdBy || '?') + ' on ' + R._when(rec.createdAt) + '.</p>' +
+                'Cut by ' + R._txt(rec.createdBy || '?') + ' on ' + R._when(rec.createdAt) + '. ' +
+                'Every page is read by ' + R._txt(String(rec.eyes || L.eyes())) + ' different Leads within ' +
+                R._txt(String(L.coverageMonths())) + ' months, and nobody is handed a page they read last time.</p>' +
                 R._table(['Lead', 'Assigned', 'Done', 'Outstanding'], sum) +
                 '<h3>Pages</h3>' +
                 R._table(['Page', 'Assigned to', 'Status', 'When'], rows);
@@ -13165,22 +13277,30 @@ JiTA.leadduty = {
             return h + R._table(['Measure', 'Value'], [
                 [R._txt('Pages in rotation'), R._txt(String(st.total))],
                 [R._txt('Excluded from rotation'), R._txt(String(pool.excludedCount || 0) + ' of ' + (pool.rawCount || st.total) + ' crawled')],
+                [R._txt('Read by ' + st.eyes + ' different Leads this year'), R._txt(String(st.covered))],
+                [R._txt('Waiting on a second reader'), R._txt(String(st.single))],
                 [R._txt('Never reviewed'), R._txt(String(st.never))],
                 [R._txt('Overdue (older than ' + st.coverage + ' months)'), R._txt(String(st.overdue))],
                 [R._txt('Oldest review'), R._txt(st.oldestMonths == null ? 'n/a' : (st.oldestMonths + ' months ago'))],
-                [R._txt('Target'), R._txt('the whole section read at least once every ' + st.coverage + ' months')],
+                [R._txt('Target'), R._txt('every page read by ' + st.eyes + ' different Leads every ' + st.coverage + ' months')],
                 [R._txt('Page tree last scanned'), R._when(pool.fetchedAt ? new Date(pool.fetchedAt).toISOString() : null)]
             ]);
         },
 
         // Every page with who last read it and when, oldest first - the answer to "is this article stale?"
-        // for anyone browsing the wiki, and the audit trail for who has been carrying the work.
+        // for anyone browsing the wiki, and the audit trail for who has been carrying the work. The eyes
+        // column is the four-eyes rule made checkable: anything below the target is a page one person's
+        // judgement is currently the only thing standing behind.
         _logSection: function (wiki, pool) {
-            var L = JiTA.leadduty, R = L.report;
+            var L = JiTA.leadduty, R = L.report, W = L.wiki;
             var h = '<h2>Review log</h2>';
             if (!pool) { return h + '<p>The page tree could not be read for this update.</p>'; }
             var last = (wiki && wiki.lastReviewed) || {}, by = (wiki && wiki.reviewedBy) || {};
+            var prev = (wiki && wiki.prevReviewed) || {};
+            var eyes = {};
+            pool.pages.forEach(function (p) { eyes[p.id] = W.eyesIn(wiki, p.id); });
             var pages = pool.pages.slice().sort(function (a, b) {
+                if (eyes[a.id] !== eyes[b.id]) { return eyes[a.id] - eyes[b.id]; }
                 var la = last[a.id] || '', lb = last[b.id] || '';
                 if (la !== lb) { return la < lb ? -1 : 1; }
                 return a.title < b.title ? -1 : 1;
@@ -13190,12 +13310,16 @@ JiTA.leadduty = {
             var rows = pages.map(function (p) {
                 var stamp = last[p.id] || '', age = L._monthsSince(stamp);
                 return [R._page(p.id, p.title),
+                    R._txt(eyes[p.id] + ' of ' + L.eyes()),
                     R._txt(stamp || 'never'),
                     R._txt(by[p.id] || ''),
+                    R._txt(prev[p.id] || ''),
                     R._txt(age == null ? '' : (age + ' months'))];
             });
-            return h + '<p>Oldest first' + (capped ? (', first ' + R.MAX_LOG_ROWS + ' of ' + pool.pages.length) : '') + '.</p>' +
-                R._table(['Page', 'Last reviewed', 'By', 'Age'], rows);
+            return h + '<p>Least-read first' + (capped ? (', first ' + R.MAX_LOG_ROWS + ' of ' + pool.pages.length) : '') +
+                '. "Eyes" counts how many different Leads have read the page within the last ' +
+                R._txt(String(L.coverageMonths())) + ' months.</p>' +
+                R._table(['Page', 'Eyes', 'Last reviewed', 'By', 'Previous', 'Age'], rows);
         }
     },
 
@@ -13349,6 +13473,12 @@ JiTA.leadduty.ui = {
             var age = L._monthsSince(last[id]);
             var meta = !last[id] ? 'never reviewed'
                 : ('last reviewed ' + last[id] + (by[id] ? (' by ' + by[id]) : '') + (age != null ? (' · ' + age + ' month' + (age === 1 ? '' : 's') + ' ago') : ''));
+            // Which pass this is matters to how it should be read: a second reader is there to catch what the
+            // first one's assumptions let through, and saying so is the difference between two readings and
+            // one reading done twice.
+            var eyes = L.wiki.eyesIn(res.ledgerValue, id);
+            if (eyes === 1 && by[id]) { meta += ' · you are the second pair of eyes'; }
+            else if (!last[id] || eyes === 0) { meta += ' · first of ' + L.eyes() + ' readings this year'; }
             $('<span class="ld-meta"></span>').text(meta).appendTo($row);
             var $act = $('<span class="ld-act"></span>').appendTo($row);
             if (!done) {
@@ -13362,7 +13492,9 @@ JiTA.leadduty.ui = {
         });
 
         var st = L.wiki.stats(res.pool, res.ledgerValue);
-        var bits = [doneCount + ' of ' + ids.length + ' done', L._poolLine(res.pool), st.never + ' never reviewed'];
+        var bits = [doneCount + ' of ' + ids.length + ' done', L._poolLine(res.pool),
+            st.covered + ' on ' + st.eyes + ' pairs of eyes', st.single + ' waiting on a second',
+            st.never + ' never reviewed'];
         if (st.oldestMonths != null) { bits.push('oldest ' + st.oldestMonths + ' month' + (st.oldestMonths === 1 ? '' : 's')); }
         if (st.overdue) { bits.push(st.overdue + ' overdue (>' + st.coverage + ' months)'); }
         if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
