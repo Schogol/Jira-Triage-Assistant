@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.18.0
+// @version     3.19.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6436,9 +6436,11 @@ JiTA.ui = {
             JiTA.ui._filterTimer = setTimeout(function () { JiTA.ui._rerenderCurrent(); }, 200);
         });
     },
-    // The active filter terms (lowercased, whitespace-split) from the box, or [] when empty.
+    // The active filter terms (lowercased, whitespace-split) from the box, or [] when empty. The triage
+    // overlay carries its OWN box (same behaviour, its own element): while it is open that one is the one
+    // being read, since the panel underneath it is covered by a full-screen sheet.
     _filterTerms: function () {
-        var $inp = $('#jita-sd-filter');
+        var $inp = (JiTA.triage && JiTA.triage._open) ? $('#jt-filter') : $('#jita-sd-filter');
         if (!$inp.length) { return []; }
         var q = ($inp.val() || '').toLowerCase().replace(/\s+/g, ' ').trim();
         return q ? q.split(' ') : [];
@@ -6452,17 +6454,19 @@ JiTA.ui = {
         else if (JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k); }
     },
     // Toggle the session ranking-mode override (Hybrid <-> Keyword) and re-render. No-op (with a hint) when
-    // semantic embeddings are unavailable, since Hybrid isn't possible then.
-    _cycleMode: function () {
+    // semantic embeddings are unavailable, since Hybrid isn't possible then. `rerender` lets the triage
+    // overlay's own badge re-rank its queue instead of the panel behind it.
+    _cycleMode: function (rerender) {
         if (JiTA.embed && JiTA.embed.unavailable) { JiTA.ui.toast('Semantic embeddings unavailable - keyword ranking only.'); return; }
         var cur = JiTA.ui.modeOverride;
         if (cur === 'Keyword') { JiTA.ui.modeOverride = 'Hybrid'; }
         else if (cur === 'Hybrid') { JiTA.ui.modeOverride = 'Keyword'; }
         else {   // automatic so far -> flip to the opposite of what's currently displayed
-            var shown = ($('#jita-sd-mode').text() || '').toLowerCase();
+            var inTriage = !!(JiTA.triage && JiTA.triage._open);
+            var shown = ($(inTriage ? '#jt-mode' : '#jita-sd-mode').text() || '').toLowerCase();
             JiTA.ui.modeOverride = (shown.indexOf('hybrid') >= 0) ? 'Keyword' : 'Hybrid';
         }
-        JiTA.ui._rerenderCurrent();
+        if (rerender) { rerender(); } else { JiTA.ui._rerenderCurrent(); }
     },
 
     // ---- session filters (funnel popover): Status (Open/Fixed/All) + Created-within-N-days ----
@@ -6490,13 +6494,15 @@ JiTA.ui = {
     },
 
     // Whether any filter that AFFECTS the current view is active (drives the funnel's active dot). Status only
-    // counts on the similar-defects (EBR) view; Created counts on both.
-    _filtersActive: function () {
+    // counts where the candidates are DEFECTS (the similar-defects view, or triage's bug-report queue);
+    // Created counts everywhere. `ctx` is how a caller that isn't the panel states which view it is: pass
+    // { status: <does Status apply here?> } and the page-derived guesses below are skipped.
+    _filtersActive: function (ctx) {
         var f = JiTA.ui.filters;
         if (!f) { return false; }
-        var onEbr = /^EBR-/.test(JiTA.ui.currentKey || '');
-        if (onEbr && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode)) { return true; }   // a report<->report view (reporter's reports / similar reports) is active
-        return !!((onEbr && f.status && f.status !== 'all') || f.createdDays > 0);
+        var status = ctx ? !!ctx.status : /^EBR-/.test(JiTA.ui.currentKey || '');
+        if (!ctx && status && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode)) { return true; }   // a report<->report view (reporter's reports / similar reports) is active
+        return !!((status && f.status && f.status !== 'all') || f.createdDays > 0);
     },
 
     _funnelSvg: '<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true"><path d="M1 2.6c0-.33.27-.6.6-.6h12.8c.33 0 .6.27.6.6 0 .14-.05.28-.14.39L10 8.7v4.3a.6.6 0 0 1-.87.54l-2.4-1.2A.6.6 0 0 1 6 11.8V8.7L1.14 2.99A.6.6 0 0 1 1 2.6z"/></svg>',
@@ -6508,18 +6514,28 @@ JiTA.ui = {
     },
 
     // Build + show the filter popover under the funnel button. Rebuilt each open so it can be view-aware
-    // (Status is only shown on the similar-defects view). Changes update JiTA.ui.filters + re-render live.
-    _showFilterMenu: function (anchor) {
+    // (Status is only shown where the candidates are defects). Changes update JiTA.ui.filters + re-render live.
+    //
+    // `opts` is how a second funnel (the triage overlay's) describes itself, since the panel's own answers come
+    // from the Jira page it is sitting on and triage has no page: { views } shows the report<->report view
+    // switches (triage: no - they are panel-only views), { status } shows the Status segment, and
+    // { rerender, syncBtn } are what a change re-ranks and which funnel button it re-colors.
+    _showFilterMenu: function (anchor, opts) {
         JiTA.ui._closeFilterMenu();
         JiTA.ui._hideTip();
         var f = JiTA.ui.filters;
+        opts = opts || {};
         var onEbr = /^EBR-/.test(JiTA.ui.currentKey || '');   // similar-defects view -> Status applies
+        var views = (opts.views === undefined) ? onEbr : !!opts.views;
+        var status = (opts.status === undefined) ? onEbr : !!opts.status;
+        var rerender = opts.rerender || function () { JiTA.ui._rerenderCurrent(); };
+        var syncBtn = opts.syncBtn || function () { JiTA.ui._syncFilterBtn(); };
         var menu = document.createElement('div');
         menu.id = 'jita-sd-filtermenu';
 
         // EBR-view view-switches (both swap the similar-defects list for a report<->report view, and back). They
         // are mutually exclusive, and while either is active the ranking filters below don't apply, so they're hidden.
-        if (onEbr) {
+        if (views) {
             // Reporter's-other-reports (a LIVE Jira search for every other report by the same Original Reporter).
             var vb = document.createElement('button');
             vb.type = 'button';
@@ -6529,8 +6545,8 @@ JiTA.ui = {
                 JiTA.ui.reporterMode = !JiTA.ui.reporterMode;
                 if (JiTA.ui.reporterMode) { JiTA.ui.simReportsMode = false; }   // the two report views are mutually exclusive
                 JiTA.ui._closeFilterMenu();
-                JiTA.ui._syncFilterBtn();
-                JiTA.ui._rerenderCurrent();
+                syncBtn();
+                rerender();
             });
             menu.appendChild(vb);
 
@@ -6544,14 +6560,14 @@ JiTA.ui = {
                 JiTA.ui.simReportsMode = !JiTA.ui.simReportsMode;
                 if (JiTA.ui.simReportsMode) { JiTA.ui.reporterMode = false; }   // mutually exclusive with the reporter view
                 JiTA.ui._closeFilterMenu();
-                JiTA.ui._syncFilterBtn();
-                JiTA.ui._rerenderCurrent();
+                syncBtn();
+                rerender();
             });
             menu.appendChild(sb);
         }
 
-        if (!(onEbr && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode))) {
-        if (onEbr) {
+        if (!(views && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode))) {
+        if (status) {
             var sl = document.createElement('div'); sl.className = 'jita-fm-label'; sl.textContent = 'Status'; menu.appendChild(sl);
             var seg = document.createElement('div'); seg.className = 'jita-fm-seg';
             [['open', 'Open'], ['fixed', 'Closed'], ['all', 'All']].forEach(function (o) {
@@ -6564,8 +6580,8 @@ JiTA.ui = {
                     var bs = seg.querySelectorAll('.jita-fm-segbtn');
                     for (var i = 0; i < bs.length; i++) { bs[i].classList.remove('on'); }
                     b.classList.add('on');
-                    JiTA.ui._syncFilterBtn();
-                    JiTA.ui._rerenderCurrent();
+                    syncBtn();
+                    rerender();
                 });
                 seg.appendChild(b);
             });
@@ -6582,8 +6598,8 @@ JiTA.ui = {
         function commitDays() {
             var v = parseInt(inp.value, 10);
             JiTA.ui.filters.createdDays = (!isNaN(v) && v > 0) ? v : 0;
-            JiTA.ui._syncFilterBtn();
-            JiTA.ui._rerenderCurrent();
+            syncBtn();
+            rerender();
         }
         inp.addEventListener('input', function () { if (ct) { clearTimeout(ct); } ct = setTimeout(commitDays, 250); });
         inp.addEventListener('change', commitDays);
@@ -6601,8 +6617,8 @@ JiTA.ui = {
         reset.addEventListener('click', function () {
             JiTA.ui.filters = { status: 'all', createdDays: 0 };
             JiTA.ui._closeFilterMenu();
-            JiTA.ui._syncFilterBtn();
-            JiTA.ui._rerenderCurrent();
+            syncBtn();
+            rerender();
         });
         menu.appendChild(reset);
         }   // end !reporterMode (ranking filters hidden while showing the reporter's other reports)
@@ -10243,12 +10259,15 @@ function jitaWorkerBody(cfg) {
  * ranked matches. Up / down walk the list (J / K too, and clicking a card jumps straight to it); left and
  * right switch WHICH queue is being walked (left = bug reports, right = open defects).
  *
- * The queue is a LIVE JQL fetch using the bug hunters' standard backlog filter (open EVE Bug Reports,
- * unassigned or mine, minus the Vanguard/Launcher lanes), oldest-first by default - the local DB stores no
- * assignee, and live results can't be stale on the one field the queue is defined by. Each report's TEXT and
+ * BOTH queues are LIVE JQL fetches, each with its own editable query behind the JQL button (the bug hunters'
+ * standard backlog filter for reports; every open defect in the crawled projects for defects), oldest-first
+ * by default - the local DB stores no assignee, and live results can't be stale on the one field the queue is
+ * defined by, nor can a stored set be narrowed by arbitrary JQL. Each report's TEXT and
  * its ranked defect matches come from the local DB + shared worker (effectiveText -> suggestBest, same engine
  * as the sidebar panel), so stepping through the queue does no per-issue Jira navigation; the NEXT report's
- * matches are prefetched while you act on the current one, making ↓ effectively instant.
+ * matches are prefetched while you act on the current one, making ↓ effectively instant. The matches column
+ * carries the panel's own filter controls (text box, funnel, ranking-mode badge) over the same
+ * JiTA.ui.filters / modeOverride, so the two rank identically.
  *
  * Actions (per Schogol): 1-9 attach to a ranked defect match (number row or numpad), T close as Won't Do, G convert to GM
  * support (category picked with 1-4; the optional internal GM note is page-DOM-bound and deliberately not
@@ -10282,19 +10301,22 @@ JiTA.triage = {
     _queueDone: true,  // false while background pages are still appending (drives the "…" on the counter)
     LAST_KEY: 'jitaTriageLast',   // persisted { key, created } of the last VIEWED report - the resume point (bug-report mode)
     LAST_DEF_KEY: 'jitaTriageLastDef',   // the same for Defect mode
-    JQL_KEY: 'jitaTriageJql',     // persisted user-edited bug-report queue JQL (WITHOUT order by); empty/absent = DEFAULT_JQL
+    // Each queue persists its OWN edited JQL (WITHOUT an order by - the order toggle appends that), so
+    // narrowing the defect queue never touches the bug-report one. Empty / absent = that mode's default.
+    JQL_KEY: 'jitaTriageJql',
+    DEF_JQL_KEY: 'jitaTriageDefJql',
     DEFAULT_JQL: 'project = EBR AND issuetype = "EVE Bug Report" AND status = Open AND assignee in (currentUser(), EMPTY) AND labels not in ("Vanguard", "Launcher") AND component not in (Launcher)',   // the bug hunters' standard backlog filter
-    // What the Details rail needs, on top of what the queue itself needs. These ride along in the crawl that
-    // already runs (one request per 100 issues), so the rail costs nothing extra in bug-report mode.
-    // customfield_11660 = Original Reporter (the in-game character), customfield_10001 = Team.
-    EBR_FIELDS: ['summary', 'created', 'status', 'attachment', 'assignee', 'reporter', 'labels', 'components',
-        'versions', 'priority', 'resolution', 'updated', 'customfield_11660', 'customfield_10001'],
-    // The same set for a single defect. The local DB carries no assignee, labels or priority, so defect mode
-    // reads them per issue - but only by widening the attachment request it was already making.
-    DEFECT_FIELDS: 'attachment,assignee,reporter,labels,components,versions,fixVersions,priority,resolution,updated,customfield_10001',
-    _mode: 'ebr',      // 'ebr' = bug-report queue (live JQL) | 'defect' = open-defect queue (local DB); left/right arrows switch
+    // Every open defect in the crawled projects - the same set the queue used to read out of the local DB,
+    // so the default behaves as before and the JQL button is purely additive.
+    DEFAULT_DEF_JQL: 'project in (EDR, EO, PLAT) AND statusCategory != Done',
+    // One field list for both queues. The first four are what the queue itself needs; the rest feed the
+    // Details rail, and they ride along in the crawl that already runs (one request per 100 issues), so the
+    // rail costs nothing extra. customfield_11660 = Original Reporter (the in-game character, bug reports
+    // only - it simply comes back null on a defect), customfield_10001 = Team.
+    QUEUE_FIELDS: ['summary', 'created', 'status', 'attachment', 'assignee', 'reporter', 'labels', 'components',
+        'versions', 'fixVersions', 'priority', 'resolution', 'updated', 'customfield_11660', 'customfield_10001'],
+    _mode: 'ebr',      // 'ebr' = bug-report queue | 'defect' = open-defect queue; left/right arrows switch. Both crawl JQL.
     _stash: {},        // the OTHER mode's parked queue state: mode -> { queue, idx, done, error }
-    _defAtt: {},       // defect key -> { att, det } (fetched per render; the local DB stores neither)
     _resume: null,     // pending resume target (consumed once positioned, or dropped when the user navigates)
     _txCache: {},      // key -> { text, note }: on-demand display translation (E hotkey), cached per report
     _txShown: false,   // is the desc box currently showing the translation? (reset per report)
@@ -10303,7 +10325,14 @@ JiTA.triage = {
 
     order: function () { return gmGet(JiTA.triage.ORDER_KEY, 'oldest') === 'newest' ? 'newest' : 'oldest'; },
     _lastKey: function () { return JiTA.triage._mode === 'defect' ? JiTA.triage.LAST_DEF_KEY : JiTA.triage.LAST_KEY; },
-    _ebrJql: function () { var j = gmGet(JiTA.triage.JQL_KEY, ''); return (typeof j === 'string' && j.trim()) ? j.trim() : JiTA.triage.DEFAULT_JQL; },
+    // Which queue's JQL / storage key / default the current mode is on. Everything that touches the query
+    // goes through these, so neither queue can read or overwrite the other's.
+    _jqlKey: function () { return JiTA.triage._mode === 'defect' ? JiTA.triage.DEF_JQL_KEY : JiTA.triage.JQL_KEY; },
+    _defaultJql: function () { return JiTA.triage._mode === 'defect' ? JiTA.triage.DEFAULT_DEF_JQL : JiTA.triage.DEFAULT_JQL; },
+    _queueJql: function () {
+        var j = gmGet(JiTA.triage._jqlKey(), '');
+        return (typeof j === 'string' && j.trim()) ? j.trim() : JiTA.triage._defaultJql();
+    },
 
     // ---- lifecycle -----------------------------------------------------------------------------------------
     open: function () {
@@ -10330,11 +10359,16 @@ JiTA.triage = {
                 T._fetchQueue().then(function () { T._render(); T._prefetch(); });
             }).appendTo($bar);
         $('<span id="jt-modelbl" class="jt-modelbl" title="← bug reports · → open defects"></span>').appendTo($bar);
-        $('<button class="jita-btn" id="jt-jqlbtn" title="Show / edit the JQL that defines the bug-report queue">JQL</button>').on('click', function () { T._toggleJqlEditor(); }).appendTo($bar);
+        $('<button class="jita-btn" id="jt-jqlbtn" title="Show / edit the JQL that defines the queue you are on">JQL</button>').on('click', function () { T._toggleJqlEditor(); }).appendTo($bar);
         $('<span id="jt-done" class="jt-muted"></span>').appendTo($bar);
-        $('<div id="jt-jqled" class="jt-jqled" style="display:none"></div>').appendTo($m);   // JQL editor panel (bug-report mode)
+        $('<div id="jt-jqled" class="jt-jqled" style="display:none"></div>').appendTo($m);   // JQL editor panel (whichever queue is on screen)
+        // The matches column is a column, not a pane: its head bar (title, filter box, funnel, ranking-mode
+        // badge) is a SIBLING of the scrolling list, so navigating to the next issue - which empties
+        // #jt-matches - can't wipe what the user typed into the filter or scroll the controls away.
         $('<div class="jt-main"><div class="jt-queue" id="jt-queue"></div><div class="jt-report" id="jt-report"></div>' +
-          '<div class="jt-details" id="jt-details"></div><div class="jt-matches" id="jt-matches"></div></div>').appendTo($m);
+          '<div class="jt-details" id="jt-details"></div>' +
+          '<div class="jt-matcol"><div class="jt-matbar" id="jt-matbar"></div><div class="jt-matches" id="jt-matches"></div></div></div>').appendTo($m);
+        T._buildMatchBar();
         $('<div class="jt-msg" id="jt-msg"></div>').appendTo($m);
         $('<div class="jt-keys" id="jt-keys"></div>').appendTo($m);
         // ONE delegated click for the whole list, not a handler per card - the queue can hold thousands. The
@@ -10350,7 +10384,7 @@ JiTA.triage = {
 
         T._open = true; T._busy = false; T._queue = []; T._idx = 0; T._done = 0; T._cache = {}; T._armed = null; T._gmPick = false;
         T._rows = []; T._actRow = null;
-        T._mode = 'ebr'; T._stash = {}; T._defAtt = {};
+        T._mode = 'ebr'; T._stash = {};
         T._txCache = {}; T._txShown = false; T._txBusy = false; T._curRec = null;
         var last = gmGet(T._lastKey(), null);
         T._resume = (last && last.key) ? last : null;   // seek back to the last viewed report once the queue holds it
@@ -10381,31 +10415,35 @@ JiTA.triage = {
         T._open = false;
         T._closeViewer();   // the viewer lives on document.body, not inside the overlay - close it explicitly
         try { JiTA.ui._hideTip(true); } catch (e) { /* ignore */ }   // a hover card outlives its removed row otherwise
+        try { JiTA.ui._closeFilterMenu(); } catch (e) { /* ignore */ }   // the funnel popover is on document.body too
         if (T._keyHandler) { document.removeEventListener('keydown', T._keyHandler, true); T._keyHandler = null; }
         if (T._mo) { try { T._mo.disconnect(); } catch (e) { /* ignore */ } T._mo = null; }
         if (T._armTimer) { clearTimeout(T._armTimer); T._armTimer = null; }
+        if (T._filterTimer) { clearTimeout(T._filterTimer); T._filterTimer = null; }
         T._flushPos();   // a debounced resume point still in flight must not be lost by closing the overlay
         // _rows holds a DOM node per queue item. The overlay is gone, but JiTA.triage is a singleton that
         // lives as long as the tab, so leaving them behind would keep thousands of detached nodes reachable
         // for every open/close cycle of the session.
         T._queue = []; T._rows = []; T._actRow = null;
-        T._cache = {}; T._armed = null; T._gmPick = false; T._busy = false; T._stash = {}; T._defAtt = {};
+        T._cache = {}; T._armed = null; T._gmPick = false; T._busy = false; T._stash = {};
     },
 
-    // ---- queue (live JQL: the local DB has no assignee, and "unassigned" must be fresh) ---------------------
-    // Scope: unassigned OR already assigned to me (my own picked-up reports belong in my queue too - and the
-    // per-action verify allows exactly the same set). Attachment METADATA rides along in the same search call
-    // (one request per 100 issues instead of a GET per report) so the overlay can list / open attachments.
-    // Streamed: the returned promise resolves after the FIRST page so the first report renders in one round
+    // ---- queue (a LIVE JQL crawl, for BOTH modes) -----------------------------------------------------------
+    // Live rather than read out of the local DB, for two reasons. The bug-report queue is defined by
+    // "unassigned or mine", and the DB stores no assignee, so it could never answer that question - and it
+    // must not be stale on the one field the queue is defined by. The defect queue used to come from the DB
+    // (instant, no crawl), but a stored set cannot be narrowed by arbitrary JQL, so both now run the same
+    // crawl and both get the JQL button. Attachment metadata and the Details-rail fields ride along in the
+    // same search call (one request per 100 issues rather than a GET per issue).
+    // Streamed: the returned promise resolves after the FIRST page so the first issue renders in one round
     // trip; the remaining pages keep appending in the background (progress counter grows live, with a trailing
     // "…" until done). A generation token cancels a stale pagination when the order toggle refetches mid-crawl.
     _fetchQueue: function () {
         var T = JiTA.triage;
         var gen = ++T._qGen;
-        // The bug hunters' standard backlog filter (per Schogol), verbatim + our order clause: open EVE Bug
-        // Reports, unassigned or mine, minus the Vanguard/Launcher lanes.
-        if (T._mode === 'defect') { return T._fetchDefectQueue(); }
-        var jql = T._ebrJql() + ' ORDER BY created ' + (T.order() === 'newest' ? 'DESC' : 'ASC');   // user-editable (JQL button); our order clause is appended
+        // This mode's query (the bug hunters' standard backlog filter, or every open defect), each editable
+        // through the JQL button, plus our own order clause.
+        var jql = T._queueJql() + ' ORDER BY created ' + (T.order() === 'newest' ? 'DESC' : 'ASC');
         T._queueError = null;
         T._queueDone = false;
         T._queue = [];
@@ -10414,7 +10452,7 @@ JiTA.triage = {
             var first = true;
             function finishPage() { if (first) { first = false; resolve(); } else { T._queueProgress(); } }
             function page(token) {
-                var body = { jql: jql, fields: T.EBR_FIELDS, maxResults: T.PAGE_SIZE };
+                var body = { jql: jql, fields: T.QUEUE_FIELDS, maxResults: T.PAGE_SIZE };
                 if (token) { body.nextPageToken = token; }
                 JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
                     if (!T._open || gen !== T._qGen) { if (first) { first = false; resolve(); } return; }   // reloaded / closed mid-crawl
@@ -10526,10 +10564,12 @@ JiTA.triage = {
             });
         }).then(function (base) {
             // Bug-report mode ranks DEFECTS for the report (suggestBest); Defect mode ranks open REPORTS for the
-            // defect (suggestEbrBest) - the same pairing as the sidebar panel on each page type.
+            // defect (suggestEbrBest) - the same pairing as the sidebar panel on each page type. The head bar's
+            // filter terms ride along exactly as they do in the panel; _cache is dropped whenever they change.
+            var terms = JiTA.ui._filterTerms();
             var rank = defectMode
-                ? JiTA.rank.suggestEbrBest(base.text, key, JiTA.ui.modeOverride, [])
-                : JiTA.rank.suggestBest(base.text, key, (base.rec && base.rec.created) || item.created || null, JiTA.ui.modeOverride, []);
+                ? JiTA.rank.suggestEbrBest(base.text, key, JiTA.ui.modeOverride, terms)
+                : JiTA.rank.suggestBest(base.text, key, (base.rec && base.rec.created) || item.created || null, JiTA.ui.modeOverride, terms);
             return rank.then(function (out) {
                 var results = out.results || [];   // already capped at the user's TOP_N (sdTopN); digits address the first MATCH_KEYS
                 return Promise.all(results.map(function (r) {   // enrich for the row title-peek (a handful of DB reads)
@@ -10829,7 +10869,6 @@ JiTA.triage = {
         // Ctrl/Shift/middle click on anything keeps the raw browser behavior. O still opens the full issue.
         T._renderAtt(item, $rep);
         T._renderRail(item);
-        if (T._mode === 'defect' && !item.det) { T._loadDefectFields(item, key); }   // defects: neither attachments nor the rail fields are stored locally
         $mat.append($('<div class="jt-empty"></div>').text('Ranking…'));
         T._setMsg('');
         // Paint the report TEXT the moment its DB read lands - never behind the ranking. _resolve chains the
@@ -10851,11 +10890,13 @@ JiTA.triage = {
             if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== key) { return; }   // navigated meanwhile
             paintRec(res.rec || {});
             $mat.empty();
-            var $mh = $('<div class="jt-mathead"></div>').appendTo($mat);
-            $('<span></span>').text(T._mode === 'defect' ? 'Matching open bug reports' : 'Defect matches').appendTo($mh);
-            $('<span class="jt-mode"></span>').text(res.mode || '').appendTo($mh);
+            $('#jt-mode').text(res.mode || '');   // the head bar is a sibling of this list, so it survives the empty()
             if (!res.results.length) {
-                $('<div class="jt-empty"></div>').text('No similar defects found.').appendTo($mat);
+                var none = T._mode === 'defect' ? 'No matching open bug reports found.' : 'No similar defects found.';
+                if (JiTA.ui._filterTerms().length || JiTA.ui._filtersActive({ status: T._mode !== 'defect' })) {
+                    none += ' The filters above are narrowing the candidates - clear them to widen the search.';
+                }
+                $('<div class="jt-empty"></div>').text(none).appendTo($mat);
                 return;
             }
             var $ul = $('<ul class="jt-list"></ul>').appendTo($mat);
@@ -11260,8 +11301,7 @@ JiTA.triage = {
         if (!el) { return; }
         el.innerHTML = '';
         var d = item.det;
-        if (!d) { el.innerHTML = '<div class="jt-qempty">Loading details…</div>'; return; }
-        if (d.failed) { el.innerHTML = '<div class="jt-qempty">Could not read this issue\'s fields. O opens it in Jira.</div>'; return; }
+        if (!d) { el.innerHTML = '<div class="jt-qempty">No fields read for this issue.</div>'; return; }
         function row(label, value, dim) {
             if (!value) { return; }
             var wrap = document.createElement('div');
@@ -11289,49 +11329,72 @@ JiTA.triage = {
         if (!el.childNodes.length) { el.innerHTML = '<div class="jt-qempty">No fields set.</div>'; }
     },
 
-    // Defect-mode queue: every OPEN defect from the LOCAL DB (all defects are synced, so no crawl - instant),
-    // sorted by created per the order toggle. Attachments and the Details-rail fields aren't stored locally:
-    // _loadDefectFields fetches both for the defect on screen, in one request.
-    _fetchDefectQueue: function () {
+    /* ---- the matches column's head bar ------------------------------------------------------------------
+     * The same controls the sidebar panel carries above its suggestion list: a text filter, the funnel
+     * (Status / Created within) and the clickable ranking-mode badge. They are not a second implementation -
+     * they drive the very same JiTA.ui.filters / modeOverride / _filterTerms, which every ranking loop already
+     * consults as a per-candidate predicate, so a filtered-out candidate is dropped BEFORE the TOP_N cut
+     * rather than hidden after it (you still get a full N of matching results).
+     *
+     * Built ONCE per session and living beside #jt-matches rather than inside it, because _render empties that
+     * list on every cursor move - a bar inside it would lose what the user typed on the next ↓. */
+    _buildMatchBar: function () {
+        var T = JiTA.triage, $b = $('#jt-matbar');
+        if (!$b.length) { return; }
+        $b.empty();
+        $('<span id="jt-mattitle" class="jt-mattitle"></span>')
+            .text(T._mode === 'defect' ? 'Matching open bug reports' : 'Defect matches').appendTo($b);
+        $('<input id="jt-filter" class="jt-filter" type="text" spellcheck="false" placeholder="Filter…">')
+            .attr('title', 'Rank only candidates containing these words. Searches the whole local DB, not just the rows on screen.')
+            .on('input', function () {
+                if (T._filterTimer) { clearTimeout(T._filterTimer); }
+                T._filterTimer = setTimeout(T._onFilterChange, 250);
+            })
+            .on('keydown', function (ev) {
+                // Handled AT the box and stopped there, like the JQL textarea: Esc must clear the filter, never
+                // tear the whole mode down, and Enter must re-rank now rather than wait out the debounce.
+                if (ev.key === 'Escape') {
+                    ev.preventDefault(); ev.stopPropagation();
+                    if ($(this).val()) { $(this).val(''); T._onFilterChange(); } else { this.blur(); }
+                } else if (ev.key === 'Enter') {
+                    ev.preventDefault(); ev.stopPropagation();
+                    T._onFilterChange();
+                }
+            }).appendTo($b);
+        $('<span id="jt-filterbtn" class="jt-filterbtn" title="Filters"></span>').html(JiTA.ui._funnelSvg)
+            .on('click', function (e) {
+                e.preventDefault(); e.stopPropagation();
+                if (document.getElementById('jita-sd-filtermenu')) { JiTA.ui._closeFilterMenu(); return; }
+                JiTA.ui._showFilterMenu(this, {
+                    views: false,                     // the reporter's-reports / similar-reports views are panel-only
+                    status: T._mode !== 'defect',     // only the bug-report queue ranks DEFECTS, which have a status worth filtering
+                    rerender: T._onFilterChange,
+                    syncBtn: T._syncFilterBtn
+                });
+            }).appendTo($b);
+        $('<span id="jt-mode" class="jt-mode" title="Click to switch ranking mode (resets to automatic on reload)"></span>')
+            .on('click', function () { JiTA.ui._cycleMode(T._onFilterChange); }).appendTo($b);
+        T._syncFilterBtn();
+    },
+    _filterTimer: null,
+
+    // A filter or ranking-mode change invalidates EVERY ranked list: _cache holds one promise per issue, each
+    // computed under the old terms, and the prefetched neighbours are stale for the same reason. Drop it all,
+    // repaint what is on screen and re-prefetch around the cursor.
+    _onFilterChange: function () {
         var T = JiTA.triage;
-        T._queueError = null; T._queueDone = true; T._queue = [];
-        T._renderList();   // _fetchQueue returns before its own reset for this mode, so the list is cleared here
-        return JiTA.db.allDefects().then(function (recs) {
-            if (!T._open || T._mode !== 'defect') { return; }
-            var out = [];
-            for (var i = 0; i < recs.length; i++) {
-                var r = recs[i];
-                if (r.project === 'EBR' || JiTA.util.isResolved(r.status, r.resolution)) { continue; }
-                out.push({ key: r.key, summary: r.summary || '', created: r.created || null, status: r.status || '', att: null, det: null });
-            }
-            var newest = T.order() === 'newest';
-            out.sort(function (a, b) { var x = a.created || '', y = b.created || ''; if (x === y) { return a.key < b.key ? -1 : 1; } return ((x < y) !== newest) ? -1 : 1; });
-            T._queue = out;
-            T._appendRows();
-        }).catch(function (e) { if (T._open) { T._queue = []; T._queueError = String(e && e.message || e); T._renderList(); } });
+        if (T._filterTimer) { clearTimeout(T._filterTimer); T._filterTimer = null; }
+        if (!T._open) { return; }
+        T._cache = {};
+        T._syncFilterBtn();
+        T._render();
+        T._prefetch();
     },
 
-    // One request per defect viewed, cached for the session, filling BOTH the attachment strip and the rail.
-    _loadDefectFields: function (item, key) {
-        var T = JiTA.triage;
-        function paint() {
-            if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== key) { return; }   // navigated meanwhile
-            T._renderAtt(item, $('#jt-report'));
-            T._renderRail(item);
-        }
-        var hit = T._defAtt[key];
-        if (hit) { item.att = hit.att; item.det = hit.det; paint(); return; }
-        $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=' + T.DEFECT_FIELDS, dataType: 'json' })
-            .done(function (d) {
-                var f = (d && d.fields) || {};
-                var rec = { att: T._mapAtt(f.attachment), det: T._mapDet(f) };
-                T._defAtt[key] = rec; item.att = rec.att; item.det = rec.det;
-                paint();
-            })
-            // Mark both as attempted so a failed read isn't retried on every re-render of the same defect.
-            // `failed` matters: an empty field set would otherwise render as "Unassigned", which is a claim
-            // we cannot make when the request never came back.
-            .fail(function () { item.att = []; item.det = { failed: true }; paint(); });
+    // Color the funnel when a filter that actually affects THIS queue is set (the typed terms are visible in
+    // the box itself, so they don't count - same rule as the panel's).
+    _syncFilterBtn: function () {
+        $('#jt-filterbtn').toggleClass('active', JiTA.ui._filtersActive({ status: JiTA.triage._mode !== 'defect' }));
     },
 
     // The attachments strip (chips + thumbnails), appended after the description. Shared by both modes.
@@ -11411,8 +11474,9 @@ JiTA.triage = {
     _syncModeUi: function () {
         var T = JiTA.triage;
         $('#jt-modelbl').text(T._mode === 'defect' ? 'Open defects' : 'Bug reports');
-        $('#jt-jqlbtn').toggle(T._mode === 'ebr');
-        if (T._mode !== 'ebr') { T._closeJqlEditor(); }
+        $('#jt-mattitle').text(T._mode === 'defect' ? 'Matching open bug reports' : 'Defect matches');
+        T._syncFilterBtn();   // Status stops counting once the candidates are reports (they are open by definition)
+        T._closeJqlEditor();  // the editor holds ONE mode's query - reopen it to edit the mode you switched to
     },
 
     _renderLegend: function () {
@@ -11423,20 +11487,24 @@ JiTA.triage = {
             : '<span><b>1-9</b> Attach match #n (number row or numpad)</span><span><b>T</b> Trash (Won\'t Do)</span><span><b>G</b> To GM</span><span><b>E</b> Translate</span><span><b>↑</b>/<b>↓</b> Prev/next (or K/J, or click a card)</span><span><b>→</b> Defect queue</span><span><b>O</b> Open in Jira</span><span><b>Esc</b> Exit</span>';
     },
 
-    // ---- bug-report queue JQL editor (JQL button, bug-report mode only) -----------------------------------------
-    // The query is persisted (JQL_KEY); Reset restores DEFAULT_JQL. Our ORDER BY is always appended by the order
-    // toggle, so a user-typed one is stripped. Esc / Ctrl+Enter are handled AT the textarea and stopped there, so
-    // neither menu._esc (which would close the whole mode) nor the triage key layer ever sees them.
+    // ---- queue JQL editor (JQL button; edits whichever queue is on screen) ---------------------------------------
+    // The query is persisted per mode (_jqlKey); Reset restores that mode's default. Our ORDER BY is always appended
+    // by the order toggle, so a user-typed one is stripped. Esc / Ctrl+Enter are handled AT the textarea and stopped
+    // there, so neither menu._esc (which would close the whole mode) nor the triage key layer ever sees them.
     _toggleJqlEditor: function () {
         var T = JiTA.triage, el = document.getElementById('jt-jqled');
-        if (!el || T._mode !== 'ebr') { return; }
+        if (!el) { return; }
         if (el.style.display !== 'none') { T._closeJqlEditor(); return; }
+        var def = T._defaultJql();
         var $ed = $(el).empty().show();
-        $('<div class="jt-jqlhead">Bug-report queue JQL <span class="jt-muted">- ORDER BY is added automatically (Oldest/Newest toggle). Ctrl+Enter saves, Esc closes.</span></div>').appendTo($ed);
-        var $ta = $('<textarea id="jt-jqlta" class="jt-jqlta" rows="3" spellcheck="false"></textarea>').val(T._ebrJql()).appendTo($ed);
+        $('<div class="jt-jqlhead"></div>')
+            .text((T._mode === 'defect' ? 'Open-defect' : 'Bug-report') + ' queue JQL ')
+            .append($('<span class="jt-muted">- ORDER BY is added automatically (Oldest/Newest toggle). Ctrl+Enter saves, Esc closes.</span>'))
+            .appendTo($ed);
+        var $ta = $('<textarea id="jt-jqlta" class="jt-jqlta" rows="3" spellcheck="false"></textarea>').val(T._queueJql()).appendTo($ed);
         var $row = $('<div class="jt-jqlrow"></div>').appendTo($ed);
         $('<button class="jita-btn">Save &amp; reload queue</button>').on('click', function () { T._saveJql($ta.val()); }).appendTo($row);
-        $('<button class="jita-btn">Reset to default</button>').on('click', function () { $ta.val(T.DEFAULT_JQL); T._saveJql(T.DEFAULT_JQL); }).appendTo($row);
+        $('<button class="jita-btn">Reset to default</button>').on('click', function () { $ta.val(def); T._saveJql(def); }).appendTo($row);
         $('<button class="jita-btn">Cancel</button>').on('click', function () { T._closeJqlEditor(); }).appendTo($row);
         $('<span id="jt-jqlerr" class="jt-jqlerr"></span>').appendTo($row);
         $ta.on('keydown', function (ev) {
@@ -11450,10 +11518,10 @@ JiTA.triage = {
         var T = JiTA.triage;
         var jql = String(text || '').replace(/\s+order\s+by\s+[\s\S]*$/i, '').replace(/\s+/g, ' ').trim();   // our order clause is appended - drop a user-typed one
         if (!jql) { $('#jt-jqlerr').text('The JQL is empty.'); return; }
-        gmSet(T.JQL_KEY, jql === T.DEFAULT_JQL ? '' : jql);   // '' = back on the default (so a future default change reaches this user)
+        gmSet(T._jqlKey(), jql === T._defaultJql() ? '' : jql);   // '' = back on the default (so a future default change reaches this user)
         T._closeJqlEditor();
         T._stash = {}; T._idx = 0; T._queue = []; T._resume = null;
-        T._setMsg('Reloading the bug-report queue…');
+        T._setMsg('Reloading the ' + (T._mode === 'defect' ? 'open-defect' : 'bug-report') + ' queue…');
         T._renderShell();
         T._fetchQueue().then(function () { T._render(); T._prefetch(); });
     },
@@ -11501,6 +11569,10 @@ JiTA.triage = {
     _injectCss: function () {
         if (JiTA.triage._cssInjected) { return; }
         JiTA.triage._cssInjected = true;
+        // The panel's stylesheet, which the funnel popover and the hover card are styled by - both live on
+        // document.body, outside this overlay. It is normally injected when the panel mounts, but triage can
+        // be entered from a page that has no panel (a board, a backlog), so ask for it explicitly.
+        try { JiTA.ui.injectCss(); } catch (e) { /* ignore */ }
         try {
             GM_addStyle(
                 // Full-screen sheet: the shared overlay chrome centers a 360px/82vh rounded box - stretch it to
@@ -11518,7 +11590,10 @@ JiTA.triage = {
                 '.jita-triage-view .jt-queue { flex: 0 0 clamp(220px, 18vw, 300px); min-width: 0; overflow-y: auto; overflow-x: hidden; border-right: 1px solid #2c333a; padding-right: 6px; }' +
                 '.jita-triage-view .jt-report { flex: 1.2; min-width: 0; display: flex; flex-direction: column; }' +
                 '.jita-triage-view .jt-details { flex: 0 0 clamp(190px, 15vw, 240px); min-width: 0; overflow-y: auto; border-left: 1px solid #2c333a; padding-left: 12px; }' +
-                '.jita-triage-view .jt-matches { flex: 1; min-width: 0; overflow-y: auto; }' +   // height comes from the flex row (full-screen sheet), not a vh cap
+                // The matches COLUMN: a fixed head bar over a scrolling list, so the filter controls stay put
+                // while the list under them scrolls (and survive the per-issue empty() of .jt-matches).
+                '.jita-triage-view .jt-matcol { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }' +
+                '.jita-triage-view .jt-matches { flex: 1; min-height: 0; overflow-y: auto; }' +   // height comes from the flex row (full-screen sheet), not a vh cap
                 // The queue card: summary clamped to two lines, then key + status + date - the old Jira card.
                 // Every row carries a TRANSPARENT 1px border so the active row can take a coloured one with no
                 // layout shift as the highlight moves.
@@ -11553,8 +11628,17 @@ JiTA.triage = {
                 '.jita-triage-view .jt-att-spin { position: absolute; top: 50%; left: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; border: 2px solid #3a434d; border-top-color: #4c9aff; border-radius: 50%; animation: jt-spin .8s linear infinite; }' +   // reuses @keyframes jt-spin (viewer)
                 '.jita-triage-view .jt-lang { color: #6bd0dc; font-size: 11px; margin-bottom: 4px; }' +
                 '.jita-triage-view .jt-desc { background: #1b2025; border: 1px solid #2c333a; border-radius: 6px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; overflow-y: auto; flex: 1 1 auto; min-height: 0; font-size: 12px; line-height: 1.5; color: #cfd6dd; }' +   // fills the report column (full-screen sheet), no vh cap
-                '.jita-triage-view .jt-mathead { display: flex; align-items: center; justify-content: space-between; font-weight: 700; color: #e6e6e6; font-size: 12px; margin-bottom: 6px; }' +
-                '.jita-triage-view .jt-mode { color: #9aa6b2; font-weight: 600; font-size: 10px; }' +
+                '.jita-triage-view .jt-matbar { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex: 0 0 auto; }' +
+                '.jita-triage-view .jt-mattitle { font-weight: 700; color: #e6e6e6; font-size: 12px; white-space: nowrap; }' +
+                '.jita-triage-view .jt-filter { flex: 1 1 60px; min-width: 0; height: 22px; box-sizing: border-box; padding: 0 7px; font-size: 11px; border: 1px solid #3a434d; border-radius: 8px; background: #14181b; color: #e6e6e6; outline: none; }' +
+                '.jita-triage-view .jt-filter:focus { border-color: #4c9aff; }' +
+                '.jita-triage-view .jt-filterbtn { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 6px; color: #9aa6b2; cursor: pointer; user-select: none; position: relative; flex: 0 0 auto; }' +
+                '.jita-triage-view .jt-filterbtn:hover { color: #e6e6e6; background: #3a434d; }' +
+                '.jita-triage-view .jt-filterbtn.active { color: #4c9aff; }' +
+                '.jita-triage-view .jt-filterbtn.active::after { content: ""; position: absolute; top: 1px; right: 1px; width: 5px; height: 5px; border-radius: 50%; background: #4c9aff; }' +
+                '.jita-triage-view .jt-mode { color: #9aa6b2; font-weight: 600; font-size: 10px; background: #3a434d; padding: 1px 6px; border-radius: 8px; cursor: pointer; user-select: none; flex: 0 0 auto; white-space: nowrap; }' +
+                '.jita-triage-view .jt-mode:hover { background: #4a545f; color: #e6e6e6; }' +
+                '.jita-triage-view .jt-mode:empty { display: none; }' +
                 // Responsive match grid: as many ~300px-min card columns as the pane's width fits (1 on narrow,
                 // 2 on a typical scaled desktop, 3+ on genuinely wide CSS viewports); the gap replaces margins.
                 // 300 not 420: OS/browser scaling shrinks the CSS viewport, and the queue list and Details rail
