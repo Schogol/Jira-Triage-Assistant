@@ -12562,58 +12562,90 @@ JiTA.leadduty = {
         },
 
         // The full month pool, identical for every Lead. Resolves { keys, byKey }.
+        //
+        // BOTH halves are restricted to the ISD group, because quality control grades ISD's OWN handling: a
+        // report a CCP dev or a GM closed is not ours to second-guess. The defect half filters in JQL
+        // (reporter in membersOf), but the report half cannot - "who moved this to Attached" is a changelog
+        // predicate - so it is one "BY <accountId>" search per member. That is one crawl a month, paid when
+        // the month is frozen, and it hands us the handler for free: the sampled rows no longer need a
+        // changelog read each to name who made the call, and the per-Lead self-exclusions fall straight out
+        // of the same data.
         fetchPool: function (ym) {
             var L = JiTA.leadduty, Q = L.qc, b = L._bounds(ym);
-            var byKey = {};
-            return Q._ebrIssues(b, null, ['summary', 'status', 'resolution', 'created']).then(function (ebr) {
-                for (var i = 0; i < ebr.length; i++) {
-                    var f = ebr[i].fields || {};
-                    byKey[ebr[i].key] = {
-                        key: ebr[i].key, kind: 'report', summary: f.summary || '',
-                        status: (f.status && f.status.name) || '', created: f.created || null, reporter: null
+            var byKey = {}, EBR_FIELDS = ['summary', 'status', 'resolution', 'created', 'assignee'];
+            function addReport(row, actor, actorAcc) {
+                var f = row.fields || {}, it = byKey[row.key];
+                if (!it) {
+                    it = byKey[row.key] = {
+                        key: row.key, kind: 'report', summary: f.summary || '',
+                        status: (f.status && f.status.name) || '', created: f.created || null,
+                        reporter: null, actor: '', handlers: {}
                     };
                 }
+                // Two members can both have touched one report (attached, reopened, closed again). Every one
+                // of them is excluded from grading it; the NAME shown is the first in the fixed member order,
+                // so each Lead displays the same one.
+                if (!it.actor && actor) { it.actor = actor; }
+                if (actorAcc) { it.handlers[actorAcc] = true; }
+            }
+            return L.group.members(false).then(function (members) {
+                var byAcc = {};
+                members.forEach(function (m) { byAcc[m.accountId] = m; });
+                return members.reduce(function (p, m) {
+                    return p.then(function () {
+                        return Q._ebrIssues(b, m.accountId, EBR_FIELDS).then(function (rows) {
+                            for (var i = 0; i < rows.length; i++) { addReport(rows[i], m.displayName, m.accountId); }
+                        });
+                    });
+                }, Promise.resolve()).then(function () {
+                    // CCP's convert-to-defect rule performs the transition AS the automation account, so those
+                    // reports carry no ISD member as the actioner even though a Bug Hunter triggered them.
+                    // The credit tracker attributes them to the assignee; do the same, and drop any whose
+                    // assignee is not one of ours. A failure here costs coverage, not the whole sample.
+                    if (!JiTA.credits.AUTOMATION_ID) { return null; }
+                    return Q._ebrIssues(b, JiTA.credits.AUTOMATION_ID, EBR_FIELDS).then(function (rows) {
+                        for (var i = 0; i < rows.length; i++) {
+                            var as = (rows[i].fields || {}).assignee, acc = (as && as.accountId) || '';
+                            if (!acc || !byAcc[acc]) { continue; }
+                            addReport(rows[i], byAcc[acc].displayName, acc);
+                        }
+                    }, function (e) {
+                        JiTA.dlog('[JiTA] leadduty: automation-actioned reports not sampled: ' + (e && e.message || e));
+                    });
+                });
+            }).then(function () {
                 return L._search(Q._defectJql(b), ['summary', 'reporter', 'created', 'status', 'project']);
             }).then(function (defs) {
                 for (var i = 0; i < defs.length; i++) {
                     var f = defs[i].fields || {};
-                    byKey[defs[i].key] = {
+                    var acc = (f.reporter && f.reporter.accountId) || null;
+                    var rec = {
                         key: defs[i].key, kind: 'defect', summary: f.summary || '',
                         status: (f.status && f.status.name) || '', created: f.created || null,
-                        reporter: (f.reporter && f.reporter.accountId) || null,
-                        reporterName: (f.reporter && f.reporter.displayName) || ''
+                        reporter: acc, reporterName: (f.reporter && f.reporter.displayName) || '',
+                        actor: (f.reporter && f.reporter.displayName) || '', handlers: {}
                     };
+                    if (acc) { rec.handlers[acc] = true; }
+                    byKey[defs[i].key] = rec;
                 }
                 return { keys: Object.keys(byKey).sort(), byKey: byKey };
             });
         },
 
-        // Per-Lead exclusion sets, so nobody is handed their own triage decision to grade. EBR uses a set
-        // DIFFERENCE (one small "BY <accountId>" search per Lead) rather than a per-issue changelog crawl over
-        // hundreds of issues; defect authorship is free from the reporter field already in the pool. One
-        // accountId per Lead is sufficient - see the note on JiTA.leadduty.roster.
-        fetchExclusions: function (ym, roster, accByHandle, pool) {
-            var L = JiTA.leadduty, Q = L.qc, b = L._bounds(ym);
+        // Per-Lead exclusion sets, so nobody is handed their own decision to grade. Both halves now fall out
+        // of the pool itself - each item records which ISD account(s) handled it - so this costs no requests
+        // at all. It used to run one extra "BY <accountId>" search per Lead on top of the pool crawl.
+        fetchExclusions: function (roster, accByHandle, pool) {
             var excl = {};
             roster.forEach(function (h) { excl[h] = {}; });
-            // defects: free
             Object.keys(pool.byKey).forEach(function (k) {
-                var it = pool.byKey[k];
-                if (it.kind !== 'defect' || !it.reporter) { return; }
+                var handlers = pool.byKey[k].handlers || {};
                 for (var i = 0; i < roster.length; i++) {
-                    if (accByHandle[roster[i]] === it.reporter) { excl[roster[i]][k] = true; }
+                    var acc = accByHandle[roster[i]];
+                    if (acc && handlers[acc]) { excl[roster[i]][k] = true; }
                 }
             });
-            // reports: one search per Lead with a resolved accountId
-            return roster.reduce(function (p, h) {
-                var acc = accByHandle[h];
-                if (!acc) { return p; }
-                return p.then(function () {
-                    return Q._ebrIssues(b, acc, ['key']).then(function (rows) {
-                        for (var i = 0; i < rows.length; i++) { excl[h][rows[i].key] = true; }
-                    }, function () { /* a failed exclusion search just means a Lead may see one of their own */ });
-                });
-            }, Promise.resolve()).then(function () { return excl; });
+            return Promise.resolve(excl);
         },
 
         // ---- who actually handled the item ------------------------------------------------------------
@@ -12747,7 +12779,7 @@ JiTA.leadduty = {
                 }
                 return Q.fetchPool(ym).then(function (pool) {
                     return L.roster.resolve(false).then(function (rr) {
-                        return Q.fetchExclusions(ym, roster, rr.accByHandle, pool).then(function (excl) {
+                        return Q.fetchExclusions(roster, rr.accByHandle, pool).then(function (excl) {
                             var quota = Math.min(L.qcCount(), Math.max(1, Math.floor(pool.keys.length / roster.length)));
                             var defectsInPool = 0;
                             for (var d = 0; d < pool.keys.length; d++) { if (!/^EBR-/.test(pool.keys[d])) { defectsInPool++; } }
@@ -12758,6 +12790,17 @@ JiTA.leadduty = {
                                 createdAt: new Date().toISOString(),
                                 createdBy: (L.me() && L.me().handle) || '?'
                             };
+                            // Who handled each SAMPLED item, known for free because the pool was built by
+                            // asking per member. Storing it means no Lead ever walks a changelog to fill the
+                            // handler column, however late in the month they open the tab. Only the assigned
+                            // keys are kept, so this is a few dozen short strings, not the whole pool.
+                            rec.actors = {};
+                            Object.keys(rec.assign).forEach(function (h) {
+                                rec.assign[h].forEach(function (k) {
+                                    var a = pool.byKey[k] && pool.byKey[k].actor;
+                                    if (a) { rec.actors[k] = a; }
+                                });
+                            });
                             if (!state.shared) { return Q._hydrate(ym, rec, val, false, pool); }
                             var stored = rec;
                             return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
@@ -12800,9 +12843,14 @@ JiTA.leadduty = {
                         created: f.created || null, reporterName: (f.reporter && f.reporter.displayName) || ''
                     };
                 }
+                var actors = record.actors || {};
                 var items = keys.map(function (key) {
-                    return (have && have[key]) || extra[key] ||
+                    var it = (have && have[key]) || extra[key] ||
                         { key: key, kind: /^EBR-/.test(key) ? 'report' : 'defect', summary: '(not found - moved or deleted)', status: '', created: null };
+                    // A month frozen before handlers were stored has no `actors`; those rows fall back to the
+                    // changelog read in qc.actor() exactly as before.
+                    if (!it.actor && actors[key]) { it.actor = actors[key]; }
+                    return it;
                 });
                 var doneMap = (ledgerValue && ledgerValue.done && ledgerValue.done[ym]) || {};
                 var mineDone = {};
@@ -12922,6 +12970,66 @@ JiTA.leadduty = {
         }
     },
 
+    // ---- ISD group membership -------------------------------------------------------------------------
+    // Quality control grades ISD's OWN handling, so both halves of the sample have to be restricted to the
+    // group. The defect half does that in JQL (reporter in membersOf), but "who moved this report to
+    // Attached" is a CHANGELOG predicate rather than a field, so there is no membersOf() to lean on - it
+    // takes one "BY <accountId>" search per member, and that needs the member list.
+    group: {
+        CACHE_KEY: 'leadduty:group',
+        TTL_MS: 7 * 24 * 60 * 60 * 1000,
+
+        // Resolves [{ accountId, displayName, emailAddress }] sorted by accountId, so every Lead walks the
+        // members in the same order and derives the same pool. INACTIVE members are deliberately included:
+        // someone who has since left ISD still handled those reports last month, and that work is still ours
+        // to check. A crawl that fails keeps serving the cached list rather than emptying the pool.
+        members: function (force) {
+            var L = JiTA.leadduty, G = L.group;
+            return JiTA.db.getMeta(G.CACHE_KEY).catch(function () { return null; }).then(function (cached) {
+                var usable = cached && cached.members && cached.members.length;
+                if (!force && usable && (Date.now() - (cached.at || 0)) < G.TTL_MS) { return cached.members; }
+                return G._crawl().then(function (list) {
+                    var out = list.map(function (m) {
+                        return { accountId: m.accountId, displayName: m.displayName || '', emailAddress: m.emailAddress || '' };
+                    }).sort(function (a, b) { return a.accountId < b.accountId ? -1 : (a.accountId > b.accountId ? 1 : 0); });
+                    if (!out.length) {
+                        if (usable) { return cached.members; }
+                        throw new Error('The group "' + L.QC_GROUP + '" came back empty, so no quality-control sample could be drawn.');
+                    }
+                    return JiTA.db.setMeta(G.CACHE_KEY, { at: Date.now(), members: out })
+                        .then(function () { return out; }, function () { return out; });
+                }, function (e) {
+                    if (usable) { return cached.members; }
+                    throw e;
+                });
+            });
+        },
+
+        // Paged /group/member crawl, by group name and then by id (mirrors the credit tracker's
+        // crGroupMembers - some tenants only resolve the id form).
+        _crawl: function () {
+            var L = JiTA.leadduty, out = [];
+            function page(param, start) {
+                return L._get('/rest/api/3/group/member?' + param + '&includeInactiveUsers=true&startAt=' + start + '&maxResults=50')
+                    .then(function (res) {
+                        var vals = (res && res.values) || [];
+                        out = out.concat(vals);
+                        if ((res && res.isLast) || !vals.length) { return out; }
+                        return page(param, start + vals.length);
+                    });
+            }
+            return page('groupname=' + encodeURIComponent(L.QC_GROUP), 0).catch(function () {
+                return L._get('/rest/api/3/groups/picker?query=' + encodeURIComponent(L.QC_GROUP)).then(function (res) {
+                    var gid = null, gs = (res && res.groups) || [];
+                    for (var i = 0; i < gs.length; i++) { if ((gs[i].name || '').toLowerCase() === L.QC_GROUP.toLowerCase()) { gid = gs[i].groupId; } }
+                    if (!gid) { throw new Error('group not found: ' + L.QC_GROUP); }
+                    out = [];
+                    return page('groupId=' + encodeURIComponent(gid), 0);
+                });
+            });
+        }
+    },
+
     // ---- roster -> accountId resolution --------------------------------------------------------------
     // Needed for the per-Lead "BY <accountId>" exclusion searches. One accountId per Lead is enough: the
     // legacy <handle>@ccpgames.com accounts the credit tracker bridges are ancient and never actioned a bug
@@ -12979,25 +13087,7 @@ JiTA.leadduty = {
         },
         _fromGroup: function (want, byHandle) {
             var L = JiTA.leadduty;
-            var out = [];
-            function page(param, start) {
-                return L._get('/rest/api/3/group/member?' + param + '&includeInactiveUsers=true&startAt=' + start + '&maxResults=50')
-                    .then(function (res) {
-                        var vals = (res && res.values) || [];
-                        out = out.concat(vals);
-                        if ((res && res.isLast) || !vals.length) { return out; }
-                        return page(param, start + vals.length);
-                    });
-            }
-            return page('groupname=' + encodeURIComponent(L.QC_GROUP), 0).catch(function () {
-                return L._get('/rest/api/3/groups/picker?query=' + encodeURIComponent(L.QC_GROUP)).then(function (res) {
-                    var gid = null, gs = (res && res.groups) || [];
-                    for (var i = 0; i < gs.length; i++) { if ((gs[i].name || '').toLowerCase() === L.QC_GROUP.toLowerCase()) { gid = gs[i].groupId; } }
-                    if (!gid) { throw new Error('group not found: ' + L.QC_GROUP); }
-                    out = [];
-                    return page('groupId=' + encodeURIComponent(gid), 0);
-                });
-            }).then(function (members) {
+            return L.group.members(false).then(function (members) {
                 for (var i = 0; i < members.length; i++) {
                     var m = members[i];
                     var h = L._matchRoster(m.displayName || '', m.emailAddress || '');
@@ -13570,27 +13660,27 @@ JiTA.leadduty.ui = {
             // table instead of four ragged edges that shift with every summary length.
             var $row = $('<div class="ld-row ld-qc' + (done ? ' done' : '') + (done && done.verdict === 'flag' ? ' flagged' : '') + '"></div>').appendTo($b);
             $('<span class="ld-tick"></span>').text(done ? (done.verdict === 'flag' ? '!' : '✓') : '').appendTo($row);
+            // No type chip: the key already says which it is - EBR is a report, EDR / EO / PLAT a defect.
             $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
                 .attr('href', JiTA.HOST + '/browse/' + it.key).text(it.key).appendTo($row);
-            $('<span class="ld-kind"></span>').text(it.kind === 'report' ? 'report' : 'defect').appendTo($row);
             $('<span class="ld-sum"></span>').attr('title', it.summary || '').text(it.summary || '').appendTo($row);
             // The status cell is always present, even when the status is unknown, or the column collapses on
             // that row and the handler beside it jumps left.
             var $stcol = $('<span class="ld-stcol"></span>').appendTo($row);
             if (it.status) { $('<span class="ld-st"></span>').text(it.status).appendTo($stcol); }
             // Whose decision is being graded: for a report, whoever moved it to Attached / Closed; for a
-            // defect, whoever created it. A verdict already recorded carries the name in the ledger, so only
-            // an unjudged report costs a changelog read - and it fills in behind the row rather than delaying it.
-            var label = it.kind === 'report' ? 'handled by ' : 'created by ';
+            // defect, whoever created it. Both come with the frozen month now, and a recorded verdict carries
+            // the name too, so the changelog read is only ever a fallback for a month frozen by an older
+            // build - and even then it fills in behind the row rather than delaying it.
             var $who = $('<span class="ld-who"></span>').text('…').appendTo($row);
-            if (done && done.actor) {
-                it.actor = done.actor;
-                $who.text(label + done.actor).attr('title', label + done.actor);   // title: the column truncates a long name
-            } else {
+            function paintWho(name) { $who.text(name || '').attr('title', name || ''); }   // title: the column truncates a long name
+            if (done && done.actor) { it.actor = done.actor; paintWho(done.actor); }
+            else if (it.actor) { paintWho(it.actor); }
+            else {
                 L.qc.actor(it).then(function (name) {
                     if (!U.isOpen()) { return; }
                     it.actor = name;
-                    $who.text(name ? (label + name) : '').attr('title', name ? (label + name) : '');
+                    paintWho(name);
                 });
             }
             // Free hover preview for defects: EO/PLAT/EDR are already in the local DB.
@@ -13700,7 +13790,6 @@ JiTA.leadduty.ui = {
                 $('<span class="ld-tick"></span>').text('!').appendTo($row);
                 $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
                     .attr('href', JiTA.HOST + '/browse/' + o.key).text(o.key).appendTo($row);
-                $('<span class="ld-kind"></span>').text(f.kind === 'report' ? 'report' : 'defect').appendTo($row);
                 $('<span class="ld-sum"></span>').text(f.note || f.summary || '(no reason given)').appendTo($row);
                 $('<span class="ld-meta"></span>')
                     .text('flagged by ' + (f.by || '?') + ' · ' + String(f.at || '').slice(0, 10) + ' · from ' + (f.ym || '?')).appendTo($row);
@@ -13824,17 +13913,15 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-gone { color: #9aa6b2; font-style: italic; }' +
                 '.jita-leadduty-view .ld-meta { color: #7a8694; font-size: 11px; margin-left: auto; flex: 0 0 auto; }' +
                 '.jita-leadduty-view .ld-sum { color: #e6e6e6; flex: 1 1 auto; overflow-wrap: anywhere; }' +
-                '.jita-leadduty-view .ld-kind { background: #2c333a; color: #9aa6b2; border-radius: 8px; padding: 0 7px; font-size: 10px; flex: 0 0 auto; }' +
                 '.jita-leadduty-view .ld-st { background: #3a434d; color: #cfd6dd; border-radius: 8px; padding: 0 7px; font-size: 10px; flex: 0 0 auto; }' +
                 '.jita-leadduty-view .ld-act { display: flex; gap: 6px; flex: 0 0 auto; }' +
-                // Quality control reads as a table: fixed columns for the key, type, status and handler, with
-                // only the summary elastic (it ellipses rather than wrapping, so every row is one line high
-                // and the columns to its right stay put). The full text is on the title attribute.
+                // Quality control reads as a table: fixed columns for the key, status and handler, with only
+                // the summary elastic (it ellipses rather than wrapping, so every row is one line high and
+                // the columns to its right stay put). The full text is on the title attribute.
                 '.jita-leadduty-view .ld-qc .ld-key { flex: 0 0 88px; }' +
-                '.jita-leadduty-view .ld-qc .ld-kind { flex: 0 0 52px; text-align: center; }' +
                 '.jita-leadduty-view .ld-qc .ld-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-qc .ld-stcol { flex: 0 0 76px; }' +
-                '.jita-leadduty-view .ld-qc .ld-who { flex: 0 0 210px; color: #7a8694; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-qc .ld-who { flex: 0 0 150px; color: #7a8694; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-mini { font-size: 10px; padding: 3px 8px; }' +
                 '.jita-leadduty-view .ld-group { border: 1px solid #2c333a; border-radius: 6px; padding: 4px 10px 6px; margin-bottom: 10px; }' +
                 '.jita-leadduty-view .ld-ghead { display: flex; align-items: center; gap: 10px; padding: 7px 0; }' +
