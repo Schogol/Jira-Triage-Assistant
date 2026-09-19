@@ -11949,7 +11949,8 @@ JiTA.leadduty = {
 
     // ---- GM keys (state, not configuration) ----
     ME_KEY: 'leadDutyMe',
-    SNOOZE_KEY: 'leadDutySnoozeTs',
+    SNOOZE_KEY: 'leadDutySnoozeTs',   // the CHIP's x - hides the ambient chip for 24h
+    NAG_KEY: 'leadDutyNagTs',         // the DIALOG's quiet-until stamp - deliberately separate (see reminder.nag)
     DRY_KEY: 'leadDutyDryRun',
 
     KEEP_MONTHS: 6,              // how many months of `months` / `done` history the ledger retains
@@ -13161,6 +13162,17 @@ JiTA.leadduty = {
         });
     },
 
+    // True when BOTH local mirrors exist for their months. A missing one is invisible except that the chip
+    // silently stops counting that half - which is exactly how the QC checks used to go unmentioned until
+    // somebody opened the tab. The scheduler treats a missing mirror as work to do NOW rather than at the
+    // next six-hourly tick. Unreadable local storage reports "ready" so it can't drive a retry loop.
+    _mirrorsReady: function () {
+        var L = JiTA.leadduty;
+        return Promise.all([L.local.get(L.wiki.localKey(L._ym())), L.local.get(L.qc.localKey(L._prevYm()))])
+            .then(function (r) { return !!(r[0] && r[0].pageIds && r[1] && r[1].items); },
+                function () { return true; });
+    },
+
     // ---- publishing the ledger to the page itself ----------------------------------------------------
     // The JSON lives in a content property, which is invisible on the page - correct for machine state, and
     // useless for "who reviewed what" or "what did we flag". So the same data is rendered into the ledger
@@ -13957,14 +13969,57 @@ JiTA.leadduty.reminder = {
             if (!R.shouldShow()) { R.remove(); return; }
             // Nothing outstanding for a month we HAVE computed: stay quiet entirely.
             if (o.known && o.pages === 0 && o.checks === 0) { R.remove(); return; }
-            var bits = [];
-            if (o.pages == null && o.checks == null) { bits.push('due this month'); }
-            else {
-                if (o.pages) { bits.push(o.pages + ' page' + (o.pages === 1 ? '' : 's')); }
-                if (o.checks) { bits.push(o.checks + ' check' + (o.checks === 1 ? '' : 's')); }
-                if (!bits.length) { bits.push('due this month'); }
-            }
-            R._paint('📋 Lead duties: ' + bits.join(', '));
+            R._paint('📋 Lead duties: ' + R._summary(o));
+        }).catch(function () { /* ignore */ });
+    },
+
+    // The one phrase both the chip and the nudge use, so they can never disagree about what is outstanding.
+    // Counts that are still unknown (a month nothing has frozen yet) fall back to the vaguer wording.
+    _summary: function (o) {
+        var bits = [];
+        if (o.pages) { bits.push(o.pages + ' page review' + (o.pages === 1 ? '' : 's')); }
+        if (o.checks) { bits.push(o.checks + ' QC check' + (o.checks === 1 ? '' : 's')); }
+        return bits.length ? bits.join(', ') : 'due this month';
+    },
+
+    // ---- the once-a-day nudge --------------------------------------------------------------------------
+    // The chip is deliberately quiet, which also means it is easy to work past for a week. So once a day a
+    // Lead with outstanding duties gets an actual dialog, with "Remind me tomorrow" as a first-class answer.
+    // It keeps its OWN quiet-until stamp rather than sharing the chip's: dismissing the loud reminder should
+    // not also take away the quiet one, and the chip's x should not suppress tomorrow's dialog.
+    NAG_DELAY_MS: 12000,        // let the page settle first - a dialog during first paint reads as a glitch
+    SEEN_QUIET_MS: 4 * 60 * 60 * 1000,   // merely SEEING it buys a few hours, so reloads and other tabs stay quiet
+    _nagged: false,
+
+    nag: function () {
+        var L = JiTA.leadduty, R = L.reminder;
+        if (R._nagged || JITA_IS_FORGE_FRAME || !L.isLead()) { return; }
+        if (Date.now() < (gmGet(L.NAG_KEY, 0) || 0)) { return; }
+        L.outstanding().then(function (o) {
+            if (R._nagged) { return; }
+            if (o.known && o.pages === 0 && o.checks === 0) { return; }   // this month is already done
+            if (JiTA.menu.isOpen()) { return; }   // never rip away an overlay the Lead is working in
+            R._nagged = true;
+            gmSet(L.NAG_KEY, Date.now() + R.SEEN_QUIET_MS);
+
+            var ov = JiTA.menu._openOverlay({ title: 'Lead duties' });
+            var $b = $('<div class="jita-menu-sect"></div>').appendTo(ov.$menu);
+            $('<div style="font-size:14px; font-weight:700; color:#e6e6e6; padding-top:4px;"></div>')
+                .text('You have ' + R._summary(o) + ' outstanding.').appendTo($b);
+            $('<div class="jita-menu-status" style="padding-top:8px;"></div>').text(
+                'Proof-reading the documentation and spot-checking last month\'s handling are split across the ' +
+                'Leads, so the pages and issues assigned to you are yours alone - nobody else picks them up.').appendTo($b);
+            var $a = $('<div class="jita-menu-actions" style="padding-top:12px;"></div>').appendTo($b);
+            $('<button class="jita-btn" style="background:#4c9aff; color:#fff; font-weight:700; border-color:#4c9aff;">Open lead duties</button>')
+                .on('click', function () {
+                    gmSet(L.NAG_KEY, Date.now() + L.SNOOZE_MS);
+                    L.ui.open();   // replaces this overlay
+                }).appendTo($a);
+            $('<button class="jita-btn">Remind me tomorrow</button>')
+                .on('click', function () {
+                    gmSet(L.NAG_KEY, Date.now() + L.SNOOZE_MS);
+                    JiTA.menu.close();
+                }).appendTo($a);
         }).catch(function () { /* ignore */ });
     },
 
@@ -14035,9 +14090,23 @@ JiTA.leadduty.sched = {
         try { L.reminder.mount(); } catch (e) { /* ignore */ }   // cheap, and re-arms the chip across a day boundary
         if (S._running) { return; }
         if (!L.rootPage() || !L.ledgerPage()) { return; }        // not configured yet: nothing to do
-        if (!S._elapsed(S.LAST_KEY, S.INTERVAL_MS)) { return; }
         if (!S._elapsed(S.FAIL_KEY, S.FAIL_MS)) { return; }
-        if (!S._lease(S.LEASE_KEY, S.LEASE_TTL_MS)) { return; }
+        // The six-hourly interval gates the ROUTINE refresh, but not a missing local mirror: without one the
+        // chip cannot count that half of the month, and waiting up to six hours for the next tick is what
+        // made it say "2 page reviews" with no sign of the QC checks until someone opened the tab. A build
+        // that adds a mirror (as the QC one was) therefore fills it in on the next poll, not next session.
+        L._mirrorsReady().then(function (ready) {
+            if (ready && !S._elapsed(S.LAST_KEY, S.INTERVAL_MS)) { return; }
+            if (S._running) { return; }                          // another poll got in while we read the mirrors
+            if (!S._lease(S.LEASE_KEY, S.LEASE_TTL_MS)) { return; }
+            S._run();
+        }, function () { /* local read failed - the next poll tries again */ });
+    },
+
+    // The refresh itself: drain queued marks, freeze BOTH months, mirror both locally so the chip can count,
+    // and republish the readable page. Split out of tick() only so the gating above reads as gating.
+    _run: function () {
+        var L = JiTA.leadduty, S = L.sched;
         S._running = true;
         L.flushPending().then(function () {
             return L.wiki.claimMonth(L._ym());
@@ -14654,6 +14723,10 @@ function jitaArmLeadDuties() {
         mounted = true;
         try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }
         try { JiTA.leadduty.sched.start(); } catch (e) { /* swallow */ }
+        // The once-a-day dialog, after the page has settled. It checks its own quiet-until stamp, so this
+        // fires at most once per session and at most once a day however many tabs are opened.
+        setTimeout(function () { try { JiTA.leadduty.reminder.nag(); } catch (e) { /* swallow */ } },
+            JiTA.leadduty.reminder.NAG_DELAY_MS);
         try {
             if (typeof GM_registerMenuCommand === 'function') {
                 GM_registerMenuCommand('📋 Lead duties…', function () { JiTA.leadduty.ui.open(); });
