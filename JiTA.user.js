@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.17.0
+// @version     3.17.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -13580,12 +13580,10 @@ JiTA.leadduty.ui = {
             }
         });
 
-        var st = L.wiki.stats(res.pool, res.ledgerValue);
-        var bits = [doneCount + ' of ' + ids.length + ' done', L._poolLine(res.pool),
-            st.covered + ' on ' + st.eyes + ' pairs of eyes', st.single + ' waiting on a second',
-            st.never + ' never reviewed'];
-        if (st.oldestMonths != null) { bits.push('oldest ' + st.oldestMonths + ' month' + (st.oldestMonths === 1 ? '' : 's')); }
-        if (st.overdue) { bits.push(st.overdue + ' overdue (>' + st.coverage + ' months)'); }
+        // Progress only. The pool size, the coverage counters and the four-eyes tallies are of no use to a
+        // Lead working their three pages - they are section-wide health, which belongs where someone goes
+        // looking for it: the Settings status line (_poolLine) and the Coverage table on the ledger page.
+        var bits = [doneCount + ' of ' + ids.length + ' done'];
         if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
         U._status(bits.join(' · '));
     },
