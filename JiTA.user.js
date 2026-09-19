@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.16.0
+// @version     3.17.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8557,6 +8557,57 @@ JiTA.menu = {
                 });
             });
 
+            // Wipes BOTH shared ledgers plus this browser's local mirror, so a month can be re-cut from
+            // scratch instead of inheriting whatever is already there. It DELETES the Confluence properties
+            // rather than writing an empty value, so the next open re-creates them exactly as a first-ever
+            // run would. This destroys real shared state for every Lead - hence the owner gate: it is here to
+            // recover from a bad freeze (2026-08's unfiltered QC sample, say), not as a routine control.
+            if (JiTA.leadduty.OWNER === ((JiTA.leadduty.me() && JiTA.leadduty.me().handle) || '')) {
+                var $wipe = $('<button class="jita-btn" title="Delete both shared ledgers and this browser\'s local mirror, so the month is cut fresh">Clear ledger</button>').appendTo($ldAct);
+                $wipe.on('click', function () {
+                    var page = JiTA.leadduty.ledgerPage();
+                    if (!confirm('Delete BOTH lead-duty ledgers on page ' + page + ' (wiki review history AND quality control, ' +
+                        'including every open follow-up), for every Lead?\n\nThis cannot be undone.')) { return; }
+                    $wipe.prop('disabled', true);
+                    $ldStatus.text('Clearing the ledgers…');
+                    var out = [];
+                    function drop(key) {
+                        return JiTA.conf.getProperty(page, key).then(function (prop) {
+                            if (!prop) { out.push(key + ': already absent'); return; }
+                            return JiTA.conf.deleteProperty(page, prop.id).then(function () { out.push(key + ': deleted'); });
+                        }, function (e) { out.push(key + ': ' + String(e && e.message || e)); });
+                    }
+                    drop(JiTA.leadduty.LEDGER_KEY).then(function () {
+                        return drop(JiTA.leadduty.QC_LEDGER_KEY);
+                    }).then(function () {
+                        // The local mirror drives the chip's outstanding count, so leaving it behind would
+                        // show work against a ledger that no longer exists.
+                        var L = JiTA.leadduty;
+                        return Promise.all([
+                            JiTA.db.setMeta(L.wiki.localKey(L._ym()), null),
+                            JiTA.db.setMeta(L.qc.localKey(L._prevYm()), null),
+                            JiTA.db.setMeta(L.pool.CACHE_KEY, null)
+                        ]).catch(function () { /* best effort */ });
+                    }).then(function () {
+                        // Reset the scheduler's own clocks too. Without this the wipe is followed by up to
+                        // six hours of nothing: the tick that rebuilds both months is gated on leadDutyLastTs,
+                        // so it would sit on an empty ledger and look broken. Cleared, the next poll (within a
+                        // minute) re-freezes the month - which is the whole point of the button.
+                        var S = JiTA.leadduty.sched;
+                        gmSet(S.LAST_KEY, 0);
+                        gmSet(S.FAIL_KEY, 0);
+                        gmSet(JiTA.leadduty.SNOOZE_KEY, 0);   // let the chip come straight back with the fresh counts
+                        JiTA.leadduty.ui._wiki = null;
+                        JiTA.leadduty.ui._qc = null;
+                        JiTA.leadduty.ui._qcWarm = null;
+                        JiTA.leadduty.qc._actorCache = {};
+                        if (!document.getElementById('jita-menu')) { return; }
+                        $wipe.prop('disabled', false);
+                        $ldStatus.text(out.join(' · ') + ' · local mirror and pool cache cleared · rebuild starts within a minute');
+                    });
+                });
+            }
+
             (function () {
                 var me = JiTA.leadduty.me();
                 var who = 'You are ' + ((me && me.handle) || '?') + ' · roster: ' + JiTA.leadduty.ROSTER().join(', ');
@@ -11862,8 +11913,13 @@ JiTA.leadduty = {
     // (ancestry is walked through parentId, so a page added under one of these later is excluded too).
     EXCLUDE_PAGES: {
         '199756496': 'Training Session Reports',
-        '199762273': 'ECAID - Lead Section'
+        '199762273': 'ECAID - Lead Section',
+        '199759108': 'Feature Ideas and Discussion'
     },
+    // Who maintains this feature. The only thing it gates is the destructive "Clear ledger" button in
+    // Settings, which wipes shared state for every Lead - one roster handle, matched against the resolved
+    // one, so the other Leads never see the button at all.
+    OWNER: 'schogol',
     COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
     // The four-eyes rule: how many DIFFERENT Leads must read each page inside the coverage window. One pair
     // of eyes misses things - the reader who wrote a page, or who read it last time, skims what they already
@@ -13656,7 +13712,11 @@ JiTA.leadduty.ui = {
                 $('<button class="jita-btn ld-mini" title="Raise a follow-up: the other Leads see it under Follow-ups and on the ledger page until someone resolves it">Flag</button>').on('click', function () {
                     // A flag without a reason is nearly useless to whoever picks it up, so ask for one. An
                     // empty note still flags (Cancel aborts) - a bare flag beats losing the judgement.
-                    var note = prompt('What is wrong with ' + it.key + '? (shown to the other Leads)', '');
+                    // Name BOTH audiences: the note is quoted verbatim into the follow-up message the handler
+                    // reads (see qc.followUpText), so "shown to the other Leads" alone invites a Lead to write
+                    // peer shorthand that then lands in front of the Bug Hunter it is about.
+                    var note = prompt('What is wrong with ' + it.key +
+                        '? (the other Leads see this, and it is quoted to whoever handled it)', '');
                     if (note === null) { return; }
                     U._act(this, L.qc.markChecked(it.key, 'flag', ym, note, it), L.qc.localKey(ym), it.key, reload);
                 }).appendTo($act);
@@ -13872,6 +13932,12 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-qc .ld-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-qc .ld-stcol { flex: 0 0 76px; }' +
                 '.jita-leadduty-view .ld-qc .ld-who { flex: 0 0 150px; color: #7a8694; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                // The action column keeps its width on a row that no longer has buttons. A checked row renders
+                // an EMPTY .ld-act, which at flex:0 0 auto collapses to nothing - the elastic summary then
+                // swallows the freed space and drags the status and handler columns right, so the done rows
+                // sit visibly out of line with the ones still to judge. Reserving the column fixes them in
+                // place; flex-end keeps the buttons themselves exactly where they were.
+                '.jita-leadduty-view .ld-qc .ld-act { flex: 0 0 132px; justify-content: flex-end; }' +
                 '.jita-leadduty-view .ld-mini { font-size: 10px; padding: 3px 8px; }' +
                 '.jita-leadduty-view .ld-group { border: 1px solid #2c333a; border-radius: 6px; padding: 4px 10px 6px; margin-bottom: 10px; }' +
                 '.jita-leadduty-view .ld-ghead { display: flex; align-items: center; gap: 10px; padding: 7px 0; }' +
@@ -14665,11 +14731,8 @@ function jitaArmLeadDuties() {
         // fires at most once per session and at most once a day however many tabs are opened.
         setTimeout(function () { try { JiTA.leadduty.reminder.nag(); } catch (e) { /* swallow */ } },
             JiTA.leadduty.reminder.NAG_DELAY_MS);
-        try {
-            if (typeof GM_registerMenuCommand === 'function') {
-                GM_registerMenuCommand('📋 Lead duties…', function () { JiTA.leadduty.ui.open(); });
-            }
-        } catch (e) { /* swallow */ }
+        // No Tampermonkey menu command of its own: the chip, the once-a-day dialog and the Settings section
+        // are already three ways in, and a fourth only lengthens a menu every Lead sees on every page.
         // If Settings happens to be open on a first-ever load, redraw it so the section appears at once.
         try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { /* swallow */ }
     }
