@@ -8616,6 +8616,7 @@ JiTA.menu = {
                     gmSet(JiTA.leadduty.SNOOZE_KEY, 0);   // let the chip come straight back with the fresh counts
                     JiTA.leadduty.ui._wiki = null;
                     JiTA.leadduty.ui._qc = null;
+                    JiTA.leadduty.ui._qcWarm = null;
                     JiTA.leadduty.qc._actorCache = {};
                     if (!document.getElementById('jita-menu')) { return; }
                     $wipe.prop('disabled', false);
@@ -11931,12 +11932,13 @@ JiTA.leadduty = {
         '199756496': 'Training Session Reports',
         '199762273': 'ECAID - Lead Section'
     },
-    COVERAGE_MONTHS: 18,         // read the whole section at least this often; drives the derived per-Lead count
+    COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
     // The four-eyes rule: how many DIFFERENT Leads must read each page inside the coverage window. One pair
     // of eyes misses things - the reader who wrote a page, or who read it last time, skims what they already
     // believe is there. Two independent readings is the point of the whole rotation. It doubles the monthly
-    // reading, which is what COVERAGE_MONTHS is set against: at 232 pages and 3 Leads, 18 months puts it at
-    // 9 pages each per month rather than the 5 a single pass would need.
+    // reading, which is what COVERAGE_MONTHS is set against - but the section is small once the excluded
+    // subtrees are out (42 pages), so at 3 Leads a 12-month window is only 3 pages each per month, against
+    // the 2 a single pass would need. Widen the window if the section grows and that starts to bite.
     EYES: 2,
     QC_COUNT: 10,                // QC items sampled per Lead per month
     // ISD handles far more bug reports than it creates defects, so a proportional sample is almost all
@@ -13365,7 +13367,7 @@ JiTA.leadduty.ui = {
         $('<span class="ld-muted" id="ld-status"></span>').appendTo($foot);
         // The page body is normally republished automatically after any change (debounced). This is the
         // manual nudge for "I want it up to date right now", and the honest error if publishing is refused.
-        $('<button class="jita-btn" id="ld-publish" title="Rewrite the ledger page with the current tables">Update page</button>')
+        $('<button class="jita-btn" id="ld-publish" title="Rewrite the Confluence ledger PAGE with the current tables, so the other Leads can read it without the script. Normally automatic after any change; this is the manual nudge.">Update wiki page</button>')
             .on('click', function () {
                 var $b = $(this).prop('disabled', true);
                 U._status('Updating the ledger page…');
@@ -13378,10 +13380,13 @@ JiTA.leadduty.ui = {
                     U._status('Could not update the ledger page: ' + String(e && e.message || e));
                 });
             }).appendTo($foot);
-        $('<button class="jita-btn" id="ld-refresh">Refresh</button>')
+        $('<button class="jita-btn" id="ld-refresh" title="Re-read the shared ledger and rebuild THIS tab (the wiki tab also re-scans the page tree). Changes nothing for anyone else.">Refresh</button>')
             .on('click', function () { U._load(true); }).appendTo($foot);
         U._render();
         U._load(false);
+        // Resolve the QC month alongside the wiki queue rather than waiting for the tab to be clicked, so
+        // both halves of the month are ready together and switching tabs just paints.
+        U._warmQc().catch(function () { /* the tab surfaces the error properly when it is opened */ });
         // One cheap read so the Follow-ups tab carries its count from the moment the overlay opens, whichever
         // tab is showing - an open flag from another Lead should not need a click to be noticed.
         L.ledger.read(L.QC_LEDGER_KEY).then(function (cur) { if (U.isOpen()) { U._tabCount(cur.value); } },
@@ -13504,12 +13509,31 @@ JiTA.leadduty.ui = {
         U._status(bits.join(' · '));
     },
 
+    // Resolve the QC month WITHOUT touching the UI, so the overlay can start it the moment it opens rather
+    // than when the tab is clicked. The month itself is frozen by the scheduler, so this is normally one
+    // targeted key lookup; it is only a real crawl on the first run of a new month. Single-flight, and it
+    // never overwrites a result _loadQc has already stored.
+    _qcWarm: null,
+    _warmQc: function () {
+        var L = JiTA.leadduty, U = L.ui, ym = L._prevYm();
+        if (U._qc && U._qc.ym === ym) { return Promise.resolve(U._qc); }
+        if (U._qcWarm) { return U._qcWarm; }
+        U._qcWarm = L.qc.claimMonth(ym).then(function (res) {
+            U._qcWarm = null;
+            if (U.isOpen() && !U._qc) { U._qc = res; }
+            return res;
+        }, function (e) { U._qcWarm = null; throw e; });
+        return U._qcWarm;
+    },
+
     _loadQc: function (force) {
         var L = JiTA.leadduty, U = L.ui, ym = L._prevYm();
         U._status('Sampling ' + ym + '…');
         U._body().empty().append($('<div class="ld-empty">Fetching last month’s reports and defects…</div>'));
-        if (force) { U._qc = null; }
-        var cached = (!force && U._qc && U._qc.ym === ym) ? Promise.resolve(U._qc) : L.qc.claimMonth(ym);
+        if (force) { U._qc = null; U._qcWarm = null; }
+        // Usually already resolved (or in flight) from the warm the overlay kicked off on open, so clicking
+        // the tab just paints.
+        var cached = U._warmQc();
         cached.then(function (res) {
             if (!U.isOpen()) { return; }
             U._qc = res;
@@ -13551,26 +13575,31 @@ JiTA.leadduty.ui = {
         res.items.forEach(function (it) {
             var done = res.done[it.key] || (qcLocalDone[it.key] ? { by: me, at: qcLocalDone[it.key], local: true } : null);
             if (done) { doneCount++; }
-            var $row = $('<div class="ld-row' + (done ? ' done' : '') + (done && done.verdict === 'flag' ? ' flagged' : '') + '"></div>').appendTo($b);
+            // ld-qc puts the key / type / status / handler in fixed-width columns, so ten rows read as a
+            // table instead of four ragged edges that shift with every summary length.
+            var $row = $('<div class="ld-row ld-qc' + (done ? ' done' : '') + (done && done.verdict === 'flag' ? ' flagged' : '') + '"></div>').appendTo($b);
             $('<span class="ld-tick"></span>').text(done ? (done.verdict === 'flag' ? '!' : '✓') : '').appendTo($row);
             $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
                 .attr('href', JiTA.HOST + '/browse/' + it.key).text(it.key).appendTo($row);
             $('<span class="ld-kind"></span>').text(it.kind === 'report' ? 'report' : 'defect').appendTo($row);
-            $('<span class="ld-sum"></span>').text(it.summary || '').appendTo($row);
-            if (it.status) { $('<span class="ld-st"></span>').text(it.status).appendTo($row); }
+            $('<span class="ld-sum"></span>').attr('title', it.summary || '').text(it.summary || '').appendTo($row);
+            // The status cell is always present, even when the status is unknown, or the column collapses on
+            // that row and the handler beside it jumps left.
+            var $stcol = $('<span class="ld-stcol"></span>').appendTo($row);
+            if (it.status) { $('<span class="ld-st"></span>').text(it.status).appendTo($stcol); }
             // Whose decision is being graded: for a report, whoever moved it to Attached / Closed; for a
             // defect, whoever created it. A verdict already recorded carries the name in the ledger, so only
             // an unjudged report costs a changelog read - and it fills in behind the row rather than delaying it.
             var label = it.kind === 'report' ? 'handled by ' : 'created by ';
-            var $who = $('<span class="ld-meta"></span>').text('…').appendTo($row);
+            var $who = $('<span class="ld-who"></span>').text('…').appendTo($row);
             if (done && done.actor) {
                 it.actor = done.actor;
-                $who.text(label + done.actor);
+                $who.text(label + done.actor).attr('title', label + done.actor);   // title: the column truncates a long name
             } else {
                 L.qc.actor(it).then(function (name) {
                     if (!U.isOpen()) { return; }
                     it.actor = name;
-                    $who.text(name ? (label + name) : '');
+                    $who.text(name ? (label + name) : '').attr('title', name ? (label + name) : '');
                 });
             }
             // Free hover preview for defects: EO/PLAT/EDR are already in the local DB.
@@ -13807,6 +13836,14 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-kind { background: #2c333a; color: #9aa6b2; border-radius: 8px; padding: 0 7px; font-size: 10px; flex: 0 0 auto; }' +
                 '.jita-leadduty-view .ld-st { background: #3a434d; color: #cfd6dd; border-radius: 8px; padding: 0 7px; font-size: 10px; flex: 0 0 auto; }' +
                 '.jita-leadduty-view .ld-act { display: flex; gap: 6px; flex: 0 0 auto; }' +
+                // Quality control reads as a table: fixed columns for the key, type, status and handler, with
+                // only the summary elastic (it ellipses rather than wrapping, so every row is one line high
+                // and the columns to its right stay put). The full text is on the title attribute.
+                '.jita-leadduty-view .ld-qc .ld-key { flex: 0 0 88px; }' +
+                '.jita-leadduty-view .ld-qc .ld-kind { flex: 0 0 52px; text-align: center; }' +
+                '.jita-leadduty-view .ld-qc .ld-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-qc .ld-stcol { flex: 0 0 76px; }' +
+                '.jita-leadduty-view .ld-qc .ld-who { flex: 0 0 210px; color: #7a8694; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-mini { font-size: 10px; padding: 3px 8px; }' +
                 '.jita-leadduty-view .ld-group { border: 1px solid #2c333a; border-radius: 6px; padding: 4px 10px 6px; margin-bottom: 10px; }' +
                 '.jita-leadduty-view .ld-ghead { display: flex; align-items: center; gap: 10px; padding: 7px 0; }' +
