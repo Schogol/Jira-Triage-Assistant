@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.16.2
+// @version     3.16.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11862,7 +11862,8 @@ JiTA.leadduty = {
     // (ancestry is walked through parentId, so a page added under one of these later is excluded too).
     EXCLUDE_PAGES: {
         '199756496': 'Training Session Reports',
-        '199762273': 'ECAID - Lead Section'
+        '199762273': 'ECAID - Lead Section',
+        '199759108': 'Feature Ideas and Discussion'
     },
     COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
     // The four-eyes rule: how many DIFFERENT Leads must read each page inside the coverage window. One pair
