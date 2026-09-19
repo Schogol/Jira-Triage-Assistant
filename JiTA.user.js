@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.16.0
+// @version     3.16.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -13656,7 +13656,11 @@ JiTA.leadduty.ui = {
                 $('<button class="jita-btn ld-mini" title="Raise a follow-up: the other Leads see it under Follow-ups and on the ledger page until someone resolves it">Flag</button>').on('click', function () {
                     // A flag without a reason is nearly useless to whoever picks it up, so ask for one. An
                     // empty note still flags (Cancel aborts) - a bare flag beats losing the judgement.
-                    var note = prompt('What is wrong with ' + it.key + '? (shown to the other Leads)', '');
+                    // Name BOTH audiences: the note is quoted verbatim into the follow-up message the handler
+                    // reads (see qc.followUpText), so "shown to the other Leads" alone invites a Lead to write
+                    // peer shorthand that then lands in front of the Bug Hunter it is about.
+                    var note = prompt('What is wrong with ' + it.key +
+                        '? (the other Leads see this, and it is quoted to whoever handled it)', '');
                     if (note === null) { return; }
                     U._act(this, L.qc.markChecked(it.key, 'flag', ym, note, it), L.qc.localKey(ym), it.key, reload);
                 }).appendTo($act);
