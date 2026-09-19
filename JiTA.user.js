@@ -13103,7 +13103,10 @@ JiTA.leadduty = {
             }, R.DEBOUNCE_MS);
         },
 
-        // Resolves { written, skipped, version } - `skipped` naming why nothing was written.
+        // Resolves { written, skipped, version } - `skipped` naming why nothing was written. Nothing in the
+        // UI passes `force` any more (publishing is automatic); it stays as the console escape hatch for
+        // "rewrite the page even though the hash says nothing changed", which is how you recover a page
+        // somebody edited by hand.
         publish: function (force) {
             var L = JiTA.leadduty, R = L.report;
             if (L._dry()) { return Promise.resolve({ skipped: 'dry run' }); }
@@ -13365,21 +13368,9 @@ JiTA.leadduty.ui = {
         $('<div class="ld-scroll" id="ld-body"></div>').appendTo(ov.$menu);
         var $foot = $('<div class="ld-foot"></div>').appendTo(ov.$menu);
         $('<span class="ld-muted" id="ld-status"></span>').appendTo($foot);
-        // The page body is normally republished automatically after any change (debounced). This is the
-        // manual nudge for "I want it up to date right now", and the honest error if publishing is refused.
-        $('<button class="jita-btn" id="ld-publish" title="Rewrite the Confluence ledger PAGE with the current tables, so the other Leads can read it without the script. Normally automatic after any change; this is the manual nudge.">Update wiki page</button>')
-            .on('click', function () {
-                var $b = $(this).prop('disabled', true);
-                U._status('Updating the ledger page…');
-                L.report.publish(true).then(function (r) {
-                    $b.prop('disabled', false);
-                    U._status(r && r.written ? ('Ledger page updated (version ' + r.version + ').')
-                        : ('Ledger page not written: ' + ((r && r.skipped) || 'unknown')));
-                }, function (e) {
-                    $b.prop('disabled', false);
-                    U._status('Could not update the ledger page: ' + String(e && e.message || e));
-                });
-            }).appendTo($foot);
+        // No "publish" button: the ledger PAGE is rewritten automatically after any change (report.tap ->
+        // a 20s debounce, so a run of marks makes one page version), and the scheduler republishes on its
+        // own tick as the backstop. A button that only duplicates that is one more thing to explain.
         $('<button class="jita-btn" id="ld-refresh" title="Re-read the shared ledger and rebuild THIS tab (the wiki tab also re-scans the page tree). Changes nothing for anyone else.">Refresh</button>')
             .on('click', function () { U._load(true); }).appendTo($foot);
         U._render();
