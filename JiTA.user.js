@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.17.1
+// @version     3.17.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6658,19 +6658,31 @@ JiTA.ui = {
     // Feature C: a styled hover card for a suggestion. Shows the key + summary, status/resolution/stale note,
     // and the full description (which includes the reproduction steps), positioned beside the hovered row and
     // clamped to the viewport. Richer + wider than a native title tooltip, and scrollable for long text.
-    // Place the (already-populated) tip beside the anchor row: prefer the left of the panel, flip to the
+    // Place the (already-populated) tip BESIDE the anchor row: prefer the left of the panel, flip to the
     // right if there isn't room, and clamp vertically so it never spills off-screen. Re-run after the
     // formatted description loads, since the height changes.
+    //
+    // A row that is nearly as wide as the viewport (the Lead-duties and duplicate-finder overlays are 1180px)
+    // leaves room on NEITHER side, and the old code then clamped the card into view - which dropped it on the
+    // right-hand end of that same row, on top of the action buttons the reader was reaching for. So when
+    // neither side fits, the card goes ABOVE or BELOW the row instead (whichever has more room), flush
+    // against it and left-aligned: the whole row stays clickable, and the pointer still reaches the card
+    // directly for scrolling a long description.
     _positionTip: function ($tip, anchor) {
         $tip.css({ display: 'block', visibility: 'hidden' });
         var el = $tip[0], rect = anchor.getBoundingClientRect();
         var tipW = el.offsetWidth, tipH = el.offsetHeight;
-        var left = rect.left - tipW - 10;
-        if (left < 6) { left = rect.right + 10; }
-        if (left + tipW > window.innerWidth - 6) { left = Math.max(6, window.innerWidth - tipW - 6); }
-        var top = rect.top;
-        if (top + tipH > window.innerHeight - 6) { top = window.innerHeight - tipH - 6; }
-        if (top < 6) { top = 6; }
+        var vw = window.innerWidth, vh = window.innerHeight, M = 6, GAP = 10;
+        var left = null, top = rect.top;
+        if (rect.left - tipW - GAP >= M) { left = rect.left - tipW - GAP; }             // beside, on the left
+        else if (rect.right + GAP + tipW <= vw - M) { left = rect.right + GAP; }        // beside, on the right
+        if (left === null) {
+            left = Math.min(Math.max(M, rect.left), Math.max(M, vw - tipW - M));        // left-aligned with the row
+            var below = vh - rect.bottom - M, above = rect.top - M;
+            top = (tipH <= below || below >= above) ? rect.bottom : (rect.top - tipH);  // flush, no gap to cross
+        }
+        if (top + tipH > vh - M) { top = vh - tipH - M; }
+        if (top < M) { top = M; }
         $tip.css({ left: left + 'px', top: top + 'px', visibility: 'visible' });
     },
 
