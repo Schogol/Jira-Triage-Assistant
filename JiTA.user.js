@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.16.1
+// @version     3.16.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -13876,6 +13876,12 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-qc .ld-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-qc .ld-stcol { flex: 0 0 76px; }' +
                 '.jita-leadduty-view .ld-qc .ld-who { flex: 0 0 150px; color: #7a8694; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                // The action column keeps its width on a row that no longer has buttons. A checked row renders
+                // an EMPTY .ld-act, which at flex:0 0 auto collapses to nothing - the elastic summary then
+                // swallows the freed space and drags the status and handler columns right, so the done rows
+                // sit visibly out of line with the ones still to judge. Reserving the column fixes them in
+                // place; flex-end keeps the buttons themselves exactly where they were.
+                '.jita-leadduty-view .ld-qc .ld-act { flex: 0 0 132px; justify-content: flex-end; }' +
                 '.jita-leadduty-view .ld-mini { font-size: 10px; padding: 3px 8px; }' +
                 '.jita-leadduty-view .ld-group { border: 1px solid #2c333a; border-radius: 6px; padding: 4px 10px 6px; margin-bottom: 10px; }' +
                 '.jita-leadduty-view .ld-ghead { display: flex; align-items: center; gap: 10px; padding: 7px 0; }' +
