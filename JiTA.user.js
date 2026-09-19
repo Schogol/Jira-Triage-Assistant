@@ -13821,7 +13821,7 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-muted, .jita-leadduty-view #ld-status { color: #9aa6b2; font-size: 11px; flex: 1; }' +
                 '.jita-leadduty-view .ld-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
                 '.jita-leadduty-view .ld-warn { color: #f0b429; font-size: 11px; padding: 6px 0 10px; }' +
-                '.jita-leadduty-view .ld-sub { color: #7a8694; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 8px; }' +
+                '.jita-leadduty-view .ld-sub { color: #9aa6b2; font-size: 12px; font-weight: 600; margin: 4px 0 8px; }' +
                 '.jita-leadduty-view .ld-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid #2c333a; font-size: 12px; }' +
                 '.jita-leadduty-view .ld-row.done { opacity: .5; }' +
                 '.jita-leadduty-view .ld-row.flagged { opacity: .8; }' +
