@@ -12963,7 +12963,7 @@ JiTA.leadduty = {
             });
             out.push('');
             out.push('This is not a telling-off - we sample everyone every month to keep our handling ' +
-                'consistent. If you think any of these calls were right, say so and we will go through it together.');
+                'consistent. If you think I have got any of these wrong, say so and we will go through it together.');
             out.push('');
             out.push('Thanks,');
             out.push(me.displayName || me.handle || '');
