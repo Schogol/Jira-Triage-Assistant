@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.17.2
+// @version     3.18.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -10229,7 +10229,7 @@ function jitaWorkerBody(cfg) {
 }
 
 
-/* ---- Triage mode: full-screen keyboard-driven queue over the open + unassigned bug-report backlog ------
+/* ---- Triage mode: Jira's removed detail view, rebuilt as a keyboard-driven triage queue ----------------
  * Entered ONLY by double-tapping '<' (a deliberately hidden power-user entry; no menu items) - NEVER
  * always-on, so JiTA's hotkeys can't fight
  * Jira's own single-key shortcuts (c / . / i / m / a / e / l / j / k / g-prefix) outside the mode. While the
@@ -10237,12 +10237,18 @@ function jitaWorkerBody(cfg) {
  * capture, per design); typing into an input/textarea/contenteditable is never intercepted, and modifier
  * combos (Ctrl/Alt/Meta) pass through so browser shortcuts keep working.
  *
+ * LAYOUT. Atlassian removed Jira's detail view - the split where the left column listed every issue in the
+ * current search and the selected one rendered beside it - which is the view the bug hunters worked in all
+ * day. This is that view: four columns, the QUEUE list on the left, the report, its DETAILS rail, and the
+ * ranked matches. Up / down walk the list (J / K too, and clicking a card jumps straight to it); left and
+ * right switch WHICH queue is being walked (left = bug reports, right = open defects).
+ *
  * The queue is a LIVE JQL fetch using the bug hunters' standard backlog filter (open EVE Bug Reports,
  * unassigned or mine, minus the Vanguard/Launcher lanes), oldest-first by default - the local DB stores no
  * assignee, and live results can't be stale on the one field the queue is defined by. Each report's TEXT and
  * its ranked defect matches come from the local DB + shared worker (effectiveText -> suggestBest, same engine
  * as the sidebar panel), so stepping through the queue does no per-issue Jira navigation; the NEXT report's
- * matches are prefetched while you act on the current one, making J effectively instant.
+ * matches are prefetched while you act on the current one, making ↓ effectively instant.
  *
  * Actions (per Schogol): 1-9 attach to a ranked defect match (number row or numpad), T close as Won't Do, G convert to GM
  * support (category picked with 1-4; the optional internal GM note is page-DOM-bound and deliberately not
@@ -10260,8 +10266,10 @@ JiTA.triage = {
 
     _open: false,
     _busy: false,      // an action is executing - swallow keys so a double-press can't fire twice
-    _queue: [],        // [{ key, summary, created, status }] from the live JQL
+    _queue: [],        // [{ key, summary, created, status, att, det }] from the live JQL
     _idx: 0,
+    _rows: [],         // the queue list's DOM nodes, index-parallel to _queue (see _renderList / _removeRow)
+    _actRow: null,     // the highlighted node, so moving the highlight is O(1) rather than a per-keystroke scan
     _done: 0,          // reports actioned this session
     _cache: {},        // key -> Promise of { rec, text, mode, results } (also the prefetch store)
     _armed: null,      // { type: 'attach'|'trash', n, matchKey, label } - first press of a destructive key
@@ -10276,9 +10284,17 @@ JiTA.triage = {
     LAST_DEF_KEY: 'jitaTriageLastDef',   // the same for Defect mode
     JQL_KEY: 'jitaTriageJql',     // persisted user-edited bug-report queue JQL (WITHOUT order by); empty/absent = DEFAULT_JQL
     DEFAULT_JQL: 'project = EBR AND issuetype = "EVE Bug Report" AND status = Open AND assignee in (currentUser(), EMPTY) AND labels not in ("Vanguard", "Launcher") AND component not in (Launcher)',   // the bug hunters' standard backlog filter
-    _mode: 'ebr',      // 'ebr' = bug-report queue (live JQL) | 'defect' = open-defect queue (local DB); up/down arrows switch
+    // What the Details rail needs, on top of what the queue itself needs. These ride along in the crawl that
+    // already runs (one request per 100 issues), so the rail costs nothing extra in bug-report mode.
+    // customfield_11660 = Original Reporter (the in-game character), customfield_10001 = Team.
+    EBR_FIELDS: ['summary', 'created', 'status', 'attachment', 'assignee', 'reporter', 'labels', 'components',
+        'versions', 'priority', 'resolution', 'updated', 'customfield_11660', 'customfield_10001'],
+    // The same set for a single defect. The local DB carries no assignee, labels or priority, so defect mode
+    // reads them per issue - but only by widening the attachment request it was already making.
+    DEFECT_FIELDS: 'attachment,assignee,reporter,labels,components,versions,fixVersions,priority,resolution,updated,customfield_10001',
+    _mode: 'ebr',      // 'ebr' = bug-report queue (live JQL) | 'defect' = open-defect queue (local DB); left/right arrows switch
     _stash: {},        // the OTHER mode's parked queue state: mode -> { queue, idx, done, error }
-    _defAtt: {},       // defect key -> attachment metadata (fetched per render; the local DB stores none)
+    _defAtt: {},       // defect key -> { att, det } (fetched per render; the local DB stores neither)
     _resume: null,     // pending resume target (consumed once positioned, or dropped when the user navigates)
     _txCache: {},      // key -> { text, note }: on-demand display translation (E hotkey), cached per report
     _txShown: false,   // is the desc box currently showing the translation? (reset per report)
@@ -10313,17 +10329,27 @@ JiTA.triage = {
                 T._renderShell();
                 T._fetchQueue().then(function () { T._render(); T._prefetch(); });
             }).appendTo($bar);
-        $('<span id="jt-modelbl" class="jt-modelbl" title="Up/Down arrows switch between the bug-report queue and the open-defect queue"></span>').appendTo($bar);
+        $('<span id="jt-modelbl" class="jt-modelbl" title="← bug reports · → open defects"></span>').appendTo($bar);
         $('<button class="jita-btn" id="jt-jqlbtn" title="Show / edit the JQL that defines the bug-report queue">JQL</button>').on('click', function () { T._toggleJqlEditor(); }).appendTo($bar);
         $('<span id="jt-done" class="jt-muted"></span>').appendTo($bar);
         $('<div id="jt-jqled" class="jt-jqled" style="display:none"></div>').appendTo($m);   // JQL editor panel (bug-report mode)
-        $('<div class="jt-main"><div class="jt-report" id="jt-report"></div><div class="jt-matches" id="jt-matches"></div></div>').appendTo($m);
+        $('<div class="jt-main"><div class="jt-queue" id="jt-queue"></div><div class="jt-report" id="jt-report"></div>' +
+          '<div class="jt-details" id="jt-details"></div><div class="jt-matches" id="jt-matches"></div></div>').appendTo($m);
         $('<div class="jt-msg" id="jt-msg"></div>').appendTo($m);
         $('<div class="jt-keys" id="jt-keys"></div>').appendTo($m);
+        // ONE delegated click for the whole list, not a handler per card - the queue can hold thousands. The
+        // clicked row resolves its position with indexOf rather than a stored index, because an action splices
+        // the queue and would leave every stored index after it pointing one issue too far.
+        $('#jt-queue').on('click', '.jt-qrow', function () {
+            if (T._busy) { return; }   // an action is mid-flight: same guard the key layer uses
+            var i = T._rows.indexOf(this);
+            if (i !== -1) { T._goTo(i); }
+        });
         T._renderLegend();
         T._syncModeUi();
 
         T._open = true; T._busy = false; T._queue = []; T._idx = 0; T._done = 0; T._cache = {}; T._armed = null; T._gmPick = false;
+        T._rows = []; T._actRow = null;
         T._mode = 'ebr'; T._stash = {}; T._defAtt = {};
         T._txCache = {}; T._txShown = false; T._txBusy = false; T._curRec = null;
         var last = gmGet(T._lastKey(), null);
@@ -10358,7 +10384,12 @@ JiTA.triage = {
         if (T._keyHandler) { document.removeEventListener('keydown', T._keyHandler, true); T._keyHandler = null; }
         if (T._mo) { try { T._mo.disconnect(); } catch (e) { /* ignore */ } T._mo = null; }
         if (T._armTimer) { clearTimeout(T._armTimer); T._armTimer = null; }
-        T._queue = []; T._cache = {}; T._armed = null; T._gmPick = false; T._busy = false; T._stash = {}; T._defAtt = {};
+        T._flushPos();   // a debounced resume point still in flight must not be lost by closing the overlay
+        // _rows holds a DOM node per queue item. The overlay is gone, but JiTA.triage is a singleton that
+        // lives as long as the tab, so leaving them behind would keep thousands of detached nodes reachable
+        // for every open/close cycle of the session.
+        T._queue = []; T._rows = []; T._actRow = null;
+        T._cache = {}; T._armed = null; T._gmPick = false; T._busy = false; T._stash = {}; T._defAtt = {};
     },
 
     // ---- queue (live JQL: the local DB has no assignee, and "unassigned" must be fresh) ---------------------
@@ -10378,19 +10409,23 @@ JiTA.triage = {
         T._queueError = null;
         T._queueDone = false;
         T._queue = [];
+        T._renderList();
         return new Promise(function (resolve) {
             var first = true;
             function finishPage() { if (first) { first = false; resolve(); } else { T._queueProgress(); } }
             function page(token) {
-                var body = { jql: jql, fields: ['summary', 'created', 'status', 'attachment'], maxResults: T.PAGE_SIZE };
+                var body = { jql: jql, fields: T.EBR_FIELDS, maxResults: T.PAGE_SIZE };
                 if (token) { body.nextPageToken = token; }
                 JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
                     if (!T._open || gen !== T._qGen) { if (first) { first = false; resolve(); } return; }   // reloaded / closed mid-crawl
                     var data = r.data || {}, issues = data.issues || [];
                     for (var i = 0; i < issues.length; i++) {
                         var f = issues[i].fields || {};
-                        T._queue.push({ key: issues[i].key, summary: f.summary || '', created: f.created || null, status: (f.status && f.status.name) || '', att: T._mapAtt(f.attachment) });
+                        T._queue.push({ key: issues[i].key, summary: f.summary || '', created: f.created || null, status: (f.status && f.status.name) || '', att: T._mapAtt(f.attachment), det: T._mapDet(f) });
                     }
+                    // Build this page's cards NOW, before anything below can render: finishPage, the resume
+                    // seek and _queueProgress all assume a row exists for every queue entry.
+                    T._appendRows();
                     var wasFirst = first;   // finishPage() flips `first` - the open() chain seeks after page 1 itself
                     if (data.nextPageToken && T._queue.length < T.QUEUE_MAX) {
                         finishPage();
@@ -10510,7 +10545,7 @@ JiTA.triage = {
         return p;
     },
 
-    // Rank the reports around the cursor in advance (PREFETCH_SPAN each way - K/← walks backward too) so
+    // Rank the reports around the cursor in advance (PREFETCH_SPAN each way - ↑ walks backward too) so
     // stepping in either direction lands on already-ranked matches. _resolve caches per key, so re-prefetching
     // an already-ranked neighbour is a no-op.
     PREFETCH_SPAN: 3,
@@ -10525,8 +10560,96 @@ JiTA.triage = {
 
     // ---- rendering -------------------------------------------------------------------------------------------
     _renderShell: function () {
-        $('#jt-report').empty(); $('#jt-matches').empty();
+        $('#jt-report').empty(); $('#jt-matches').empty(); $('#jt-details').empty();
+        JiTA.triage._renderList();
         $('#jt-progress').text('Loading queue…'); $('#jt-done').text('');
+    },
+
+    /* ---- the queue list (the left column) --------------------------------------------------------------
+     * _render() runs on every single cursor move, so the list must never be rebuilt there: on a four-thousand
+     * item queue that would mean thousands of nodes per keystroke. The split is strict - _renderList builds
+     * the whole thing (queue replaced), _appendRows extends it (a background page landed), and _syncActiveRow
+     * is the only one _render is allowed to call, which moves one class and scrolls.
+     */
+
+    // One card: the summary clamped to two lines, then key + status + date. Native DOM rather than jQuery,
+    // because this is the one place in the file that builds thousands of nodes at once.
+    _makeRow: function (item) {
+        var row = document.createElement('div');
+        row.className = 'jt-qrow';
+        var sum = document.createElement('div');
+        sum.className = 'jt-qsum';
+        sum.textContent = item.summary || '(no summary)';
+        row.appendChild(sum);
+        var meta = document.createElement('div');
+        meta.className = 'jt-qmeta';
+        var key = document.createElement('span');
+        key.className = 'jt-qkey';
+        key.textContent = item.key;
+        meta.appendChild(key);
+        if (item.status) {
+            var st = document.createElement('span');
+            st.className = 'jt-qstat';
+            st.textContent = item.status;
+            meta.appendChild(st);
+        }
+        var when = JiTA.util.fmtDate(item.created);
+        if (when) {
+            var d = document.createElement('span');
+            d.className = 'jt-qdate';
+            d.textContent = when;
+            meta.appendChild(d);
+        }
+        row.appendChild(meta);
+        return row;
+    },
+
+    // Card up every queue entry that has no card yet. Takes no index, so calling it twice is a no-op and a
+    // missed call heals on the next one - which is what makes the streaming crawl safe to hook.
+    _appendRows: function () {
+        var T = JiTA.triage, el = document.getElementById('jt-queue');
+        if (!el || T._rows.length >= T._queue.length) { return; }
+        if (!T._rows.length) { el.innerHTML = ''; }   // drop the placeholder before the first real card
+        var frag = document.createDocumentFragment();
+        for (var i = T._rows.length; i < T._queue.length; i++) {
+            var row = T._makeRow(T._queue[i]);
+            T._rows.push(row);
+            frag.appendChild(row);
+        }
+        el.appendChild(frag);   // one insertion, one reflow, however many cards
+    },
+
+    // The whole list, from scratch. Every path that REPLACES _queue calls this; nothing else may.
+    _renderList: function () {
+        var T = JiTA.triage, el = document.getElementById('jt-queue');
+        T._rows = []; T._actRow = null;
+        if (!el) { return; }
+        el.innerHTML = '';
+        if (!T._queue.length) { el.innerHTML = '<div class="jt-qempty">Loading queue…</div>'; return; }
+        T._appendRows();
+        T._syncActiveRow();
+    },
+
+    // O(1), and the only list work per keystroke: move the highlight and keep it in view. `block: 'nearest'`
+    // deliberately - a bare scrollIntoView() walks every scrollable ancestor and would scroll the Jira page
+    // behind the overlay, and a smooth one queues an animation per keypress under auto-repeat.
+    _syncActiveRow: function () {
+        var T = JiTA.triage, row = T._rows[T._idx] || null;
+        if (T._actRow === row) { return; }
+        if (T._actRow) { T._actRow.className = 'jt-qrow'; }
+        T._actRow = row;
+        if (!row) { return; }
+        row.className = 'jt-qrow on';
+        try { row.scrollIntoView({ block: 'nearest' }); } catch (e) { row.scrollIntoView(false); }
+    },
+
+    // Mirror a _queue.splice(i, 1) in the card list, so the two stay index-parallel.
+    _removeRow: function (i) {
+        var T = JiTA.triage, row = T._rows[i];
+        if (!row) { return; }
+        T._rows.splice(i, 1);
+        if (T._actRow === row) { T._actRow = null; }
+        if (row.parentNode) { row.parentNode.removeChild(row); }
     },
 
     _fmtSize: function (b) {
@@ -10672,15 +10795,16 @@ JiTA.triage = {
         T._disarm(); T._gmPick = false;
         T._txShown = false; T._curRec = null;   // fresh report -> desc box shows the original again (E re-toggles)
         try { JiTA.ui._hideTip(true); } catch (e) { /* a removed row never fires mouseleave - drop its tip here */ }
+        T._syncActiveRow();   // before the early return below, or the highlight sticks on the row just actioned
         var $rep = $('#jt-report'), $mat = $('#jt-matches');
         $('#jt-done').text(T._done ? (T._done + ' actioned') : '');
         if (!T._queue.length || T._idx >= T._queue.length) {
             $('#jt-progress').text(T._queue.length ? (T._queue.length + ' in queue') : '');
-            $rep.empty(); $mat.empty();
+            $rep.empty(); $mat.empty(); $('#jt-details').empty();
             var emptyMsg = !T._queueDone
                 ? 'More of the queue is still loading…'
                 : (T._queue.length
-                    ? 'End of queue - ' + T._done + ' actioned this session. K goes back.'
+                    ? 'End of queue - ' + T._done + ' actioned this session. ↑ goes back.'
                     : (T._queueError ? 'Queue fetch failed: ' + T._queueError
                         : (T._done ? 'Queue clear - ' + T._done + ' actioned this session. 🎉' : 'Queue is empty - nothing open here. 🎉')));
             $('<div class="jt-empty"></div>').text(emptyMsg).appendTo($rep);
@@ -10688,7 +10812,7 @@ JiTA.triage = {
             return;
         }
         var item = T._queue[T._idx], key = item.key;
-        gmSet(T._lastKey(), { key: item.key, created: item.created || null });   // resume point for the next session
+        T._rememberPos(item);   // resume point for the next session (debounced - see _rememberPos)
         $('#jt-progress').text((T._idx + 1) + ' / ' + T._queue.length + (T._queueDone ? '' : '…'));   // "…" = background pages still arriving
         $rep.empty(); $mat.empty();
         var $h = $('<div class="jt-rephead"></div>').appendTo($rep);
@@ -10704,7 +10828,8 @@ JiTA.triage = {
         // run through the regular Logfile Parser. Other types stay plain links (browser download), and a
         // Ctrl/Shift/middle click on anything keeps the raw browser behavior. O still opens the full issue.
         T._renderAtt(item, $rep);
-        if (T._mode === 'defect' && !item.att) { T._loadDefectAtt(item, key); }   // defects: attachment metadata isn't stored locally - fetch it now
+        T._renderRail(item);
+        if (T._mode === 'defect' && !item.det) { T._loadDefectFields(item, key); }   // defects: neither attachments nor the rail fields are stored locally
         $mat.append($('<div class="jt-empty"></div>').text('Ranking…'));
         T._setMsg('');
         // Paint the report TEXT the moment its DB read lands - never behind the ranking. _resolve chains the
@@ -10759,15 +10884,38 @@ JiTA.triage = {
         });
     },
 
-    _go: function (delta) {
+    /* Where the cursor is, remembered for the next session. Debounced on purpose: navigation moved from J/K,
+     * which is one keypress per issue, to the arrow keys, which AUTO-REPEAT - holding ↓ through a hundred
+     * rows would otherwise mean a hundred GM writes. The pending value carries the storage key it was
+     * captured with, so a flush that lands after a queue switch still writes to the right one. */
+    _posTimer: null,
+    _posPending: null,
+    _rememberPos: function (item) {
+        var T = JiTA.triage;
+        T._posPending = { gm: T._lastKey(), rec: { key: item.key, created: item.created || null } };
+        if (T._posTimer) { return; }   // a write is already scheduled and will pick up this newer value
+        T._posTimer = setTimeout(T._flushPos, 400);
+    },
+    _flushPos: function () {
+        var T = JiTA.triage;
+        if (T._posTimer) { clearTimeout(T._posTimer); T._posTimer = null; }
+        if (!T._posPending) { return; }
+        gmSet(T._posPending.gm, T._posPending.rec);
+        T._posPending = null;
+    },
+
+    // Move the cursor to an absolute position. The one navigation primitive: the arrows, J/K, Home/End,
+    // PageUp/Down and a click on a queue card all come through here.
+    _goTo: function (to) {
         var T = JiTA.triage;
         T._resume = null;   // manual navigation - the user took over, drop any pending session-resume seek
-        var to = T._idx + delta;
         if (to < 0 || to > T._queue.length) { return; }   // allow stepping to the end-of-queue state (== length)
+        if (to === T._idx) { return; }
         T._idx = to;
         T._render();
         T._prefetch();   // keep +-PREFETCH_SPAN ranked in both directions
     },
+    _go: function (delta) { JiTA.triage._goTo(JiTA.triage._idx + delta); },
 
     // E hotkey: toggle the desc box between the original text and an on-demand English translation of
     // summary + description (the same keyless endpoints as the page's Translate button; jitaTranslateRR).
@@ -10857,11 +11005,19 @@ JiTA.triage = {
             return;
         }
 
-        if (k === 'ArrowUp' || k === 'ArrowDown') { T._switchMode(); return; }   // bug-report queue <-> open-defect queue
-        if (k === 'j' || k === 'J' || k === 'ArrowRight') { T._go(1); return; }
-        if (k === 'k' || k === 'K' || k === 'ArrowLeft') { T._go(-1); return; }
+        // Navigation and queue switching sit ABOVE the end-of-queue guard, so both still work when the cursor
+        // is parked past the last item. eat() above already preventDefaults, so the arrows never also scroll
+        // the list natively.
+        if (k === 'ArrowDown' || k === 'j' || k === 'J') { T._go(1); return; }
+        if (k === 'ArrowUp' || k === 'k' || k === 'K') { T._go(-1); return; }
+        if (k === 'ArrowLeft') { T._switchMode('ebr'); return; }        // ← the bug-report queue
+        if (k === 'ArrowRight') { T._switchMode('defect'); return; }    // → the open-defect queue
+        if (k === 'Home') { T._goTo(0); return; }
+        if (k === 'End') { T._goTo(Math.max(0, T._queue.length - 1)); return; }
+        if (k === 'PageDown') { T._goTo(Math.min(Math.max(0, T._queue.length - 1), T._idx + 10)); return; }
+        if (k === 'PageUp') { T._goTo(Math.max(0, T._idx - 10)); return; }
         if (!item) { return; }   // end-of-queue: only navigation applies
-        if (T._mode === 'defect' && (k === 't' || k === 'T' || k === 'g' || k === 'G' || k === 'e' || k === 'E')) { T._setMsg('T / G / E act on bug reports - press the up or down arrow to switch to the bug-report queue.', true); return; }
+        if (T._mode === 'defect' && (k === 't' || k === 'T' || k === 'g' || k === 'G' || k === 'e' || k === 'E')) { T._setMsg('T / G / E act on bug reports - press ← to switch to the bug-report queue.', true); return; }
         if (k === 'o' || k === 'O') { try { window.open('/browse/' + item.key, '_blank'); } catch (e2) { /* ignore */ } return; }
         if (k === 'e' || k === 'E') { T._toggleTranslate(); return; }
         if (k === 'Enter') { if (T._armed) { T._execArmed(); } return; }
@@ -10978,7 +11134,7 @@ JiTA.triage = {
         T._verifyActionable(ebrKey).then(function (v) {
             if (!v.ok) {
                 T._busy = false;
-                T._setMsg(ebrKey + ' changed server-side (' + v.reason + ')' + (ebrKey === key ? ' - J skips it.' : ' - pick another match.'), true);
+                T._setMsg(ebrKey + ' changed server-side (' + v.reason + ')' + (ebrKey === key ? ' - ↓ skips it.' : ' - pick another match.'), true);
                 return null;
             }
             if (type === 'attach') {
@@ -11035,7 +11191,7 @@ JiTA.triage = {
     _pendingGm: function (key, category) {
         var T = JiTA.triage, started = Date.now();
         T._busy = false;
-        T._setMsg(key + ' is still open after 10s - the GM rule may just be slow. Verifying in the background for up to a minute; ←/→ to move on meanwhile.', true);
+        T._setMsg(key + ' is still open after 10s - the GM rule may just be slow. Verifying in the background for up to a minute; ↑/↓ to move on meanwhile.', true);
         (function poll(n) {
             setTimeout(function () {
                 $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status', dataType: 'json' })
@@ -11066,37 +11222,116 @@ JiTA.triage = {
         return att;
     },
 
+    // Flatten a Jira issue's `fields` into the plain strings the Details rail shows. One shape for both modes,
+    // so the renderer never has to know whether the issue came from the queue crawl or a single-defect read.
+    _mapDet: function (f) {
+        f = f || {};
+        function name(o) { return (o && (o.displayName || o.name || o.value)) || ''; }
+        function list(a) {
+            var out = [];
+            for (var i = 0; i < (a || []).length; i++) {
+                var n = (typeof a[i] === 'string') ? a[i] : name(a[i]);
+                if (n) { out.push(n); }
+            }
+            return out.join(', ');
+        }
+        return {
+            resolution: name(f.resolution),
+            priority: name(f.priority),
+            assignee: name(f.assignee),
+            reporter: name(f.reporter),
+            // The in-game character who filed it. A bare id string carries no name to show, so it renders only
+            // when Jira gives us the text value.
+            origReporter: (typeof f.customfield_11660 === 'string') ? f.customfield_11660.replace(/^\s+|\s+$/g, '') : '',
+            team: name(f.customfield_10001),   // the Team field can also be a bare id; then there is nothing to show
+            labels: list(f.labels),
+            components: list(f.components),
+            affects: list(f.versions),
+            fixVersions: list(f.fixVersions),
+            updated: f.updated || ''
+        };
+    },
+
+    // The Details rail - Jira's old right-hand field list. Only fields that are actually set are rendered, so
+    // a bare bug report shows three rows rather than a column of "None". Assignee is the exception: it always
+    // renders, because "is anyone already on this?" is the first question triage asks.
+    _renderRail: function (item) {
+        var el = document.getElementById('jt-details');
+        if (!el) { return; }
+        el.innerHTML = '';
+        var d = item.det;
+        if (!d) { el.innerHTML = '<div class="jt-qempty">Loading details…</div>'; return; }
+        if (d.failed) { el.innerHTML = '<div class="jt-qempty">Could not read this issue\'s fields. O opens it in Jira.</div>'; return; }
+        function row(label, value, dim) {
+            if (!value) { return; }
+            var wrap = document.createElement('div');
+            wrap.className = 'jt-drow';
+            var l = document.createElement('div');
+            l.className = 'jt-dlbl';
+            l.textContent = label;
+            var v = document.createElement('div');
+            v.className = 'jt-dval' + (dim ? ' jt-dnone' : '');
+            v.textContent = value;
+            wrap.appendChild(l); wrap.appendChild(v);
+            el.appendChild(wrap);
+        }
+        row('Assignee', d.assignee || 'Unassigned', !d.assignee);
+        row('Reporter', d.reporter);
+        row('Original reporter', d.origReporter);
+        row('Priority', d.priority);
+        row('Resolution', d.resolution);
+        row('Labels', d.labels);
+        row('Components', d.components);
+        row('Affects version', d.affects);
+        row('Fix version', d.fixVersions);
+        row('Team', d.team);
+        row('Updated', JiTA.util.fmtDate(d.updated));
+        if (!el.childNodes.length) { el.innerHTML = '<div class="jt-qempty">No fields set.</div>'; }
+    },
+
     // Defect-mode queue: every OPEN defect from the LOCAL DB (all defects are synced, so no crawl - instant),
-    // sorted by created per the order toggle. Attachment metadata isn't stored locally: _loadDefectAtt fetches it
-    // for the defect on screen.
+    // sorted by created per the order toggle. Attachments and the Details-rail fields aren't stored locally:
+    // _loadDefectFields fetches both for the defect on screen, in one request.
     _fetchDefectQueue: function () {
         var T = JiTA.triage;
         T._queueError = null; T._queueDone = true; T._queue = [];
+        T._renderList();   // _fetchQueue returns before its own reset for this mode, so the list is cleared here
         return JiTA.db.allDefects().then(function (recs) {
             if (!T._open || T._mode !== 'defect') { return; }
             var out = [];
             for (var i = 0; i < recs.length; i++) {
                 var r = recs[i];
                 if (r.project === 'EBR' || JiTA.util.isResolved(r.status, r.resolution)) { continue; }
-                out.push({ key: r.key, summary: r.summary || '', created: r.created || null, status: r.status || '', att: null });
+                out.push({ key: r.key, summary: r.summary || '', created: r.created || null, status: r.status || '', att: null, det: null });
             }
             var newest = T.order() === 'newest';
             out.sort(function (a, b) { var x = a.created || '', y = b.created || ''; if (x === y) { return a.key < b.key ? -1 : 1; } return ((x < y) !== newest) ? -1 : 1; });
             T._queue = out;
-        }).catch(function (e) { if (T._open) { T._queue = []; T._queueError = String(e && e.message || e); } });
+            T._appendRows();
+        }).catch(function (e) { if (T._open) { T._queue = []; T._queueError = String(e && e.message || e); T._renderList(); } });
     },
 
-    _loadDefectAtt: function (item, key) {
+    // One request per defect viewed, cached for the session, filling BOTH the attachment strip and the rail.
+    _loadDefectFields: function (item, key) {
         var T = JiTA.triage;
-        if (T._defAtt[key]) { item.att = T._defAtt[key]; T._renderAtt(item, $('#jt-report')); return; }
-        $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=attachment', dataType: 'json' })
+        function paint() {
+            if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== key) { return; }   // navigated meanwhile
+            T._renderAtt(item, $('#jt-report'));
+            T._renderRail(item);
+        }
+        var hit = T._defAtt[key];
+        if (hit) { item.att = hit.att; item.det = hit.det; paint(); return; }
+        $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=' + T.DEFECT_FIELDS, dataType: 'json' })
             .done(function (d) {
-                var att = T._mapAtt(d && d.fields && d.fields.attachment);
-                T._defAtt[key] = att; item.att = att;
-                if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== key) { return; }   // navigated meanwhile
-                T._renderAtt(item, $('#jt-report'));
+                var f = (d && d.fields) || {};
+                var rec = { att: T._mapAtt(f.attachment), det: T._mapDet(f) };
+                T._defAtt[key] = rec; item.att = rec.att; item.det = rec.det;
+                paint();
             })
-            .fail(function () { item.att = []; });
+            // Mark both as attempted so a failed read isn't retried on every re-render of the same defect.
+            // `failed` matters: an empty field set would otherwise render as "Unassigned", which is a claim
+            // we cannot make when the request never came back.
+            .fail(function () { item.att = []; item.det = { failed: true }; paint(); });
     },
 
     // The attachments strip (chips + thumbnails), appended after the description. Shared by both modes.
@@ -11139,22 +11374,29 @@ JiTA.triage = {
         }
     },
 
-    // Up/Down arrows: park the current mode's queue and switch. A parked queue is restored as-is (same position)
-    // if it had finished loading; otherwise (or on a first visit) the mode's queue is (re)fetched and the mode's
-    // own persisted resume point applies. Bumping _qGen cancels a streaming bug-report crawl mid-flight so its
-    // pages can't append to the other mode's queue.
-    _switchMode: function () {
+    // Left/Right arrows: park the current mode's queue and switch to `to` ('ebr' | 'defect'). Directional, so
+    // pressing ← while already on the bug reports is inert rather than a pointless round trip. A parked queue
+    // is restored as-is (same position) if it had finished loading; otherwise (or on a first visit) the mode's
+    // queue is (re)fetched and the mode's own persisted resume point applies. Bumping _qGen cancels a streaming
+    // bug-report crawl mid-flight so its pages can't append to the other mode's queue.
+    _switchMode: function (to) {
         var T = JiTA.triage;
         if (T._busy) { return; }
+        if (!to) { to = (T._mode === 'defect') ? 'ebr' : 'defect'; }   // no target given: plain toggle
+        if (to === T._mode) { return; }
         T._disarm(); T._gmPick = false; T._closeJqlEditor();
         try { JiTA.ui._hideTip(true); } catch (e) { /* ignore */ }
+        T._flushPos();   // write the outgoing queue's position now, before _lastKey() starts naming the other one
         T._qGen++;
         T._stash[T._mode] = { queue: T._queue, idx: T._idx, done: T._queueDone, error: T._queueError };
-        T._mode = (T._mode === 'defect') ? 'ebr' : 'defect';
+        T._mode = to;
         T._syncModeUi(); T._renderLegend();
         var s = T._stash[T._mode];
         if (s && s.done && !s.error && s.queue.length) {
             T._queue = s.queue; T._idx = s.idx; T._queueDone = true; T._queueError = null; T._resume = null;
+            // This path bypasses both _renderShell and the fetchers, so it is the one place the list would
+            // otherwise keep showing the OTHER queue's cards under this queue's report.
+            T._renderList();
             T._render(); T._prefetch();
             return;
         }
@@ -11177,8 +11419,8 @@ JiTA.triage = {
         var T = JiTA.triage, el = document.getElementById('jt-keys');
         if (!el) { return; }
         el.innerHTML = (T._mode === 'defect')
-            ? '<span><b>1-9</b> Attach report #n to this defect (number row or numpad)</span><span><b>←</b>/<b>→</b> Prev/next (or K/J)</span><span><b>↑</b>/<b>↓</b> Bug-report queue</span><span><b>O</b> Open in Jira</span><span><b>Esc</b> Exit</span>'
-            : '<span><b>1-9</b> Attach match #n (number row or numpad)</span><span><b>T</b> Trash (Won\'t Do)</span><span><b>G</b> To GM</span><span><b>E</b> Translate</span><span><b>←</b>/<b>→</b> Prev/next (or K/J)</span><span><b>↑</b>/<b>↓</b> Defect queue</span><span><b>O</b> Open in Jira</span><span><b>Esc</b> Exit</span>';
+            ? '<span><b>1-9</b> Attach report #n to this defect (number row or numpad)</span><span><b>↑</b>/<b>↓</b> Prev/next (or K/J, or click a card)</span><span><b>←</b> Bug-report queue</span><span><b>O</b> Open in Jira</span><span><b>Esc</b> Exit</span>'
+            : '<span><b>1-9</b> Attach match #n (number row or numpad)</span><span><b>T</b> Trash (Won\'t Do)</span><span><b>G</b> To GM</span><span><b>E</b> Translate</span><span><b>↑</b>/<b>↓</b> Prev/next (or K/J, or click a card)</span><span><b>→</b> Defect queue</span><span><b>O</b> Open in Jira</span><span><b>Esc</b> Exit</span>';
     },
 
     // ---- bug-report queue JQL editor (JQL button, bug-report mode only) -----------------------------------------
@@ -11245,7 +11487,7 @@ JiTA.triage = {
             delete T._cache[key];
             var i = -1;
             for (var q = 0; q < T._queue.length; q++) { if (T._queue[q].key === key) { i = q; break; } }
-            if (i !== -1) { T._queue.splice(i, 1); if (T._idx > i) { T._idx--; } }
+            if (i !== -1) { T._queue.splice(i, 1); T._removeRow(i); if (T._idx > i) { T._idx--; } }   // queue and cards stay index-parallel
             T._busy = false;
             if (!T._open) { return; }
             T._render();
@@ -11270,8 +11512,31 @@ JiTA.triage = {
                 '.jita-triage-view .jt-muted { color: #9aa6b2; font-size: 12px; }' +
                 '.jita-triage-view #jt-done { margin-left: auto; }' +
                 '.jita-triage-view .jt-main { display: flex; gap: 16px; padding: 10px 16px; flex: 1 1 auto; min-height: 0; overflow: hidden; }' +
-                '.jita-triage-view .jt-report { flex: 1.15; min-width: 0; display: flex; flex-direction: column; }' +
+                // Four columns, the shape of Jira's removed detail view: queue list, the report, its Details
+                // rail, and our ranked matches. clamp() rather than media queries - a 1280px laptop and a
+                // 2560px desktop both stay usable with no breakpoint to keep in sync.
+                '.jita-triage-view .jt-queue { flex: 0 0 clamp(220px, 18vw, 300px); min-width: 0; overflow-y: auto; overflow-x: hidden; border-right: 1px solid #2c333a; padding-right: 6px; }' +
+                '.jita-triage-view .jt-report { flex: 1.2; min-width: 0; display: flex; flex-direction: column; }' +
+                '.jita-triage-view .jt-details { flex: 0 0 clamp(190px, 15vw, 240px); min-width: 0; overflow-y: auto; border-left: 1px solid #2c333a; padding-left: 12px; }' +
                 '.jita-triage-view .jt-matches { flex: 1; min-width: 0; overflow-y: auto; }' +   // height comes from the flex row (full-screen sheet), not a vh cap
+                // The queue card: summary clamped to two lines, then key + status + date - the old Jira card.
+                // Every row carries a TRANSPARENT 1px border so the active row can take a coloured one with no
+                // layout shift as the highlight moves.
+                '.jita-triage-view .jt-qrow { padding: 7px 9px; border: 1px solid transparent; border-bottom: 1px solid #262c32; cursor: pointer; }' +
+                '.jita-triage-view .jt-qrow:hover { background: #22272b; }' +
+                '.jita-triage-view .jt-qrow.on { background: rgba(76,154,255,.15); border-color: #4c9aff; border-radius: 5px; }' +
+                '.jita-triage-view .jt-qsum { color: #e6e6e6; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }' +
+                '.jita-triage-view .jt-qmeta { display: flex; align-items: center; gap: 6px; margin-top: 4px; }' +
+                '.jita-triage-view .jt-qkey { color: #9aa6b2; font-size: 11px; font-weight: 700; }' +
+                '.jita-triage-view .jt-qrow.on .jt-qkey { color: #4c9aff; }' +
+                '.jita-triage-view .jt-qstat { color: #7a8694; background: #2c333a; border-radius: 3px; padding: 0 5px; font-size: 10px; white-space: nowrap; }' +
+                '.jita-triage-view .jt-qdate { color: #55606b; font-size: 10px; margin-left: auto; white-space: nowrap; }' +
+                '.jita-triage-view .jt-qempty { color: #7a8694; font-size: 11px; padding: 12px 8px; }' +
+                // The Details rail: label over value, Jira-style.
+                '.jita-triage-view .jt-drow { margin-bottom: 9px; }' +
+                '.jita-triage-view .jt-dlbl { color: #7a8694; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }' +
+                '.jita-triage-view .jt-dval { color: #cfd6dd; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }' +
+                '.jita-triage-view .jt-dnone { color: #7a8694; font-style: italic; }' +
                 '.jita-triage-view .jt-rephead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }' +
                 '.jita-triage-view .jt-key { color: #4c9aff; font-weight: 800; font-size: 15px; text-decoration: none; }' +
                 '.jita-triage-view .jt-key:hover { text-decoration: underline; }' +
@@ -11290,11 +11555,11 @@ JiTA.triage = {
                 '.jita-triage-view .jt-desc { background: #1b2025; border: 1px solid #2c333a; border-radius: 6px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; overflow-y: auto; flex: 1 1 auto; min-height: 0; font-size: 12px; line-height: 1.5; color: #cfd6dd; }' +   // fills the report column (full-screen sheet), no vh cap
                 '.jita-triage-view .jt-mathead { display: flex; align-items: center; justify-content: space-between; font-weight: 700; color: #e6e6e6; font-size: 12px; margin-bottom: 6px; }' +
                 '.jita-triage-view .jt-mode { color: #9aa6b2; font-weight: 600; font-size: 10px; }' +
-                // Responsive match grid: as many ~340px-min card columns as the pane's width fits (1 on narrow,
+                // Responsive match grid: as many ~300px-min card columns as the pane's width fits (1 on narrow,
                 // 2 on a typical scaled desktop, 3+ on genuinely wide CSS viewports); the gap replaces margins.
-                // 340 not 420: OS/browser scaling shrinks the CSS viewport (150% -> pane ~780 CSS px), and the
-                // two-column layout must survive that.
-                '.jita-triage-view .jt-list { list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 8px; align-content: start; }' +
+                // 300 not 420: OS/browser scaling shrinks the CSS viewport, and the queue list and Details rail
+                // now take a fixed slice of it too, so the two-column layout has to survive a much narrower pane.
+                '.jita-triage-view .jt-list { list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; align-content: start; }' +
                 '.jita-triage-view .jt-list li { padding: 6px 8px; border: 1px solid #2c333a; border-radius: 6px; background: #22272b; }' +
                 '.jita-triage-view .jt-list li.armed { border-color: #ffb547; background: #2e2a1e; }' +
                 '.jita-triage-view .jt-n { display: inline-block; min-width: 16px; text-align: center; background: #3a434d; color: #cfd6dd; border-radius: 4px; font-size: 10px; font-weight: 700; margin-right: 8px; }' +
