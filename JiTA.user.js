@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.15.0
+// @version     3.16.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8,6 +8,7 @@
 // @match       https://fenriscreations.atlassian.net/jira*
 // @match       https://fenriscreations.atlassian.net/browse*
 // @match       https://fenriscreations.atlassian.net/issues*
+// @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
 // @grant       GM_addStyle
@@ -34,6 +35,10 @@
 // dependency that gated this script's ENTIRE init. Inlining it makes the script self-contained. Requires jQuery.
 function waitForKeyElements(selectorTxt, actionFunction, bWaitOnce, iframeSelector) {
     var targetNodes, btargetsFound;
+
+    // Every caller polls for JIRA DOM. Off a Jira page (Confluence, the Forge iframe) that node can never
+    // appear, so the poller would just burn a timer forever - one guard here neutralises all eight call sites.
+    if (typeof JITA_NO_JIRA_UI !== 'undefined' && JITA_NO_JIRA_UI) { return; }
 
     if (typeof iframeSelector == "undefined")
         targetNodes = $(selectorTxt);
@@ -107,6 +112,20 @@ var LOG_HDR = "Time\tFacility\tType\tMessage";
 var JITA_IS_FORGE_FRAME = (function () {
     try { return /(^|\.)atlassian-dev\.net$/i.test(location.hostname); } catch (e) { return false; }
 })();
+
+// True on a CONFLUENCE page (same host as Jira, under /wiki). The script is matched there for ONE reason:
+// the Lead-duties chip and overlay belong where the documentation is actually read, so a page can be marked
+// proof-read on the page itself. Nothing else applies - there is no Jira DOM to decorate, no issue to parse,
+// and a wiki tab has no business electing the embedding-worker leader or driving the defect sync.
+var JITA_IS_WIKI = (function () {
+    try { return /^\/wiki(\/|$)/i.test(location.pathname) && !/(^|\.)atlassian-dev\.net$/i.test(location.hostname); } catch (e) { return false; }
+})();
+
+// The two contexts where the JIRA feature set must stay switched off: the Zendesk Forge iframe (which runs
+// only the canned-response dropdown) and Confluence (which runs only Lead duties). Guards that used to read
+// JITA_IS_FORGE_FRAME for "am I on a real Jira page?" read this instead; the ones that are genuinely about
+// the Forge frame still read JITA_IS_FORGE_FRAME.
+var JITA_NO_JIRA_UI = JITA_IS_FORGE_FRAME || JITA_IS_WIKI;
 
 
 // Safe GM storage wrappers. Return `dflt` when the API isn't granted (some frames / managers) or on any
@@ -223,8 +242,8 @@ if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') {
 }
 
 
-// Activate a custom scrollbar if the scrollbar value is set to true
-if (flagOn('scrollbar')) {
+// Activate a custom scrollbar if the scrollbar value is set to true (Jira pages only)
+if (!JITA_NO_JIRA_UI && flagOn('scrollbar')) {
     GM_addStyle(SCROLLBAR_CSS);
 };
 
@@ -233,14 +252,19 @@ if (flagOn('scrollbar')) {
 // embedding backend) live in an in-page settings overlay (JiTA.menu) instead of a long flat list of GM
 // menu commands. The callback references JiTA lazily, so it's fine that the namespace is defined later.
 if (!JITA_IS_FORGE_FRAME) {
+    // Available on Confluence too: the Lead-duties diagnostics (Test Confluence access, Show ledger) are
+    // exactly what you want to hand a Lead who is standing on the wiki wondering why nothing happened.
+    // render() hides the Jira-only sections there.
     GM_registerMenuCommand("⚙ Jira Triage Assistant - Settings…", function () {
         if (typeof JiTA !== 'undefined' && JiTA.menu) { JiTA.menu.open(); }
     });
     // Declutter: choose which Details fields / collapsible sections to hide (per issue-type). Built from the
-    // issue you're viewing, so open a bug report or defect first.
-    GM_registerMenuCommand("Declutter Jira fields…", function () {
-        if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.openConfig(); }
-    });
+    // issue you're viewing, so open a bug report or defect first - hence Jira-only.
+    if (!JITA_IS_WIKI) {
+        GM_registerMenuCommand("Declutter Jira fields…", function () {
+            if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.openConfig(); }
+        });
+    }
 }
 
 
@@ -345,7 +369,7 @@ var jitaButtonObserver = new MutationObserver(function () {
         try { if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.apply(); } } catch (e) { /* ignore */ }   // re-apply the user's field/section hides
     }, 200);
 });
-if (!JITA_IS_FORGE_FRAME) { jitaButtonObserver.observe(document.body, { childList: true, subtree: true }); }
+if (!JITA_NO_JIRA_UI) { jitaButtonObserver.observe(document.body, { childList: true, subtree: true }); }
 
 
 // ---- Surface the issue's Created / Updated dates at the TOP of the header ----
@@ -973,7 +997,7 @@ waitForKeyElements(cmSelector, SwapUI);
 // code-blocks and the comment editor are never touched, and a per-element fallback timer reveals anything that
 // somehow never gets parsed, so content can't get stuck invisible.
 (function () {
-    if (JITA_IS_FORGE_FRAME || !window.MutationObserver) { return; }
+    if (JITA_NO_JIRA_UI || !window.MutationObserver) { return; }
     try { GM_addStyle('.jita-log-hiding { visibility: hidden !important; }'); } catch (e) { /* ignore */ }
     var HIDE_SIG = new RegExp(LOG_HDR + '|dateTime\tpyDateTime\tprocCpu|Time\tMethod\tDuration');
     function hideLogs() {
@@ -1065,10 +1089,12 @@ function jitaRevealLogs() {   // reveal every container the flash suppressor hid
 // generation, while an untracked file just leaves every poller cancelled. File entries are <button>s containing a
 // [data-item-title] element (the same markers waitForKeyElements uses above); other buttons (download, toggles)
 // have no such child and are ignored.
-document.addEventListener('click', function (e) {
-    var btn = e.target && e.target.closest ? e.target.closest('button') : null;
-    if (btn && btn.querySelector('[data-item-title]')) { jitaParserGen++; }
-}, true);
+if (!JITA_NO_JIRA_UI) {
+    document.addEventListener('click', function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest('button') : null;
+        if (btn && btn.querySelector('[data-item-title]')) { jitaParserGen++; }
+    }, true);
+}
 function jitaRunParserWhenLoaded(setFlag) {
     var myGen = ++jitaParserGen;
     var CB = SELECTORS.CODE_BLOCK;
@@ -8327,10 +8353,11 @@ JiTA.menu = {
                 JiTA.ui.ensure();
             }
         }));
-        // ISD Credits: mount / tear down the corner badge (and start the scheduler) on toggle.
+        // ISD Credits: mount / tear down the corner badge (and start the scheduler) on toggle. The badge and
+        // its crawl belong to Jira tabs only - toggling from Confluence still persists the flag for them.
         $feat.append(JiTA.menu._toggleRow('ISD Credits', 3, function () {
             if (!flagOn('credits')) { JiTA.credits.badge.remove(); }
-            else { JiTA.credits.badge.mount(); JiTA.credits.sched.start(); }
+            else if (!JITA_NO_JIRA_UI) { JiTA.credits.badge.mount(); JiTA.credits.sched.start(); }
         }));
         $p.append($feat);
 
@@ -8348,8 +8375,8 @@ JiTA.menu = {
             .on('click', function () { JiTA.responses.openEditor(); }).appendTo($respActions);
         $p.append($resp);
 
-        // ---- Triage Assistant (only when enabled) ----
-        if (flagOn('similarDefects')) {
+        // ---- Triage Assistant (only when enabled, and only on Jira - its actions are all Jira-tab machinery) ----
+        if (flagOn('similarDefects') && !JITA_IS_WIKI) {
             var $ta = $('<div class="jita-menu-sect"></div>');
             $('<h3>Triage Assistant</h3>').appendTo($ta);
 
@@ -8449,6 +8476,100 @@ JiTA.menu = {
             }, function () { $status.text(''); });
 
             $p.append($ta);
+        }
+
+        // ---- Lead duties (Leads only; roster membership IS the gate, so a non-Lead never sees this) ----
+        // No configuration lives here: the root page, ledger page, excluded subtrees, coverage window and QC
+        // sample size are all constants on JiTA.leadduty, so every Lead resolves identical values. What is
+        // left is diagnostics.
+        if (JiTA.leadduty.isLead()) {
+            var $ld = $('<div class="jita-menu-sect"></div>');
+            $('<h3>Lead duties</h3>').appendTo($ld);
+            var $ldAct = $('<div class="jita-menu-actions"></div>').appendTo($ld);
+            var $ldStatus = $('<div class="jita-menu-status"></div>').appendTo($ld);
+
+            $('<button class="jita-btn">Open lead duties</button>')
+                .on('click', function () { JiTA.menu.close(); JiTA.leadduty.ui.open(); }).appendTo($ldAct);
+
+            // The whole feature rests on "can this Lead write a content property on the ledger page?" - worth
+            // keeping permanently, since it is how another Lead diagnoses a permission problem in five seconds.
+            var $test = $('<button class="jita-btn" title="Read the ledger, then write and delete a probe property - proves both halves of the permission">Test Confluence access</button>').appendTo($ldAct);
+            $test.on('click', function () {
+                var page = JiTA.leadduty.ledgerPage();
+                $test.prop('disabled', true);
+                $ldStatus.text('Testing Confluence access…');
+                var out = [];
+                JiTA.conf.getProperty(page, JiTA.leadduty.LEDGER_KEY).then(function () {
+                    out.push('read ok');
+                    return JiTA.conf.getProperty(page, JiTA.leadduty.PROBE_KEY);
+                }).then(function (existing) {
+                    return JiTA.conf.saveProperty(page, JiTA.leadduty.PROBE_KEY, { at: Date.now() }, existing);
+                }).then(function (pr) {
+                    out.push('write ok');
+                    return JiTA.conf.deleteProperty(page, pr.id).then(function () { out.push('cleanup ok'); },
+                        function () { out.push('cleanup failed (a jita_leadduty_probe property was left behind)'); });
+                }).then(function () {
+                    if (!document.getElementById('jita-menu')) { return; }
+                    $test.prop('disabled', false);
+                    $ldStatus.text('Ledger page ' + page + ': ' + out.join(' · '));
+                }, function (e) {
+                    if (!document.getElementById('jita-menu')) { return; }
+                    $test.prop('disabled', false);
+                    $ldStatus.text('Ledger page ' + page + ': ' + (out.length ? (out.join(' · ') + ' · ') : '') + String(e && e.message || e));
+                });
+            });
+
+            // The ledger is a content PROPERTY, so it is invisible in the page body - this is the only way to
+            // see it. Summary in the status line, full JSON to the console.
+            var $show = $('<button class="jita-btn" title="Read the shared ledger and print the full JSON to the console (F12)">Show ledger</button>').appendTo($ldAct);
+            $show.on('click', function () {
+                var page = JiTA.leadduty.ledgerPage();
+                $show.prop('disabled', true);
+                $ldStatus.text('Reading the ledger…');
+                Promise.all([
+                    JiTA.conf.getProperty(page, JiTA.leadduty.LEDGER_KEY),
+                    JiTA.conf.getProperty(page, JiTA.leadduty.QC_LEDGER_KEY)
+                ]).then(function (r) {
+                    if (!document.getElementById('jita-menu')) { return; }
+                    $show.prop('disabled', false);
+                    var wiki = r[0], qc = r[1], bits = [];
+                    if (window.console) {
+                        console.log('[JiTA.leadduty] page ' + page + ' property ' + JiTA.leadduty.LEDGER_KEY + ':', wiki ? wiki.value : '(does not exist yet)');
+                        console.log('[JiTA.leadduty] page ' + page + ' property ' + JiTA.leadduty.QC_LEDGER_KEY + ':', qc ? qc.value : '(does not exist yet)');
+                    }
+                    if (!wiki) {
+                        bits.push('wiki ledger: not created yet - open Lead duties once to freeze this month');
+                    } else {
+                        var v = wiki.value || {};
+                        var months = Object.keys(v.months || {}).sort();
+                        bits.push('wiki ledger v' + wiki.version + ': ' + Object.keys(v.lastReviewed || {}).length +
+                            ' page(s) reviewed, month(s) ' + (months.join(', ') || 'none'));
+                    }
+                    bits.push(qc
+                        ? ('QC ledger v' + qc.version + ': month(s) ' + (Object.keys((qc.value || {}).months || {}).sort().join(', ') || 'none'))
+                        : 'QC ledger: not created yet');
+                    bits.push('full JSON in the console (F12)');
+                    $ldStatus.text(bits.join(' · '));
+                }, function (e) {
+                    if (!document.getElementById('jita-menu')) { return; }
+                    $show.prop('disabled', false);
+                    $ldStatus.text(String(e && e.message || e));
+                });
+            });
+
+            (function () {
+                var me = JiTA.leadduty.me();
+                var who = 'You are ' + ((me && me.handle) || '?') + ' · roster: ' + JiTA.leadduty.ROSTER().join(', ');
+                JiTA.db.getMeta(JiTA.leadduty.pool.CACHE_KEY).then(function (raw) {
+                    if (!document.getElementById('jita-menu') || $ldStatus.text()) { return; }
+                    var line = who;
+                    if (raw && raw.pages) { line = JiTA.leadduty._poolLine(JiTA.leadduty.pool._applyExclusions(raw)) + ' · ' + who; }
+                    if (JiTA.leadduty._dry()) { line += ' · DRY RUN is on'; }
+                    $ldStatus.text(line);
+                }).catch(function () { $ldStatus.text(who); });
+            })();
+
+            $p.append($ld);
         }
 
         // ---- Debug (worker diagnostics + self-heal test) ----
@@ -8957,7 +9078,7 @@ JiTA.credits = {
     // ---- always-on corner badge (your current-month total + rank; reads cache; click opens the view) -----
     badge: {
         mount: function () {
-            if (!flagOn('credits') || JITA_IS_FORGE_FRAME) { return; }
+            if (!flagOn('credits') || JITA_NO_JIRA_UI) { return; }   // Jira tabs only (never the Forge iframe or Confluence)
             var el = document.getElementById('jita-credits-badge');
             if (!el) {
                 el = document.createElement('div');
@@ -11506,6 +11627,2492 @@ JiTA.dupfind = {
 };
 
 
+/* ---- Confluence REST client (v2 only) -----------------------------------------------------------------
+ * Confluence lives on the SAME host as Jira (fenriscreations.atlassian.net/wiki), so these are same-origin
+ * $.ajax calls riding the session cookie - exactly like every Jira call in this file. No token, no GM_xhr.
+ *
+ * v2 ONLY, deliberately: the v1 content-PROPERTY endpoints (/wiki/rest/api/content/{id}/property) were
+ * REMOVED by Atlassian (deprecation deadline passed Apr 2025), so there is no v1 fallback for the ledger.
+ *
+ * Three gotchas that shaped this client:
+ *  - Page ids are int64. They are treated as OPAQUE STRINGS end to end - never parseInt, never sorted numerically.
+ *  - Property keys are [a-z0-9_] only: Confluence silently rewrites a dash to an underscore (CONFCLOUD-67657),
+ *    and a dot breaks any dotted expand path. Hence jita_leadduty_v1, not jita-leadduty-v1.
+ *  - A browser with no Confluence tenant session gets an HTML login page, which through dataType:'json'
+ *    surfaces as a bare "parsererror" on a 2xx. _err names that case instead of leaving a mystery.
+ */
+JiTA.conf = {
+    MAX_DEPTH: 10,          // v2 caps descendants depth at 10; deeper trees need a recursive second pass
+    PAGE_LIMIT: 250,        // v2 caps limit at 250
+    // Optimistic-concurrency statuses: "re-read the property and apply the change again".
+    // MEASURED on this tenant (2026-09-19): a stale version.number on a PUT returns 409 - even though the v2
+    // spec documents only 400/401/404 for that endpoint and no 409 at all. 412 is kept as a near neighbour.
+    // 400 stays in the set deliberately, for the ONE conflict path the probe could not measure: two Leads
+    // POSTing the ledger into existence at the same instant, where the loser's status is unknown. The cost of
+    // keeping it is a couple of seconds of pointless retrying if a body is ever genuinely malformed.
+    CONFLICT: { 400: true, 409: true, 412: true },
+
+    pageUrl: function (id) { return JiTA.HOST + '/wiki/pages/viewpage.action?pageId=' + encodeURIComponent(id); },
+
+    // Normalize a `_links.next` / Link-header target back to a path we can re-request. Confluence returns it
+    // either absolute, rooted at /wiki, or rooted at /api - all three end up as /wiki/api/...
+    _relPath: function (u) {
+        if (!u) { return null; }
+        var p = String(u);
+        if (/^https?:\/\//i.test(p)) { p = p.replace(/^https?:\/\/[^/]+/i, ''); }
+        if (p.charAt(0) !== '/') { p = '/' + p; }
+        if (p.indexOf('/wiki/') !== 0) { p = '/wiki' + p; }
+        return p;
+    },
+    _nextLink: function (xhr) {
+        try {
+            var h = xhr.getResponseHeader('Link');
+            if (!h) { return null; }
+            var m = /<([^>]+)>\s*;\s*rel="?next"?/i.exec(h);
+            return m ? m[1] : null;
+        } catch (e) { return null; }
+    },
+
+    _err: function (method, path, xhr, textStatus) {
+        var e;
+        if (textStatus === 'parsererror') {
+            e = new Error('Confluence answered ' + path + ' with a non-JSON body (HTTP ' + xhr.status +
+                '). Open ' + JiTA.HOST + '/wiki once in this browser to establish a Confluence session, then retry.');
+            e.status = xhr.status;
+            e.noSession = true;
+            return e;
+        }
+        e = new Error('Confluence ' + method + ' ' + path + ' failed: HTTP ' + xhr.status);
+        e.status = xhr.status;
+        return e;
+    },
+    isConflict: function (err) { return !!(err && JiTA.conf.CONFLICT[err.status]); },
+
+    // Retry policy mirrors JiTA.sync._apiPost, with one deliberate difference: only GETs auto-retry. A write
+    // that fails ambiguously (5xx, dropped connection) may already have applied, so the CAS loop in
+    // JiTA.leadduty re-reads the property before trying again rather than blindly resending.
+    _ajax: function (method, path, body) {
+        var idempotent = (method === 'GET');
+        return new Promise(function (resolve, reject) {
+            (function attempt(retries) {
+                var opts = {
+                    url: JiTA.HOST + path,
+                    type: method,
+                    dataType: 'json',
+                    headers: { 'Accept': 'application/json', 'X-Atlassian-Token': 'no-check' }
+                };
+                if (body !== undefined && body !== null) {
+                    opts.contentType = 'application/json';
+                    opts.data = JSON.stringify(body);
+                }
+                $.ajax(opts).done(function (data, status, xhr) {
+                    resolve({ data: data, xhr: xhr });
+                }).fail(function (xhr, textStatus) {
+                    if (idempotent && retries > 0 && (xhr.status === 429 || xhr.status >= 500 || xhr.status === 0)) {
+                        var ra = parseInt(xhr.getResponseHeader('Retry-After'), 10);
+                        var wait = xhr.status === 429 ? (isNaN(ra) ? 5 : ra) * 1000
+                                                      : (JiTA.MAX_RETRIES - retries + 1) * 1000;   // 1s,2s,3s...
+                        setTimeout(function () { attempt(retries - 1); }, wait);
+                        return;
+                    }
+                    reject(JiTA.conf._err(method, path, xhr, textStatus));
+                });
+            })(JiTA.MAX_RETRIES);
+        });
+    },
+
+    // Every descendant PAGE of rootId, paginated. Resolves { pages: [{id,title,parentId,depth}], truncated }.
+    // The endpoint also returns folders / whiteboards / databases / embeds and archived content - all filtered
+    // out here. `truncated` flags a tree deeper than the API's depth cap, so the UI can say so rather than
+    // silently omitting a subtree.
+    descendants: function (rootId) {
+        var out = [], seen = {}, truncated = false, guard = 0;
+        function page(path) {
+            if (++guard > 200) { return Promise.resolve(); }   // pathological cursor loop backstop
+            return JiTA.conf._ajax('GET', path).then(function (r) {
+                var d = r.data || {}, res = d.results || [];
+                for (var i = 0; i < res.length; i++) {
+                    var n = res[i];
+                    if (n.type !== 'page') { continue; }
+                    if (n.status && n.status !== 'current') { continue; }
+                    if (n.depth >= JiTA.conf.MAX_DEPTH) { truncated = true; }
+                    var id = String(n.id);
+                    if (seen[id]) { continue; }
+                    seen[id] = true;
+                    out.push({ id: id, title: n.title || '(untitled)', parentId: n.parentId != null ? String(n.parentId) : null, depth: n.depth || 0 });
+                }
+                var next = (d._links && d._links.next) || JiTA.conf._nextLink(r.xhr);
+                if (!next) { return null; }
+                return page(JiTA.conf._relPath(next));
+            });
+        }
+        return page('/wiki/api/v2/pages/' + encodeURIComponent(rootId) + '/descendants?depth=' + JiTA.conf.MAX_DEPTH + '&limit=' + JiTA.conf.PAGE_LIMIT)
+            .then(function () { return { pages: out, truncated: truncated }; });
+    },
+
+    // Resolves { id, key, value, version } or null when the property doesn't exist yet.
+    getProperty: function (pageId, key) {
+        return JiTA.conf._ajax('GET', '/wiki/api/v2/pages/' + encodeURIComponent(pageId) +
+            '/properties?key=' + encodeURIComponent(key) + '&limit=1').then(function (r) {
+            var res = (r.data && r.data.results) || [];
+            if (!res.length) { return null; }
+            return JiTA.conf._mapProp(res[0]);
+        });
+    },
+    _mapProp: function (p) {
+        return { id: String(p.id), key: p.key, value: p.value, version: (p.version && p.version.number) || 1 };
+    },
+
+    // Create (POST, no prop) or update (PUT at version+1 - the CAS token). Resolves the stored property.
+    saveProperty: function (pageId, key, value, prop) {
+        var base = '/wiki/api/v2/pages/' + encodeURIComponent(pageId) + '/properties';
+        if (!prop) {
+            return JiTA.conf._ajax('POST', base, { key: key, value: value })
+                .then(function (r) { return JiTA.conf._mapProp(r.data || {}); });
+        }
+        return JiTA.conf._ajax('PUT', base + '/' + encodeURIComponent(prop.id), {
+            key: key, value: value, version: { number: prop.version + 1, message: 'JiTA lead duties' }
+        }).then(function (r) { return JiTA.conf._mapProp(r.data || {}); });
+    },
+
+    deleteProperty: function (pageId, propId) {
+        return JiTA.conf._ajax('DELETE', '/wiki/api/v2/pages/' + encodeURIComponent(pageId) +
+            '/properties/' + encodeURIComponent(propId));
+    },
+
+    // ---- page BODY (the human-readable half of the ledger page) --------------------------------------
+    // A content property is invisible in the page itself, which is right for machine state and useless for
+    // "what did the other Leads do". So the same JSON is rendered into the page body as tables. Reading and
+    // writing a body is a different endpoint pair from the property one above.
+
+    // Page metadata + (optionally) its storage body. `withBody` costs real bandwidth on a long page, so the
+    // publisher skips it and change-detects on a stored hash instead; it is here for diagnostics.
+    getPage: function (pageId, withBody) {
+        var q = withBody ? '?body-format=storage' : '';
+        return JiTA.conf._ajax('GET', '/wiki/api/v2/pages/' + encodeURIComponent(pageId) + q).then(function (r) {
+            var d = r.data || {};
+            return {
+                id: String(d.id), title: d.title || '', status: d.status || 'current',
+                version: (d.version && d.version.number) || 1,
+                body: (d.body && d.body.storage && d.body.storage.value) || ''
+            };
+        });
+    },
+
+    // Replace the page body at version+1 - the same CAS token as saveProperty, so a second Lead publishing
+    // at the same instant loses cleanly instead of silently overwriting. `page` comes from getPage: its
+    // title and status must be echoed back or the update is rejected.
+    savePageBody: function (page, storageHtml, message) {
+        return JiTA.conf._ajax('PUT', '/wiki/api/v2/pages/' + encodeURIComponent(page.id), {
+            id: String(page.id),
+            status: page.status || 'current',
+            title: page.title,
+            body: { representation: 'storage', value: storageHtml },
+            version: { number: page.version + 1, message: message || 'JiTA lead duties' }
+        }).then(function (r) {
+            var d = r.data || {};
+            return { id: String(d.id), title: d.title || page.title, version: (d.version && d.version.number) || (page.version + 1) };
+        });
+    },
+
+    // Escape for Confluence storage format, which is XHTML: a bare & or < in a page title would make the
+    // whole body unparseable and the PUT would fail for the entire page, not just that cell.
+    esc: function (s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+};
+
+
+/* ---- ISD Lead duties: monthly wiki-review rotation + quality-control sampling --------------------------
+ * Two Lead responsibilities that until now ran on memory:
+ *   A. Proof-read the Confluence documentation section, so nothing silently goes stale.
+ *   B. Spot-check that last month's bug reports and defects were handled correctly.
+ *
+ * Both are monthly and both must be SPLIT ACROSS LEADS WITHOUT OVERLAP. There is no server, and GM storage /
+ * IndexedDB are per browser, so the shared "who checked what, when" state lives in a single JSON ledger held
+ * in a Confluence content property (see JiTA.conf). One ledger on one page, not one property per page:
+ * Confluence v2 has no bulk property read, and writing a property needs edit permission ON THAT PAGE - a
+ * per-page design would cost one request per page AND need tree-wide edit rights for every Lead.
+ *
+ * Disjointness without coordination comes from determinism plus a freeze:
+ *   - Every Lead computes the same assignment from the same inputs (pool + roster + month).
+ *   - The FIRST Lead to open the tool in a month writes that assignment into the ledger; everyone else reads
+ *     it. So a Lead opening on the 20th sees exactly what the one who opened on the 2nd saw, even though
+ *     completed reviews have reshuffled the queue in between. Assignment is never re-derived mid-month.
+ * The only other write is completion, which is a read-modify-write against the latest ledger value so two
+ * Leads marking different items in the same second both survive.
+ *
+ * Visibility: Leads only. There is no feature flag and no off switch - the gate is roster membership, so a
+ * non-Lead gets no chip, no settings section, no menu command, no scheduler and no Confluence traffic.
+ */
+JiTA.leadduty = {
+    // ---- Confluence property keys (see the [a-z0-9_] constraint in JiTA.conf) ----
+    LEDGER_KEY: 'jita_leadduty_v1',
+    QC_LEDGER_KEY: 'jita_leadduty_qc_v1',
+    PROBE_KEY: 'jita_leadduty_probe',
+
+    // ---- fixed configuration -------------------------------------------------------------------------
+    // Hardcoded on purpose: these are properties of the ISD space, not of the person running the script, and
+    // every Lead must resolve the SAME values or the shared ledger splits in two. Change them here.
+    ROOT_PAGE: '199758317',      // root of the documentation section the Leads own
+    LEDGER_PAGE: '3214901257',   // "ECAID Lead Ledger" - holds the shared JSON; every Lead needs EDIT on it
+    // Subtrees that need no maintenance review. Each id and EVERY page beneath it is dropped from the pool
+    // (ancestry is walked through parentId, so a page added under one of these later is excluded too).
+    EXCLUDE_PAGES: {
+        '199756496': 'Training Session Reports',
+        '199762273': 'ECAID - Lead Section'
+    },
+    COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
+    // The four-eyes rule: how many DIFFERENT Leads must read each page inside the coverage window. One pair
+    // of eyes misses things - the reader who wrote a page, or who read it last time, skims what they already
+    // believe is there. Two independent readings is the point of the whole rotation. It doubles the monthly
+    // reading, which is what COVERAGE_MONTHS is set against - but the section is small once the excluded
+    // subtrees are out (42 pages), so at 3 Leads a 12-month window is only 3 pages each per month, against
+    // the 2 a single pass would need. Widen the window if the section grows and that starts to bite.
+    EYES: 2,
+    QC_COUNT: 10,                // QC items sampled per Lead per month
+    // ISD handles far more bug reports than it creates defects, so a proportional sample is almost all
+    // reports and a Lead can go months without grading a single defect. This is the floor: fill this many
+    // defect slots first, then make up the rest from reports. It is a floor, not a quota - if the month
+    // produced fewer defects than the roster can absorb, everyone simply gets what there is.
+    QC_MIN_DEFECTS: 2,
+
+    // ---- GM keys (state, not configuration) ----
+    ME_KEY: 'leadDutyMe',
+    SNOOZE_KEY: 'leadDutySnoozeTs',   // the CHIP's x - hides the ambient chip for 24h
+    NAG_KEY: 'leadDutyNagTs',         // the DIALOG's quiet-until stamp - deliberately separate (see reminder.nag)
+    DRY_KEY: 'leadDutyDryRun',
+
+    KEEP_MONTHS: 6,              // how many months of `months` / `done` history the ledger retains
+    // Stay under Confluence's 32KB per-property cap, with headroom. The per-page maps dominate: roughly 48
+    // bytes a page now that four eyes needs the previous review date alongside the last one, so the ceiling
+    // is somewhere near 550 pages. Well clear of the ~230 in rotation, but worth knowing before the section
+    // doubles in size - _prune trims month history first and the write then refuses rather than truncating.
+    MAX_PROP_BYTES: 28000,
+    POOL_TTL_MS: 24 * 60 * 60 * 1000,
+    SNOOZE_MS: 24 * 60 * 60 * 1000,
+    CAS_TRIES: 4,
+    QC_GROUP: 'Contractors ISD ECAID',   // same group the credit tracker attributes against
+    QC_PROJECTS: 'EO, PLAT, EDR',
+    // Both outcomes are worth evaluating: Attached means "this became a defect", Closed means "this was
+    // rejected or converted to support", and a wrong Close costs at least as much as a wrong Attach.
+    QC_EBR_STATUSES: ['Attached', 'Closed'],
+
+    _changedToMulti: null,       // null = untested, false = this instance rejects CHANGED TO ("A","B")
+
+    // ---- small helpers -------------------------------------------------------------------------------
+    _clone: function (v) { return v == null ? null : JSON.parse(JSON.stringify(v)); },
+    _p2: function (n) { return (n < 10 ? '0' : '') + n; },
+    _dry: function () { return !!gmGet(JiTA.leadduty.DRY_KEY, false); },
+
+    // Month keys are UTC on purpose. JiTA.credits._ymNow() is LOCAL time, and two Leads in different
+    // timezones must never disagree about which month is being frozen.
+    _ym: function (d) {
+        d = d || new Date();
+        return d.getUTCFullYear() + '-' + JiTA.leadduty._p2(d.getUTCMonth() + 1);
+    },
+    _ymParts: function (ym) { return { y: parseInt(String(ym).slice(0, 4), 10), m: parseInt(String(ym).slice(5, 7), 10) }; },
+    _prevYm: function (ym) {
+        var p = JiTA.leadduty._ymParts(ym || JiTA.leadduty._ym());
+        var y = p.m === 1 ? p.y - 1 : p.y, m = p.m === 1 ? 12 : p.m - 1;
+        return y + '-' + JiTA.leadduty._p2(m);
+    },
+    _monthIndex: function (ym) { var p = JiTA.leadduty._ymParts(ym); return p.y * 12 + p.m; },
+    // Half-open [start, end) month bounds, matching the worker's crMonthBounds. Jira resolves these bare
+    // date strings in the INSTANCE timezone, identical for every Lead, so determinism holds.
+    _bounds: function (ym) {
+        var p = JiTA.leadduty._ymParts(ym);
+        var ny = p.m === 12 ? p.y + 1 : p.y, nm = p.m === 12 ? 1 : p.m + 1;
+        return { start: p.y + '-' + JiTA.leadduty._p2(p.m) + '-01', end: ny + '-' + JiTA.leadduty._p2(nm) + '-01' };
+    },
+    _today: function () {
+        var d = new Date();
+        return d.getUTCFullYear() + '-' + JiTA.leadduty._p2(d.getUTCMonth() + 1) + '-' + JiTA.leadduty._p2(d.getUTCDate());
+    },
+    // Whole months between a YYYY-MM-DD review stamp and today; '' (never reviewed) yields null.
+    _monthsSince: function (ymd) {
+        if (!ymd) { return null; }
+        var y = parseInt(String(ymd).slice(0, 4), 10), m = parseInt(String(ymd).slice(5, 7), 10);
+        if (isNaN(y) || isNaN(m)) { return null; }
+        var now = JiTA.leadduty._ymParts(JiTA.leadduty._ym());
+        return (now.y * 12 + now.m) - (y * 12 + m);
+    },
+
+    // Accept a raw page id or any Confluence URL shape that carries one.
+    _pageId: function (raw) {
+        var s = String(raw == null ? '' : raw).replace(/^\s+|\s+$/g, '');
+        if (!s) { return ''; }
+        if (/^\d+$/.test(s)) { return s; }
+        var m = /[?&]pageId=(\d+)/.exec(s) || /\/pages\/(\d+)/.exec(s);
+        return m ? m[1] : '';
+    },
+    rootPage: function () { return JiTA.leadduty.ROOT_PAGE; },
+    // Deliberately a SEPARATE page from the root: the documentation root can stay locked while this one
+    // carries the Lead-writable state.
+    ledgerPage: function () { return JiTA.leadduty.LEDGER_PAGE; },
+    coverageMonths: function () { return JiTA.leadduty.COVERAGE_MONTHS; },
+    eyes: function () { return JiTA.leadduty.EYES; },
+    qcCount: function () { return JiTA.leadduty.QC_COUNT; },
+    qcMinDefects: function () { return JiTA.leadduty.QC_MIN_DEFECTS; },
+
+    // ---- deterministic PRNG (xmur3 seed + mulberry32 stream) -----------------------------------------
+    // Tiny, dependency-free and identical across browsers, which is what makes every Lead shuffle the QC
+    // pool the same way. JiTA.util.hash (djb2) is deliberately NOT reused: on near-identical short strings
+    // like '2026-08' vs '2026-09' it lands in adjacent buckets, so consecutive months would barely differ.
+    _xmur3: function (str) {
+        var h = 1779033703 ^ str.length;
+        for (var i = 0; i < str.length; i++) {
+            h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
+            h = (h << 13) | (h >>> 19);
+        }
+        return function () {
+            h = Math.imul(h ^ (h >>> 16), 2246822507);
+            h = Math.imul(h ^ (h >>> 13), 3266489909);
+            h ^= h >>> 16;
+            return h >>> 0;
+        };
+    },
+    _mulberry32: function (a) {
+        return function () {
+            a = (a + 0x6D2B79F5) | 0;
+            var t = Math.imul(a ^ (a >>> 15), 1 | a);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    },
+    // Deterministic Fisher-Yates. `arr` MUST already be canonically ordered - two Leads whose search pages
+    // came back in different orders would otherwise shuffle differently and lose disjointness.
+    _shuffle: function (arr, seedStr) {
+        var L = JiTA.leadduty;
+        var rnd = L._mulberry32(L._xmur3(seedStr)());
+        var a = arr.slice();
+        for (var i = a.length - 1; i > 0; i--) {
+            var j = Math.floor(rnd() * (i + 1));
+            var t = a[i]; a[i] = a[j]; a[j] = t;
+        }
+        return a;
+    },
+
+    // ---- identity: am I a Lead? ----------------------------------------------------------------------
+    // The roster is the hardcoded JiTA.credits.LEADS map, sorted so every Lead derives the same order.
+    ROSTER: function () { return Object.keys(JiTA.credits.LEADS || {}).sort(); },
+
+    // Handle tokens for a Jira user, mirroring the worker's crHandles so both sides agree on what
+    // "schogol" means. Keep the two in sync.
+    _handles: function (displayName, email) {
+        var out = [], seen = {}, uniq = [];
+        if (email && email.indexOf('@') > 0) { out.push(email.split('@')[0]); }
+        var dn = String(displayName || '').replace(/^\s+|\s+$/g, '');
+        var norm = /^isd /i.test(dn) ? dn.slice(4) : dn;
+        out.push(norm.replace(/ /g, '').toLowerCase());
+        out.push(norm.split(' ')[0].toLowerCase());
+        for (var i = 0; i < out.length; i++) {
+            var h = out[i];
+            if (h && !seen[h]) { seen[h] = true; uniq.push(h); }
+        }
+        return uniq;
+    },
+    _matchRoster: function (displayName, email) {
+        var hs = JiTA.leadduty._handles(displayName, email), leads = JiTA.credits.LEADS || {};
+        for (var i = 0; i < hs.length; i++) { if (leads[hs[i]]) { return hs[i]; } }
+        return null;
+    },
+
+    _me: null,
+    // Synchronous verdict from the GM cache, so mounting never waits on the network. resolveMe() refreshes it.
+    me: function () {
+        var L = JiTA.leadduty;
+        if (L._me) { return L._me; }
+        var c = gmGet(L.ME_KEY, null);
+        if (c && c.accountId) { L._me = c; }
+        return L._me;
+    },
+    isLead: function () { var m = JiTA.leadduty.me(); return !!(m && m.isLead); },
+
+    resolveMe: function () {
+        var L = JiTA.leadduty;
+        return JiTA.link.currentUser().then(function (acc) {
+            if (!acc) { return null; }
+            return L._get('/rest/api/2/myself').then(function (u) {
+                var name = (u && u.displayName) || '';
+                var handle = L._matchRoster(name, (u && u.emailAddress) || '');
+                var rec = { accountId: acc, displayName: name, handle: handle, isLead: !!handle, at: Date.now() };
+                var prev = gmGet(L.ME_KEY, null);
+                // Only rewrite on a real change, so a shared machine switching Jira accounts invalidates
+                // cleanly while an unchanged verdict doesn't churn GM storage on every page load.
+                if (!prev || prev.accountId !== rec.accountId || prev.isLead !== rec.isLead || prev.handle !== rec.handle) {
+                    gmSet(L.ME_KEY, rec);
+                }
+                L._me = rec;
+                if (!handle) { JiTA.dlog('[JiTA] leadduty: "' + name + '" matched no roster handle (' + L.ROSTER().join(', ') + ')'); }
+                return rec;
+            });
+        }).catch(function () { return null; });
+    },
+
+    // Plain same-origin Jira GET (JiTA.sync._apiPost is POST-only).
+    _get: function (path) {
+        return new Promise(function (resolve, reject) {
+            $.ajax({ url: JiTA.HOST + path, dataType: 'json', headers: { 'Accept': 'application/json' } })
+                .done(function (d) { resolve(d); })
+                .fail(function (xhr) { reject(new Error('Jira GET ' + path + ' failed: HTTP ' + xhr.status)); });
+        });
+    },
+    // Page through /search/jql, collecting issues. Mirrors the worker's crFetchIssues.
+    _search: function (jql, fields) {
+        var out = [];
+        function page(token) {
+            var body = { jql: jql, fields: fields, maxResults: JiTA.PAGE_SIZE };
+            if (token) { body.nextPageToken = token; }
+            return JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
+                var d = r.data || {};
+                out = out.concat(d.issues || []);
+                var next = d.nextPageToken || null;
+                if (!next || d.isLast) { return out; }
+                return new Promise(function (res) { setTimeout(res, JiTA.PAGE_DELAY_MS); }).then(function () { return page(next); });
+            });
+        }
+        return page(null);
+    },
+    // An issue's full changelog, oldest first. Mirrors the worker's crAllHistories: the endpoint pages, and
+    // a long-lived bug report carries more history than one page holds.
+    _changelog: function (key) {
+        var L = JiTA.leadduty, out = [];
+        function page(start) {
+            return L._get('/rest/api/3/issue/' + encodeURIComponent(key) + '/changelog?startAt=' + start + '&maxResults=100')
+                .then(function (res) {
+                    var vals = (res && res.values) || [];
+                    out = out.concat(vals);
+                    if (!vals.length || (start + vals.length) >= ((res && res.total) || 0)) {
+                        out.sort(function (a, b) { return (a.created || '') < (b.created || '') ? -1 : 1; });
+                        return out;
+                    }
+                    return page(start + vals.length);
+                });
+        }
+        return page(0);
+    },
+
+    // ---- ledger: read-modify-write with optimistic concurrency ---------------------------------------
+    ledger: {
+        read: function (key) {
+            var L = JiTA.leadduty, page = L.ledgerPage();
+            if (!page) { return Promise.reject(L._notConfigured()); }
+            return JiTA.conf.getProperty(page, key).then(function (prop) {
+                return { prop: prop, value: (prop && prop.value) || null };
+            });
+        },
+
+        // mutate(key, fn): fn receives a deep CLONE of the current value (or null) and returns the value to
+        // write, or null/undefined to write nothing. On a version conflict the property is re-read and fn is
+        // applied again to the FRESH value, so a concurrent Lead's change is merged, never clobbered.
+        mutate: function (key, fn, tries) {
+            var L = JiTA.leadduty, page = L.ledgerPage();
+            if (!page) { return Promise.reject(L._notConfigured()); }
+            tries = (tries == null) ? L.CAS_TRIES : tries;
+            return JiTA.conf.getProperty(page, key).then(function (prop) {
+                var cur = (prop && prop.value) || null;
+                var next = fn(L._clone(cur));
+                if (!next) { return { value: cur, prop: prop, written: false }; }
+                next = L._prune(next);
+                var size = JSON.stringify(next).length;
+                if (size > L.MAX_PROP_BYTES) {
+                    throw new Error('The lead-duty ledger is full (' + size + ' bytes, cap ' + L.MAX_PROP_BYTES +
+                        '). The wiki pool has outgrown a single Confluence property - raise the issue rather than losing history.');
+                }
+                if (L._dry()) {
+                    if (window.console) {
+                        console.log('[JiTA.leadduty] DRY RUN: would ' + (prop ? ('PUT ' + key + ' v' + (prop.version + 1)) : ('POST ' + key)) +
+                            ' (' + size + ' bytes)', next);
+                    }
+                    return { value: next, prop: prop, written: false, dry: true };
+                }
+                return JiTA.conf.saveProperty(page, key, next, prop).then(function (np) {
+                    return { value: next, prop: np, written: true };
+                }, function (err) {
+                    if (tries > 1 && JiTA.conf.isConflict(err)) {
+                        var wait = 200 + Math.floor(Math.random() * 600);
+                        return new Promise(function (res) { setTimeout(res, wait); })
+                            .then(function () { return JiTA.leadduty.ledger.mutate(key, fn, tries - 1); });
+                    }
+                    throw err;
+                });
+            });
+        }
+    },
+
+    _notConfigured: function () {
+        return new Error('No Confluence ledger page is set (JiTA.leadduty.LEDGER_PAGE).');
+    },
+
+    // One line describing the pool, shared by the settings status and the overlay footer.
+    _poolLine: function (pool) {
+        var L = JiTA.leadduty;
+        var bits = [pool.pages.length + ' pages in rotation'];
+        if (pool.excludedCount) { bits.push(pool.excludedCount + ' excluded of ' + pool.rawCount + ' crawled'); }
+        bits.push(L.wiki.perLead(pool.pages.length, L.ROSTER().length) + ' per Lead per month (' + L.eyes() +
+            ' different Leads on every page every ' + L.coverageMonths() + ' months)');
+        if (pool.fetchedAt) { bits.push('scanned ' + new Date(pool.fetchedAt).toISOString().slice(0, 10)); }
+        if (pool.truncated) { bits.push('tree deeper than ' + JiTA.conf.MAX_DEPTH + ' levels - some pages may be missing'); }
+        return bits.join(' · ');
+    },
+
+    // Keep only the newest KEEP_MONTHS entries of the month-keyed maps, so the ledger cannot grow without
+    // bound. lastReviewed / reviewedBy are per PAGE and are pruned separately, against a fresh pool.
+    _prune: function (val) {
+        var L = JiTA.leadduty;
+        ['months', 'done'].forEach(function (f) {
+            var m = val[f];
+            if (!m) { return; }
+            var keys = Object.keys(m).sort();
+            while (keys.length > L.KEEP_MONTHS) { delete m[keys.shift()]; }
+        });
+        // Flags deliberately sit OUTSIDE `done`, so a follow-up raised in March is still open in September
+        // rather than vanishing with its month. Only RESOLVED ones age out, once they are older than the
+        // retention window - an open flag is never dropped, however old.
+        if (val.flags) {
+            var cutoff = new Date(Date.now() - L.KEEP_MONTHS * 31 * 24 * 60 * 60 * 1000).toISOString();
+            Object.keys(val.flags).forEach(function (k) {
+                var f = val.flags[k];
+                if (f && f.resolvedAt && f.resolvedAt < cutoff) { delete val.flags[k]; }
+            });
+        }
+        return val;
+    },
+
+    // ---- wiki page pool ------------------------------------------------------------------------------
+    pool: {
+        CACHE_KEY: 'leadduty:pool',
+
+        // Resolves the pool, re-crawling when stale / forced / the root changed. A crawl that fails or comes
+        // back EMPTY never overwrites a good cache: a transient permission or network problem must not be able
+        // to wipe the page list that the prune guard measures against.
+        //
+        // The cache holds the RAW crawl; exclusions are applied on the way out (see _applyExclusions), so
+        // editing EXCLUDE_PAGES takes effect on the next call without waiting for a re-crawl.
+        ensureFresh: function (force) {
+            var L = JiTA.leadduty, root = L.rootPage();
+            if (!root) { return Promise.reject(new Error('No wiki root page is set (JiTA.leadduty.ROOT_PAGE).')); }
+            return JiTA.db.getMeta(L.pool.CACHE_KEY).catch(function () { return null; }).then(function (cached) {
+                var usable = cached && cached.rootId === root && cached.pages && cached.pages.length;
+                if (!force && usable && (Date.now() - (cached.fetchedAt || 0)) < L.POOL_TTL_MS) {
+                    return L.pool._applyExclusions(cached);
+                }
+                return JiTA.conf.descendants(root).then(function (r) {
+                    if (!r.pages.length) {
+                        if (usable) { return L.pool._applyExclusions(cached); }
+                        throw new Error('Root page ' + root + ' has no page descendants. Wrong id, or it is a folder / whiteboard rather than a page.');
+                    }
+                    var rec = { fetchedAt: Date.now(), rootId: root, truncated: r.truncated, pages: r.pages };
+                    return JiTA.db.setMeta(L.pool.CACHE_KEY, rec)
+                        .then(function () { return L.pool._applyExclusions(rec); }, function () { return L.pool._applyExclusions(rec); });
+                }, function (e) {
+                    if (usable) { return L.pool._applyExclusions(cached); }   // keep serving the last good list through an outage
+                    throw e;
+                });
+            });
+        },
+
+        // Drop every page that IS an excluded subtree root or sits anywhere beneath one. Ancestry is walked
+        // through parentId rather than matched on depth or title, so a page moved or created under an excluded
+        // branch later is excluded automatically, with no list to maintain.
+        _applyExclusions: function (rec) {
+            var L = JiTA.leadduty, ex = L.EXCLUDE_PAGES || {};
+            var byId = {}, i;
+            for (i = 0; i < rec.pages.length; i++) { byId[rec.pages[i].id] = rec.pages[i]; }
+            function excluded(page) {
+                var cur = page, hops = 0;
+                while (cur && hops++ < 64) {          // hop cap: a malformed parent chain can't spin forever
+                    if (ex[cur.id]) { return true; }
+                    if (!cur.parentId) { return false; }
+                    cur = byId[cur.parentId];         // undefined once we walk past the root: not excluded
+                }
+                return false;
+            }
+            var kept = [];
+            for (i = 0; i < rec.pages.length; i++) { if (!excluded(rec.pages[i])) { kept.push(rec.pages[i]); } }
+            return {
+                fetchedAt: rec.fetchedAt, rootId: rec.rootId, truncated: rec.truncated,
+                pages: kept, rawCount: rec.pages.length, excludedCount: rec.pages.length - kept.length
+            };
+        },
+
+        byId: function (pool) {
+            var m = {};
+            for (var i = 0; i < pool.pages.length; i++) { m[pool.pages[i].id] = pool.pages[i]; }
+            return m;
+        }
+    },
+
+    // ---- Part A: wiki review rotation ----------------------------------------------------------------
+    wiki: {
+        localKey: function (ym) { return 'leadduty:wiki:' + ym; },
+
+        // Pages per Lead is DERIVED, never configured: sustain enough reviews a month that every page is read
+        // EYES times within COVERAGE_MONTHS. The pool grows, the number grows with it. Four eyes doubles this
+        // outright - that is the price of the rule, and COVERAGE_MONTHS is the dial if it turns out too steep.
+        perLead: function (poolCount, leadCount) {
+            var L = JiTA.leadduty;
+            return Math.max(1, Math.ceil(poolCount * L.eyes() / (L.coverageMonths() * Math.max(1, leadCount))));
+        },
+
+        // How many of a page's reviews fall INSIDE the current coverage window: 0, 1 or 2. This is what the
+        // four-eyes rule is measured against - a pair of readings that has aged out of the window no longer
+        // counts, so the page goes back to needing a fresh pair. (lastReviewed >= prevReviewed always, so
+        // the count is honest.)
+        eyesIn: function (ledgerValue, id) {
+            var L = JiTA.leadduty, win = L.coverageMonths();
+            var last = (ledgerValue && ledgerValue.lastReviewed && ledgerValue.lastReviewed[id]) || '';
+            var prev = (ledgerValue && ledgerValue.prevReviewed && ledgerValue.prevReviewed[id]) || '';
+            function inside(d) { var a = L._monthsSince(d); return a != null && a < win; }
+            return (inside(last) ? 1 : 0) + (inside(prev) ? 1 : 0);
+        },
+
+        // Fewest eyes first, then oldest-first within a tier ('' sorts before any YYYY-MM-DD, so a page nobody
+        // has ever opened leads). Tie-break on the id as a STRING, so the order is total and identical for
+        // every Lead. The eyes tier is what makes a page waiting on its SECOND reader outrank a page that two
+        // Leads have already signed off - without it, the second pass would never get priority over a stale
+        // first pass and half the section would sit on one pair of eyes indefinitely.
+        buildQueue: function (pool, ledgerValue) {
+            var W = JiTA.leadduty.wiki;
+            var last = (ledgerValue && ledgerValue.lastReviewed) || {};
+            var eyes = {};
+            pool.pages.forEach(function (p) { eyes[p.id] = W.eyesIn(ledgerValue, p.id); });
+            return pool.pages.slice().sort(function (a, b) {
+                if (eyes[a.id] !== eyes[b.id]) { return eyes[a.id] - eyes[b.id]; }
+                var la = last[a.id] || '', lb = last[b.id] || '';
+                if (la !== lb) { return la < lb ? -1 : 1; }
+                return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);
+            });
+        },
+
+        // Round-robin over the queue with a monthly rotation, so each Lead gets one page from each staleness
+        // tier and the tiers rotate. Disjoint by construction - no claims, no coordination.
+        //
+        // The four-eyes rule lives here: a page is never handed to the Lead who read it LAST. With the queue
+        // ordering above, a page on one pair of eyes comes round again quickly and necessarily lands on
+        // somebody else, which is what makes the second reading a genuinely independent one. A page whose
+        // only eligible Leads are already full is simply left for next month - it keeps its place at the head
+        // of the queue, so nothing is lost. (With a single-Lead roster the rule is unsatisfiable and is
+        // waived, since a rotation that assigns nothing at all would be worse than one pair of eyes.)
+        computeAssign: function (queue, roster, perLead, ym, reviewedBy) {
+            var offset = JiTA.leadduty._monthIndex(ym) % roster.length;
+            var by = reviewedBy || {};
+            var fourEyes = roster.length > 1;
+            var assign = {}, counts = {};
+            roster.forEach(function (h) { assign[h] = []; counts[h] = 0; });
+            for (var i = 0; i < queue.length; i++) {
+                var full = true;
+                for (var c = 0; c < roster.length; c++) { if (counts[roster[c]] < perLead) { full = false; break; } }
+                if (full) { break; }
+                var id = queue[i].id;
+                for (var r = 0; r < roster.length; r++) {
+                    var h = roster[(i + r + offset) % roster.length];
+                    if (counts[h] >= perLead) { continue; }
+                    if (fourEyes && by[id] === h) { continue; }   // you never proof-read the same page twice running
+                    assign[h].push(id);
+                    counts[h]++;
+                    break;
+                }
+            }
+            return assign;
+        },
+
+        // Freeze-on-first-open. Returns { record, ledgerValue, pool, frozen } where `frozen` says whether THIS
+        // call created the month. Never rewrites an existing month: whoever got there first defines it.
+        claimMonth: function (ym) {
+            var L = JiTA.leadduty, W = L.wiki;
+            ym = ym || L._ym();
+            return L.pool.ensureFresh(false).then(function (pool) {
+                return L.ledger.read(L.LEDGER_KEY).then(function (cur) {
+                    var val = cur.value;
+                    if (val && val.months && val.months[ym]) {
+                        return { record: val.months[ym], ledgerValue: val, pool: pool, frozen: false };
+                    }
+                    var roster = L.ROSTER();
+                    if (!roster.length) { throw new Error('The Lead roster is empty (JiTA.credits.LEADS).'); }
+                    var perLead = W.perLead(pool.pages.length, roster.length);
+                    var created = null;
+                    return L.ledger.mutate(L.LEDGER_KEY, function (v) {
+                        v = v || { v: 1, lastReviewed: {}, prevReviewed: {}, reviewedBy: {}, months: {}, done: {} };
+                        v.lastReviewed = v.lastReviewed || {};
+                        v.prevReviewed = v.prevReviewed || {};
+                        v.reviewedBy = v.reviewedBy || {};
+                        v.months = v.months || {};
+                        v.done = v.done || {};
+                        if (v.months[ym]) { created = v.months[ym]; return null; }   // someone froze it first
+                        W._pruneDeleted(v, pool);
+                        var queue = W.buildQueue(pool, v);
+                        created = {
+                            roster: roster,
+                            perLead: perLead,
+                            eyes: L.eyes(),
+                            assign: W.computeAssign(queue, roster, perLead, ym, v.reviewedBy),
+                            createdAt: new Date().toISOString(),
+                            createdBy: (L.me() && L.me().handle) || '?'
+                        };
+                        v.months[ym] = created;
+                        return v;
+                    }).then(function (res) {
+                        var val2 = res.value || { months: {} };
+                        var rec = (val2.months && val2.months[ym]) || created;
+                        return { record: rec, ledgerValue: val2, pool: pool, frozen: !!res.written };
+                    });
+                });
+            });
+        },
+
+        // Drop review history for pages that have left the tree - but ONLY against a pool that is plausibly
+        // complete. A partial or permission-degraded crawl must never be able to erase the ledger.
+        _pruneDeleted: function (val, pool) {
+            var ids = JiTA.leadduty.pool.byId(pool);
+            var tracked = Object.keys(val.lastReviewed || {});
+            if (!tracked.length) { return; }
+            if (pool.pages.length < 0.5 * tracked.length) { return; }   // suspiciously small crawl: leave it alone
+            for (var i = 0; i < tracked.length; i++) {
+                if (!ids[tracked[i]]) {
+                    delete val.lastReviewed[tracked[i]];
+                    delete val.reviewedBy[tracked[i]];
+                    if (val.prevReviewed) { delete val.prevReviewed[tracked[i]]; }
+                }
+            }
+        },
+
+        // Record a proof-read: stamp the page and send it to the back of the queue for everyone.
+        markReviewed: function (pageId, ym) {
+            var L = JiTA.leadduty;
+            ym = ym || L._ym();
+            var handle = (L.me() && L.me().handle) || '?';
+            var today = L._today(), nowIso = new Date().toISOString();
+            return L.ledger.mutate(L.LEDGER_KEY, function (v) {
+                v = v || { v: 1, lastReviewed: {}, prevReviewed: {}, reviewedBy: {}, months: {}, done: {} };
+                v.lastReviewed = v.lastReviewed || {};
+                v.prevReviewed = v.prevReviewed || {};
+                v.reviewedBy = v.reviewedBy || {};
+                v.done = v.done || {};
+                // Keep the previous review's date so eyesIn() can see TWO readings. A repeat by the SAME Lead
+                // is not a second pair of eyes, so it overwrites their own stamp instead of shifting it down -
+                // otherwise one Lead reading a page twice would mark it fully covered on their own.
+                if (v.lastReviewed[pageId] && v.reviewedBy[pageId] !== handle) {
+                    v.prevReviewed[pageId] = v.lastReviewed[pageId];
+                }
+                v.lastReviewed[pageId] = today;
+                v.reviewedBy[pageId] = handle;
+                v.done[ym] = v.done[ym] || {};
+                v.done[ym][pageId] = { by: handle, at: nowIso };
+                return v;
+            }).then(L.report.tap);
+        },
+
+        // A page that can't be reviewed (deleted, moved out of the tree, no access): record it as handled for
+        // the month WITHOUT stamping lastReviewed, so it isn't falsely counted as checked.
+        skip: function (pageId, ym) {
+            var L = JiTA.leadduty;
+            ym = ym || L._ym();
+            var handle = (L.me() && L.me().handle) || '?';
+            var nowIso = new Date().toISOString();
+            return L.ledger.mutate(L.LEDGER_KEY, function (v) {
+                v = v || { v: 1, lastReviewed: {}, prevReviewed: {}, reviewedBy: {}, months: {}, done: {} };
+                v.done = v.done || {};
+                v.done[ym] = v.done[ym] || {};
+                v.done[ym][pageId] = { by: handle, at: nowIso, skipped: true };
+                return v;
+            }).then(L.report.tap);
+        },
+
+        // Queue health for the footer: how the section stands against the four-eyes target. `single` is the
+        // number waiting on their second reader - the measure that says whether the rule is actually being
+        // met, as opposed to `never`, which only says whether anyone has looked at all.
+        stats: function (pool, ledgerValue) {
+            var L = JiTA.leadduty, W = L.wiki;
+            var last = (ledgerValue && ledgerValue.lastReviewed) || {};
+            var never = 0, oldest = null, overdue = 0, single = 0, covered = 0, months = L.coverageMonths();
+            for (var i = 0; i < pool.pages.length; i++) {
+                var id = pool.pages[i].id, stamp = last[id] || '';
+                var eyes = W.eyesIn(ledgerValue, id);
+                if (eyes >= L.eyes()) { covered++; } else if (eyes === 1) { single++; }
+                if (!stamp) { never++; continue; }
+                var age = L._monthsSince(stamp);
+                if (age != null) {
+                    if (oldest == null || age > oldest) { oldest = age; }
+                    if (age > months) { overdue++; }
+                }
+            }
+            return { total: pool.pages.length, never: never, oldestMonths: oldest, overdue: overdue,
+                single: single, covered: covered, eyes: L.eyes(), coverage: months };
+        }
+    },
+
+    // ---- Part B: quality-control sampling ------------------------------------------------------------
+    // Always the PREVIOUS month: "status CHANGED TO ... DURING (window)" and "created >= ... < ..." are
+    // immutable once the window closes, so the pool can't grow under the Leads mid-review.
+    qc: {
+        localKey: function (ym) { return 'leadduty:qc:' + ym; },
+
+        _statusList: function () {
+            return JiTA.leadduty.QC_EBR_STATUSES.map(function (s) { return '"' + s + '"'; }).join(', ');
+        },
+        _ebrJql: function (b, byAcc, single) {
+            var target = single ? ('"' + single + '"') : ('(' + JiTA.leadduty.qc._statusList() + ')');
+            return 'project = EBR AND status CHANGED TO ' + target +
+                (byAcc ? (' BY "' + byAcc + '"') : '') +
+                ' DURING ("' + b.start + '", "' + b.end + '")';
+        },
+        // Not every Jira instance accepts the multi-value CHANGED TO ("A", "B") form. Try it once, and on a
+        // 400 fall back to one search per status for the rest of the session.
+        _ebrIssues: function (b, byAcc, fields) {
+            var L = JiTA.leadduty, Q = L.qc;
+            function split() {
+                var out = [];
+                return L.QC_EBR_STATUSES.reduce(function (p, st) {
+                    return p.then(function () {
+                        return L._search(Q._ebrJql(b, byAcc, st), fields).then(function (rows) { out = out.concat(rows); });
+                    });
+                }, Promise.resolve()).then(function () { return out; });
+            }
+            if (L._changedToMulti === false) { return split(); }
+            return L._search(Q._ebrJql(b, byAcc, null), fields).then(function (rows) {
+                L._changedToMulti = true;
+                return rows;
+            }, function (err) {
+                if (err && err.message && /HTTP 400/.test(err.message)) {
+                    L._changedToMulti = false;
+                    JiTA.dlog('[JiTA] leadduty: multi-value CHANGED TO rejected, falling back to one search per status');
+                    return split();
+                }
+                throw err;
+            });
+        },
+        _defectJql: function (b) {
+            var L = JiTA.leadduty;
+            // Deliberately NOT carrying over crDefectsCreated's "(resolution is EMPTY OR resolution != Duplicate)":
+            // resolution is mutable after the fact, which would make a closed month's pool drift.
+            return 'project in (' + L.QC_PROJECTS + ') AND issuetype = Defect ' +
+                'AND reporter in membersOf("' + L.QC_GROUP + '") ' +
+                'AND created >= "' + b.start + '" AND created < "' + b.end + '"';
+        },
+
+        // The full month pool, identical for every Lead. Resolves { keys, byKey }.
+        //
+        // BOTH halves are restricted to the ISD group, because quality control grades ISD's OWN handling: a
+        // report a CCP dev or a GM closed is not ours to second-guess. The defect half filters in JQL
+        // (reporter in membersOf), but the report half cannot - "who moved this to Attached" is a changelog
+        // predicate - so it is one "BY <accountId>" search per member. That is one crawl a month, paid when
+        // the month is frozen, and it hands us the handler for free: the sampled rows no longer need a
+        // changelog read each to name who made the call, and the per-Lead self-exclusions fall straight out
+        // of the same data.
+        fetchPool: function (ym) {
+            var L = JiTA.leadduty, Q = L.qc, b = L._bounds(ym);
+            var byKey = {}, EBR_FIELDS = ['summary', 'status', 'resolution', 'created', 'assignee'];
+            function addReport(row, actor, actorAcc) {
+                var f = row.fields || {}, it = byKey[row.key];
+                if (!it) {
+                    it = byKey[row.key] = {
+                        key: row.key, kind: 'report', summary: f.summary || '',
+                        status: (f.status && f.status.name) || '', created: f.created || null,
+                        reporter: null, actor: '', handlers: {}
+                    };
+                }
+                // Two members can both have touched one report (attached, reopened, closed again). Every one
+                // of them is excluded from grading it; the NAME shown is the first in the fixed member order,
+                // so each Lead displays the same one.
+                if (!it.actor && actor) { it.actor = actor; }
+                if (actorAcc) { it.handlers[actorAcc] = true; }
+            }
+            return L.group.members(false).then(function (members) {
+                var byAcc = {};
+                members.forEach(function (m) { byAcc[m.accountId] = m; });
+                return members.reduce(function (p, m) {
+                    return p.then(function () {
+                        return Q._ebrIssues(b, m.accountId, EBR_FIELDS).then(function (rows) {
+                            for (var i = 0; i < rows.length; i++) { addReport(rows[i], m.displayName, m.accountId); }
+                        });
+                    });
+                }, Promise.resolve()).then(function () {
+                    // CCP's convert-to-defect rule performs the transition AS the automation account, so those
+                    // reports carry no ISD member as the actioner even though a Bug Hunter triggered them.
+                    // The credit tracker attributes them to the assignee; do the same, and drop any whose
+                    // assignee is not one of ours. A failure here costs coverage, not the whole sample.
+                    if (!JiTA.credits.AUTOMATION_ID) { return null; }
+                    return Q._ebrIssues(b, JiTA.credits.AUTOMATION_ID, EBR_FIELDS).then(function (rows) {
+                        for (var i = 0; i < rows.length; i++) {
+                            var as = (rows[i].fields || {}).assignee, acc = (as && as.accountId) || '';
+                            if (!acc || !byAcc[acc]) { continue; }
+                            addReport(rows[i], byAcc[acc].displayName, acc);
+                        }
+                    }, function (e) {
+                        JiTA.dlog('[JiTA] leadduty: automation-actioned reports not sampled: ' + (e && e.message || e));
+                    });
+                });
+            }).then(function () {
+                return L._search(Q._defectJql(b), ['summary', 'reporter', 'created', 'status', 'project']);
+            }).then(function (defs) {
+                for (var i = 0; i < defs.length; i++) {
+                    var f = defs[i].fields || {};
+                    var acc = (f.reporter && f.reporter.accountId) || null;
+                    var rec = {
+                        key: defs[i].key, kind: 'defect', summary: f.summary || '',
+                        status: (f.status && f.status.name) || '', created: f.created || null,
+                        reporter: acc, reporterName: (f.reporter && f.reporter.displayName) || '',
+                        actor: (f.reporter && f.reporter.displayName) || '', handlers: {}
+                    };
+                    if (acc) { rec.handlers[acc] = true; }
+                    byKey[defs[i].key] = rec;
+                }
+                return { keys: Object.keys(byKey).sort(), byKey: byKey };
+            });
+        },
+
+        // Per-Lead exclusion sets, so nobody is handed their own decision to grade. Both halves now fall out
+        // of the pool itself - each item records which ISD account(s) handled it - so this costs no requests
+        // at all. It used to run one extra "BY <accountId>" search per Lead on top of the pool crawl.
+        fetchExclusions: function (roster, accByHandle, pool) {
+            var excl = {};
+            roster.forEach(function (h) { excl[h] = {}; });
+            Object.keys(pool.byKey).forEach(function (k) {
+                var handlers = pool.byKey[k].handlers || {};
+                for (var i = 0; i < roster.length; i++) {
+                    var acc = accByHandle[roster[i]];
+                    if (acc && handlers[acc]) { excl[roster[i]][k] = true; }
+                }
+            });
+            return Promise.resolve(excl);
+        },
+
+        // ---- who actually handled the item ------------------------------------------------------------
+        // Grading a decision is far easier when you can see whose decision it was. For a DEFECT that is its
+        // reporter, which the pool already carries for free. For a REPORT it is whoever moved it to Attached
+        // or Closed, which only the changelog knows - so that is one small GET per sampled report, cached for
+        // the session, and written into the ledger with the verdict so the Follow-ups tab and the published
+        // page never have to fetch it again.
+        _actorCache: {},
+
+        // Mirrors the worker's crIsAutomation. CCP's convert-to-support and convert-to-defect rules act AS the
+        // automation app account, so taking the changelog author at face value would name a robot instead of
+        // the Bug Hunter who triggered it.
+        _isAutomation: function (author) {
+            if (!author) { return false; }
+            if (JiTA.credits.AUTOMATION_ID && author.accountId === JiTA.credits.AUTOMATION_ID) { return true; }
+            if (String(author.emailAddress || '').toLowerCase() === String(JiTA.credits.AUTOMATION_EMAIL).toLowerCase()) { return true; }
+            return String(author.displayName || '').toLowerCase().indexOf('automation for jira') !== -1;
+        },
+
+        // Who the report was assigned to as of `ts`, read from the changelog's own assignee items - their
+        // `toString` carries the display name, so this costs no extra user lookup.
+        _assigneeAt: function (histories, ts) {
+            var who = null;
+            for (var i = 0; i < histories.length; i++) {
+                if ((histories[i].created || '') > ts) { break; }
+                var items = histories[i].items || [];
+                for (var j = 0; j < items.length; j++) {
+                    if (items[j].field === 'assignee') { who = items[j].toString || null; }
+                }
+            }
+            return who;
+        },
+
+        // Resolves a display name, or '' when it can't be determined. Deliberately never rejects: not knowing
+        // who handled something must not stop a Lead from grading it.
+        actor: function (item) {
+            var L = JiTA.leadduty, Q = L.qc;
+            if (!item || !item.key) { return Promise.resolve(''); }
+            if (item.actor) { return Promise.resolve(item.actor); }
+            if (Object.prototype.hasOwnProperty.call(Q._actorCache, item.key)) { return Promise.resolve(Q._actorCache[item.key]); }
+            if (item.kind !== 'report') {
+                Q._actorCache[item.key] = item.reporterName || '';
+                return Promise.resolve(Q._actorCache[item.key]);
+            }
+            return L._changelog(item.key).then(function (hist) {
+                var want = {}, last = null;
+                L.QC_EBR_STATUSES.forEach(function (s) { want[String(s).toLowerCase()] = true; });
+                // The LAST transition into Attached / Closed, not the first: a report that was re-opened and
+                // then handled again is being graded on the decision that stuck.
+                for (var i = 0; i < hist.length; i++) {
+                    var items = hist[i].items || [];
+                    for (var j = 0; j < items.length; j++) {
+                        if (items[j].field === 'status' && want[String(items[j].toString || '').toLowerCase()]) { last = hist[i]; }
+                    }
+                }
+                var name = '';
+                if (last) {
+                    var author = last.author || {};
+                    name = Q._isAutomation(author)
+                        ? (Q._assigneeAt(hist, last.created || '') || 'automation')
+                        : (author.displayName || '');
+                }
+                Q._actorCache[item.key] = name;
+                return name;
+            }, function () { return ''; });   // no changelog access / a network blip: just show nothing
+        },
+
+        // Seeded shuffle, then eligibility-aware greedy in three passes. The inner rotation loop matters:
+        // Leads are the most active actioners, so "take the first N of my slice that I didn't author"
+        // under-fills badly. Here a second Lead picks up an item its primary claimant authored, and everyone
+        // reaches quota.
+        //
+        // The passes are what guarantee defects get looked at. Drawing straight from the shuffled pool would
+        // mirror its composition, and the pool is overwhelmingly bug reports, so a Lead could go a whole
+        // quarter without grading one defect. So: fill the defect floor first, make the rest up from reports,
+        // then let any leftover defect top up a Lead the reports could not fill. Disjoint across Leads.
+        computeAssign: function (poolKeys, roster, quota, excl, ym) {
+            var L = JiTA.leadduty;
+            var shuffled = L._shuffle(poolKeys, 'jita-leadduty-qc|v1|' + ym);
+            var offset = L._monthIndex(ym) % roster.length;
+            var assign = {}, counts = {}, defects = {}, taken = {};
+            roster.forEach(function (h) { assign[h] = []; counts[h] = 0; defects[h] = 0; });
+            var floor = Math.min(L.qcMinDefects(), quota);
+
+            // Hand each key in `list` to the first Lead (in the month's rotating order) who is under quota,
+            // still has room under `cap`, and did not action that item themselves.
+            function pass(list, cap) {
+                for (var i = 0; i < list.length; i++) {
+                    var key = list[i];
+                    if (taken[key]) { continue; }
+                    var full = true;
+                    for (var c = 0; c < roster.length; c++) { if (counts[roster[c]] < quota && cap(roster[c]) > 0) { full = false; break; } }
+                    if (full) { return; }
+                    for (var r = 0; r < roster.length; r++) {
+                        var h = roster[(i + r + offset) % roster.length];
+                        if (counts[h] >= quota || cap(h) <= 0) { continue; }
+                        if (excl[h] && excl[h][key]) { continue; }
+                        assign[h].push(key);
+                        counts[h]++;
+                        taken[key] = true;
+                        if (!/^EBR-/.test(key)) { defects[h]++; }
+                        break;
+                    }
+                }
+            }
+            var defList = [], repList = [];
+            for (var s = 0; s < shuffled.length; s++) { (/^EBR-/.test(shuffled[s]) ? repList : defList).push(shuffled[s]); }
+            var room = function (h) { return quota - counts[h]; };
+            pass(defList, function (h) { return floor - defects[h]; });   // the defect floor
+            pass(repList, room);                                          // the bulk of the work: reports
+            pass(defList, room);                                          // short only because reports ran out
+            return assign;
+        },
+
+        // Freeze the month the same way Part A does. Deleted or moved issues can still shift the shuffle, so
+        // even an immutable window needs pinning. Falls back to a local computation when Confluence is down.
+        claimMonth: function (ym) {
+            var L = JiTA.leadduty, Q = L.qc;
+            ym = ym || L._prevYm();
+            var roster = L.ROSTER();
+            if (!roster.length) { return Promise.reject(new Error('The Lead roster is empty (JiTA.credits.LEADS).')); }
+            return L.ledger.read(L.QC_LEDGER_KEY).then(function (cur) {
+                return { value: cur.value, shared: true };
+            }, function () {
+                return { value: null, shared: false };   // Confluence unreachable: compute locally instead
+            }).then(function (state) {
+                var val = state.value;
+                if (val && val.months && val.months[ym]) {
+                    return Q._hydrate(ym, val.months[ym], val, true);
+                }
+                return Q.fetchPool(ym).then(function (pool) {
+                    return L.roster.resolve(false).then(function (rr) {
+                        return Q.fetchExclusions(roster, rr.accByHandle, pool).then(function (excl) {
+                            var quota = Math.min(L.qcCount(), Math.max(1, Math.floor(pool.keys.length / roster.length)));
+                            var defectsInPool = 0;
+                            for (var d = 0; d < pool.keys.length; d++) { if (!/^EBR-/.test(pool.keys[d])) { defectsInPool++; } }
+                            var rec = {
+                                roster: roster, quota: quota, poolSize: pool.keys.length,
+                                minDefects: Math.min(L.qcMinDefects(), quota), poolDefects: defectsInPool,
+                                assign: Q.computeAssign(pool.keys, roster, quota, excl, ym),
+                                createdAt: new Date().toISOString(),
+                                createdBy: (L.me() && L.me().handle) || '?'
+                            };
+                            // Who handled each SAMPLED item, known for free because the pool was built by
+                            // asking per member. Storing it means no Lead ever walks a changelog to fill the
+                            // handler column, however late in the month they open the tab. Only the assigned
+                            // keys are kept, so this is a few dozen short strings, not the whole pool.
+                            rec.actors = {};
+                            Object.keys(rec.assign).forEach(function (h) {
+                                rec.assign[h].forEach(function (k) {
+                                    var a = pool.byKey[k] && pool.byKey[k].actor;
+                                    if (a) { rec.actors[k] = a; }
+                                });
+                            });
+                            if (!state.shared) { return Q._hydrate(ym, rec, val, false, pool); }
+                            var stored = rec;
+                            return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
+                                v = v || { v: 1, months: {}, done: {}, flags: {} };
+                                v.months = v.months || {};
+                                v.done = v.done || {};
+                                if (v.months[ym]) { stored = v.months[ym]; return null; }
+                                v.months[ym] = rec;
+                                return v;
+                            }).then(function (r) {
+                                return Q._hydrate(ym, (r.value && r.value.months && r.value.months[ym]) || stored, r.value, true, pool);
+                            }, function () {
+                                return Q._hydrate(ym, rec, val, false, pool);
+                            });
+                        });
+                    });
+                });
+            });
+        },
+
+        // Turn a frozen record into rows for MY list: resolve each key's summary, from the pool when we just
+        // fetched it, otherwise via a single targeted search.
+        _hydrate: function (ym, record, ledgerValue, shared, pool) {
+            var L = JiTA.leadduty, Q = L.qc;
+            var me = (L.me() && L.me().handle) || null;
+            var keys = (me && record.assign && record.assign[me]) || [];
+            var have = (pool && pool.byKey) || null;
+            var need = [];
+            for (var k = 0; k < keys.length; k++) { if (!have || !have[keys[k]]) { need.push(keys[k]); } }
+            var fetch = need.length
+                ? L._search('key in (' + need.join(', ') + ')', ['summary', 'status', 'created', 'reporter'])
+                : Promise.resolve([]);
+            return fetch.then(function (rows) {
+                var extra = {};
+                for (var n = 0; n < rows.length; n++) {
+                    var f = rows[n].fields || {};
+                    extra[rows[n].key] = {
+                        key: rows[n].key, kind: /^EBR-/.test(rows[n].key) ? 'report' : 'defect',
+                        summary: f.summary || '', status: (f.status && f.status.name) || '',
+                        created: f.created || null, reporterName: (f.reporter && f.reporter.displayName) || ''
+                    };
+                }
+                var actors = record.actors || {};
+                var items = keys.map(function (key) {
+                    var it = (have && have[key]) || extra[key] ||
+                        { key: key, kind: /^EBR-/.test(key) ? 'report' : 'defect', summary: '(not found - moved or deleted)', status: '', created: null };
+                    // A month frozen before handlers were stored has no `actors`; those rows fall back to the
+                    // changelog read in qc.actor() exactly as before.
+                    if (!it.actor && actors[key]) { it.actor = actors[key]; }
+                    return it;
+                });
+                var doneMap = (ledgerValue && ledgerValue.done && ledgerValue.done[ym]) || {};
+                var mineDone = {};
+                Object.keys(doneMap).forEach(function (key) { if (doneMap[key] && doneMap[key].by === me) { mineDone[key] = doneMap[key]; } });
+                return { ym: ym, record: record, items: items, done: mineDone, shared: shared, ledgerValue: ledgerValue };
+            });
+        },
+
+        // Record a QC verdict. 'flag' additionally raises a FOLLOW-UP: a flag used to be nothing but a
+        // one-Lead-visible amber row, so it is now lifted out of the month into a top-level `flags` map that
+        // survives month pruning, carries a reason, shows on the ledger page, and has to be resolved by hand.
+        // `item` is the row being judged; its kind, summary and resolved actor are copied in so the Flags tab
+        // and the published page can render a flag long after the issue has dropped out of the sampled month -
+        // and so nothing ever re-walks a changelog to name the person who handled it.
+        markChecked: function (key, verdict, ym, note, item) {
+            var L = JiTA.leadduty;
+            ym = ym || L._prevYm();
+            var handle = (L.me() && L.me().handle) || '?';
+            var nowIso = new Date().toISOString();
+            var txt = String(note == null ? '' : note).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').slice(0, 300);
+            var actor = String((item && item.actor) || '').slice(0, 80);
+            return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
+                v = v || { v: 1, months: {}, done: {}, flags: {} };
+                v.done = v.done || {};
+                v.done[ym] = v.done[ym] || {};
+                v.done[ym][key] = { by: handle, at: nowIso, verdict: verdict || 'ok' };
+                if (actor) { v.done[ym][key].actor = actor; }
+                if (verdict === 'flag') {
+                    v.flags = v.flags || {};
+                    v.flags[key] = {
+                        by: handle, at: nowIso, ym: ym, note: txt, actor: actor,
+                        kind: (item && item.kind) || (/^EBR-/.test(key) ? 'report' : 'defect'),
+                        summary: String((item && item.summary) || '').slice(0, 140)
+                    };
+                } else if (v.flags && v.flags[key] && !v.flags[key].resolvedAt) {
+                    delete v.flags[key];   // re-judged as fine before anyone followed up
+                }
+                return v;
+            }).then(L.report.tap);
+        },
+
+        // Close out a follow-up. The flag is kept (resolved, not deleted) so the ledger page can show that it
+        // was dealt with; _prune drops it once it is older than the retention window.
+        resolveFlag: function (key, note) {
+            var L = JiTA.leadduty;
+            var handle = (L.me() && L.me().handle) || '?';
+            var nowIso = new Date().toISOString();
+            var txt = String(note == null ? '' : note).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').slice(0, 300);
+            return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
+                if (!v || !v.flags || !v.flags[key]) { return null; }
+                v.flags[key].resolvedBy = handle;
+                v.flags[key].resolvedAt = nowIso;
+                if (txt) { v.flags[key].outcome = txt; }
+                return v;
+            }).then(L.report.tap);
+        },
+
+        // Open (unresolved) follow-ups, newest first. Reads whatever ledger value the caller already has.
+        openFlags: function (ledgerValue) {
+            var flags = (ledgerValue && ledgerValue.flags) || {};
+            var out = [];
+            Object.keys(flags).forEach(function (k) {
+                if (flags[k] && !flags[k].resolvedAt) { out.push({ key: k, flag: flags[k] }); }
+            });
+            out.sort(function (a, b) { return (a.flag.at || '') < (b.flag.at || '') ? 1 : -1; });
+            return out;
+        },
+
+        // Open follow-ups grouped by the Bug Hunter whose decision was flagged. Three separate pings about
+        // three reports is nagging; one note listing them is feedback - so the tab is organised the way the
+        // conversation actually happens. A flag raised before the handler was recorded has no name to group
+        // under and collects in its own bucket rather than being dropped.
+        UNKNOWN_ACTOR: '(handler not recorded)',
+        groupFlags: function (ledgerValue) {
+            var L = JiTA.leadduty;
+            var open = L.qc.openFlags(ledgerValue), byName = {};
+            open.forEach(function (o) {
+                var name = o.flag.actor || L.qc.UNKNOWN_ACTOR;
+                (byName[name] = byName[name] || []).push(o);
+            });
+            return Object.keys(byName).map(function (name) {
+                return { name: name, known: name !== L.qc.UNKNOWN_ACTOR, entries: byName[name] };
+            }).sort(function (a, b) {
+                if (a.entries.length !== b.entries.length) { return b.entries.length - a.entries.length; }
+                return a.name < b.name ? -1 : 1;
+            });
+        },
+
+        // The message a Lead pastes to that Bug Hunter. Written to be sent as-is, so it names each issue,
+        // says what was wrong with it in the flagger's own words, and frames the whole thing as the routine
+        // monthly pass it is rather than a reprimand. The Lead can edit it before copying.
+        followUpText: function (group) {
+            var L = JiTA.leadduty, me = L.me() || {};
+            var entries = (group && group.entries) || [];
+            var reports = 0, defects = 0;
+            entries.forEach(function (e) { if ((e.flag.kind || 'report') === 'report') { reports++; } else { defects++; } });
+            // A report is HANDLED, a defect is CREATED - a Bug Hunter told they mishandled a defect they
+            // filed would rightly be confused about what they are being asked to look at.
+            var what = (reports && defects) ? 'the bug reports you handled and the defects you created'
+                : (defects ? 'the defects you created' : 'the bug reports you handled');
+            var out = ['Hey ' + ((group && group.known && group.name) || 'there') + ',', ''];
+            out.push('As part of this month\'s quality control I went back over some of ' + what +
+                ', and ' + (entries.length === 1 ? 'one of them needs' : 'these ones need') + ' another look:');
+            out.push('');
+            entries.forEach(function (e) {
+                var f = e.flag;
+                out.push('* ' + e.key + (f.summary ? (' - ' + f.summary) : ''));
+                out.push('  ' + (f.note || '(no reason was recorded)'));
+            });
+            out.push('');
+            out.push('This is not a telling-off - we sample everyone every month to keep our handling ' +
+                'consistent. If you think I have got any of these wrong, say so and we will go through it together.');
+            out.push('');
+            out.push('Thanks,');
+            out.push(me.displayName || me.handle || '');
+            return out.join('\n');
+        }
+    },
+
+    // ---- ISD group membership -------------------------------------------------------------------------
+    // Quality control grades ISD's OWN handling, so both halves of the sample have to be restricted to the
+    // group. The defect half does that in JQL (reporter in membersOf), but "who moved this report to
+    // Attached" is a CHANGELOG predicate rather than a field, so there is no membersOf() to lean on - it
+    // takes one "BY <accountId>" search per member, and that needs the member list.
+    group: {
+        CACHE_KEY: 'leadduty:group',
+        TTL_MS: 7 * 24 * 60 * 60 * 1000,
+
+        // Resolves [{ accountId, displayName, emailAddress }] sorted by accountId, so every Lead walks the
+        // members in the same order and derives the same pool. INACTIVE members are deliberately included:
+        // someone who has since left ISD still handled those reports last month, and that work is still ours
+        // to check. A crawl that fails keeps serving the cached list rather than emptying the pool.
+        members: function (force) {
+            var L = JiTA.leadduty, G = L.group;
+            return JiTA.db.getMeta(G.CACHE_KEY).catch(function () { return null; }).then(function (cached) {
+                var usable = cached && cached.members && cached.members.length;
+                if (!force && usable && (Date.now() - (cached.at || 0)) < G.TTL_MS) { return cached.members; }
+                return G._crawl().then(function (list) {
+                    var out = list.map(function (m) {
+                        return { accountId: m.accountId, displayName: m.displayName || '', emailAddress: m.emailAddress || '' };
+                    }).sort(function (a, b) { return a.accountId < b.accountId ? -1 : (a.accountId > b.accountId ? 1 : 0); });
+                    if (!out.length) {
+                        if (usable) { return cached.members; }
+                        throw new Error('The group "' + L.QC_GROUP + '" came back empty, so no quality-control sample could be drawn.');
+                    }
+                    return JiTA.db.setMeta(G.CACHE_KEY, { at: Date.now(), members: out })
+                        .then(function () { return out; }, function () { return out; });
+                }, function (e) {
+                    if (usable) { return cached.members; }
+                    throw e;
+                });
+            });
+        },
+
+        // Paged /group/member crawl, by group name and then by id (mirrors the credit tracker's
+        // crGroupMembers - some tenants only resolve the id form).
+        _crawl: function () {
+            var L = JiTA.leadduty, out = [];
+            function page(param, start) {
+                return L._get('/rest/api/3/group/member?' + param + '&includeInactiveUsers=true&startAt=' + start + '&maxResults=50')
+                    .then(function (res) {
+                        var vals = (res && res.values) || [];
+                        out = out.concat(vals);
+                        if ((res && res.isLast) || !vals.length) { return out; }
+                        return page(param, start + vals.length);
+                    });
+            }
+            return page('groupname=' + encodeURIComponent(L.QC_GROUP), 0).catch(function () {
+                return L._get('/rest/api/3/groups/picker?query=' + encodeURIComponent(L.QC_GROUP)).then(function (res) {
+                    var gid = null, gs = (res && res.groups) || [];
+                    for (var i = 0; i < gs.length; i++) { if ((gs[i].name || '').toLowerCase() === L.QC_GROUP.toLowerCase()) { gid = gs[i].groupId; } }
+                    if (!gid) { throw new Error('group not found: ' + L.QC_GROUP); }
+                    out = [];
+                    return page('groupId=' + encodeURIComponent(gid), 0);
+                });
+            });
+        }
+    },
+
+    // ---- roster -> accountId resolution --------------------------------------------------------------
+    // Needed for the per-Lead "BY <accountId>" exclusion searches. One accountId per Lead is enough: the
+    // legacy <handle>@ccpgames.com accounts the credit tracker bridges are ancient and never actioned a bug
+    // report or created a defect, and a Lead does not change account, so JiTA.credits' crResolveOldReporters
+    // dance is deliberately NOT replicated here. The credit tracker's cached leaderboard already maps
+    // displayName -> accountId for the whole ISD group, so that is tried first; a group crawl is the fallback.
+    roster: {
+        CACHE_KEY: 'leadduty:roster',
+        TTL_MS: 7 * 24 * 60 * 60 * 1000,
+
+        resolve: function (force) {
+            var L = JiTA.leadduty, R = L.roster, want = L.ROSTER();
+            return JiTA.db.getMeta(R.CACHE_KEY).catch(function () { return null; }).then(function (cached) {
+                if (!force && cached && cached.byHandle && (Date.now() - (cached.resolvedAt || 0)) < R.TTL_MS) {
+                    var complete = true;
+                    for (var i = 0; i < want.length; i++) { if (!cached.byHandle[want[i]]) { complete = false; break; } }
+                    if (complete) { return R._shape(cached); }
+                }
+                return R._fromCredits(want).then(function (byHandle) {
+                    var missing = want.filter(function (h) { return !byHandle[h]; });
+                    if (!missing.length) { return byHandle; }
+                    return R._fromGroup(want, byHandle).catch(function () { return byHandle; });
+                }).then(function (byHandle) {
+                    var rec = { resolvedAt: Date.now(), byHandle: byHandle };
+                    return JiTA.db.setMeta(R.CACHE_KEY, rec).then(function () { return R._shape(rec); }, function () { return R._shape(rec); });
+                });
+            });
+        },
+        _shape: function (rec) {
+            var accByHandle = {};
+            Object.keys(rec.byHandle || {}).forEach(function (h) { accByHandle[h] = rec.byHandle[h].accountId; });
+            return { byHandle: rec.byHandle || {}, accByHandle: accByHandle, resolvedAt: rec.resolvedAt };
+        },
+        // The credit tracker's cached leaderboard, current month then previous (the current one may not have
+        // been computed yet this month).
+        _fromCredits: function (want) {
+            var L = JiTA.leadduty, R = L.roster;
+            return R._creditsCache().then(function (res) {
+                var byHandle = {};
+                var map = (res && res.nameToAcc) || null;
+                if (!map) { return byHandle; }
+                Object.keys(map).forEach(function (name) {
+                    var h = L._matchRoster(name, '');
+                    if (h && want.indexOf(h) >= 0 && !byHandle[h]) { byHandle[h] = { accountId: map[name], displayName: name }; }
+                });
+                return byHandle;
+            });
+        },
+        _creditsCache: function () {
+            var L = JiTA.leadduty;
+            return JiTA.credits.getCached(L._ym()).catch(function () { return null; }).then(function (a) {
+                if (a && a.nameToAcc) { return a; }
+                return JiTA.credits.getCached(L._prevYm()).catch(function () { return null; });
+            });
+        },
+        _fromGroup: function (want, byHandle) {
+            var L = JiTA.leadduty;
+            return L.group.members(false).then(function (members) {
+                for (var i = 0; i < members.length; i++) {
+                    var m = members[i];
+                    var h = L._matchRoster(m.displayName || '', m.emailAddress || '');
+                    if (h && want.indexOf(h) >= 0 && !byHandle[h]) { byHandle[h] = { accountId: m.accountId, displayName: m.displayName || '' }; }
+                }
+                return byHandle;
+            });
+        }
+    },
+
+    // ---- local progress mirror ------------------------------------------------------------------------
+    // The chip must be able to answer "how much is left?" with no network at all, and a mark made while
+    // Confluence is unreachable must not be lost. Both live in the meta store, keyed by month.
+    local: {
+        get: function (key) { return JiTA.db.getMeta(key).catch(function () { return null; }); },
+        put: function (key, rec) { return JiTA.db.setMeta(key, rec).catch(function () { return null; }); },
+
+        // Record a completed item locally; `pending` collects anything the ledger hasn't accepted yet.
+        mark: function (key, id, ok) {
+            return JiTA.leadduty.local.get(key).then(function (rec) {
+                rec = rec || {};
+                rec.done = rec.done || {};
+                rec.pending = rec.pending || [];
+                rec.done[id] = new Date().toISOString();
+                var at = rec.pending.indexOf(id);
+                if (ok && at >= 0) { rec.pending.splice(at, 1); }
+                if (!ok && at < 0) { rec.pending.push(id); }
+                return JiTA.leadduty.local.put(key, rec).then(function () { return rec; });
+            });
+        }
+    },
+
+    // Drain marks that were made while Confluence was unreachable.
+    flushPending: function () {
+        var L = JiTA.leadduty;
+        var wym = L._ym(), qym = L._prevYm();
+        return L.local.get(L.wiki.localKey(wym)).then(function (w) {
+            var ids = (w && w.pending) || [];
+            return ids.reduce(function (p, id) {
+                return p.then(function () {
+                    return L.wiki.markReviewed(id, wym).then(function () { return L.local.mark(L.wiki.localKey(wym), id, true); },
+                        function () { /* still down; keep it queued */ });
+                });
+            }, Promise.resolve());
+        }).then(function () {
+            return L.local.get(L.qc.localKey(qym));
+        }).then(function (q) {
+            var ids = (q && q.pending) || [];
+            return ids.reduce(function (p, id) {
+                return p.then(function () {
+                    return L.qc.markChecked(id, 'ok', qym).then(function () { return L.local.mark(L.qc.localKey(qym), id, true); },
+                        function () { /* still down */ });
+                });
+            }, Promise.resolve());
+        }).catch(function () { /* best effort */ });
+    },
+
+    // Outstanding counts for the chip, entirely from local state (no network).
+    outstanding: function () {
+        var L = JiTA.leadduty;
+        var wym = L._ym(), qym = L._prevYm();
+        return Promise.all([L.local.get(L.wiki.localKey(wym)), L.local.get(L.qc.localKey(qym))]).then(function (r) {
+            var w = r[0], q = r[1];
+            function left(rec, field) {
+                if (!rec || !rec[field]) { return null; }          // not computed yet this month
+                var total = rec[field].length, done = 0;
+                for (var i = 0; i < total; i++) { if (rec.done && rec.done[rec[field][i]]) { done++; } }
+                return total - done;
+            }
+            return { pages: left(w, 'pageIds'), checks: left(q, 'items'), known: !!(w || q) };
+        });
+    },
+
+    // True when BOTH local mirrors exist for their months. A missing one is invisible except that the chip
+    // silently stops counting that half - which is exactly how the QC checks used to go unmentioned until
+    // somebody opened the tab. The scheduler treats a missing mirror as work to do NOW rather than at the
+    // next six-hourly tick. Unreadable local storage reports "ready" so it can't drive a retry loop.
+    _mirrorsReady: function () {
+        var L = JiTA.leadduty;
+        return Promise.all([L.local.get(L.wiki.localKey(L._ym())), L.local.get(L.qc.localKey(L._prevYm()))])
+            .then(function (r) { return !!(r[0] && r[0].pageIds && r[1] && r[1].items); },
+                function () { return true; });
+    },
+
+    // ---- publishing the ledger to the page itself ----------------------------------------------------
+    // The JSON lives in a content property, which is invisible on the page - correct for machine state, and
+    // useless for "who reviewed what" or "what did we flag". So the same data is rendered into the ledger
+    // page BODY as plain tables: readable by anyone with the link, no script required, and the one place a
+    // flagged issue is visible to the Leads who did not raise it.
+    //
+    // Every publish creates a page version, so this is change-detected on a hash of the rendered HTML kept
+    // in the wiki ledger. A Lead marking five pages in a row produces one page version, not five, and a
+    // scheduler tick that changes nothing produces none.
+    report: {
+        HASH_KEY: 'reportHash',
+        DEBOUNCE_MS: 20000,
+        MAX_LOG_ROWS: 500,
+        _timer: null,
+        _busy: false,
+
+        // Used as `.then(JiTA.leadduty.report.tap)` on a ledger write: republish when something actually
+        // changed, and pass the mutate result through untouched.
+        tap: function (r) {
+            if (r && r.written) { JiTA.leadduty.report.schedule(); }
+            return r;
+        },
+
+        schedule: function () {
+            var R = JiTA.leadduty.report;
+            if (R._timer) { clearTimeout(R._timer); }
+            R._timer = setTimeout(function () {
+                R._timer = null;
+                R.publish(false).catch(function () { /* cosmetic - never surfaced from a background write */ });
+            }, R.DEBOUNCE_MS);
+        },
+
+        // Resolves { written, skipped, version } - `skipped` naming why nothing was written. Nothing in the
+        // UI passes `force` any more (publishing is automatic); it stays as the console escape hatch for
+        // "rewrite the page even though the hash says nothing changed", which is how you recover a page
+        // somebody edited by hand.
+        publish: function (force) {
+            var L = JiTA.leadduty, R = L.report;
+            if (L._dry()) { return Promise.resolve({ skipped: 'dry run' }); }
+            if (!L.ledgerPage()) { return Promise.resolve({ skipped: 'no ledger page' }); }
+            if (R._busy) { return Promise.resolve({ skipped: 'already publishing' }); }
+            R._busy = true;
+            var done = function (v) { R._busy = false; return v; };
+            var fail = function (e) { R._busy = false; throw e; };
+            return Promise.all([
+                L.ledger.read(L.LEDGER_KEY),
+                L.ledger.read(L.QC_LEDGER_KEY).catch(function () { return { value: null }; }),
+                L.pool.ensureFresh(false).catch(function () { return null; })
+            ]).then(function (r) {
+                var wiki = r[0].value, qc = r[1].value, pool = r[2];
+                if (!wiki && !qc) { return { skipped: 'nothing in the ledger yet' }; }
+                var html = R.render(wiki, qc, pool);
+                var hash = JiTA.util.hash(html);
+                if (!force && wiki && wiki[R.HASH_KEY] === hash) { return { skipped: 'unchanged' }; }
+                return R._write(html).then(function (res) {
+                    // Remember what we published so the next tick can skip. Deliberately NOT tapped: this
+                    // write is a consequence of publishing, not a reason to publish again.
+                    return L.ledger.mutate(L.LEDGER_KEY, function (v) {
+                        if (!v) { return null; }
+                        v[R.HASH_KEY] = hash;
+                        return v;
+                    }).then(function () { return { written: true, version: res.version }; },
+                        function () { return { written: true, version: res.version }; });
+                });
+            }).then(done, fail);
+        },
+
+        // PUT the body, retrying once against a re-read version: two Leads publishing in the same second is
+        // rare but entirely possible, and the loser just needs the newer version number.
+        _write: function (html, retry) {
+            var L = JiTA.leadduty;
+            var msg = 'JiTA lead duties ' + new Date().toISOString().slice(0, 10);
+            return JiTA.conf.getPage(L.ledgerPage(), false).then(function (page) {
+                return JiTA.conf.savePageBody(page, html, msg);
+            }).catch(function (e) {
+                if (!retry && JiTA.conf.isConflict(e)) { return L.report._write(html, true); }
+                throw e;
+            });
+        },
+
+        // ---- rendering (Confluence storage format, which is XHTML - every value goes through esc) ----
+        _txt: function (s) { return JiTA.conf.esc(s); },
+        _issue: function (key) {
+            return '<a href="' + JiTA.conf.esc(JiTA.HOST + '/browse/' + key) + '">' + JiTA.conf.esc(key) + '</a>';
+        },
+        _page: function (id, title) {
+            return '<a href="' + JiTA.conf.esc(JiTA.conf.pageUrl(id)) + '">' + JiTA.conf.esc(title || ('page ' + id)) + '</a>';
+        },
+        _when: function (iso) { return iso ? JiTA.conf.esc(String(iso).replace('T', ' ').slice(0, 16)) : ''; },
+        _table: function (headers, rows) {
+            var h = '<table><tbody><tr>';
+            for (var i = 0; i < headers.length; i++) { h += '<th>' + JiTA.conf.esc(headers[i]) + '</th>'; }
+            h += '</tr>';
+            for (var r = 0; r < rows.length; r++) {
+                h += '<tr>';
+                for (var c = 0; c < rows[r].length; c++) { h += '<td>' + (rows[r][c] == null ? '' : rows[r][c]) + '</td>'; }
+                h += '</tr>';
+            }
+            return h + '</tbody></table>';
+        },
+
+        render: function (wiki, qc, pool) {
+            var L = JiTA.leadduty, R = L.report;
+            var ym = L._ym(), pym = L._prevYm();
+            var byId = pool ? L.pool.byId(pool) : {};
+            var out = [];
+
+            out.push('<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant on ' +
+                R._when(new Date().toISOString()) + ' UTC. Anything typed on this page by hand is replaced on ' +
+                'the next update - record work through the Lead duties overlay in Jira instead.</em></p>');
+
+            out.push(R._flagsSection(qc));
+            out.push(R._wikiSection(wiki, ym, byId));
+            out.push(R._qcSection(qc, pym));
+            out.push(R._coverageSection(wiki, pool));
+            out.push(R._logSection(wiki, pool));
+            return out.join('\n');
+        },
+
+        // The point of the whole exercise: a flag raised by one Lead is now visible to all of them.
+        _flagsSection: function (qc) {
+            var R = JiTA.leadduty.report;
+            var open = JiTA.leadduty.qc.openFlags(qc);
+            var h = '<h2>Open follow-ups</h2>';
+            if (!open.length) {
+                return h + '<p>Nothing flagged is waiting on anyone. A flag raised during quality control ' +
+                    'appears here until a Lead resolves it in the overlay.</p>';
+            }
+            // Ordered by the person who handled them, so the page reads the same way the Follow-ups tab does:
+            // everything one Bug Hunter needs telling about sits together.
+            var rows = open.slice().sort(function (a, b) {
+                var an = a.flag.actor || '', bn = b.flag.actor || '';
+                if (an !== bn) { return an < bn ? -1 : 1; }
+                return (a.flag.at || '') < (b.flag.at || '') ? 1 : -1;
+            }).map(function (o) {
+                return [R._issue(o.key), R._txt(o.flag.kind || ''), R._txt(o.flag.summary || ''),
+                    R._txt(o.flag.actor || ''), R._txt(o.flag.by || ''), R._when(o.flag.at),
+                    R._txt(o.flag.ym || ''), R._txt(o.flag.note || '')];
+            });
+            return h + '<p><strong>' + open.length + '</strong> open. "Handled by" is whoever moved the report ' +
+                'to Attached or Closed, or created the defect.</p>' +
+                R._table(['Issue', 'Type', 'Summary', 'Handled by', 'Flagged by', 'Flagged', 'From month', 'Reason'], rows);
+        },
+
+        _wikiSection: function (wiki, ym, byId) {
+            var L = JiTA.leadduty, R = L.report;
+            var rec = (wiki && wiki.months && wiki.months[ym]) || null;
+            var h = '<h2>Wiki review - ' + R._txt(ym) + '</h2>';
+            if (!rec) { return h + '<p>This month has not been assigned yet. It is cut the first time any Lead opens the overlay.</p>'; }
+            var done = (wiki.done && wiki.done[ym]) || {};
+            var rows = [], counts = {}, total = 0, doneCount = 0;
+            (rec.roster || []).forEach(function (lead) { counts[lead] = { n: 0, done: 0 }; });
+            Object.keys(rec.assign || {}).sort().forEach(function (lead) {
+                (rec.assign[lead] || []).forEach(function (id) {
+                    var p = byId[id], d = done[id], status;
+                    counts[lead] = counts[lead] || { n: 0, done: 0 };
+                    counts[lead].n++; total++;
+                    if (d) { doneCount++; counts[lead].done++; }
+                    status = !d ? 'Outstanding'
+                        : (d.skipped ? ('Skipped by ' + (d.by || '?')) : ('Reviewed by ' + (d.by || '?')));
+                    rows.push([R._page(id, p && p.title), R._txt(lead), R._txt(status), R._when(d && d.at)]);
+                });
+            });
+            var sum = Object.keys(counts).sort().map(function (lead) {
+                return [R._txt(lead), String(counts[lead].n), String(counts[lead].done),
+                    String(counts[lead].n - counts[lead].done)];
+            });
+            return h +
+                '<p><strong>' + doneCount + ' of ' + total + '</strong> pages proof-read this month. ' +
+                'Cut by ' + R._txt(rec.createdBy || '?') + ' on ' + R._when(rec.createdAt) + '. ' +
+                'Every page is read by ' + R._txt(String(rec.eyes || L.eyes())) + ' different Leads within ' +
+                R._txt(String(L.coverageMonths())) + ' months, and nobody is handed a page they read last time.</p>' +
+                R._table(['Lead', 'Assigned', 'Done', 'Outstanding'], sum) +
+                '<h3>Pages</h3>' +
+                R._table(['Page', 'Assigned to', 'Status', 'When'], rows);
+        },
+
+        _qcSection: function (qc, pym) {
+            var R = JiTA.leadduty.report;
+            var rec = (qc && qc.months && qc.months[pym]) || null;
+            var h = '<h2>Quality control - ' + R._txt(pym) + '</h2>';
+            if (!rec) { return h + '<p>Last month has not been sampled yet. The sample is drawn the first time any Lead opens the overlay.</p>'; }
+            var done = (qc.done && qc.done[pym]) || {};
+            var rows = [], sum = [], total = 0, checked = 0, flagged = 0;
+            Object.keys(rec.assign || {}).sort().forEach(function (lead) {
+                var n = 0, c = 0, f = 0;
+                (rec.assign[lead] || []).forEach(function (key) {
+                    var d = done[key];
+                    n++; total++;
+                    if (d) { c++; checked++; }
+                    if (d && d.verdict === 'flag') { f++; flagged++; }
+                    rows.push([R._issue(key), R._txt(lead), R._txt((d && d.actor) || ''),
+                        R._txt(!d ? 'Outstanding' : (d.verdict === 'flag' ? 'Flagged' : 'Checked')),
+                        R._when(d && d.at)]);
+                });
+                sum.push([R._txt(lead), String(n), String(c), String(f)]);
+            });
+            return h +
+                '<p><strong>' + checked + ' of ' + total + '</strong> sampled items checked, ' + flagged +
+                ' flagged. Drawn from a pool of ' + R._txt(String(rec.poolSize || '?')) +
+                ' reports and defects' +
+                (rec.poolDefects != null ? (' (' + R._txt(String(rec.poolDefects)) + ' of them defects)') : '') +
+                ', ' + R._txt(String(rec.quota || '?')) + ' per Lead' +
+                (rec.minDefects ? (', at least ' + R._txt(String(rec.minDefects)) + ' of them defects where the month produced enough') : '') +
+                '.</p>' +
+                R._table(['Lead', 'Sampled', 'Checked', 'Flagged'], sum) +
+                '<h3>Items</h3>' +
+                '<p>"Handled by" is whoever moved the report to Attached or Closed, or created the defect. ' +
+                'It is recorded with the verdict, so an item nobody has checked yet does not carry one.</p>' +
+                R._table(['Issue', 'Assigned to', 'Handled by', 'Verdict', 'When'], rows);
+        },
+
+        _coverageSection: function (wiki, pool) {
+            var L = JiTA.leadduty, R = L.report;
+            var h = '<h2>Coverage</h2>';
+            if (!pool) { return h + '<p>The page tree could not be read for this update, so coverage is unknown.</p>'; }
+            var st = L.wiki.stats(pool, wiki);
+            return h + R._table(['Measure', 'Value'], [
+                [R._txt('Pages in rotation'), R._txt(String(st.total))],
+                [R._txt('Excluded from rotation'), R._txt(String(pool.excludedCount || 0) + ' of ' + (pool.rawCount || st.total) + ' crawled')],
+                [R._txt('Read by ' + st.eyes + ' different Leads in the last ' + st.coverage + ' months'), R._txt(String(st.covered))],
+                [R._txt('Waiting on a second reader'), R._txt(String(st.single))],
+                [R._txt('Never reviewed'), R._txt(String(st.never))],
+                [R._txt('Overdue (older than ' + st.coverage + ' months)'), R._txt(String(st.overdue))],
+                [R._txt('Oldest review'), R._txt(st.oldestMonths == null ? 'n/a' : (st.oldestMonths + ' months ago'))],
+                [R._txt('Target'), R._txt('every page read by ' + st.eyes + ' different Leads every ' + st.coverage + ' months')],
+                [R._txt('Page tree last scanned'), R._when(pool.fetchedAt ? new Date(pool.fetchedAt).toISOString() : null)]
+            ]);
+        },
+
+        // Every page with who last read it and when, oldest first - the answer to "is this article stale?"
+        // for anyone browsing the wiki, and the audit trail for who has been carrying the work. The eyes
+        // column is the four-eyes rule made checkable: anything below the target is a page one person's
+        // judgement is currently the only thing standing behind.
+        _logSection: function (wiki, pool) {
+            var L = JiTA.leadduty, R = L.report, W = L.wiki;
+            var h = '<h2>Review log</h2>';
+            if (!pool) { return h + '<p>The page tree could not be read for this update.</p>'; }
+            var last = (wiki && wiki.lastReviewed) || {}, by = (wiki && wiki.reviewedBy) || {};
+            var prev = (wiki && wiki.prevReviewed) || {};
+            var eyes = {};
+            pool.pages.forEach(function (p) { eyes[p.id] = W.eyesIn(wiki, p.id); });
+            var pages = pool.pages.slice().sort(function (a, b) {
+                if (eyes[a.id] !== eyes[b.id]) { return eyes[a.id] - eyes[b.id]; }
+                var la = last[a.id] || '', lb = last[b.id] || '';
+                if (la !== lb) { return la < lb ? -1 : 1; }
+                return a.title < b.title ? -1 : 1;
+            });
+            var capped = pages.length > R.MAX_LOG_ROWS;
+            if (capped) { pages = pages.slice(0, R.MAX_LOG_ROWS); }
+            var rows = pages.map(function (p) {
+                var stamp = last[p.id] || '', age = L._monthsSince(stamp);
+                return [R._page(p.id, p.title),
+                    R._txt(eyes[p.id] + ' of ' + L.eyes()),
+                    R._txt(stamp || 'never'),
+                    R._txt(by[p.id] || ''),
+                    R._txt(prev[p.id] || ''),
+                    R._txt(age == null ? '' : (age + ' months'))];
+            });
+            return h + '<p>Least-read first' + (capped ? (', first ' + R.MAX_LOG_ROWS + ' of ' + pool.pages.length) : '') +
+                '. "Eyes" counts how many different Leads have read the page within the last ' +
+                R._txt(String(L.coverageMonths())) + ' months.</p>' +
+                R._table(['Page', 'Eyes', 'Last reviewed', 'By', 'Previous', 'Age'], rows);
+        }
+    },
+
+    _noop: null
+};
+
+
+/* ---- Lead duties: the two-tab overlay ---------------------------------------------------------------- */
+JiTA.leadduty.ui = {
+    _cssInjected: false,
+    _tab: 'wiki',        // session-only; deliberately not persisted
+    _wiki: null,         // { record, ledgerValue, pool }
+    _qc: null,           // { ym, record, items, done, shared, ledgerValue }
+    _wikiLocalDone: null,   // id -> iso: marks the ledger has not accepted yet (offline / write failure)
+    _qcLocalDone: null,
+
+    isOpen: function () { return !!document.querySelector('#jita-menu.jita-leadduty-view'); },
+
+    open: function (tab) {
+        var L = JiTA.leadduty, U = L.ui;
+        if (JITA_IS_FORGE_FRAME || !L.isLead()) { return; }
+        if (U.isOpen()) { JiTA.menu.close(); return; }
+        U._injectCss();
+        if (tab) { U._tab = tab; }
+        var ov = JiTA.menu._openOverlay({ title: 'ISD Lead duties' });
+        ov.$menu.addClass('jita-leadduty-view');
+        var $tabs = $('<div class="ld-tabs"></div>').appendTo(ov.$menu);
+        $('<button class="ld-tab" data-tab="wiki">Wiki review</button>').appendTo($tabs);
+        $('<button class="ld-tab" data-tab="qc">Quality control</button>').appendTo($tabs);
+        $('<button class="ld-tab" data-tab="flags" title="Everything any Lead flagged during quality control and nobody has closed out yet">Follow-ups</button>').appendTo($tabs);
+        $tabs.on('click', '.ld-tab', function () { U._tab = $(this).attr('data-tab'); U._render(); });
+        $('<div class="ld-scroll" id="ld-body"></div>').appendTo(ov.$menu);
+        var $foot = $('<div class="ld-foot"></div>').appendTo(ov.$menu);
+        $('<span class="ld-muted" id="ld-status"></span>').appendTo($foot);
+        // No "publish" button: the ledger PAGE is rewritten automatically after any change (report.tap ->
+        // a 20s debounce, so a run of marks makes one page version), and the scheduler republishes on its
+        // own tick as the backstop. A button that only duplicates that is one more thing to explain.
+        $('<button class="jita-btn" id="ld-refresh" title="Re-read the shared ledger and rebuild THIS tab (the wiki tab also re-scans the page tree). Changes nothing for anyone else.">Refresh</button>')
+            .on('click', function () { U._load(true); }).appendTo($foot);
+        U._render();
+        U._load(false);
+        // Resolve the QC month alongside the wiki queue rather than waiting for the tab to be clicked, so
+        // both halves of the month are ready together and switching tabs just paints.
+        U._warmQc().catch(function () { /* the tab surfaces the error properly when it is opened */ });
+        // One cheap read so the Follow-ups tab carries its count from the moment the overlay opens, whichever
+        // tab is showing - an open flag from another Lead should not need a click to be noticed.
+        L.ledger.read(L.QC_LEDGER_KEY).then(function (cur) { if (U.isOpen()) { U._tabCount(cur.value); } },
+            function () { /* Confluence unreachable - the tab just stays uncounted */ });
+    },
+
+    _status: function (msg) {
+        var el = document.getElementById('ld-status');
+        if (el) { el.textContent = msg || ''; }
+    },
+    _body: function () { return $('#ld-body'); },
+
+    _load: function (force) {
+        var L = JiTA.leadduty, U = L.ui;
+        if (!U.isOpen()) { return; }
+        if (U._tab === 'wiki') { U._loadWiki(force); }
+        else if (U._tab === 'flags') { U._loadFlags(force); }
+        else { U._loadQc(force); }
+    },
+
+    // Put the open-follow-up count on the tab itself, so a flag another Lead raised is visible without
+    // clicking through. Called by whichever load path happens to have read the QC ledger.
+    _tabCount: function (ledgerValue) {
+        var n = JiTA.leadduty.qc.openFlags(ledgerValue).length;
+        $('#jita-menu.jita-leadduty-view .ld-tab[data-tab="flags"]').text(n ? ('Follow-ups (' + n + ')') : 'Follow-ups');
+    },
+
+    _loadWiki: function (force) {
+        var L = JiTA.leadduty, U = L.ui, ym = L._ym();
+        U._status('Loading the wiki queue…');
+        U._body().empty().append($('<div class="ld-empty">Reading the Confluence ledger…</div>'));
+        var chain = force ? L.pool.ensureFresh(true) : Promise.resolve(null);
+        chain.then(function () { return L.wiki.claimMonth(ym); }).then(function (res) {
+            if (!U.isOpen()) { return; }
+            U._wiki = res;
+            var me = (L.me() && L.me().handle) || null;
+            var ids = (res.record.assign && res.record.assign[me]) || [];
+            var rec = { ym: ym, perLead: res.record.perLead, pageIds: ids, done: {}, pending: [] };
+            var ledgerDone = (res.ledgerValue && res.ledgerValue.done && res.ledgerValue.done[ym]) || {};
+            ids.forEach(function (id) { if (ledgerDone[id]) { rec.done[id] = ledgerDone[id].at; } });
+            return L.local.get(L.wiki.localKey(ym)).then(function (prev) {
+                if (prev && prev.pending) { rec.pending = prev.pending; }
+                if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!rec.done[k]) { rec.done[k] = prev.done[k]; } }); }
+                // A mark made while Confluence was unreachable lives only in the local mirror; surface it as
+                // done so the row doesn't look unactioned until flushPending() gets through.
+                U._wikiLocalDone = rec.done;
+                return L.local.put(L.wiki.localKey(ym), rec);
+            }).then(function () { U._renderWiki(); });
+        }).catch(function (e) {
+            if (!U.isOpen()) { return; }
+            U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
+            U._status('');
+        });
+    },
+
+    _renderWiki: function () {
+        var L = JiTA.leadduty, U = L.ui, res = U._wiki;
+        if (!res || !U.isOpen()) { return; }
+        var ym = L._ym(), me = (L.me() && L.me().handle) || null;
+        var $b = U._body().empty();
+        var byId = L.pool.byId(res.pool);
+        var ledgerDone = (res.ledgerValue && res.ledgerValue.done && res.ledgerValue.done[ym]) || {};
+        var last = (res.ledgerValue && res.ledgerValue.lastReviewed) || {};
+        var by = (res.ledgerValue && res.ledgerValue.reviewedBy) || {};
+        var ids = (res.record.assign && res.record.assign[me]) || [];
+
+        $('<div class="ld-sub"></div>').text('Proof-read these ' + ids.length + ' page' + (ids.length === 1 ? '' : 's') + ' this month (' + ym + ')').appendTo($b);
+
+        // A Lead who joined after the month was frozen has no slice in this record. Say so plainly rather
+        // than rendering an empty list that looks broken.
+        if (!me) {
+            $b.append($('<div class="ld-empty">Your Jira display name does not match any roster handle, so no pages could be assigned.</div>'));
+        } else if (!ids.length && res.record.roster && res.record.roster.indexOf(me) < 0) {
+            $b.append($('<div class="ld-empty"></div>').text('You joined after this month’s rotation was set (it was cut for ' +
+                res.record.roster.join(', ') + '). Your first assignment is next month.'));
+        } else if (!ids.length) {
+            $b.append($('<div class="ld-empty">Nothing assigned this month.</div>'));
+        }
+        if (res.record.roster && me && res.record.roster.length !== L.ROSTER().length) {
+            $b.append($('<div class="ld-warn"></div>').text('This month was frozen with a roster of ' + res.record.roster.length +
+                ' (' + res.record.roster.join(', ') + ') but your script lists ' + L.ROSTER().length + '. First writer wins; the split above is the shared one.'));
+        }
+
+        var localDone = U._wikiLocalDone || {};
+        var doneCount = 0;
+        ids.forEach(function (id) {
+            var page = byId[id];
+            var done = ledgerDone[id] || (localDone[id] ? { by: me, at: localDone[id], local: true } : null);
+            if (done) { doneCount++; }
+            var $row = $('<div class="ld-row' + (done ? ' done' : '') + '"></div>').appendTo($b);
+            $('<span class="ld-tick"></span>').text(done ? (done.skipped ? '–' : '✓') : '').appendTo($row);
+            if (page) {
+                $('<a class="ld-title" target="_blank" rel="noopener"></a>')
+                    .attr('href', JiTA.conf.pageUrl(id)).text(page.title).appendTo($row);
+            } else {
+                $('<span class="ld-title ld-gone">(page deleted or moved out of the tree)</span>').appendTo($row);
+            }
+            var age = L._monthsSince(last[id]);
+            var meta = !last[id] ? 'never reviewed'
+                : ('last reviewed ' + last[id] + (by[id] ? (' by ' + by[id]) : '') + (age != null ? (' · ' + age + ' month' + (age === 1 ? '' : 's') + ' ago') : ''));
+            $('<span class="ld-meta"></span>').text(meta).appendTo($row);
+            var $act = $('<span class="ld-act"></span>').appendTo($row);
+            if (!done) {
+                $('<button class="jita-btn ld-mini">Mark reviewed</button>').on('click', function () {
+                    U._act(this, L.wiki.markReviewed(id, ym), L.wiki.localKey(ym), id, function () { U._loadWiki(false); });
+                }).appendTo($act);
+                $('<button class="jita-btn ld-mini" title="Record it as handled without stamping it as read (deleted page, no access)">Skip</button>').on('click', function () {
+                    U._act(this, L.wiki.skip(id, ym), L.wiki.localKey(ym), id, function () { U._loadWiki(false); });
+                }).appendTo($act);
+            }
+        });
+
+        var st = L.wiki.stats(res.pool, res.ledgerValue);
+        var bits = [doneCount + ' of ' + ids.length + ' done', L._poolLine(res.pool),
+            st.covered + ' on ' + st.eyes + ' pairs of eyes', st.single + ' waiting on a second',
+            st.never + ' never reviewed'];
+        if (st.oldestMonths != null) { bits.push('oldest ' + st.oldestMonths + ' month' + (st.oldestMonths === 1 ? '' : 's')); }
+        if (st.overdue) { bits.push(st.overdue + ' overdue (>' + st.coverage + ' months)'); }
+        if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
+        U._status(bits.join(' · '));
+    },
+
+    // Resolve the QC month WITHOUT touching the UI, so the overlay can start it the moment it opens rather
+    // than when the tab is clicked. The month itself is frozen by the scheduler, so this is normally one
+    // targeted key lookup; it is only a real crawl on the first run of a new month. Single-flight, and it
+    // never overwrites a result _loadQc has already stored.
+    _qcWarm: null,
+    _warmQc: function () {
+        var L = JiTA.leadduty, U = L.ui, ym = L._prevYm();
+        if (U._qc && U._qc.ym === ym) { return Promise.resolve(U._qc); }
+        if (U._qcWarm) { return U._qcWarm; }
+        U._qcWarm = L.qc.claimMonth(ym).then(function (res) {
+            U._qcWarm = null;
+            if (U.isOpen() && !U._qc) { U._qc = res; }
+            return res;
+        }, function (e) { U._qcWarm = null; throw e; });
+        return U._qcWarm;
+    },
+
+    _loadQc: function (force) {
+        var L = JiTA.leadduty, U = L.ui, ym = L._prevYm();
+        U._status('Sampling ' + ym + '…');
+        U._body().empty().append($('<div class="ld-empty">Fetching last month’s reports and defects…</div>'));
+        if (force) { U._qc = null; U._qcWarm = null; }
+        // Usually already resolved (or in flight) from the warm the overlay kicked off on open, so clicking
+        // the tab just paints.
+        var cached = U._warmQc();
+        cached.then(function (res) {
+            if (!U.isOpen()) { return; }
+            U._qc = res;
+            var rec = { ym: ym, quota: res.record.quota, items: res.items.map(function (i) { return i.key; }), done: {}, pending: [] };
+            Object.keys(res.done || {}).forEach(function (k) { rec.done[k] = res.done[k].at; });
+            return L.local.get(L.qc.localKey(ym)).then(function (prev) {
+                if (prev && prev.pending) { rec.pending = prev.pending; }
+                if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!rec.done[k]) { rec.done[k] = prev.done[k]; } }); }
+                U._qcLocalDone = rec.done;   // see the note in _loadWiki: shows marks the ledger hasn't taken yet
+                return L.local.put(L.qc.localKey(ym), rec);
+            }).then(function () { U._renderQc(); });
+        }).catch(function (e) {
+            if (!U.isOpen()) { return; }
+            U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
+            U._status('');
+        });
+    },
+
+    _renderQc: function () {
+        var L = JiTA.leadduty, U = L.ui, res = U._qc;
+        if (!res || !U.isOpen()) { return; }
+        var ym = res.ym, $b = U._body().empty();
+        var me = (L.me() && L.me().handle) || null;
+
+        $('<div class="ld-sub"></div>').text('Check how these were handled in ' + ym).appendTo($b);
+        if (!res.items.length) {
+            $b.append($('<div class="ld-empty">Nothing sampled for you this month.</div>'));
+        }
+        if (res.record.quota < L.qcCount()) {
+            $b.append($('<div class="ld-warn"></div>').text('Only ' + res.record.quota + ' of ' + L.qcCount() +
+                ' available for you this month (pool of ' + res.record.poolSize + ' across ' + res.record.roster.length + ' Leads).'));
+        }
+        if (!res.shared) {
+            $b.append($('<div class="ld-warn">Computed locally - Confluence was unreachable, so this sample has not been shared with the other Leads yet.</div>'));
+        }
+
+        var qcLocalDone = U._qcLocalDone || {};
+        var doneCount = 0;
+        res.items.forEach(function (it) {
+            var done = res.done[it.key] || (qcLocalDone[it.key] ? { by: me, at: qcLocalDone[it.key], local: true } : null);
+            if (done) { doneCount++; }
+            // ld-qc puts the key / type / status / handler in fixed-width columns, so ten rows read as a
+            // table instead of four ragged edges that shift with every summary length.
+            var $row = $('<div class="ld-row ld-qc' + (done ? ' done' : '') + (done && done.verdict === 'flag' ? ' flagged' : '') + '"></div>').appendTo($b);
+            $('<span class="ld-tick"></span>').text(done ? (done.verdict === 'flag' ? '!' : '✓') : '').appendTo($row);
+            // No type chip: the key already says which it is - EBR is a report, EDR / EO / PLAT a defect.
+            $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
+                .attr('href', JiTA.HOST + '/browse/' + it.key).text(it.key).appendTo($row);
+            $('<span class="ld-sum"></span>').attr('title', it.summary || '').text(it.summary || '').appendTo($row);
+            // The status cell is always present, even when the status is unknown, or the column collapses on
+            // that row and the handler beside it jumps left.
+            var $stcol = $('<span class="ld-stcol"></span>').appendTo($row);
+            if (it.status) { $('<span class="ld-st"></span>').text(it.status).appendTo($stcol); }
+            // Whose decision is being graded: for a report, whoever moved it to Attached / Closed; for a
+            // defect, whoever created it. Both come with the frozen month now, and a recorded verdict carries
+            // the name too, so the changelog read is only ever a fallback for a month frozen by an older
+            // build - and even then it fills in behind the row rather than delaying it.
+            var $who = $('<span class="ld-who"></span>').text('…').appendTo($row);
+            function paintWho(name) { $who.text(name || '').attr('title', name || ''); }   // title: the column truncates a long name
+            if (done && done.actor) { it.actor = done.actor; paintWho(done.actor); }
+            else if (it.actor) { paintWho(it.actor); }
+            else {
+                L.qc.actor(it).then(function (name) {
+                    if (!U.isOpen()) { return; }
+                    it.actor = name;
+                    paintWho(name);
+                });
+            }
+            // Hover preview on every row. A DEFECT is free - EO/PLAT/EDR are all synced locally, whatever
+            // their status - but a sampled REPORT never is: the local DB holds only OPEN bug reports, and the
+            // sample is by definition reports that were Attached or Closed, so the lookup always misses. That
+            // is why reports used to have no card at all. _showTip does not actually need the DB though: it
+            // fetches the RENDERED description from Jira itself (cached per key) and paints it in, so the DB
+            // record is only a head start. Hand it what we have and let it fill in the rest.
+            $row.on('mouseenter', function () {
+                var self = this;
+                function tip(r) {
+                    JiTA.ui._showTip({
+                        key: it.key, summary: (r && r.summary) || it.summary,
+                        description: (r && r.description) || '', created: (r && r.created) || it.created
+                    }, self, it.status);
+                }
+                JiTA.db.getDefect(it.key).then(tip, function () { tip(null); });
+            });
+            $row.on('mouseleave', function () { try { JiTA.ui._hideTip(); } catch (e) { /* ignore */ } });
+            var $act = $('<span class="ld-act"></span>').appendTo($row);
+            if (!done) {
+                // Drop the hydrated cache before reloading: the ledger now carries a `done` entry this
+                // snapshot predates, and re-hydrating is cheap (the month is frozen, so it re-reads the
+                // ledger plus one targeted key lookup - it never re-crawls the pool).
+                var reload = function () { U._qc = null; U._loadQc(false); };
+                $('<button class="jita-btn ld-mini">Checked</button>').on('click', function () {
+                    U._act(this, L.qc.markChecked(it.key, 'ok', ym, null, it), L.qc.localKey(ym), it.key, reload);
+                }).appendTo($act);
+                $('<button class="jita-btn ld-mini" title="Raise a follow-up: the other Leads see it under Follow-ups and on the ledger page until someone resolves it">Flag</button>').on('click', function () {
+                    // A flag without a reason is nearly useless to whoever picks it up, so ask for one. An
+                    // empty note still flags (Cancel aborts) - a bare flag beats losing the judgement.
+                    var note = prompt('What is wrong with ' + it.key + '? (shown to the other Leads)', '');
+                    if (note === null) { return; }
+                    U._act(this, L.qc.markChecked(it.key, 'flag', ym, note, it), L.qc.localKey(ym), it.key, reload);
+                }).appendTo($act);
+            }
+        });
+
+        var nDef = 0;
+        res.items.forEach(function (it) { if (it.kind !== 'report') { nDef++; } });
+        var bits = [doneCount + ' of ' + res.items.length + ' checked',
+            nDef + ' defect' + (nDef === 1 ? '' : 's') + ', ' + (res.items.length - nDef) + ' report' + (res.items.length - nDef === 1 ? '' : 's'),
+            'pool ' + res.record.poolSize + ' items'];
+        // The floor is a target, not a promise: say so when the month simply had too few defects to go round.
+        if (res.record.minDefects && nDef < res.record.minDefects) {
+            bits.push('only ' + (res.record.poolDefects != null ? res.record.poolDefects : 'a few') +
+                ' defect(s) created that month, so the floor of ' + res.record.minDefects + ' could not be met');
+        }
+        if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
+        U._status(bits.join(' · '));
+        U._tabCount(res.ledgerValue);
+    },
+
+    // ---- Follow-ups: every open flag, from every Lead and every retained month --------------------------
+    // The reason a flag now exists at all: before this, flagging an item only dimmed one row in the flagger's
+    // own list. Here it is a shared queue anyone can work, and resolving one is what takes it off the page.
+    _loadFlags: function (force) {
+        var L = JiTA.leadduty, U = L.ui;
+        U._status('Reading follow-ups…');
+        U._body().empty().append($('<div class="ld-empty">Reading the Confluence ledger…</div>'));
+        void force;   // nothing is cached here - the ledger read IS the load
+        L.ledger.read(L.QC_LEDGER_KEY).then(function (cur) {
+            if (!U.isOpen()) { return; }
+            U._renderFlags(cur.value);
+        }, function (e) {
+            if (!U.isOpen()) { return; }
+            U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
+            U._status('');
+        });
+    },
+
+    _renderFlags: function (ledgerValue) {
+        var L = JiTA.leadduty, U = L.ui;
+        var $b = U._body().empty();
+        var open = L.qc.openFlags(ledgerValue);
+        U._tabCount(ledgerValue);
+
+        $('<div class="ld-sub"></div>').text('Open follow-ups, by the person who handled them').appendTo($b);
+        if (!open.length) {
+            $b.append($('<div class="ld-empty">Nothing is waiting on anyone. Flagging an item during quality control puts it here until a Lead resolves it.</div>'));
+        }
+
+        // Grouped per Bug Hunter, because the output of this tab is a conversation with a person, not a list
+        // of issues: one note covering everything they got wrong this month, ready to paste.
+        L.qc.groupFlags(ledgerValue).forEach(function (g) {
+            var $g = $('<div class="ld-group"></div>').appendTo($b);
+            var $head = $('<div class="ld-ghead"></div>').appendTo($g);
+            $('<span class="ld-gname"></span>').text(g.name).appendTo($head);
+            $('<span class="ld-gcount"></span>')
+                .text(g.entries.length + ' open follow-up' + (g.entries.length === 1 ? '' : 's')).appendTo($head);
+            var $gact = $('<span class="ld-act"></span>').appendTo($head);
+
+            // The message: hidden until asked for, editable once shown, and copied from whatever is in the
+            // box at the time - so a Lead can soften or sharpen it before it reaches anyone.
+            var $msg = $('<textarea class="ld-msg" spellcheck="false"></textarea>')
+                .val(L.qc.followUpText(g)).hide().appendTo($g);
+            var $toggle = $('<button class="jita-btn ld-mini" title="Show the message so you can edit it before copying">Edit text</button>')
+                .on('click', function () {
+                    $msg.toggle();
+                    $toggle.text($msg.is(':visible') ? 'Hide text' : 'Edit text');
+                    if ($msg.is(':visible')) { $msg[0].style.height = Math.min(420, $msg[0].scrollHeight + 8) + 'px'; }
+                }).appendTo($gact);
+            $('<button class="jita-btn ld-mini" title="Copy a message listing every open follow-up for this person">Copy message</button>')
+                .on('click', function () {
+                    var $btn = $(this);
+                    U._copy($msg.val()).then(function () { U._flashBtn($btn, 'Copied'); },
+                        function () { $msg.show(); $toggle.text('Hide text'); $msg.trigger('select'); U._status('Could not reach the clipboard - the text is selected, copy it with Ctrl+C.'); });
+                }).appendTo($gact);
+
+            g.entries.forEach(function (o) {
+                var f = o.flag;
+                var $row = $('<div class="ld-row flagged"></div>').appendTo($g);
+                $('<span class="ld-tick"></span>').text('!').appendTo($row);
+                $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
+                    .attr('href', JiTA.HOST + '/browse/' + o.key).text(o.key).appendTo($row);
+                $('<span class="ld-sum"></span>').text(f.note || f.summary || '(no reason given)').appendTo($row);
+                $('<span class="ld-meta"></span>')
+                    .text('flagged by ' + (f.by || '?') + ' · ' + String(f.at || '').slice(0, 10) + ' · from ' + (f.ym || '?')).appendTo($row);
+                var $act = $('<span class="ld-act"></span>').appendTo($row);
+                $('<button class="jita-btn ld-mini" title="Close this follow-up out - it leaves the list and the ledger page">Resolve</button>')
+                    .on('click', function () {
+                        var note = prompt('What was done about ' + o.key + '? (optional)', '');
+                        if (note === null) { return; }
+                        var $btn = $(this).prop('disabled', true);
+                        L.qc.resolveFlag(o.key, note).then(function () { U._loadFlags(false); },
+                            function (e) { $btn.prop('disabled', false); U._status('Could not resolve: ' + String(e && e.message || e)); });
+                    }).appendTo($act);
+            });
+        });
+
+        // A short tail of what was recently closed out, so "did anyone deal with that?" has an answer here
+        // rather than only in the page history.
+        var flags = (ledgerValue && ledgerValue.flags) || {};
+        var done = Object.keys(flags).filter(function (k) { return flags[k] && flags[k].resolvedAt; })
+            .sort(function (a, c) { return flags[a].resolvedAt < flags[c].resolvedAt ? 1 : -1; }).slice(0, 15);
+        if (done.length) {
+            $('<div class="ld-sub" style="margin-top:14px;"></div>').text('Recently resolved').appendTo($b);
+            done.forEach(function (k) {
+                var f = flags[k];
+                var $row = $('<div class="ld-row done"></div>').appendTo($b);
+                $('<span class="ld-tick"></span>').text('✓').appendTo($row);
+                $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
+                    .attr('href', JiTA.HOST + '/browse/' + k).text(k).appendTo($row);
+                $('<span class="ld-sum"></span>').text(f.outcome || f.note || '').appendTo($row);
+                $('<span class="ld-meta"></span>')
+                    .text('resolved by ' + (f.resolvedBy || '?') + ' · ' + String(f.resolvedAt || '').slice(0, 10)).appendTo($row);
+            });
+        }
+
+        var people = L.qc.groupFlags(ledgerValue).length;
+        U._status(open.length + ' open across ' + people + ' ' + (people === 1 ? 'person' : 'people') +
+            ' · ' + done.length + ' recently resolved' + (L._dry() ? ' · DRY RUN - nothing is written' : ''));
+    },
+
+    // Copy to the clipboard, falling back to the old selection + execCommand path where the async API is
+    // unavailable or refused (it needs a secure context and a user gesture; a button click is one, but a
+    // browser policy can still say no). Rejects so the caller can show the text and let Ctrl+C finish it.
+    _copy: function (text) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); }
+        } catch (e) { /* fall through */ }
+        return new Promise(function (resolve, reject) {
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                var ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (ok) { resolve(); } else { reject(new Error('copy refused')); }
+            } catch (e2) { reject(e2); }
+        });
+    },
+
+    // Brief "it worked" on a button, then back to its own label. Cheaper to read than a status line that
+    // the eye is nowhere near when the button is clicked.
+    _flashBtn: function ($btn, msg) {
+        var was = $btn.text();
+        $btn.text(msg).prop('disabled', true);
+        setTimeout(function () { $btn.text(was).prop('disabled', false); }, 1400);
+    },
+
+    // Run a ledger write from a row button: disable it, and on failure keep the mark locally so
+    // flushPending() can replay it when Confluence comes back.
+    _act: function (btn, promise, localKey, id, after) {
+        var L = JiTA.leadduty, U = L.ui;
+        var $btn = $(btn);
+        $btn.prop('disabled', true);
+        promise.then(function (r) {
+            return L.local.mark(localKey, id, !(r && r.dry)).then(function () {
+                if (r && r.dry) { U._status('DRY RUN - not written to Confluence'); }
+                after();
+            });
+        }, function (e) {
+            return L.local.mark(localKey, id, false).then(function () {
+                U._status('Saved locally only - ' + String(e && e.message || e) + ' It will be retried automatically.');
+                after();
+            });
+        }).catch(function () { $btn.prop('disabled', false); });
+    },
+
+    _render: function () {
+        var U = JiTA.leadduty.ui;
+        $('#jita-menu.jita-leadduty-view .ld-tab').each(function () {
+            $(this).toggleClass('on', $(this).attr('data-tab') === U._tab);
+        });
+        U._load(false);
+    },
+
+    _injectCss: function () {
+        var U = JiTA.leadduty.ui;
+        if (U._cssInjected) { return; }
+        U._cssInjected = true;
+        try {
+            GM_addStyle(
+                '#jita-menu.jita-leadduty-view { width: 1180px; max-width: 96vw; display: flex; flex-direction: column; overflow: hidden; }' +
+                '.jita-leadduty-view .ld-tabs { flex: 0 0 auto; display: flex; gap: 6px; padding: 8px 16px 0; border-bottom: 1px solid #3a434d; }' +
+                '.jita-leadduty-view .ld-tab { background: transparent; color: #9aa6b2; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; padding: 7px 14px; cursor: pointer; font-size: 12px; }' +
+                '.jita-leadduty-view .ld-tab:hover { color: #e6e6e6; }' +
+                '.jita-leadduty-view .ld-tab.on { background: #22272b; color: #e6e6e6; border-color: #3a434d; font-weight: 700; }' +
+                '.jita-leadduty-view .ld-scroll { flex: 1 1 auto; min-height: 0; max-height: 70vh; overflow-y: auto; padding: 10px 16px; }' +
+                '.jita-leadduty-view .ld-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #3a434d; background: #282d33; }' +
+                '.jita-leadduty-view .ld-muted, .jita-leadduty-view #ld-status { color: #9aa6b2; font-size: 11px; flex: 1; }' +
+                '.jita-leadduty-view .ld-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
+                '.jita-leadduty-view .ld-warn { color: #f0b429; font-size: 11px; padding: 6px 0 10px; }' +
+                '.jita-leadduty-view .ld-sub { color: #9aa6b2; font-size: 12px; font-weight: 600; margin: 4px 0 8px; }' +
+                '.jita-leadduty-view .ld-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid #2c333a; font-size: 12px; }' +
+                '.jita-leadduty-view .ld-row.done { opacity: .5; }' +
+                '.jita-leadduty-view .ld-row.flagged { opacity: .8; }' +
+                '.jita-leadduty-view .ld-tick { flex: 0 0 14px; color: #4caf7d; font-weight: 700; }' +
+                '.jita-leadduty-view .ld-row.flagged .ld-tick { color: #f0b429; }' +
+                '.jita-leadduty-view .ld-title { color: #4c9aff; text-decoration: none; overflow-wrap: anywhere; }' +
+                '.jita-leadduty-view .ld-title:hover { text-decoration: underline; }' +
+                '.jita-leadduty-view .ld-key { font-weight: 700; flex: 0 0 auto; }' +
+                '.jita-leadduty-view .ld-gone { color: #9aa6b2; font-style: italic; }' +
+                '.jita-leadduty-view .ld-meta { color: #7a8694; font-size: 11px; margin-left: auto; flex: 0 0 auto; }' +
+                '.jita-leadduty-view .ld-sum { color: #e6e6e6; flex: 1 1 auto; overflow-wrap: anywhere; }' +
+                '.jita-leadduty-view .ld-st { background: #3a434d; color: #cfd6dd; border-radius: 8px; padding: 0 7px; font-size: 10px; flex: 0 0 auto; }' +
+                '.jita-leadduty-view .ld-act { display: flex; gap: 6px; flex: 0 0 auto; }' +
+                // Quality control reads as a table: fixed columns for the key, status and handler, with only
+                // the summary elastic (it ellipses rather than wrapping, so every row is one line high and
+                // the columns to its right stay put). The full text is on the title attribute.
+                '.jita-leadduty-view .ld-qc .ld-key { flex: 0 0 88px; }' +
+                '.jita-leadduty-view .ld-qc .ld-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-qc .ld-stcol { flex: 0 0 76px; }' +
+                '.jita-leadduty-view .ld-qc .ld-who { flex: 0 0 150px; color: #7a8694; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-mini { font-size: 10px; padding: 3px 8px; }' +
+                '.jita-leadduty-view .ld-group { border: 1px solid #2c333a; border-radius: 6px; padding: 4px 10px 6px; margin-bottom: 10px; }' +
+                '.jita-leadduty-view .ld-ghead { display: flex; align-items: center; gap: 10px; padding: 7px 0; }' +
+                '.jita-leadduty-view .ld-gname { color: #e6e6e6; font-weight: 700; font-size: 13px; }' +
+                '.jita-leadduty-view .ld-gcount { color: #7a8694; font-size: 11px; flex: 1 1 auto; }' +
+                '.jita-leadduty-view .ld-msg { width: 100%; box-sizing: border-box; min-height: 120px; margin: 2px 0 8px; padding: 8px 10px; background: #14181b; color: #cfd6dd; border: 1px solid #3a434d; border-radius: 5px; font: 12px/1.5 Consolas, "Courier New", monospace; resize: vertical; }' +
+                '.jita-leadduty-view .ld-msg:focus { outline: none; border-color: #4c9aff; }'
+            );
+        } catch (e) { /* ignore */ }
+    }
+};
+
+
+/* ---- Lead duties: the ambient monthly reminder -------------------------------------------------------
+ * A chip that comes BACK every 24h until the month's duties are done, rather than a permanent badge (a
+ * once-a-month task behind an always-lit badge becomes wallpaper within a week) or a one-shot monthly
+ * dismissal (too easy to lose). It sits above the ISD credits badge, which owns bottom:16px.
+ */
+JiTA.leadduty.reminder = {
+    ID: 'jita-leadduty-chip',
+
+    shouldShow: function () {
+        var L = JiTA.leadduty;
+        if (JITA_IS_FORGE_FRAME || !L.isLead()) { return false; }
+        var snoozed = gmGet(L.SNOOZE_KEY, 0) || 0;
+        return (Date.now() - snoozed) > L.SNOOZE_MS;
+    },
+
+    mount: function () {
+        var L = JiTA.leadduty, R = L.reminder;
+        if (!R.shouldShow()) { R.remove(); return; }
+        L.outstanding().then(function (o) {
+            if (!R.shouldShow()) { R.remove(); return; }
+            // Nothing outstanding for a month we HAVE computed: stay quiet entirely.
+            if (o.known && o.pages === 0 && o.checks === 0) { R.remove(); return; }
+            R._paint('📋 Lead duties: ' + R._summary(o));
+        }).catch(function () { /* ignore */ });
+    },
+
+    // The one phrase both the chip and the nudge use, so they can never disagree about what is outstanding.
+    // Counts that are still unknown (a month nothing has frozen yet) fall back to the vaguer wording.
+    _summary: function (o) {
+        var bits = [];
+        if (o.pages) { bits.push(o.pages + ' page review' + (o.pages === 1 ? '' : 's')); }
+        if (o.checks) { bits.push(o.checks + ' QC check' + (o.checks === 1 ? '' : 's')); }
+        return bits.length ? bits.join(', ') : 'due this month';
+    },
+
+    // ---- the once-a-day nudge --------------------------------------------------------------------------
+    // The chip is deliberately quiet, which also means it is easy to work past for a week. So once a day a
+    // Lead with outstanding duties gets an actual dialog, with "Remind me tomorrow" as a first-class answer.
+    // It keeps its OWN quiet-until stamp rather than sharing the chip's: dismissing the loud reminder should
+    // not also take away the quiet one, and the chip's x should not suppress tomorrow's dialog.
+    NAG_DELAY_MS: 12000,        // let the page settle first - a dialog during first paint reads as a glitch
+    SEEN_QUIET_MS: 4 * 60 * 60 * 1000,   // merely SEEING it buys a few hours, so reloads and other tabs stay quiet
+    _nagged: false,
+
+    nag: function () {
+        var L = JiTA.leadduty, R = L.reminder;
+        if (R._nagged || JITA_IS_FORGE_FRAME || !L.isLead()) { return; }
+        if (Date.now() < (gmGet(L.NAG_KEY, 0) || 0)) { return; }
+        L.outstanding().then(function (o) {
+            if (R._nagged) { return; }
+            if (o.known && o.pages === 0 && o.checks === 0) { return; }   // this month is already done
+            if (JiTA.menu.isOpen()) { return; }   // never rip away an overlay the Lead is working in
+            R._nagged = true;
+            gmSet(L.NAG_KEY, Date.now() + R.SEEN_QUIET_MS);
+
+            var ov = JiTA.menu._openOverlay({ title: 'Lead duties' });
+            var $b = $('<div class="jita-menu-sect"></div>').appendTo(ov.$menu);
+            $('<div style="font-size:14px; font-weight:700; color:#e6e6e6; padding-top:4px;"></div>')
+                .text('You have ' + R._summary(o) + ' outstanding.').appendTo($b);
+            $('<div class="jita-menu-status" style="padding-top:8px;"></div>').text(
+                'Proof-reading the documentation and spot-checking last month\'s handling are split across the ' +
+                'Leads, so the pages and issues assigned to you are yours alone - nobody else picks them up.').appendTo($b);
+            var $a = $('<div class="jita-menu-actions" style="padding-top:12px;"></div>').appendTo($b);
+            $('<button class="jita-btn" style="background:#4c9aff; color:#fff; font-weight:700; border-color:#4c9aff;">Open lead duties</button>')
+                .on('click', function () {
+                    gmSet(L.NAG_KEY, Date.now() + L.SNOOZE_MS);
+                    L.ui.open();   // replaces this overlay
+                }).appendTo($a);
+            $('<button class="jita-btn">Remind me tomorrow</button>')
+                .on('click', function () {
+                    gmSet(L.NAG_KEY, Date.now() + L.SNOOZE_MS);
+                    JiTA.menu.close();
+                }).appendTo($a);
+        }).catch(function () { /* ignore */ });
+    },
+
+    _paint: function (text) {
+        var L = JiTA.leadduty, R = L.reminder;
+        var el = document.getElementById(R.ID);
+        if (!el) {
+            el = document.createElement('div');
+            el.id = R.ID;
+            el.style.cssText = 'position:fixed;z-index:9000;left:16px;bottom:56px;cursor:pointer;display:flex;align-items:center;gap:8px;' +
+                'background:#1a1c1f;color:#e8e8ea;border:1px solid #34373d;border-radius:16px;padding:6px 8px 6px 12px;' +
+                'font:12px/1 "Segoe UI",Roboto,Arial,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.4);user-select:none;';
+            el.title = 'Your monthly Lead duties - click to open';
+            var label = document.createElement('span');
+            label.setAttribute('data-ld', 'label');
+            label.addEventListener('click', function () { JiTA.leadduty.ui.open(); });
+            el.appendChild(label);
+            var x = document.createElement('span');
+            x.textContent = '×';
+            x.title = 'Remind me again tomorrow';
+            x.style.cssText = 'color:#9aa6b2;font-weight:700;padding:0 4px;';
+            x.addEventListener('click', function (e) {
+                e.stopPropagation();
+                gmSet(JiTA.leadduty.SNOOZE_KEY, Date.now());
+                JiTA.leadduty.reminder.remove();
+            });
+            el.appendChild(x);
+            (document.body || document.documentElement).appendChild(el);
+        }
+        var lbl = el.querySelector('[data-ld="label"]');
+        if (lbl) { lbl.textContent = text; }
+    },
+
+    remove: function () {
+        var el = document.getElementById(JiTA.leadduty.reminder.ID);
+        if (el && el.parentNode) { el.parentNode.removeChild(el); }
+    }
+};
+
+
+/* ---- Lead duties: background scheduler ----------------------------------------------------------------
+ * A monthly feature needs no fast cadence: one job, a long interval, and a cross-tab lease so several open
+ * Jira tabs don't all freeze the month at once. Trimmed from JiTA.credits.sched (same lease/backoff idiom).
+ */
+JiTA.leadduty.sched = {
+    INTERVAL_MS: 6 * 60 * 60 * 1000,
+    POLL_MS: 60 * 1000,
+    STARTUP_DELAY_MS: 25 * 1000,
+    LEASE_TTL_MS: 5 * 60 * 1000,
+    FAIL_MS: 30 * 60 * 1000,
+    LAST_KEY: 'leadDutyLastTs',
+    FAIL_KEY: 'leadDutyFailTs',
+    LEASE_KEY: 'leadDutyLease',
+    _timer: null,
+    _running: false,
+
+    _elapsed: function (key, ms) { var last = gmGet(key, 0) || 0; return !last || (Date.now() - last) >= ms; },
+    _lease: function (key, ttl) {
+        var l = gmGet(key, null), now = Date.now();
+        if (!l || !l.ts || (now - l.ts) > ttl || l.tabId === JiTA.sched.tabId) { gmSet(key, { tabId: JiTA.sched.tabId, ts: now }); return true; }
+        return false;
+    },
+    _release: function (key) { var l = gmGet(key, null); if (l && l.tabId === JiTA.sched.tabId) { gmSet(key, null); } },
+
+    tick: function () {
+        var L = JiTA.leadduty, S = L.sched;
+        if (!L.isLead()) { return; }
+        try { L.reminder.mount(); } catch (e) { /* ignore */ }   // cheap, and re-arms the chip across a day boundary
+        if (S._running) { return; }
+        if (!L.rootPage() || !L.ledgerPage()) { return; }        // not configured yet: nothing to do
+        if (!S._elapsed(S.FAIL_KEY, S.FAIL_MS)) { return; }
+        // The six-hourly interval gates the ROUTINE refresh, but not a missing local mirror: without one the
+        // chip cannot count that half of the month, and waiting up to six hours for the next tick is what
+        // made it say "2 page reviews" with no sign of the QC checks until someone opened the tab. A build
+        // that adds a mirror (as the QC one was) therefore fills it in on the next poll, not next session.
+        L._mirrorsReady().then(function (ready) {
+            if (ready && !S._elapsed(S.LAST_KEY, S.INTERVAL_MS)) { return; }
+            if (S._running) { return; }                          // another poll got in while we read the mirrors
+            if (!S._lease(S.LEASE_KEY, S.LEASE_TTL_MS)) { return; }
+            S._run();
+        }, function () { /* local read failed - the next poll tries again */ });
+    },
+
+    // The refresh itself: drain queued marks, freeze BOTH months, mirror both locally so the chip can count,
+    // and republish the readable page. Split out of tick() only so the gating above reads as gating.
+    _run: function () {
+        var L = JiTA.leadduty, S = L.sched;
+        S._running = true;
+        L.flushPending().then(function () {
+            return L.wiki.claimMonth(L._ym());
+        }).then(function (res) {
+            // Refresh the local mirror so the chip's count is right without opening the overlay.
+            var ym = L._ym(), me = (L.me() && L.me().handle) || null;
+            var ids = (res.record.assign && res.record.assign[me]) || [];
+            var ledgerDone = (res.ledgerValue && res.ledgerValue.done && res.ledgerValue.done[ym]) || {};
+            var done = {};
+            ids.forEach(function (id) { if (ledgerDone[id]) { done[id] = ledgerDone[id].at; } });
+            return L.local.get(L.wiki.localKey(ym)).then(function (prev) {
+                // Carry any local-only marks across: a mark made while Confluence was unreachable is not in
+                // the ledger yet, and dropping it here would make the chip count work that is already done.
+                if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!done[k]) { done[k] = prev.done[k]; } }); }
+                return L.local.put(L.wiki.localKey(ym), { ym: ym, perLead: res.record.perLead, pageIds: ids, done: done, pending: (prev && prev.pending) || [] });
+            });
+        }).then(function () {
+            // Freeze the QC month here too. Leaving it to the overlay meant the sample was only ever drawn
+            // when a Lead happened to click the Quality control TAB - so the month could go unsampled well
+            // into the next one, the chip could not count the checks (nothing wrote the local mirror), and
+            // whoever opened that tab first silently decided the split for everyone. Once the month is
+            // frozen this costs one small key lookup per tick; the crawl happens once a month.
+            return L.qc.claimMonth(L._prevYm()).then(function (q) {
+                var qdone = {};
+                Object.keys(q.done || {}).forEach(function (k) { qdone[k] = q.done[k].at; });
+                return L.local.get(L.qc.localKey(q.ym)).then(function (prev) {
+                    if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!qdone[k]) { qdone[k] = prev.done[k]; } }); }
+                    return L.local.put(L.qc.localKey(q.ym), {
+                        ym: q.ym, quota: q.record.quota,
+                        items: q.items.map(function (i) { return i.key; }),
+                        done: qdone, pending: (prev && prev.pending) || []
+                    });
+                });
+            }, function (e) {
+                // A QC failure must not cost the wiki half its refresh: the wiki month is already frozen and
+                // mirrored by this point, so swallow it and let the next tick retry the sample.
+                JiTA.dlog('[JiTA] leadduty: QC month not claimed this tick: ' + (e && e.message || e));
+            });
+        }).then(function () {
+            // Keep the readable page in step with the ledger even when nobody opens the overlay. publish()
+            // is a no-op when nothing changed, so an idle month costs one hash comparison, not a page version.
+            return L.report.publish(false).catch(function () { /* cosmetic - never fails the tick */ });
+        }).then(function () {
+            gmSet(S.LAST_KEY, Date.now());
+            gmSet(S.FAIL_KEY, 0);
+            S._running = false;
+            S._release(S.LEASE_KEY);
+            try { L.reminder.mount(); } catch (e) { /* ignore */ }
+        }).catch(function (e) {
+            gmSet(S.FAIL_KEY, Date.now());   // back off so a misconfigured root doesn't retry every poll
+            S._running = false;
+            S._release(S.LEASE_KEY);
+            JiTA.dlog('[JiTA] leadduty: scheduled refresh failed: ' + (e && e.message || e));
+        });
+    },
+
+    start: function () {
+        var S = JiTA.leadduty.sched;
+        if (S._timer) { return; }
+        try { window.addEventListener('pagehide', function () { S._release(S.LEASE_KEY); }); } catch (e) { /* ignore */ }
+        setTimeout(function () {
+            try { S.tick(); } catch (e) { /* swallow */ }
+            S._timer = setInterval(function () { try { S.tick(); } catch (e2) { /* swallow */ } }, S.POLL_MS);
+        }, S.STARTUP_DELAY_MS);
+    }
+};
+
+
 /* ---- shared ranking worker: one model+index for ALL tabs instead of one per tab -----------------------
  * A userscript can't host a same-origin SharedWorker script (blob/data-URL SharedWorkers don't share across
  * tabs), so we get the same "one instance for everyone" outcome from primitives that DO work: one tab is
@@ -12044,8 +14651,46 @@ JiTA.declutter = {
 
 
 /* ---- init: watch the DOM and (re)inject the panel across Atlassian's React re-renders / SPA nav ---- */
+// Mount the Lead-duties chip + menu command for a Lead. Shared by the Jira boot below and the Confluence
+// boot: the cached verdict (leadDutyMe) arms it synchronously on every load after the first, and resolveMe()
+// re-checks it against Jira shortly after so a first-ever load (or a changed account) lights up a moment later.
+function jitaArmLeadDuties() {
+    var mounted = false;
+    function arm() {
+        if (mounted || !JiTA.leadduty.isLead()) { return; }
+        mounted = true;
+        try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }
+        try { JiTA.leadduty.sched.start(); } catch (e) { /* swallow */ }
+        // The once-a-day dialog, after the page has settled. It checks its own quiet-until stamp, so this
+        // fires at most once per session and at most once a day however many tabs are opened.
+        setTimeout(function () { try { JiTA.leadduty.reminder.nag(); } catch (e) { /* swallow */ } },
+            JiTA.leadduty.reminder.NAG_DELAY_MS);
+        try {
+            if (typeof GM_registerMenuCommand === 'function') {
+                GM_registerMenuCommand('📋 Lead duties…', function () { JiTA.leadduty.ui.open(); });
+            }
+        } catch (e) { /* swallow */ }
+        // If Settings happens to be open on a first-ever load, redraw it so the section appears at once.
+        try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { /* swallow */ }
+    }
+    arm();
+    setTimeout(function () { JiTA.leadduty.resolveMe().then(arm, function () { /* ignore */ }); }, 3000);
+}
+
+
+// ---- Confluence boot: Lead duties and nothing else -------------------------------------------------------
+// No Jira DOM to observe, no issue to parse, no defect sync, and deliberately no worker leader election - a
+// wiki tab must never become the tab that owns the embedding model for everyone.
+if (JITA_IS_WIKI) {
+    (function () {
+        if (!window.indexedDB) { return; }
+        setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { /* swallow */ } }, 1200);
+    })();
+}
+
+
 (function () {
-    if (JITA_IS_FORGE_FRAME) { return; }  // inside the Zendesk Forge iframe we only run the responses dropdown
+    if (JITA_NO_JIRA_UI) { return; }      // Forge iframe runs only the responses dropdown; Confluence only Lead duties (above)
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
     var scheduled = false;
     var observer = new MutationObserver(function () {
@@ -12126,6 +14771,8 @@ JiTA.declutter = {
         try { JiTA.credits.badge.mount(); } catch (e) { /* swallow */ }
         try { JiTA.credits.sched.start(); } catch (e) { /* swallow */ }
     }
+    // ISD Lead duties: Leads only, and there is no feature flag - roster membership IS the gate.
+    jitaArmLeadDuties();
 })();
 
 
@@ -12135,6 +14782,7 @@ JiTA.declutter = {
 // we don't assume which, so the injector simply feature-detects the ticket selector wherever it lives. It's
 // cheap: inject() early-exits unless #ticket-select is present, so it's a no-op in frames without the panel.
 (function () {
+    if (JITA_IS_WIKI) { return; }   // Confluence has no Zendesk panel; don't observe a big wiki page for nothing
     var scheduled = false;
     function tick() { try { JiTA.responses.inject(); } catch (e) { /* ignore */ } }
     // Re-inject across the panel's React re-renders / lazy tab load / ticket switches. The Zendesk tab isn't
