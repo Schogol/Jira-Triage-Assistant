@@ -13695,17 +13695,23 @@ JiTA.leadduty.ui = {
                     paintWho(name);
                 });
             }
-            // Free hover preview for defects: EO/PLAT/EDR are already in the local DB.
-            if (it.kind === 'defect') {
-                $row.on('mouseenter', function () {
-                    var self = this;
-                    JiTA.db.getDefect(it.key).then(function (r) {
-                        if (!r) { return; }
-                        JiTA.ui._showTip({ key: it.key, summary: r.summary || it.summary, description: r.description || '', created: r.created || it.created }, self, it.status);
-                    }).catch(function () { /* no tip */ });
-                });
-                $row.on('mouseleave', function () { try { JiTA.ui._hideTip(); } catch (e) { /* ignore */ } });
-            }
+            // Hover preview on every row. A DEFECT is free - EO/PLAT/EDR are all synced locally, whatever
+            // their status - but a sampled REPORT never is: the local DB holds only OPEN bug reports, and the
+            // sample is by definition reports that were Attached or Closed, so the lookup always misses. That
+            // is why reports used to have no card at all. _showTip does not actually need the DB though: it
+            // fetches the RENDERED description from Jira itself (cached per key) and paints it in, so the DB
+            // record is only a head start. Hand it what we have and let it fill in the rest.
+            $row.on('mouseenter', function () {
+                var self = this;
+                function tip(r) {
+                    JiTA.ui._showTip({
+                        key: it.key, summary: (r && r.summary) || it.summary,
+                        description: (r && r.description) || '', created: (r && r.created) || it.created
+                    }, self, it.status);
+                }
+                JiTA.db.getDefect(it.key).then(tip, function () { tip(null); });
+            });
+            $row.on('mouseleave', function () { try { JiTA.ui._hideTip(); } catch (e) { /* ignore */ } });
             var $act = $('<span class="ld-act"></span>').appendTo($row);
             if (!done) {
                 // Drop the hydrated cache before reloading: the ledger now carries a `done` entry this
