@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.20.0
+// @version     3.20.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -12230,22 +12230,29 @@ JiTA.conf = {
         });
     },
 
-    // Every descendant PAGE of rootId, paginated. Resolves { pages: [{id,title,parentId,depth}], truncated }.
-    // The endpoint also returns folders / whiteboards / databases / embeds and archived content - all filtered
-    // out here. `truncated` flags a tree deeper than the API's depth cap, so the UI can say so rather than
-    // silently omitting a subtree.
+    // Every descendant PAGE of rootId, paginated. Resolves { pages: [{id,title,parentId,depth}], parents,
+    // truncated }. The endpoint also returns folders / whiteboards / databases / embeds and archived content,
+    // which have no place in a proof-reading rotation and are kept out of `pages`.
+    //
+    // `parents` (id -> parentId) is built from EVERY node, whatever its type, and that distinction matters:
+    // it is the ANCESTRY, and a Confluence FOLDER sitting between a page and its section root is still a real
+    // link in that chain. A pages-only chain snaps at the folder, which is how a page under
+    // "Lead Section > Monthly Newsletters > [folder] Newsletters - 2025" read as belonging to no excluded
+    // subtree at all. `truncated` flags a tree deeper than the API's depth cap, so the UI can say so rather
+    // than silently omitting a subtree.
     descendants: function (rootId) {
-        var out = [], seen = {}, truncated = false, guard = 0;
+        var out = [], parents = {}, seen = {}, truncated = false, guard = 0;
         function page(path) {
             if (++guard > 200) { return Promise.resolve(); }   // pathological cursor loop backstop
             return JiTA.conf._ajax('GET', path).then(function (r) {
                 var d = r.data || {}, res = d.results || [];
                 for (var i = 0; i < res.length; i++) {
                     var n = res[i];
+                    var id = String(n.id);
+                    if (n.parentId != null) { parents[id] = String(n.parentId); }   // BEFORE the type filter: folders are chain links
                     if (n.type !== 'page') { continue; }
                     if (n.status && n.status !== 'current') { continue; }
                     if (n.depth >= JiTA.conf.MAX_DEPTH) { truncated = true; }
-                    var id = String(n.id);
                     if (seen[id]) { continue; }
                     seen[id] = true;
                     out.push({ id: id, title: n.title || '(untitled)', parentId: n.parentId != null ? String(n.parentId) : null, depth: n.depth || 0 });
@@ -12256,7 +12263,7 @@ JiTA.conf = {
             });
         }
         return page('/wiki/api/v2/pages/' + encodeURIComponent(rootId) + '/descendants?depth=' + JiTA.conf.MAX_DEPTH + '&limit=' + JiTA.conf.PAGE_LIMIT)
-            .then(function () { return { pages: out, truncated: truncated }; });
+            .then(function () { return { pages: out, parents: parents, truncated: truncated }; });
     },
 
     // Resolves { id, key, value, version } or null when the property doesn't exist yet.
@@ -12711,15 +12718,17 @@ JiTA.leadduty = {
             if (!root) { return Promise.reject(new Error('No wiki root page is set (JiTA.leadduty.ROOT_PAGE).')); }
             return JiTA.db.getMeta(L.pool.CACHE_KEY).catch(function () { return null; }).then(function (cached) {
                 var usable = cached && cached.rootId === root && cached.pages && cached.pages.length;
-                if (!force && usable && (Date.now() - (cached.fetchedAt || 0)) < L.POOL_TTL_MS) {
-                    return L.pool._applyExclusions(cached);
-                }
+                // A record cached before `parents` existed can only walk ancestry through pages, so it cannot
+                // see past a folder and would keep an excluded subtree in the rotation for another day. Treat
+                // it as due for a re-crawl however young it is; it still serves as the outage fallback below.
+                var fresh = usable && cached.parents && (Date.now() - (cached.fetchedAt || 0)) < L.POOL_TTL_MS;
+                if (!force && fresh) { return L.pool._applyExclusions(cached); }
                 return JiTA.conf.descendants(root).then(function (r) {
                     if (!r.pages.length) {
                         if (usable) { return L.pool._applyExclusions(cached); }
                         throw new Error('Root page ' + root + ' has no page descendants. Wrong id, or it is a folder / whiteboard rather than a page.');
                     }
-                    var rec = { fetchedAt: Date.now(), rootId: root, truncated: r.truncated, pages: r.pages };
+                    var rec = { fetchedAt: Date.now(), rootId: root, truncated: r.truncated, pages: r.pages, parents: r.parents };
                     return JiTA.db.setMeta(L.pool.CACHE_KEY, rec)
                         .then(function () { return L.pool._applyExclusions(rec); }, function () { return L.pool._applyExclusions(rec); });
                 }, function (e) {
@@ -12732,24 +12741,37 @@ JiTA.leadduty = {
         // Drop every page that IS an excluded subtree root or sits anywhere beneath one. Ancestry is walked
         // through parentId rather than matched on depth or title, so a page moved or created under an excluded
         // branch later is excluded automatically, with no list to maintain.
+        //
+        // The walk uses the crawl's FULL `parents` map, which includes folders and every other non-page node.
+        // Walking a pages-only map was the bug: the chain snapped at the first folder, and a page three levels
+        // inside the Lead Section came back unexcluded. A record cached before that map existed falls back to
+        // the page links, so an outage-served old cache still excludes whatever it can reach.
         _applyExclusions: function (rec) {
-            var L = JiTA.leadduty, ex = L.EXCLUDE_PAGES || {};
-            var byId = {}, i;
-            for (i = 0; i < rec.pages.length; i++) { byId[rec.pages[i].id] = rec.pages[i]; }
-            function excluded(page) {
-                var cur = page, hops = 0;
+            var L = JiTA.leadduty, ex = L.EXCLUDE_PAGES || {}, i;
+            var parents = rec.parents;
+            if (!parents) {
+                parents = {};
+                for (i = 0; i < rec.pages.length; i++) {
+                    if (rec.pages[i].parentId) { parents[rec.pages[i].id] = rec.pages[i].parentId; }
+                }
+            }
+            function excluded(id) {
+                var cur = id, hops = 0;
                 while (cur && hops++ < 64) {          // hop cap: a malformed parent chain can't spin forever
-                    if (ex[cur.id]) { return true; }
-                    if (!cur.parentId) { return false; }
-                    cur = byId[cur.parentId];         // undefined once we walk past the root: not excluded
+                    if (ex[cur]) { return true; }
+                    cur = parents[cur];               // undefined once we walk past the root: not excluded
                 }
                 return false;
             }
-            var kept = [];
-            for (i = 0; i < rec.pages.length; i++) { if (!excluded(rec.pages[i])) { kept.push(rec.pages[i]); } }
+            var kept = [], excludedIds = {};
+            for (i = 0; i < rec.pages.length; i++) {
+                var p = rec.pages[i];
+                if (excluded(p.id)) { excludedIds[p.id] = true; } else { kept.push(p); }
+            }
             return {
                 fetchedAt: rec.fetchedAt, rootId: rec.rootId, truncated: rec.truncated,
-                pages: kept, rawCount: rec.pages.length, excludedCount: rec.pages.length - kept.length
+                pages: kept, excludedIds: excludedIds,
+                rawCount: rec.pages.length, excludedCount: rec.pages.length - kept.length
             };
         },
 
@@ -12770,6 +12792,19 @@ JiTA.leadduty = {
         perLead: function (poolCount, leadCount) {
             var L = JiTA.leadduty;
             return Math.max(1, Math.ceil(poolCount * L.eyes() / (L.coverageMonths() * Math.max(1, leadCount))));
+        },
+
+        // The pages assigned to ME this month, minus any the pool now EXCLUDES. A frozen month cannot be
+        // re-cut, so without this a page that has since moved under an excluded subtree - or one the
+        // exclusions never caught until the folder-ancestry fix - would sit in the list until the month ends,
+        // as work nobody should be doing. A page that merely VANISHED is deliberately left in: that one wants
+        // a human Skip, and its row says as much.
+        assignedIds: function (record, pool) {
+            var me = (JiTA.leadduty.me() && JiTA.leadduty.me().handle) || null;
+            var ids = (me && record && record.assign && record.assign[me]) || [];
+            var ex = (pool && pool.excludedIds) || null;
+            if (!ex) { return ids.slice(); }
+            return ids.filter(function (id) { return !ex[id]; });
         },
 
         // How many of a page's reviews fall INSIDE the current coverage window: 0, 1 or 2. This is what the
@@ -13961,8 +13996,7 @@ JiTA.leadduty.ui = {
         chain.then(function () { return L.wiki.claimMonth(ym); }).then(function (res) {
             if (!U.isOpen()) { return; }
             U._wiki = res;
-            var me = (L.me() && L.me().handle) || null;
-            var ids = (res.record.assign && res.record.assign[me]) || [];
+            var ids = L.wiki.assignedIds(res.record, res.pool);   // frozen slice, minus anything now excluded
             var rec = { ym: ym, perLead: res.record.perLead, pageIds: ids, done: {}, pending: [] };
             var ledgerDone = (res.ledgerValue && res.ledgerValue.done && res.ledgerValue.done[ym]) || {};
             ids.forEach(function (id) { if (ledgerDone[id]) { rec.done[id] = ledgerDone[id].at; } });
@@ -13990,9 +14024,16 @@ JiTA.leadduty.ui = {
         var ledgerDone = (res.ledgerValue && res.ledgerValue.done && res.ledgerValue.done[ym]) || {};
         var last = (res.ledgerValue && res.ledgerValue.lastReviewed) || {};
         var by = (res.ledgerValue && res.ledgerValue.reviewedBy) || {};
-        var ids = (res.record.assign && res.record.assign[me]) || [];
+        var ids = L.wiki.assignedIds(res.record, res.pool);   // frozen slice, minus anything now excluded
+        var dropped = ((res.record.assign && res.record.assign[me]) || []).length - ids.length;
 
         $('<div class="ld-sub"></div>').text('Proof-read these ' + ids.length + ' page' + (ids.length === 1 ? '' : 's') + ' this month (' + ym + ')').appendTo($b);
+        if (dropped) {
+            // Say it rather than quietly shrinking the list: a Lead who saw four pages yesterday and three
+            // today should know why, and that nothing was lost.
+            $b.append($('<div class="ld-warn"></div>').text(dropped + ' page' + (dropped === 1 ? ' that is' : 's that are') +
+                ' in an excluded section dropped out of this month\'s assignment - they need no review.'));
+        }
 
         // A Lead who joined after the month was frozen has no slice in this record. Say so plainly rather
         // than rendering an empty list that looks broken.
@@ -14571,9 +14612,10 @@ JiTA.leadduty.sched = {
         L.flushPending().then(function () {
             return L.wiki.claimMonth(L._ym());
         }).then(function (res) {
-            // Refresh the local mirror so the chip's count is right without opening the overlay.
-            var ym = L._ym(), me = (L.me() && L.me().handle) || null;
-            var ids = (res.record.assign && res.record.assign[me]) || [];
+            // Refresh the local mirror so the chip's count is right without opening the overlay. Excluded
+            // pages are dropped here too, or the chip would keep counting work the overlay no longer lists.
+            var ym = L._ym();
+            var ids = L.wiki.assignedIds(res.record, res.pool);
             var ledgerDone = (res.ledgerValue && res.ledgerValue.done && res.ledgerValue.done[ym]) || {};
             var done = {};
             ids.forEach(function (id) { if (ledgerDone[id]) { done[id] = ledgerDone[id].at; } });
