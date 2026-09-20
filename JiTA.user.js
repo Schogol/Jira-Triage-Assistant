@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.20.4
+// @version     3.20.5
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -12735,6 +12735,10 @@ JiTA.leadduty = {
             ' different Leads on every page every ' + L.coverageMonths() + ' months)');
         if (pool.fetchedAt) { bits.push('scanned ' + new Date(pool.fetchedAt).toISOString().slice(0, 10)); }
         if (pool.truncated) { bits.push('tree deeper than ' + JiTA.conf.MAX_DEPTH + ' levels - some pages may be missing'); }
+        // An incomplete crawl is otherwise invisible: the untraceable pages just look un-excluded.
+        if (pool.verified === false) {
+            bits.push('INCOMPLETE - ' + pool.holes + ' page(s) could not be traced to the root, so no month will be cut from this crawl');
+        }
         return bits.join(' · ');
     },
 
@@ -12781,19 +12785,41 @@ JiTA.leadduty = {
                 // it as due for a re-crawl however young it is; it still serves as the outage fallback below.
                 var fresh = usable && cached.parents && (Date.now() - (cached.fetchedAt || 0)) < L.POOL_TTL_MS;
                 if (!force && fresh) { return L.pool._applyExclusions(cached); }
-                return JiTA.conf.descendants(root).then(function (r) {
+                return L.pool._crawlOnce(root).then(function (r) {
                     if (!r.pages.length) {
                         if (usable) { return L.pool._applyExclusions(cached); }
                         throw new Error('Root page ' + root + ' has no page descendants. Wrong id, or it is a folder / whiteboard rather than a page.');
                     }
                     var rec = { fetchedAt: Date.now(), rootId: root, truncated: r.truncated, pages: r.pages, parents: r.parents };
+                    var out = L.pool._applyExclusions(rec);
+                    // An incomplete crawl must not become the cache: it would then look FRESH for the next
+                    // 24 hours and every read would inherit its holes. Keep the last good list instead.
+                    if (!out.verified) {
+                        JiTA.dlog('[JiTA] leadduty: discarding an incomplete page-tree crawl (' + out.holes + ' page(s) could not be traced to the root)');
+                        if (usable) { return L.pool._applyExclusions(cached); }
+                        return out;   // nothing better to serve; `verified: false` stops it cutting a month
+                    }
                     return JiTA.db.setMeta(L.pool.CACHE_KEY, rec)
-                        .then(function () { return L.pool._applyExclusions(rec); }, function () { return L.pool._applyExclusions(rec); });
+                        .then(function () { return out; }, function () { return out; });
                 }, function (e) {
                     if (usable) { return L.pool._applyExclusions(cached); }   // keep serving the last good list through an outage
                     throw e;
                 });
             });
+        },
+
+        // ONE crawl at a time, however many callers ask at once. Clear ledger empties the cache, and the
+        // scheduler tick, the overlay and the reminder can all call in within the same second - each of which
+        // used to start its own crawl, and the freeze then consumed whichever happened to resolve for it.
+        // That is the race behind the newsletter: one of those crawls came back short, and a short crawl is
+        // indistinguishable from a complete one unless you check (see the ancestry walk below).
+        _crawl: null,
+        _crawlOnce: function (root) {
+            var P = JiTA.leadduty.pool;
+            if (P._crawl) { return P._crawl; }
+            P._crawl = JiTA.conf.descendants(root).then(function (r) { P._crawl = null; return r; },
+                function (e) { P._crawl = null; throw e; });
+            return P._crawl;
         },
 
         // Drop every page that IS an excluded subtree root or sits anywhere beneath one. Ancestry is walked
@@ -12813,12 +12839,20 @@ JiTA.leadduty = {
                     if (rec.pages[i].parentId) { parents[rec.pages[i].id] = rec.pages[i].parentId; }
                 }
             }
+            // The walk now has to END somewhere it recognises: at an excluded root, or at the crawl root. A
+            // chain that simply runs out is a MISSING LINK, not a page outside the excluded subtrees - and
+            // the difference is invisible, because both read as "excluded by nothing" and the page quietly
+            // joins the rotation. That is how the February 2025 newsletter kept being assigned: its chain
+            // runs through a folder, so one absent node is all it takes. Count them instead of guessing.
+            var root = String(rec.rootId == null ? '' : rec.rootId), holes = 0;
             function excluded(id) {
                 var cur = id, hops = 0;
                 while (cur && hops++ < 64) {          // hop cap: a malformed parent chain can't spin forever
                     if (ex[cur]) { return true; }
-                    cur = parents[cur];               // undefined once we walk past the root: not excluded
+                    if (cur === root) { return false; }   // reached the top of the tree cleanly
+                    cur = parents[cur];
                 }
+                holes++;                              // ran out before the root: this crawl is incomplete
                 return false;
             }
             var kept = [], excludedIds = {};
@@ -12829,6 +12863,10 @@ JiTA.leadduty = {
             return {
                 fetchedAt: rec.fetchedAt, rootId: rec.rootId, truncated: rec.truncated,
                 pages: kept, excludedIds: excludedIds,
+                // `verified` is what a freeze gates on: every page's ancestry resolved, so "not excluded"
+                // genuinely means not excluded rather than not reachable. A degraded pool is still fine to
+                // READ from (see the outage rule in wiki.notExcluded) - it must just never cut a month.
+                verified: holes === 0, holes: holes,
                 rawCount: rec.pages.length, excludedCount: rec.pages.length - kept.length
             };
         },
@@ -12946,6 +12984,14 @@ JiTA.leadduty = {
                     var val = cur.value;
                     if (val && val.months && val.months[ym]) {
                         return { record: val.months[ym], ledgerValue: val, pool: pool, frozen: false };
+                    }
+                    // A month is frozen ONCE and never re-cut, so it must never be cut from a pool whose
+                    // ancestry has holes: a page the walk could not trace reads as excluded by nothing and
+                    // lands in somebody's queue for the rest of the month. Reading is allowed to degrade
+                    // (the month above is returned regardless); cutting is not. The next tick retries.
+                    if (pool.verified === false) {
+                        throw new Error('The page tree came back incomplete (' + pool.holes +
+                            ' page(s) could not be traced to the root), so ' + ym + ' was not cut. It will be retried automatically.');
                     }
                     var roster = L.ROSTER();
                     if (!roster.length) { throw new Error('The Lead roster is empty (JiTA.credits.LEADS).'); }
