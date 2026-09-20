@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.20.1
+// @version     3.20.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8591,6 +8591,32 @@ JiTA.menu = {
             // run would. This destroys real shared state for every Lead - hence the owner gate: it is here to
             // recover from a bad freeze (2026-08's unfiltered QC sample, say), not as a routine control.
             if (JiTA.leadduty.OWNER === ((JiTA.leadduty.me() && JiTA.leadduty.me().handle) || '')) {
+                // The page tree is cached for a day, so a change to EXCLUDE_PAGES - or a fix to how the
+                // ancestry is walked - otherwise takes until tomorrow to show up. This re-crawls now.
+                // NON-destructive, and deliberately not a re-cut: the frozen month keeps its assignment, and
+                // anything the fresh crawl excludes simply drops out of it at read time (wiki.assignedIds).
+                // Owner-gated only to keep the other Leads' settings free of a button they never need.
+                var $rescan = $('<button class="jita-btn" title="Re-crawl the documentation tree now instead of waiting out the 24h cache. Changes no assignment - it only refreshes which pages exist and which are excluded.">Re-scan wiki pool</button>').appendTo($ldAct);
+                $rescan.on('click', function () {
+                    $rescan.prop('disabled', true);
+                    $ldStatus.text('Re-crawling the page tree…');
+                    JiTA.leadduty.pool.ensureFresh(true).then(function (pool) {
+                        // The chip counts from the local mirror, which still lists the pre-crawl assignment.
+                        // Zero the scheduler's clock so its next poll (within a minute) re-mirrors both
+                        // months against the fresh pool, rather than up to six hours from now.
+                        gmSet(JiTA.leadduty.sched.LAST_KEY, 0);
+                        gmSet(JiTA.leadduty.sched.FAIL_KEY, 0);
+                        JiTA.leadduty.ui._wiki = null;
+                        if (!document.getElementById('jita-menu')) { return; }
+                        $rescan.prop('disabled', false);
+                        $ldStatus.text(JiTA.leadduty._poolLine(pool) + ' · the chip re-counts within a minute');
+                    }, function (e) {
+                        if (!document.getElementById('jita-menu')) { return; }
+                        $rescan.prop('disabled', false);
+                        $ldStatus.text(String(e && e.message || e));
+                    });
+                });
+
                 var $wipe = $('<button class="jita-btn" title="Delete both shared ledgers and this browser\'s local mirror, so the month is cut fresh">Clear ledger</button>').appendTo($ldAct);
                 $wipe.on('click', function () {
                     var page = JiTA.leadduty.ledgerPage();
@@ -12381,9 +12407,10 @@ JiTA.leadduty = {
         '199762273': 'ECAID - Lead Section',
         '199759108': 'Feature Ideas and Discussion'
     },
-    // Who maintains this feature. The only thing it gates is the destructive "Clear ledger" button in
-    // Settings, which wipes shared state for every Lead - one roster handle, matched against the resolved
-    // one, so the other Leads never see the button at all.
+    // Who maintains this feature. It gates the two maintenance buttons in Settings - the destructive "Clear
+    // ledger", which wipes shared state for every Lead, and the harmless "Re-scan wiki pool", which is here
+    // only so a change to EXCLUDE_PAGES can be proven in the same minute it is made. One roster handle,
+    // matched against the resolved one, so the other Leads never see either button at all.
     OWNER: 'schogol',
     COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
     // The four-eyes rule: how many DIFFERENT Leads must read each page inside the coverage window. One pair
@@ -12794,17 +12821,26 @@ JiTA.leadduty = {
             return Math.max(1, Math.ceil(poolCount * L.eyes() / (L.coverageMonths() * Math.max(1, leadCount))));
         },
 
-        // The pages assigned to ME this month, minus any the pool now EXCLUDES. A frozen month cannot be
-        // re-cut, so without this a page that has since moved under an excluded subtree - or one the
-        // exclusions never caught until the folder-ancestry fix - would sit in the list until the month ends,
-        // as work nobody should be doing. A page that merely VANISHED is deliberately left in: that one wants
-        // a human Skip, and its row says as much.
+        // Subtract the pages the pool now EXCLUDES from a frozen id list. A frozen month cannot be re-cut,
+        // so this is how an exclusion that arrives after the cut takes effect: at READ time, in every place
+        // the list is shown. Without it a page that has since moved under an excluded subtree - or one the
+        // exclusions never caught until the folder-ancestry fix - sits there until the month ends, as work
+        // nobody should be doing. A page that merely VANISHED is deliberately left in: that one wants a
+        // human Skip, and its row says as much.
+        //
+        // Every consumer goes through here (the overlay, the scheduler's mirror, and the published ledger
+        // page), because they must agree. They did not: the page's Pages table walked rec.assign directly
+        // and kept listing an excluded newsletter as outstanding work after the overlay had dropped it.
+        notExcluded: function (ids, pool) {
+            var ex = (pool && pool.excludedIds) || null;
+            if (!ex) { return (ids || []).slice(); }
+            return (ids || []).filter(function (id) { return !ex[id]; });
+        },
+
+        // The same, for MY slice of a frozen month.
         assignedIds: function (record, pool) {
             var me = (JiTA.leadduty.me() && JiTA.leadduty.me().handle) || null;
-            var ids = (me && record && record.assign && record.assign[me]) || [];
-            var ex = (pool && pool.excludedIds) || null;
-            if (!ex) { return ids.slice(); }
-            return ids.filter(function (id) { return !ex[id]; });
+            return JiTA.leadduty.wiki.notExcluded((me && record && record.assign && record.assign[me]) || [], pool);
         },
 
         // How many of a page's reviews fall INSIDE the current coverage window: 0, 1 or 2. This is what the
@@ -13766,7 +13802,7 @@ JiTA.leadduty = {
                 'the next update - record work through the Lead duties overlay in Jira instead.</em></p>');
 
             out.push(R._flagsSection(qc));
-            out.push(R._wikiSection(wiki, ym, byId));
+            out.push(R._wikiSection(wiki, ym, byId, pool));
             out.push(R._qcSection(qc, pym));
             out.push(R._coverageSection(wiki, pool));
             out.push(R._logSection(wiki, pool));
@@ -13798,16 +13834,21 @@ JiTA.leadduty = {
                 R._table(['Issue', 'Type', 'Summary', 'Handled by', 'Flagged by', 'Flagged', 'From month', 'Reason'], rows);
         },
 
-        _wikiSection: function (wiki, ym, byId) {
+        _wikiSection: function (wiki, ym, byId, pool) {
             var L = JiTA.leadduty, R = L.report;
             var rec = (wiki && wiki.months && wiki.months[ym]) || null;
             var h = '<h2>Wiki review - ' + R._txt(ym) + '</h2>';
             if (!rec) { return h + '<p>This month has not been assigned yet. It is cut the first time any Lead opens the overlay.</p>'; }
             var done = (wiki.done && wiki.done[ym]) || {};
-            var rows = [], counts = {}, total = 0, doneCount = 0;
+            var rows = [], counts = {}, total = 0, doneCount = 0, dropped = 0;
             (rec.roster || []).forEach(function (lead) { counts[lead] = { n: 0, done: 0 }; });
             Object.keys(rec.assign || {}).sort().forEach(function (lead) {
-                (rec.assign[lead] || []).forEach(function (id) {
+                // Through the SAME filter the overlay uses, or this table keeps listing a page the Lead
+                // reading it can no longer see - which is exactly how an excluded newsletter stayed on the
+                // page as outstanding work for a whole month.
+                var ids = L.wiki.notExcluded(rec.assign[lead], pool);
+                dropped += ((rec.assign[lead] || []).length - ids.length);
+                ids.forEach(function (id) {
                     var p = byId[id], d = done[id], status;
                     counts[lead] = counts[lead] || { n: 0, done: 0 };
                     counts[lead].n++; total++;
@@ -13826,6 +13867,10 @@ JiTA.leadduty = {
                 'Cut by ' + R._txt(rec.createdBy || '?') + ' on ' + R._when(rec.createdAt) + '. ' +
                 'Every page is read by ' + R._txt(String(rec.eyes || L.eyes())) + ' different Leads within ' +
                 R._txt(String(L.coverageMonths())) + ' months, and nobody is handed a page they read last time.</p>' +
+                (dropped ? ('<p>' + dropped + ' page' + (dropped === 1 ? '' : 's') +
+                    ' assigned this month turned out to be in an excluded section and ' +
+                    (dropped === 1 ? 'has' : 'have') + ' been dropped from the list above. ' +
+                    'They need no review, and nothing was reassigned in their place.</p>') : '') +
                 R._table(['Lead', 'Assigned', 'Done', 'Outstanding'], sum) +
                 '<h3>Pages</h3>' +
                 R._table(['Page', 'Assigned to', 'Status', 'When'], rows);
