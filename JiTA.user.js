@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.20.1
+// @version     3.20.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8591,6 +8591,32 @@ JiTA.menu = {
             // run would. This destroys real shared state for every Lead - hence the owner gate: it is here to
             // recover from a bad freeze (2026-08's unfiltered QC sample, say), not as a routine control.
             if (JiTA.leadduty.OWNER === ((JiTA.leadduty.me() && JiTA.leadduty.me().handle) || '')) {
+                // The page tree is cached for a day, so a change to EXCLUDE_PAGES - or a fix to how the
+                // ancestry is walked - otherwise takes until tomorrow to show up. This re-crawls now.
+                // NON-destructive, and deliberately not a re-cut: the frozen month keeps its assignment, and
+                // anything the fresh crawl excludes simply drops out of it at read time (wiki.assignedIds).
+                // Owner-gated only to keep the other Leads' settings free of a button they never need.
+                var $rescan = $('<button class="jita-btn" title="Re-crawl the documentation tree now instead of waiting out the 24h cache. Changes no assignment - it only refreshes which pages exist and which are excluded.">Re-scan wiki pool</button>').appendTo($ldAct);
+                $rescan.on('click', function () {
+                    $rescan.prop('disabled', true);
+                    $ldStatus.text('Re-crawling the page tree…');
+                    JiTA.leadduty.pool.ensureFresh(true).then(function (pool) {
+                        // The chip counts from the local mirror, which still lists the pre-crawl assignment.
+                        // Zero the scheduler's clock so its next poll (within a minute) re-mirrors both
+                        // months against the fresh pool, rather than up to six hours from now.
+                        gmSet(JiTA.leadduty.sched.LAST_KEY, 0);
+                        gmSet(JiTA.leadduty.sched.FAIL_KEY, 0);
+                        JiTA.leadduty.ui._wiki = null;
+                        if (!document.getElementById('jita-menu')) { return; }
+                        $rescan.prop('disabled', false);
+                        $ldStatus.text(JiTA.leadduty._poolLine(pool) + ' · the chip re-counts within a minute');
+                    }, function (e) {
+                        if (!document.getElementById('jita-menu')) { return; }
+                        $rescan.prop('disabled', false);
+                        $ldStatus.text(String(e && e.message || e));
+                    });
+                });
+
                 var $wipe = $('<button class="jita-btn" title="Delete both shared ledgers and this browser\'s local mirror, so the month is cut fresh">Clear ledger</button>').appendTo($ldAct);
                 $wipe.on('click', function () {
                     var page = JiTA.leadduty.ledgerPage();
@@ -12381,9 +12407,10 @@ JiTA.leadduty = {
         '199762273': 'ECAID - Lead Section',
         '199759108': 'Feature Ideas and Discussion'
     },
-    // Who maintains this feature. The only thing it gates is the destructive "Clear ledger" button in
-    // Settings, which wipes shared state for every Lead - one roster handle, matched against the resolved
-    // one, so the other Leads never see the button at all.
+    // Who maintains this feature. It gates the two maintenance buttons in Settings - the destructive "Clear
+    // ledger", which wipes shared state for every Lead, and the harmless "Re-scan wiki pool", which is here
+    // only so a change to EXCLUDE_PAGES can be proven in the same minute it is made. One roster handle,
+    // matched against the resolved one, so the other Leads never see either button at all.
     OWNER: 'schogol',
     COVERAGE_MONTHS: 12,         // read the whole section at least this often; drives the derived per-Lead count
     // The four-eyes rule: how many DIFFERENT Leads must read each page inside the coverage window. One pair
