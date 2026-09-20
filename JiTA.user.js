@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.26.3
+// @version     3.26.4
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -12734,7 +12734,12 @@ JiTA.leadduty = {
         if (pool.excludedCount) { bits.push(pool.excludedCount + ' excluded of ' + pool.rawCount + ' crawled'); }
         bits.push(L.wiki.perLead(pool.pages.length, L.ROSTER().length) + ' per Lead per month (' + L.eyes() +
             ' different Leads on every page every ' + L.coverageMonths() + ' months)');
-        if (pool.fetchedAt) { bits.push('scanned ' + new Date(pool.fetchedAt).toISOString().slice(0, 10)); }
+        // To the MINUTE, and in the same format as the page's own "Page tree last scanned" row. The date
+        // alone made the two surfaces impossible to compare: when they disagreed about the pool size there
+        // was no way to see which of them was describing the older crawl.
+        if (pool.fetchedAt) {
+            bits.push('scanned ' + new Date(pool.fetchedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC');
+        }
         if (pool.truncated) { bits.push('tree deeper than ' + JiTA.conf.MAX_DEPTH + ' levels - some pages may be missing'); }
         // An incomplete crawl is otherwise invisible: the untraceable pages just look un-excluded.
         if (pool.verified === false) {
@@ -12801,12 +12806,30 @@ JiTA.leadduty = {
                         return out;   // nothing better to serve; `verified: false` stops it cutting a month
                     }
                     return JiTA.db.setMeta(L.pool.CACHE_KEY, rec)
-                        .then(function () { return out; }, function () { return out; });
+                        .then(function () { return L.pool._crawled(out); }, function () { return L.pool._crawled(out); });
                 }, function (e) {
                     if (usable) { return L.pool._applyExclusions(cached); }   // keep serving the last good list through an outage
                     throw e;
                 });
             });
+        },
+
+        // A new crawl landed, so the ledger PAGE is now out of date - its Coverage table and Review log are
+        // rendered FROM the pool, and a crawl writes nothing to the ledger, so report.tap never fires. That
+        // is the gap behind a page reading "31 pages in rotation" against a Settings line already saying 30:
+        // the numbers are the same expression (pool.pages.length) read at two different moments.
+        //
+        // The Re-scan button already closed this for itself, but it is not the only door: the overlay's
+        // Refresh re-crawls too (_loadWiki passes force), and so does the first open after the 24h cache
+        // expires. Closing it HERE covers all three and any door added later - this is the one place that
+        // knows the pool the page describes has just changed.
+        //
+        // schedule() is debounced and publish() skips on an unchanged hash, so a crawl that found nothing
+        // new costs one hash comparison, not a page version. It cannot recurse: publish() calls
+        // ensureFresh(false), which by then reads a fresh cache and never reaches this line.
+        _crawled: function (out) {
+            try { JiTA.leadduty.report.schedule(); } catch (e) { /* publishing is cosmetic - never fail the crawl */ }
+            return out;
         },
 
         // ONE crawl at a time, however many callers ask at once. Clear ledger empties the cache, and the
@@ -14140,7 +14163,7 @@ JiTA.leadduty.ui = {
         // No "publish" button: the ledger PAGE is rewritten automatically after any change (report.tap ->
         // a 20s debounce, so a run of marks makes one page version), and the scheduler republishes on its
         // own tick as the backstop. A button that only duplicates that is one more thing to explain.
-        $('<button class="jita-btn" id="ld-refresh" title="Re-read the shared ledger and rebuild THIS tab (the wiki tab also re-scans the page tree). Changes nothing for anyone else.">Refresh</button>')
+        $('<button class="jita-btn" id="ld-refresh" title="Re-read the shared ledger and rebuild THIS tab. On the wiki tab it also re-scans the page tree - and because the ledger page reports the pool, a scan that finds a change republishes it. Nobody is assigned anything new.">Refresh</button>')
             .on('click', function () {
                 U._load(true);
                 L.apps.refresh(true).then(function () { U._paintApps(); }, function () { U._paintApps(); });
