@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.22.0
+// @version     3.22.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14564,6 +14564,13 @@ JiTA.leadduty.ui = {
             }
             U._apps = { items: res.items, idx: 0, qa: {}, rows: [], partial: !!res.partial };
             U._renderApps();
+            // The live list is the freshest count there is - let the tab, the footer and the chip catch up
+            // rather than keep quoting an hour-old dashboard number beside it.
+            L.apps.adopt(res).then(function (rec) {
+                if (!rec) { return; }
+                U._paintApps();
+                try { L.reminder.mount(); } catch (e2) { /* ignore */ }
+            });
         }, function (e) {
             if (!U.isOpen() || U._tab !== 'apps') { return; }
             U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
@@ -14968,6 +14975,10 @@ JiTA.leadduty.apps = {
     // HTML fragment -> readable text, keeping the paragraph breaks that carry a long answer's structure.
     _text: function (html) {
         return String(html == null ? '' : html)
+            // Comments FIRST. The applicant cell carries a commented-out avatar div, and stripping tags
+            // before comments eats the "<!--" and the "</div>" but leaves the "-->" behind - which is how
+            // every name in the queue came out reading "--> Makthrraaa".
+            .replace(/<!--[\s\S]*?-->/g, ' ')
             .replace(/<\s*br\s*\/?>/gi, '\n')
             .replace(/<\/\s*(p|div|li)\s*>/gi, '\n\n')
             .replace(/<[^>]*>/g, '')
@@ -15002,6 +15013,23 @@ JiTA.leadduty.apps = {
     },
 
     // One human line for the overlay and the chip.
+    // The queue we just read IS the count: the two stages it covers are exactly the two we count. So a
+    // successful read refreshes the cached number, and the tab, the footer line and the chip stop
+    // disagreeing with the list sitting right next to them (Schogol acted on one in VMS and the tab kept
+    // saying 11 against a list of 10, because the count was the cache's and the list was live).
+    //
+    // A PARTIAL read is deliberately NOT adopted: it would understate the queue, which is the one direction
+    // this feature must never move in.
+    adopt: function (res) {
+        var A = JiTA.leadduty.apps;
+        if (!res || !res.ok || res.partial) { return Promise.resolve(null); }
+        var rec = { ok: true, at: Date.now(), total: res.items.length };
+        A.STAGES.forEach(function (s) {
+            rec[s.key] = res.items.filter(function (it) { return it.stage === s.key; }).length;
+        });
+        return JiTA.db.setMeta(A.CACHE_KEY, rec).then(function () { return rec; }, function () { return rec; });
+    },
+
     // How long somebody has been waiting. The queue holds applications from 2017, and "9y" says that far
     // more usefully than a date does.
     age: function (iso) {
