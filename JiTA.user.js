@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.20.5
+// @version     3.26.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -24,6 +24,7 @@
 // @connect     atlassian.com
 // @connect     translate.googleapis.com
 // @connect     clients5.google.com
+// @connect     volunteers.eveonline.com
 // ==/UserScript==
 /* global $ */
 
@@ -13740,11 +13741,13 @@ JiTA.leadduty = {
         }).catch(function () { /* best effort */ });
     },
 
-    // Outstanding counts for the chip, entirely from local state (no network).
+    // Outstanding counts for the chip, entirely from local state (no network). `apps` is the VMS cache the
+    // scheduler refills on its own schedule - read here, never fetched here, so the chip never waits on a
+    // third-party site to paint.
     outstanding: function () {
         var L = JiTA.leadduty;
         var wym = L._ym(), qym = L._prevYm();
-        return Promise.all([L.local.get(L.wiki.localKey(wym)), L.local.get(L.qc.localKey(qym))]).then(function (r) {
+        return Promise.all([L.local.get(L.wiki.localKey(wym)), L.local.get(L.qc.localKey(qym)), L.apps.read()]).then(function (r) {
             var w = r[0], q = r[1];
             function left(rec, field) {
                 if (!rec || !rec[field]) { return null; }          // not computed yet this month
@@ -13752,7 +13755,7 @@ JiTA.leadduty = {
                 for (var i = 0; i < total; i++) { if (rec.done && rec.done[rec[field][i]]) { done++; } }
                 return total - done;
             }
-            return { pages: left(w, 'pageIds'), checks: left(q, 'items'), known: !!(w || q) };
+            return { pages: left(w, 'pageIds'), checks: left(q, 'items'), apps: r[2], known: !!(w || q) };
         });
     },
 
@@ -14123,15 +14126,27 @@ JiTA.leadduty.ui = {
         $('<button class="ld-tab" data-tab="wiki">Wiki review</button>').appendTo($tabs);
         $('<button class="ld-tab" data-tab="qc">Quality control</button>').appendTo($tabs);
         $('<button class="ld-tab" data-tab="flags" title="Everything any Lead flagged during quality control and nobody has closed out yet">Follow-ups</button>').appendTo($tabs);
+        $('<button class="ld-tab" data-tab="apps" title="Read the applications waiting in VMS here instead of clicking through the site. Read-only - acting on one still happens in VMS.">Applications</button>').appendTo($tabs);
         $tabs.on('click', '.ld-tab', function () { U._tab = $(this).attr('data-tab'); U._render(); });
         $('<div class="ld-scroll" id="ld-body"></div>').appendTo(ov.$menu);
         var $foot = $('<div class="ld-foot"></div>').appendTo(ov.$menu);
         $('<span class="ld-muted" id="ld-status"></span>').appendTo($foot);
+        // Applications live in VMS, not in the ledger, so they get a link rather than a tab: there is
+        // nothing here to mark done. It sits in the footer so it is visible from every tab.
+        $('<a class="ld-apps" id="ld-apps" target="_blank" rel="noopener"></a>')
+            .attr('href', L.apps.URL).attr('title', 'Open the volunteer management dashboard').appendTo($foot);
+        U._paintApps();
+        L.apps.refresh(false).then(function () { U._paintApps(); }, function () { U._paintApps(); });
         // No "publish" button: the ledger PAGE is rewritten automatically after any change (report.tap ->
         // a 20s debounce, so a run of marks makes one page version), and the scheduler republishes on its
         // own tick as the backstop. A button that only duplicates that is one more thing to explain.
         $('<button class="jita-btn" id="ld-refresh" title="Re-read the shared ledger and rebuild THIS tab (the wiki tab also re-scans the page tree). Changes nothing for anyone else.">Refresh</button>')
-            .on('click', function () { U._load(true); }).appendTo($foot);
+            .on('click', function () {
+                U._load(true);
+                L.apps.refresh(true).then(function () { U._paintApps(); }, function () { U._paintApps(); });
+            }).appendTo($foot);
+        U._wireKeys();
+        U._apps = null;   // applicant answers are never kept across an open (see the _apps comment)
         U._render();
         U._load(false);
         // Resolve the QC month alongside the wiki queue rather than waiting for the tab to be clicked, so
@@ -14149,11 +14164,26 @@ JiTA.leadduty.ui = {
     },
     _body: function () { return $('#ld-body'); },
 
+    // The VMS line in the footer. Painted from the cache, so it is instant; whatever refresh is in flight
+    // repaints it when it lands. `warn` is anything we could not read - never a number we guessed.
+    _paintApps: function () {
+        var L = JiTA.leadduty, U = L.ui;
+        if (!U.isOpen()) { return; }
+        L.apps.read().then(function (rec) {
+            var $a = $('#ld-apps');
+            if (!U.isOpen() || !$a.length) { return; }
+            $a.text('VMS: ' + L.apps.line(rec)).toggleClass('warn', !!(rec && !rec.ok));
+            $('#jita-menu.jita-leadduty-view .ld-tab[data-tab="apps"]')
+                .text((rec && rec.ok && rec.total) ? ('Applications (' + rec.total + ')') : 'Applications');
+        });
+    },
+
     _load: function (force) {
         var L = JiTA.leadduty, U = L.ui;
         if (!U.isOpen()) { return; }
         if (U._tab === 'wiki') { U._loadWiki(force); }
         else if (U._tab === 'flags') { U._loadFlags(force); }
+        else if (U._tab === 'apps') { U._loadApps(force); }
         else { U._loadQc(force); }
     },
 
@@ -14512,6 +14542,359 @@ JiTA.leadduty.ui = {
             ' · ' + done.length + ' recently resolved' + (L._dry() ? ' · DRY RUN - nothing is written' : ''));
     },
 
+    // ---- Applications: read the VMS queue here instead of clicking through the site --------------------
+    // Read-only. Acting on an application still happens in VMS (the link on every row), because a POST into
+    // CCP's live recruitment system is a different risk class from reading one.
+    //
+    // NOTHING here is persisted. `_apps` holds the list and the answers in the tab's memory for as long as
+    // the overlay is open and is dropped on the next open - these are somebody's answers to personal
+    // questions, and the rest of this script's storage is for our own data, not theirs.
+    _apps: null,
+
+    _loadApps: function () {
+        var L = JiTA.leadduty, U = L.ui;
+        U._status('Reading the VMS queue…');
+        U._body().empty().append($('<div class="ld-empty">Fetching applications from VMS…</div>'));
+        L.apps.list().then(function (res) {
+            if (!U.isOpen() || U._tab !== 'apps') { return; }
+            if (!res.ok) {
+                U._body().empty().append($('<div class="ld-empty"></div>').text(L.apps.line(res)));
+                U._status('');
+                return;
+            }
+            // `drafts` keeps a half-written note alive while you click between applications, and across a
+            // Refresh - which rebuilds this whole object, so the drafts have to be carried over by hand or
+            // the one button named "Refresh" silently throws away the paragraph you were typing. Memory
+            // only, like everything else here: dropped with the rest on the next open of the overlay.
+            var drafts = (U._apps && U._apps.drafts) || {};
+            var qtab = (U._apps && U._apps.qtab) || {};
+            U._apps = { items: res.items, idx: 0, qa: {}, drafts: drafts, qtab: qtab, rows: [], partial: !!res.partial };
+            U._renderApps();
+            // The live list is the freshest count there is - let the tab, the footer and the chip catch up
+            // rather than keep quoting an hour-old dashboard number beside it.
+            L.apps.adopt(res).then(function (rec) {
+                if (!rec) { return; }
+                U._paintApps();
+                try { L.reminder.mount(); } catch (e2) { /* ignore */ }
+            });
+        }, function (e) {
+            if (!U.isOpen() || U._tab !== 'apps') { return; }
+            U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
+            U._status('');
+        });
+    },
+
+    _renderApps: function () {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps;
+        if (!st || !U.isOpen()) { return; }
+        var $b = U._body().empty();
+        $('<div class="ld-sub"></div>')
+            .text(st.items.length + ' application' + (st.items.length === 1 ? '' : 's') + ' waiting on ' + L.apps.TEAM +
+                ' · oldest first · ↑/↓ to move').appendTo($b);
+        if (st.partial) {
+            $b.append($('<div class="ld-warn">One of the two queues could not be read, so this list may be short - open VMS to be sure.</div>'));
+        }
+        if (!st.items.length) {
+            $b.append($('<div class="ld-empty">Nothing waiting. 🎉</div>'));
+            U._status('');
+            return;
+        }
+        var $wrap = $('<div class="ld-apps-wrap"></div>').appendTo($b);
+        var $list = $('<div class="ld-apps-list"></div>').appendTo($wrap);
+        $('<div class="ld-apps-detail" id="ld-apps-detail"></div>').appendTo($wrap);
+        st.rows = [];
+        st.items.forEach(function (it, i) {
+            var $r = $('<div class="ld-arow"></div>').appendTo($list);
+            $('<div class="ld-aname"></div>').text(it.name).appendTo($r);
+            var $m = $('<div class="ld-ameta"></div>').appendTo($r);
+            $('<span class="ld-astage"></span>').text(it.state || '').appendTo($m);
+            $('<span></span>').text(L.apps.age(it.applied)).appendTo($m);
+            $r.on('click', function () { U._showApp(i); });
+            st.rows.push($r);
+        });
+        U._showApp(st.idx);
+    },
+
+    _showApp: function (i) {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps;
+        if (!st || !st.items.length || !U.isOpen()) { return; }
+        i = Math.max(0, Math.min(st.items.length - 1, i));
+        st.idx = i;
+        (st.rows || []).forEach(function ($r, n) { $r.toggleClass('on', n === i); });
+        var it = st.items[i], $d = $('#ld-apps-detail');
+        if (!$d.length) { return; }
+        $d.empty();
+        var $h = $('<div class="ld-ahead"></div>').appendTo($d);
+        $('<a class="ld-title" target="_blank" rel="noopener"></a>').attr('href', it.url).text(it.name).appendTo($h);
+        if (it.state) { $('<span class="ld-st"></span>').text(it.state).appendTo($h); }
+        $('<span class="ld-meta"></span>')
+            .text('applied ' + (it.applied || '?') + (L.apps.age(it.applied) ? (' · waiting ' + L.apps.age(it.applied)) : '')).appendTo($h);
+        U._status((i + 1) + ' of ' + st.items.length);
+        var cached = st.qa[it.id];
+        if (cached) { U._appActions($h, it, cached.actions); }
+        $('<a class="ld-apps-open" target="_blank" rel="noopener">Open in VMS ↗</a>').attr('href', it.url).appendTo($h);
+        if (cached) { U._paintNotes($d, cached.notes, it, cached.note); U._paintQa($d, cached.sections, it); return; }
+        $('<div class="ld-empty">Loading the application…</div>').appendTo($d);
+        L.apps.detail(it.id).then(function (res) {
+            // The cursor may have moved on while this was in flight - only paint the one still selected.
+            if (!U.isOpen() || U._tab !== 'apps' || !U._apps || U._apps.items[U._apps.idx] !== it) { return; }
+            if (res.ok) { st.qa[it.id] = { sections: res.sections, actions: res.actions, notes: res.notes, note: res.note }; U._showApp(i); }
+            else { $('#ld-apps-detail').find('.ld-empty').text(L.apps.line(res)); }
+        }, function () {
+            if (!U.isOpen() || U._tab !== 'apps') { return; }
+            $('#ld-apps-detail').find('.ld-empty').text('Could not load this application - open it in VMS.');
+        });
+    },
+
+    // The controls VMS rendered for THIS application, in its own words. Nothing is offered that its page
+    // did not offer, and what is shown here is re-read from a fresh fetch before anything is sent.
+    _appActions: function ($h, it, actions) {
+        var L = JiTA.leadduty, U = L.ui;
+        var keys = Object.keys(actions || {});
+        if (!keys.length) { return; }
+        var $bar = $('<span class="ld-aacts"></span>').appendTo($h);
+        keys.forEach(function (key) {
+            var a = actions[key];
+            var $b = $('<button class="jita-btn ld-mini"></button>')
+                .addClass(key === 'decline' ? 'ld-danger' : (key === 'reset' ? 'ld-warnbtn' : ''))
+                .text(a.label).appendTo($bar);
+            $b.on('click', function () { U._armApp(it, key, a, $b); });
+        });
+    },
+
+    // Two presses, always. One keystroke away from telling a real person no is not a margin worth having,
+    // and the wording names which of the two it is - declining notifies the applicant, resetting does not.
+    ARM_MS: 6000,
+    _armApp: function (it, key, a, $b) {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps, armed = st._armed;
+        if (armed && armed.id === it.id && armed.key === key && (Date.now() - armed.at) < U.ARM_MS) {
+            st._armed = null;
+            U._runApp(it, key, $b);
+            return;
+        }
+        st._armed = { id: it.id, key: key, at: Date.now() };
+        $('.ld-aacts .jita-btn').removeClass('armed');
+        $b.addClass('armed');
+        var msg;
+        if (key === 'decline') {
+            msg = '⚠ Decline ' + it.name + "'s application? They WILL be told. Press " + a.label + ' again to confirm.';
+        } else if (key === 'reset') {
+            msg = '⚠ Reset ' + it.name + "'s application? They are not told. Press " + a.label + ' again to confirm.';
+        } else {
+            msg = '⚠ "' + a.label + '" for ' + it.name + '? Press it again to confirm.';
+        }
+        U._status(msg);
+        setTimeout(function () {
+            if (!st._armed || st._armed.id !== it.id || st._armed.key !== key) { return; }
+            st._armed = null;
+            $b.removeClass('armed');
+            if (U.isOpen() && U._tab === 'apps' && st.items.length) { U._status((st.idx + 1) + ' of ' + st.items.length); }
+        }, U.ARM_MS);
+    },
+
+    _runApp: function (it, key, $b) {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps;
+        $b.prop('disabled', true).removeClass('armed');
+        U._status('Sending to VMS…');
+        L.apps.act(it.id, key).then(function (res) {
+            if (!U.isOpen() || U._tab !== 'apps' || U._apps !== st) { return; }
+            $b.prop('disabled', false);
+            // Anything short of an explicit Success leaves the row exactly where it is. The queue must never
+            // shrink on an outcome we could not read - that is how an application silently goes missing.
+            if (!res.ok) { U._status('✗ ' + res.message); return; }
+            var i = st.items.indexOf(it);
+            if (i !== -1) {
+                st.items.splice(i, 1);
+                delete st.qa[it.id];
+                if (st.idx > i) { st.idx--; }
+            }
+            L.apps.adopt({ ok: true, partial: st.partial, items: st.items }).then(function (rec) {
+                if (!rec) { return; }
+                U._paintApps();
+                try { L.reminder.mount(); } catch (e) { /* ignore */ }
+            });
+            U._renderApps();
+            U._status('✓ ' + it.name + ': ' + res.message);
+        });
+    },
+
+    // Above the answers, and visually separated: this is what somebody else already found out, and reading
+    // it after forming a view is worth much less than reading it before. An application with no notes says
+    // so explicitly rather than showing nothing - "nobody has commented" and "notes did not load" must not
+    // look the same on a screen that has a Decline button on it.
+    _paintNotes: function ($d, notes, it, target) {
+        var U = JiTA.leadduty.ui;
+        var $box = $('<div class="ld-notes"></div>').appendTo($d);
+        var $head = $('<div class="ld-nhead"></div>').appendTo($box);
+        var $label = $('<span></span>').appendTo($head);
+        if (!notes) {
+            $head.addClass('warn');
+            $label.text('Notes could not be read for this application - check it in VMS before acting.');
+        } else if (!notes.length) {
+            $label.text('No notes on this account.');
+        } else {
+            $label.text('Notes on account (' + notes.length + ')');
+        }
+        (notes || []).forEach(function (n) {
+            var $n = $('<div class="ld-note"></div>').appendTo($box);
+            $('<div class="ld-ntext"></div>').text(n.text).appendTo($n);
+            var who = (n.by || 'unknown') + (n.at ? (' · ' + n.at) : '');
+            $('<div class="ld-nby"></div>').text(who).appendTo($n);
+        });
+        // The composer is offered only when VMS itself rendered an Add-note control for this page. A note
+        // still goes UNDER the existing ones: they are the context you write against.
+        if (it && target) { U._noteComposer($box, $head, it, target); }
+    },
+
+    // Writing a note. Deliberately NOT armed the way Decline is: a note is additive and correctable, and
+    // making it feel as dangerous as declining somebody would devalue the confirm that actually matters.
+    // What it does get instead is an explicit visibility on screen, because an internal note going out
+    // Public is the one mistake here that cannot be taken back.
+    _noteComposer: function ($box, $head, it, target) {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps;
+        var draft = (st && st.drafts && st.drafts[it.id]) || null;
+        var $toggle = $('<button class="jita-btn ld-mini ld-nadd"></button>')
+            .attr('title', 'Write a note on ' + target.name + "'s account").appendTo($head);
+        var $c = $('<div class="ld-ncomp"></div>').appendTo($box);
+        // Said plainly and every time, both halves. A note written from an application screen reads as being
+        // about that application; it is not, and somebody should know that before they write "declined, see
+        // part two". And VMS offers no edit and no delete - confirmed against the live page and main.js, which
+        // carries NoteAdd and nothing else - so the only correction for a note is another note.
+        $('<div class="ld-nwho"></div>')
+            .text('Goes on ' + target.name + "'s account, so it shows on every application they file. " +
+                'VMS cannot edit or delete a note once it is posted.').appendTo($c);
+        var $ta = $('<textarea class="ld-nta" rows="4" spellcheck="false" placeholder="Text to be included in the note"></textarea>')
+            .val((draft && draft.text) || '').appendTo($c);
+        var $row = $('<div class="ld-nrow"></div>').appendTo($c);
+        $('<span class="ld-nvis-lbl">Visible to</span>').appendTo($row);
+        var $sel = $('<select class="ld-nvis"></select>').appendTo($row);
+        target.states.forEach(function (s) { $('<option></option>').attr('value', s).text(s).appendTo($sel); });
+        $sel.val((draft && draft.vis && target.states.indexOf(draft.vis) >= 0)
+            ? draft.vis : L.apps.noteDefaultState(target.states));
+        var $post = $('<button class="jita-btn ld-mini">Post note</button>').appendTo($row);
+        var $msg = $('<span class="ld-nmsg"></span>').appendTo($row);
+        $('<span class="ld-nhint">Ctrl+Enter posts</span>').appendTo($row);
+
+        function remember() {
+            if (!st || !st.drafts) { return; }
+            var t = $ta.val() || '';
+            if (t.replace(/^\s+|\s+$/g, '')) { st.drafts[it.id] = { text: t, vis: $sel.val(), open: true }; }
+            else { delete st.drafts[it.id]; }
+        }
+        function open(on) {
+            $c.toggle(on);
+            $toggle.text(on ? 'Cancel' : '+ Write a note');
+            if (on) { $ta.trigger('focus'); }
+        }
+        open(!!draft);   // a half-written note reopens where it was left, rather than hiding behind the button
+
+        function post() {
+            var text = ($ta.val() || '').replace(/^\s+|\s+$/g, '');
+            if (!text) { $msg.addClass('warn').text('Write something first.'); return; }
+            var vis = $sel.val();
+            $post.prop('disabled', true);
+            $msg.removeClass('warn').text('Sending to VMS…');
+            L.apps.addNote(it.id, text, vis).then(function (res) {
+                if (!U.isOpen() || U._tab !== 'apps' || U._apps !== st) { return; }
+                $post.prop('disabled', false);
+                // The text stays exactly where it is on a failure. Losing a paragraph somebody just wrote
+                // because their session expired would be a worse bug than not having the feature at all.
+                if (!res.ok) { $msg.addClass('warn').text('✗ ' + res.message); return; }
+                $ta.val('');
+                if (st.drafts) { delete st.drafts[it.id]; }
+                U._status('✓ Note added on ' + (res.name || target.name) + "'s account.");
+                // Re-read the application so the list shows what VMS actually stored, rather than an
+                // optimistic copy of what we sent - the same rule the action buttons follow.
+                delete st.qa[it.id];
+                U._showApp(st.idx);
+            });
+        }
+        $toggle.on('click', function () { open(!$c.is(':visible')); if (!$c.is(':visible')) { remember(); } });
+        $post.on('click', post);
+        $ta.on('input', remember);
+        $sel.on('change', remember);
+        // Handled AT the box and stopped there: Escape must close the composer, never tear the whole overlay
+        // down, and the arrow keys must stay ordinary text navigation while the caret is in here.
+        $ta.on('keydown', function (e) {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); e.stopPropagation(); post(); }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); remember(); open(false); }
+        });
+    },
+
+    // The questionnaires. A part-two application carries both, and part one is usually settled by the time
+    // part two is being read - so they get a tab each rather than one long scroll, and the one that opens is
+    // the one this application is actually waiting on. The other stays one click away, because "usually
+    // settled" is not "never worth checking".
+    //
+    // A single questionnaire gets NO tab strip: a row of tabs you can never switch is just furniture.
+    _paintQa: function ($d, sections, it) {
+        var U = JiTA.leadduty.ui, st = U._apps;
+        sections = sections || [];
+        if (!sections.length) { return; }
+        var $pane = $('<div class="ld-qpane"></div>');
+        function paint(n) {
+            $pane.empty();
+            (sections[n].qa || []).forEach(function (p) {
+                var $w = $('<div class="ld-qa"></div>').appendTo($pane);
+                $('<div class="ld-q"></div>').text(p.q).appendTo($w);
+                $('<div class="ld-a"></div>').text(p.a || '(no answer)').appendTo($w);
+            });
+        }
+        if (sections.length === 1) { $pane.appendTo($d); paint(0); return; }
+        // Which questionnaire this application is waiting on comes from the QUEUE it was listed in, not from
+        // reading a status string off the page - so rewording "Second questionnaire returned" cannot break it.
+        var fallback = (it && it.stage === 'second') ? sections.length - 1 : 0;
+        var saved = (st && st.qtab && st.qtab[it.id]);
+        var sel = (typeof saved === 'number' && saved >= 0 && saved < sections.length) ? saved : fallback;
+        var $tabs = $('<div class="ld-qtabs"></div>').appendTo($d);
+        var $btns = [];
+        sections.forEach(function (s, n) {
+            var $b = $('<button class="jita-btn ld-mini ld-qtab"></button>')
+                // Numbered rather than titled. VMS calls them "Application" and "Application part 2", which
+                // reads as one thing and its appendix; they are two questionnaires, and the number is what a
+                // Lead actually thinks in. The position is as structural as the heading was, so a third one
+                // still numbers itself. The page's own name stays on the tooltip, where it costs nothing and
+                // is the quickest way to tell whether the split still tracks what VMS renders.
+                // The count is on the label so the tab you are NOT on still says whether there is anything
+                // over there - a part two with two answers is worth a glance, an empty one is not.
+                .text('Questionnaire ' + (n + 1) + ' (' + s.qa.length + ')')
+                .attr('title', s.title)
+                .on('click', function () {
+                    sel = n;
+                    if (st && st.qtab && it) { st.qtab[it.id] = n; }   // survives navigating away and back
+                    $btns.forEach(function ($x, k) { $x.toggleClass('on', k === n); });
+                    paint(n);
+                }).appendTo($tabs);
+            $btns.push($b);
+        });
+        $btns.forEach(function ($x, k) { $x.toggleClass('on', k === sel); });
+        $pane.appendTo($d);
+        paint(sel);
+    },
+
+    // Arrow keys on the applications tab. Delegated once and gated on the tab being open, so there is no
+    // teardown to get wrong; Escape is left alone so the overlay still closes on it.
+    _wireKeys: function () {
+        var U = JiTA.leadduty.ui;
+        if (U._keysWired) { return; }
+        U._keysWired = true;
+        document.addEventListener('keydown', function (e) {
+            if (!U.isOpen() || U._tab !== 'apps') { return; }
+            if (e.ctrlKey || e.metaKey || e.altKey) { return; }
+            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') { return; }
+            var t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
+            var st = U._apps;
+            if (!st || !st.items || !st.items.length) { return; }
+            e.preventDefault();
+            U._showApp(st.idx + (e.key === 'ArrowDown' ? 1 : -1));
+            var $r = (st.rows || [])[st.idx];
+            if ($r && $r[0]) {
+                try { $r[0].scrollIntoView({ block: 'nearest' }); } catch (x) { $r[0].scrollIntoView(false); }
+            }
+        }, true);
+    },
+
     // Copy to the clipboard, falling back to the old selection + execCommand path where the async API is
     // unavailable or refused (it needs a secure context and a user gesture; a button click is one, but a
     // browser policy can still say no). Rejects so the caller can show the text and let Ctrl+C finish it.
@@ -14582,6 +14965,9 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-scroll { flex: 1 1 auto; min-height: 0; max-height: 70vh; overflow-y: auto; padding: 10px 16px; }' +
                 '.jita-leadduty-view .ld-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #3a434d; background: #282d33; }' +
                 '.jita-leadduty-view .ld-muted, .jita-leadduty-view #ld-status { color: #9aa6b2; font-size: 11px; flex: 1; }' +
+                '.jita-leadduty-view .ld-apps { color: #6bd0dc; font-size: 11px; text-decoration: none; flex: 0 0 auto; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-apps:hover { text-decoration: underline; }' +
+                '.jita-leadduty-view .ld-apps.warn { color: #f0b429; }' +
                 '.jita-leadduty-view .ld-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
                 '.jita-leadduty-view .ld-warn { color: #f0b429; font-size: 11px; padding: 6px 0 10px; }' +
                 '.jita-leadduty-view .ld-sub { color: #9aa6b2; font-size: 12px; font-weight: 600; margin: 4px 0 8px; }' +
@@ -14616,11 +15002,581 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-ghead { display: flex; align-items: center; gap: 10px; padding: 7px 0; }' +
                 '.jita-leadduty-view .ld-gname { color: #e6e6e6; font-weight: 700; font-size: 13px; }' +
                 '.jita-leadduty-view .ld-gcount { color: #7a8694; font-size: 11px; flex: 1 1 auto; }' +
+                // Applications: a list beside the answers, each scrolling on its own, so walking the queue
+                // never moves the reading pane's scroll position out from under you.
+                '.jita-leadduty-view .ld-apps-wrap { display: flex; gap: 14px; height: 62vh; }' +
+                '.jita-leadduty-view .ld-apps-list { flex: 0 0 240px; overflow-y: auto; overflow-x: hidden; border-right: 1px solid #2c333a; padding-right: 6px; }' +
+                '.jita-leadduty-view .ld-apps-detail { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding-right: 4px; }' +
+                '.jita-leadduty-view .ld-arow { padding: 7px 8px; border: 1px solid transparent; border-bottom: 1px solid #262c32; cursor: pointer; }' +
+                '.jita-leadduty-view .ld-arow:hover { background: #22272b; }' +
+                '.jita-leadduty-view .ld-arow.on { background: rgba(76,154,255,.15); border-color: #4c9aff; border-radius: 5px; }' +
+                '.jita-leadduty-view .ld-aname { color: #e6e6e6; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }' +
+                '.jita-leadduty-view .ld-ameta { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: #7a8694; font-size: 10px; }' +
+                '.jita-leadduty-view .ld-astage { background: #3a434d; color: #cfd6dd; border-radius: 3px; padding: 0 5px; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-ahead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px solid #2c333a; margin-bottom: 10px; }' +
+                '.jita-leadduty-view .ld-ahead .ld-title { font-weight: 700; font-size: 14px; }' +
+                '.jita-leadduty-view .ld-aacts { display: flex; gap: 6px; flex: 0 0 auto; margin-left: auto; }' +
+                '.jita-leadduty-view .ld-aacts .jita-btn.armed { border-color: #f0b429; color: #f0b429; font-weight: 700; }' +
+                '.jita-leadduty-view .ld-danger:hover { border-color: #ff8f8f; color: #ff8f8f; }' +
+                '.jita-leadduty-view .ld-warnbtn:hover { border-color: #f0b429; color: #f0b429; }' +
+                '.jita-leadduty-view .ld-apps-open { color: #6bd0dc; font-size: 11px; text-decoration: none; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-apps-open:hover { text-decoration: underline; }' +
+                '.jita-leadduty-view .ld-notes { border: 1px solid #3a434d; border-left: 3px solid #f0b429; border-radius: 5px; padding: 8px 10px; margin-bottom: 16px; background: #1f2329; }' +
+                '.jita-leadduty-view .ld-nhead { display: flex; align-items: center; gap: 8px; color: #f0b429; font-size: 11px; font-weight: 700; margin-bottom: 6px; }' +
+                '.jita-leadduty-view .ld-nhead.warn { color: #ff8f8f; }' +
+                '.jita-leadduty-view .ld-nadd { margin-left: auto; flex: 0 0 auto; font-weight: 400; }' +
+                '.jita-leadduty-view .ld-ncomp { margin-top: 8px; padding-top: 8px; border-top: 1px solid #2c333a; }' +
+                '.jita-leadduty-view .ld-nwho { color: #7a8694; font-size: 10px; margin-bottom: 5px; }' +
+                '.jita-leadduty-view .ld-nta { width: 100%; box-sizing: border-box; padding: 7px 9px; background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; font: 13px/1.6 inherit; resize: vertical; }' +
+                '.jita-leadduty-view .ld-nta:focus { outline: none; border-color: #4c9aff; }' +
+                '.jita-leadduty-view .ld-nrow { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }' +
+                '.jita-leadduty-view .ld-nvis-lbl { color: #7a8694; font-size: 10px; }' +
+                '.jita-leadduty-view .ld-nvis { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 3px 6px; font-size: 11px; color-scheme: dark; }' +
+                '.jita-leadduty-view .ld-nvis:focus { outline: none; border-color: #4c9aff; }' +
+                '.jita-leadduty-view .ld-nmsg { color: #9aa6b2; font-size: 11px; }' +
+                '.jita-leadduty-view .ld-nmsg.warn { color: #ff8f8f; }' +
+                '.jita-leadduty-view .ld-nhint { color: #55606b; font-size: 10px; margin-left: auto; }' +
+                '.jita-leadduty-view .ld-note { padding: 6px 0; border-top: 1px solid #2c333a; }' +
+                '.jita-leadduty-view .ld-note:first-of-type { border-top: none; padding-top: 0; }' +
+                '.jita-leadduty-view .ld-ntext { color: #e6e6e6; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }' +
+                '.jita-leadduty-view .ld-nby { color: #7a8694; font-size: 10px; margin-top: 3px; }' +
+                '.jita-leadduty-view .ld-qtabs { display: flex; gap: 6px; margin: 0 0 12px; flex-wrap: wrap; }' +
+                '.jita-leadduty-view .ld-qtab.on { background: #4c9aff; color: #fff; font-weight: 700; border-color: #4c9aff; }' +
+                // The reading measure. Left to fill the pane, an answer runs ~130 characters a line, and on
+                // the return sweep the eye loses which line it was on - which reads as "hard to read" long
+                // before anything about the size or the colour does. Capped in ch so it tracks the font size
+                // rather than a pixel count that stops being right the moment either changes. The notes block
+                // and its composer share the cap: same column, same reading.
+                '.jita-leadduty-view .ld-qpane, .jita-leadduty-view .ld-notes { max-width: 90ch; }' +
+                '.jita-leadduty-view .ld-qa { margin-bottom: 18px; }' +
+                // The questions are what you navigate by, so they are a heading, not fine print: brighter and
+                // heavier than the chrome around them, without competing with the answer for attention.
+                '.jita-leadduty-view .ld-q { color: #b9c4cf; font-size: 12px; font-weight: 600; line-height: 1.45; margin-bottom: 5px; }' +
+                // Bigger and airier than the rest of the overlay, deliberately. Everything else here is
+                // scanned; this is the only part anybody actually reads at length.
+                '.jita-leadduty-view .ld-a { color: #e6e6e6; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; background: #1b2025; border: 1px solid #2c333a; border-radius: 5px; padding: 10px 12px; }' +
                 '.jita-leadduty-view .ld-msg { width: 100%; box-sizing: border-box; min-height: 120px; margin: 2px 0 8px; padding: 8px 10px; background: #14181b; color: #cfd6dd; border: 1px solid #3a434d; border-radius: 5px; font: 12px/1.5 Consolas, "Courier New", monospace; resize: vertical; }' +
                 '.jita-leadduty-view .ld-msg:focus { outline: none; border-color: #4c9aff; }'
             );
         } catch (e) { /* ignore */ }
     }
+};
+
+
+/* ---- Lead duties: applications waiting in VMS --------------------------------------------------------
+ * The third duty: new applications and returned questionnaires sitting in the volunteer management system
+ * (volunteers.eveonline.com). Unlike the other two this is READ-ONLY and deliberately carries NO LEDGER
+ * ENTRY (Schogol's call) - it is visibility, not accountability. So there is no month to freeze, nothing
+ * shared between Leads, and nothing that can be written wrongly: each Lead's tab reads with their own
+ * session and nobody inherits anybody else's answer.
+ *
+ * VMS is a different origin, so this goes through GM_xmlhttpRequest (declared in @connect), which carries
+ * the Lead's existing volunteer session cookie. No credential is stored and nothing leaves the browser.
+ *
+ * The counts are read by LINK TARGET, not by column position. The dashboard renders each one as
+ * <a href="/admin/applications/<stage>/ECAID">N</a>, and those paths name the stage, so a reordered or
+ * newly-added column changes nothing - which matters for a third-party page we do not control.
+ *
+ * A count we cannot find is NEVER reported as zero. A false zero on somebody's application is worse than
+ * no number at all: an expired session says "log in to VMS", an unreadable page says "open VMS", and the
+ * last good numbers are kept and labelled stale rather than quietly replaced by a plausible-looking 0.
+ */
+JiTA.leadduty.apps = {
+    URL: 'https://volunteers.eveonline.com/Admin',
+    TEAM: 'ECAID',
+    CACHE_KEY: 'leadduty:apps',
+    TTL_MS: 60 * 60 * 1000,      // the poll runs every minute; this is what actually caps the request rate
+    TIMEOUT_MS: 20000,
+    // The two stages where a player is waiting on ECAID. "Waiting on player" is theirs, not ours, and the
+    // background-check / NDA stages are deliberately out (Schogol's call) - they are a different step.
+    STAGES: [
+        { key: 'fresh',  path: 'new',     one: 'new application',        many: 'new applications' },
+        { key: 'second', path: 'parttwo', one: 'returned questionnaire', many: 'returned questionnaires' }
+    ],
+    _busy: null,
+
+    read: function () { return JiTA.db.getMeta(JiTA.leadduty.apps.CACHE_KEY).catch(function () { return null; }); },
+
+    // Cached for TTL_MS, so the once-a-minute poll costs one meta read and the dashboard sees one request
+    // an hour. `force` is the overlay's Refresh.
+    refresh: function (force) {
+        var A = JiTA.leadduty.apps;
+        if (A._busy) { return A._busy; }
+        var done = function (v) { A._busy = null; return v; };
+        A._busy = A.read().then(function (cached) {
+            if (!force && cached && (Date.now() - (cached.at || 0)) < A.TTL_MS) { return cached; }
+            return A._fetch().then(function (res) {
+                res.at = Date.now();
+                // Keep the last GOOD numbers through a blip, flagged as stale rather than presented as
+                // current - the alternative is the count vanishing every time the network hiccups.
+                if (!res.ok && cached && cached.ok) {
+                    res.last = { fresh: cached.fresh, second: cached.second, total: cached.total, at: cached.at };
+                }
+                return JiTA.db.setMeta(A.CACHE_KEY, res).then(function () { return res; }, function () { return res; });
+            });
+        }).then(done, function (e) { done(); throw e; });
+        return A._busy;
+    },
+
+    _fetch: function () {
+        var A = JiTA.leadduty.apps;
+        return A._get(A.URL).then(function (r) { return A._parse(r.body, r.finalUrl, r.status); });
+    },
+
+    // One GET against VMS, shared by the dashboard count, the queue list and an application's detail.
+    // Always resolves { body, finalUrl, status } or { failed: true } - callers decide what a failure means.
+    _get: function (url) {
+        var A = JiTA.leadduty.apps;
+        return new Promise(function (resolve) {
+            if (typeof GM_xmlhttpRequest !== 'function') { resolve({ failed: true, reason: 'nogm' }); return; }
+            try {
+                GM_xmlhttpRequest({
+                    method: 'GET', url: url, timeout: A.TIMEOUT_MS,
+                    onload: function (r) { resolve({ body: r.responseText || '', finalUrl: r.finalUrl || '', status: r.status }); },
+                    onerror: function () { resolve({ failed: true, reason: 'net' }); },
+                    ontimeout: function () { resolve({ failed: true, reason: 'net' }); }
+                });
+            } catch (e) { resolve({ failed: true, reason: 'net' }); }
+        });
+    },
+
+    // Shared preamble for every parse: the reasons a response cannot be read at all. Returns a failure
+    // object, or null when the body is worth looking at.
+    _unusable: function (r) {
+        if (!r || r.failed) { return { ok: false, reason: (r && r.reason) || 'net' }; }
+        if (r.status && (r.status < 200 || r.status >= 300)) {
+            return { ok: false, reason: (r.status === 401 || r.status === 403) ? 'login' : 'net' };
+        }
+        // GM follows redirects, so an expired session shows up as having LANDED on the SSO login page.
+        if (/login\.eveonline\.com|\/account\/(login|signin)|\/oauth2?\/authorize/i.test(r.finalUrl || '')) {
+            return { ok: false, reason: 'login' };
+        }
+        return null;
+    },
+
+    // ---- the queue: the applications themselves ------------------------------------------------------
+    // Deliberately NOT cached anywhere. Everything else this script stores is ours - defect text, page ids,
+    // counts - but these are somebody's answers to personal questions, so they live in the tab's memory for
+    // as long as the overlay is open and nowhere else.
+    LIST_URL: 'https://volunteers.eveonline.com/admin/applications/',      // + stage + '/' + TEAM
+    DETAIL_URL: 'https://volunteers.eveonline.com/Admin/Application/',     // + id
+
+    // Both stages we count, merged and tagged, oldest first - the person who has waited longest is the one
+    // to answer next. Resolves { ok, items } or { ok: false, reason }.
+    list: function () {
+        var A = JiTA.leadduty.apps;
+        return Promise.all(A.STAGES.map(function (s) {
+            return A._get(A.LIST_URL + s.path + '/' + A.TEAM).then(function (r) { return A._parseList(r, s); });
+        })).then(function (parts) {
+            var items = [], bad = null;
+            for (var i = 0; i < parts.length; i++) {
+                if (!parts[i].ok) { bad = bad || parts[i]; continue; }
+                items = items.concat(parts[i].items);
+            }
+            // One stage failing while the other worked still hides applications, so say so rather than
+            // presenting a short list as the whole queue.
+            if (bad && !items.length) { return bad; }
+            items.sort(function (a, b) { return (a.applied || '') < (b.applied || '') ? -1 : 1; });
+            return { ok: true, items: items, partial: !!bad };
+        });
+    },
+
+    // Rows are found by the REVIEW link - href="/Admin/Application/<guid>" - so a reordered table or an
+    // added column changes nothing. The cells are then read positionally within that row only.
+    _parseList: function (r, stage) {
+        var A = JiTA.leadduty.apps, bad = A._unusable(r);
+        if (bad) { return bad; }
+        var body = r.body || '', items = [], chunks = body.split(/<tr\b/i);
+        for (var i = 1; i < chunks.length; i++) {
+            var row = chunks[i];
+            var idm = /href\s*=\s*["']\/Admin\/Application\/([0-9a-f-]{36})["']/i.exec(row);
+            if (!idm) { continue; }
+            var cells = [], cm, cre = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+            while ((cm = cre.exec(row))) { cells.push(A._text(cm[1])); }
+            var dates = [];
+            for (var c = 0; c < cells.length; c++) {
+                if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(cells[c])) { dates.push(cells[c]); }
+            }
+            var st = /<span class="state">([^<]*)<\/span>/i.exec(row);
+            items.push({
+                id: idm[1],
+                name: cells[0] || '(unnamed)',
+                state: st ? A._text(st[1]) : (stage ? stage.one : ''),
+                stage: stage ? stage.key : '',
+                applied: dates[0] || '',
+                updated: dates[1] || dates[0] || '',
+                url: A.DETAIL_URL + idm[1]
+            });
+        }
+        // An applications page with no rows is a real answer (nobody waiting); a page that is not the
+        // applications page at all is not, and must not read as an empty queue.
+        if (!items.length && !/\/Admin\/Application|applications/i.test(body)) { return { ok: false, reason: 'unreadable' }; }
+        return { ok: true, items: items };
+    },
+
+    // One application's questions and answers, split into the questionnaires VMS itself splits them into,
+    // plus a flat `qa` across all of them. The questionnaire has changed over the years and a part-two
+    // application carries both sets, so nothing here assumes a fixed list of questions.
+    detail: function (id) {
+        var A = JiTA.leadduty.apps;
+        return A._get(A.DETAIL_URL + id).then(function (r) {
+            var bad = A._unusable(r);
+            if (bad) { return bad; }
+            var body = r.body || '';
+            var sections = A._parseSections(body), qa = [];
+            sections.forEach(function (s) { qa = qa.concat(s.qa); });
+            if (!qa.length) { return { ok: false, reason: /application-answer/i.test(body) ? 'norow' : 'unreadable' }; }
+            // The controls come from the SAME fetch, so the buttons the overlay offers are the ones that
+            // page rendered. They are read again at action time - this is what to show, not what to trust.
+            return { ok: true, qa: qa, sections: sections, actions: A._parseControls(body),
+                notes: A._parseNotes(body), note: A._parseNoteTarget(body) };
+        });
+    },
+
+    // The questionnaires, split the way VMS splits them: one accordion panel each, titled by its own
+    // <h4 class="panel-title"> ("Application", "Application part 2"). Keyed on that STRUCTURE and never on
+    // the questions, which are the one thing here guaranteed to change - so a renamed questionnaire simply
+    // relabels its tab, a third one appears as a third tab, and a merge back to one loses the tab strip,
+    // all without a line changing here. Panels holding no answers (the notes panel) fall out on their own.
+    // Resolves [{ title, qa: [{ q, a }] }] in document order.
+    _parseSections: function (body) {
+        var A = JiTA.leadduty.apps, src = body || '', out = [];
+        var heads = [], hm, hre = /<h4\b[^>]*\bclass\s*=\s*["'][^"']*\bpanel-title\b[^"']*["'][^>]*>([\s\S]*?)<\/h4>/gi;
+        while ((hm = hre.exec(src))) { heads.push({ title: A._text(hm[1]), at: hm.index + hm[0].length }); }
+        for (var i = 0; i < heads.length; i++) {
+            var end = (i + 1 < heads.length) ? heads[i + 1].at : src.length;
+            var qa = A._pairs(src.slice(heads[i].at, end));
+            if (qa.length) { out.push({ title: heads[i].title || ('Part ' + (out.length + 1)), qa: qa }); }
+        }
+        // A page whose panel headings moved must still be READABLE. Falling back to the whole body as one
+        // untitled set costs the tabs; failing to find the headings and showing nothing would cost the
+        // answers, and an application you cannot read is worse than one you cannot tab through.
+        if (!out.length) {
+            var all = A._pairs(src);
+            if (all.length) { out.push({ title: 'Application', qa: all }); }
+        }
+        return out;
+    },
+
+    // Every question/answer pair in a chunk of the page, in document order.
+    _pairs: function (chunk) {
+        var A = JiTA.leadduty.apps, qa = [], m;
+        var re = /<dt\b[^>]*>([\s\S]*?)<\/dt>\s*<dd\b[^>]*class\s*=\s*["'][^"']*application-answer[^"']*["'][^>]*>([\s\S]*?)<\/dd>/gi;
+        while ((m = re.exec(chunk || ''))) {
+            var q = A._text(m[1]), a = A._text(m[2]);
+            if (q) { qa.push({ q: q, a: a }); }
+        }
+        return qa;
+    },
+
+    // Notes on the account, in document order (VMS renders newest first). These are the single most
+    // decision-relevant thing on the page - "background check flagged ... I would recommend declining" -
+    // and on the site they sit at the BOTTOM, below a long questionnaire. In the overlay they go on top,
+    // because they are what you want to have read before forming a view rather than after.
+    _parseNotes: function (body) {
+        var A = JiTA.leadduty.apps, out = [];
+        var list = /<ul\b[^>]*\bid\s*=\s*["']notesList["'][^>]*>([\s\S]*?)<\/ul>/i.exec(body || '');
+        if (!list) { return out; }
+        var li = /<li\b[^>]*>([\s\S]*?)<\/li>/gi, m;
+        while ((m = li.exec(list[1]))) {
+            var row = m[1];
+            // The body is everything in .noteText up to the byline, so a note with several paragraphs (or
+            // any nesting) survives whole rather than being cut at the first closing div.
+            var bm = /<div[^>]*class\s*=\s*["'][^"']*noteText[^"']*["'][^>]*>([\s\S]*?)<span[^>]*class\s*=\s*["'][^"']*date/i.exec(row);
+            var sm = /<span[^>]*class\s*=\s*["'][^"']*date[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(row);
+            var meta = sm ? sm[1] : '';
+            var am = /<a[^>]*>([^<]*)<\/a>/i.exec(meta);
+            var img = /<img[^>]*\btitle\s*=\s*["']([^"']*)["']/i.exec(row);
+            var when = /\bon\s+(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2})?)/i.exec(A._text(meta));
+            var text = A._text(bm ? bm[1] : row);
+            if (!text) { continue; }
+            out.push({
+                text: text,
+                by: A._text(am ? am[1] : (img ? img[1] : '')),
+                at: when ? when[1] : ''
+            });
+        }
+        return out;
+    },
+
+    // Who a note would be written about, and which visibilities VMS offers - both read from the page's own
+    // Add-note control, which carries the character name in data-character (exactly what the site's modal
+    // reads). The note is keyed on the CHARACTER NAME, not the application, so it lands on the ACCOUNT and
+    // shows on everything that person ever files. A page that renders no Add-note button offers no composer
+    // here either: the same rule the action buttons follow. Resolves { name, states } or null.
+    NOTE_STATES: ['Developers', 'Volunteers', 'Public'],
+    // The visibility a new note STARTS on. VMS's own modal defaults to its first option (Developers), but a
+    // Lead writing about an applicant is writing for the other volunteers, so that is where this starts.
+    // It is only ever a preference: a page that does not offer it falls back to the first option that is
+    // NOT Public, because the one visibility that must never be arrived at by accident is the one the
+    // applicant themselves can read.
+    NOTE_DEFAULT_STATE: 'Volunteers',
+    noteDefaultState: function (states) {
+        var A = JiTA.leadduty.apps, list = states || [];
+        if (list.indexOf(A.NOTE_DEFAULT_STATE) >= 0) { return A.NOTE_DEFAULT_STATE; }
+        for (var i = 0; i < list.length; i++) { if (!/public/i.test(list[i])) { return list[i]; } }
+        return list[0] || A.NOTE_DEFAULT_STATE;
+    },
+    _parseNoteTarget: function (body) {
+        var A = JiTA.leadduty.apps;
+        var btn = /<button\b([^>]*\bdata-target\s*=\s*["']#add-note-modal["'][^>]*)>/i.exec(body || '');
+        if (!btn) { return null; }
+        var nm = /\bdata-character\s*=\s*["']([^"']+)["']/i.exec(btn[1]);
+        if (!nm) { return null; }
+        // The visibility list is read from the modal's own <select>, so a fourth option added later appears
+        // without a code change here. The known three are a fallback for a page that renders the button but
+        // not the modal - never an override of what the page actually offers.
+        var sel = /<select\b[^>]*note-modal-viewstate[^>]*>([\s\S]*?)<\/select>/i.exec(body || '');
+        var states = [], om, ore = /<option\b[^>]*\bvalue\s*=\s*["']([^"']*)["']/gi;
+        while (sel && (om = ore.exec(sel[1]))) { if (om[1]) { states.push(om[1]); } }
+        return { name: A._text(nm[1]), states: states.length ? states : A.NOTE_STATES.slice() };
+    },
+
+    // ---- acting on an application ---------------------------------------------------------------------
+    // The site's own buttons call ApproveApplication / DeclineApplication / NoteAdd, which POST JSON to two
+    // ASMX services. We replay the same calls rather than inventing an API:
+    //   /services/ApplicationService.asmx/ApplicationAccept    {token, applicationId, state}
+    //   /services/ApplicationService.asmx/ApplicationDecline   {token, applicationId, sendMessage, reset}
+    //   /services/AdministratorService.asmx/NoteAdd            {token, characterName, content, viewState}
+    // Note the SECOND service: a note is written about a person, not about an application, so it does not
+    // live on ApplicationService at all.
+    //
+    // The CSRF token is <body data-csrf="...">, so it comes from the very page fetch that also tells us
+    // which actions that application currently offers - there is no stale copy to keep anywhere.
+    //
+    // Nothing here is ever assumed. "Proceed to PartTwo" exists only because the application is in New, so
+    // the available actions, the target state, the id, the note's subject and the token are ALL read from a
+    // fresh fetch of that application immediately before posting. A queue that moved underneath us then
+    // refuses instead of acting on the wrong record, the wrong transition, or the wrong person.
+    SERVICES_URL: 'https://volunteers.eveonline.com/services/',
+    APP_SERVICE: 'ApplicationService',
+    NOTE_SERVICE: 'AdministratorService',
+    ACTIONS: {
+        // `notifies` drives the wording of the confirm. Declining tells a real person no; resetting does
+        // not. That distinction is the single most important thing on this screen and must never be
+        // flattened into "are you sure?".
+        accept:  { btn: 'btn-approve', method: 'ApplicationAccept',  notifies: false, verb: 'move on' },
+        decline: { btn: 'btn-decline', method: 'ApplicationDecline', notifies: true,  verb: 'decline' },
+        reset:   { btn: 'btn-reset',   method: 'ApplicationDecline', notifies: false, verb: 'reset' }
+    },
+
+    // What a specific application currently offers, read from its own page. Resolves
+    // { ok, token, appId, actions: { key: { label, state } }, note } or { ok: false, reason }.
+    inspect: function (id) {
+        var A = JiTA.leadduty.apps;
+        return A._get(A.DETAIL_URL + id).then(function (r) {
+            var bad = A._unusable(r);
+            if (bad) { return bad; }
+            var body = r.body || '';
+            var tok = /<body[^>]*\sdata-csrf\s*=\s*["']([^"']+)["']/i.exec(body);
+            var app = /data-applicationid\s*=\s*["']([0-9a-f-]{36})["']/i.exec(body);
+            if (!tok || !app) { return { ok: false, reason: 'noform' }; }
+            return { ok: true, token: tok[1], appId: app[1], actions: A._parseControls(body), note: A._parseNoteTarget(body) };
+        });
+    },
+
+    // Which of the three controls this page actually renders, and what the accept button would move it to.
+    // An action that is not on the page is not offered, which is the whole verification.
+    _parseControls: function (body) {
+        var A = JiTA.leadduty.apps, actions = {};
+        Object.keys(A.ACTIONS).forEach(function (key) {
+            var cfg = A.ACTIONS[key];
+            var re = new RegExp('<a\\b([^>]*\\bid\\s*=\\s*["\']' + cfg.btn + '["\'][^>]*)>([\\s\\S]*?)<\\/a>', 'i');
+            var m = re.exec(body);
+            if (!m) { return; }
+            var st = /\bdata-state\s*=\s*["']([^"']*)["']/i.exec(m[1]);
+            actions[key] = { label: A._text(m[2]) || key, state: st ? st[1] : null };
+        });
+        return actions;
+    },
+
+    // Re-verify, then post. Resolves { ok: true, message } or { ok: false, reason, message } - never throws,
+    // because every caller has to be able to say what happened rather than swallow it.
+    act: function (id, key) {
+        var A = JiTA.leadduty.apps, cfg = A.ACTIONS[key];
+        if (!cfg) { return Promise.resolve({ ok: false, reason: 'unknown', message: 'Unknown action.' }); }
+        return A.inspect(id).then(function (info) {
+            if (!info.ok) { return { ok: false, reason: info.reason, message: A.line(info) }; }
+            var offered = info.actions[key];
+            // The action vanished between the queue being listed and this click: somebody else handled it,
+            // or its state moved. Refusing is the only safe answer - the button that is there NOW may mean
+            // something entirely different from the one that was there when the list was drawn.
+            if (!offered) {
+                return { ok: false, reason: 'gone',
+                    message: 'VMS no longer offers that action on this application - it has moved on or somebody else handled it. Refresh the queue.' };
+            }
+            if (info.appId !== id) {
+                return { ok: false, reason: 'mismatch', message: 'The application page did not match the one requested - nothing was sent.' };
+            }
+            var payload = (key === 'accept')
+                ? { token: info.token, applicationId: id, state: offered.state }
+                : { token: info.token, applicationId: id, sendMessage: key === 'decline', reset: key === 'reset' };
+            return A._post(A.APP_SERVICE, cfg.method, payload);
+        });
+    },
+
+    // Write a note on the applicant's ACCOUNT, with the same discipline as act(): the subject's character
+    // name, the visibilities on offer and the CSRF token are all re-read from a fresh fetch of this
+    // application immediately before posting, so a note can never land on whoever happened to be on screen
+    // when the queue was drawn. Resolves { ok, message } and never throws.
+    addNote: function (id, text, viewState) {
+        var A = JiTA.leadduty.apps;
+        var content = String(text == null ? '' : text).replace(/^\s+|\s+$/g, '');
+        if (!content) { return Promise.resolve({ ok: false, reason: 'empty', message: 'The note is empty - nothing was sent.' }); }
+        return A.inspect(id).then(function (info) {
+            if (!info.ok) { return { ok: false, reason: info.reason, message: A.line(info) }; }
+            if (info.appId !== id) {
+                return { ok: false, reason: 'mismatch', message: 'The application page did not match the one requested - nothing was sent.' };
+            }
+            if (!info.note) {
+                return { ok: false, reason: 'gone',
+                    message: 'VMS no longer offers an Add-note control on this application - write the note in VMS.' };
+            }
+            // Visibility is never inferred or passed through unchecked. An unrecognised value would be sent
+            // verbatim, and the single mistake here that cannot be taken back is an internal note going out
+            // Public - so anything the page did not itself offer is refused before a request is made.
+            if (info.note.states.indexOf(viewState) < 0) {
+                return { ok: false, reason: 'visibility',
+                    message: 'VMS does not offer "' + viewState + '" as a visibility on this page - nothing was sent.' };
+            }
+            return A._post(A.NOTE_SERVICE, 'NoteAdd', {
+                token: info.token, characterName: info.note.name, content: content, viewState: viewState
+            }).then(function (res) {
+                if (res.ok) { res.name = info.note.name; }
+                return res;
+            });
+        });
+    },
+
+    _post: function (service, method, payload) {
+        var A = JiTA.leadduty.apps;
+        return new Promise(function (resolve) {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                resolve({ ok: false, reason: 'nogm', message: 'Actions are unavailable in this browser.' });
+                return;
+            }
+            try {
+                GM_xmlhttpRequest({
+                    method: 'POST', url: A.SERVICES_URL + service + '.asmx/' + method, timeout: A.TIMEOUT_MS,
+                    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json' },
+                    data: JSON.stringify(payload),
+                    onload: function (r) { resolve(A._postResult(r)); },
+                    onerror: function () { resolve({ ok: false, reason: 'net', message: 'The request did not reach VMS - nothing was changed.' }); },
+                    ontimeout: function () { resolve({ ok: false, reason: 'net', message: 'VMS did not answer in time. Check the application in VMS before retrying.' }); }
+                });
+            } catch (e) { resolve({ ok: false, reason: 'net', message: String(e && e.message || e) }); }
+        });
+    },
+
+    // The service answers HTTP 200 with { d: { Success: false } } when it REFUSES, so "the request worked"
+    // is emphatically not "the action happened". Anything we cannot read as an explicit Success is reported
+    // as a failure the Lead has to go and check, never as a success.
+    _postResult: function (r) {
+        if (!r || r.status < 200 || r.status >= 300) {
+            return { ok: false, reason: (r && (r.status === 401 || r.status === 403)) ? 'login' : 'net',
+                message: 'VMS rejected the request (HTTP ' + ((r && r.status) || '?') + ') - nothing was changed.' };
+        }
+        var d = null;
+        try { d = JSON.parse(r.responseText || '{}').d; } catch (e) { d = null; }
+        if (!d || typeof d.Success !== 'boolean') {
+            return { ok: false, reason: 'unreadable',
+                message: 'VMS answered in a shape this could not read. Check the application in VMS - it may or may not have changed.' };
+        }
+        if (!d.Success) { return { ok: false, reason: 'refused', message: d.Message || 'VMS refused the action.' }; }
+        return { ok: true, message: d.Message || 'Done.' };
+    },
+
+    // HTML fragment -> readable text, keeping the paragraph breaks that carry a long answer's structure.
+    _text: function (html) {
+        return String(html == null ? '' : html)
+            // Comments FIRST. The applicant cell carries a commented-out avatar div, and stripping tags
+            // before comments eats the "<!--" and the "</div>" but leaves the "-->" behind - which is how
+            // every name in the queue came out reading "--> Makthrraaa".
+            .replace(/<!--[\s\S]*?-->/g, ' ')
+            .replace(/<\s*br\s*\/?>/gi, '\n')
+            .replace(/<\/\s*(p|div|li)\s*>/gi, '\n\n')
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0*39;|&apos;/gi, "'")
+            .replace(/[ \t]+/g, ' ')
+            .replace(/\n{3,}/g, '\n\n')
+            .replace(/^\s+|\s+$/g, '');
+    },
+
+    // Resolves { ok, fresh, second, total } or { ok: false, reason }. Split out so a harness can drive it
+    // against real captured markup instead of the live site.
+    _parse: function (body, finalUrl, status) {
+        var A = JiTA.leadduty.apps;
+        var bad = A._unusable({ body: body, finalUrl: finalUrl, status: status });
+        if (bad) { return bad; }
+        var out = { ok: true, total: 0 };
+        for (var i = 0; i < A.STAGES.length; i++) {
+            var s = A.STAGES[i];
+            var re = new RegExp('href\\s*=\\s*["\'][^"\']*/admin/applications/' + s.path + '/' + A.TEAM +
+                '["\'][^>]*>\\s*([\\d,]+)\\s*<', 'i');
+            var m = re.exec(body);
+            // No match: say so. Guessing zero here is the one outcome that must never happen, because it
+            // reads exactly like "nothing to do" and an applicant waits.
+            if (!m) {
+                return { ok: false, reason: /Unresolved applications/i.test(body) ? 'norow' : 'unreadable' };
+            }
+            out[s.key] = parseInt(m[1].replace(/,/g, ''), 10) || 0;
+            out.total += out[s.key];
+        }
+        return out;
+    },
+
+    // One human line for the overlay and the chip.
+    // The queue we just read IS the count: the two stages it covers are exactly the two we count. So a
+    // successful read refreshes the cached number, and the tab, the footer line and the chip stop
+    // disagreeing with the list sitting right next to them (Schogol acted on one in VMS and the tab kept
+    // saying 11 against a list of 10, because the count was the cache's and the list was live).
+    //
+    // A PARTIAL read is deliberately NOT adopted: it would understate the queue, which is the one direction
+    // this feature must never move in.
+    adopt: function (res) {
+        var A = JiTA.leadduty.apps;
+        if (!res || !res.ok || res.partial) { return Promise.resolve(null); }
+        var rec = { ok: true, at: Date.now(), total: res.items.length };
+        A.STAGES.forEach(function (s) {
+            rec[s.key] = res.items.filter(function (it) { return it.stage === s.key; }).length;
+        });
+        return JiTA.db.setMeta(A.CACHE_KEY, rec).then(function () { return rec; }, function () { return rec; });
+    },
+
+    // How long somebody has been waiting. The queue holds applications from 2017, and "9y" says that far
+    // more usefully than a date does.
+    age: function (iso) {
+        var t = Date.parse(String(iso || '').replace(' ', 'T') + 'Z');
+        if (isNaN(t)) { return ''; }
+        var d = Math.floor((Date.now() - t) / 86400000);
+        if (d < 1) { return 'today'; }
+        if (d < 60) { return d + 'd'; }
+        if (d < 730) { return Math.round(d / 30) + 'mo'; }
+        return Math.round(d / 365) + 'y';
+    },
+
+    line: function (rec) {
+        var A = JiTA.leadduty.apps;
+        if (!rec) { return 'applications have not been checked yet'; }
+        if (rec.ok) {
+            var bits = [];
+            for (var i = 0; i < A.STAGES.length; i++) {
+                var s = A.STAGES[i], n = rec[s.key] || 0;
+                if (n) { bits.push(n + ' ' + (n === 1 ? s.one : s.many)); }
+            }
+            return bits.length ? bits.join(', ') : 'nothing waiting on ' + A.TEAM;
+        }
+        var stale = rec.last ? (' (last seen: ' + rec.last.total + ' waiting, ' +
+            new Date(rec.last.at).toISOString().slice(0, 10) + ')') : '';
+        if (rec.reason === 'login') { return 'log in to VMS to see applications' + stale; }
+        if (rec.reason === 'nogm') { return 'applications cannot be read from this browser'; }
+        if (rec.reason === 'norow') { return 'VMS has no ' + A.TEAM + ' row - open it to check' + stale; }
+        if (rec.reason === 'noform') { return 'the application page did not carry its controls - act on it in VMS'; }
+        return 'could not read the VMS dashboard - open it to check' + stale;
+    },
+
+    _noop: null
 };
 
 
@@ -14644,8 +15600,12 @@ JiTA.leadduty.reminder = {
         if (!R.shouldShow()) { R.remove(); return; }
         L.outstanding().then(function (o) {
             if (!R.shouldShow()) { R.remove(); return; }
-            // Nothing outstanding for a month we HAVE computed: stay quiet entirely.
-            if (o.known && o.pages === 0 && o.checks === 0) { R.remove(); return; }
+            // Nothing outstanding for a month we HAVE computed: stay quiet entirely. Applications count as
+            // outstanding only when we actually READ a non-zero number - an unreadable VMS must never be
+            // able to raise the chip on its own, or a Lead who simply is not logged in gets nagged daily
+            // about a queue nobody can see.
+            var appsDue = !!(o.apps && o.apps.ok && o.apps.total);
+            if (o.known && !o.pages && !o.checks && !appsDue) { R.remove(); return; }
             R._paint('📋 Lead duties: ' + R._summary(o));
         }).catch(function () { /* ignore */ });
     },
@@ -14656,6 +15616,13 @@ JiTA.leadduty.reminder = {
         var bits = [];
         if (o.pages) { bits.push(o.pages + ' page review' + (o.pages === 1 ? '' : 's')); }
         if (o.checks) { bits.push(o.checks + ' QC check' + (o.checks === 1 ? '' : 's')); }
+        if (o.apps && o.apps.ok && o.apps.total) {
+            bits.push(o.apps.total + ' application' + (o.apps.total === 1 ? '' : 's'));
+        } else if (o.apps && !o.apps.ok && o.apps.reason === 'login' && bits.length) {
+            // Only ever an ADDITION to a chip that is already up for real work (see mount): worth telling a
+            // Lead the applications number is missing, never worth summoning the chip to say it.
+            bits.push('VMS needs a login');
+        }
         return bits.length ? bits.join(', ') : 'due this month';
     },
 
@@ -14765,6 +15732,11 @@ JiTA.leadduty.sched = {
         var L = JiTA.leadduty, S = L.sched;
         if (!L.isLead()) { return; }
         try { L.reminder.mount(); } catch (e) { /* ignore */ }   // cheap, and re-arms the chip across a day boundary
+        // The VMS count, on its own (hourly) clock rather than the six-hourly ledger one: an applicant
+        // waiting to hear back is a faster-moving thing than a monthly page review. apps.refresh is a meta
+        // read until its TTL is up, so the once-a-minute poll costs nothing. Re-mount so the chip picks up
+        // a changed number; a failure is silent by design (see reminder.mount).
+        try { L.apps.refresh(false).then(function () { try { L.reminder.mount(); } catch (e2) { /* ignore */ } }, function () { /* ignore */ }); } catch (e3) { /* ignore */ }
         if (S._running) { return; }
         if (!L.rootPage() || !L.ledgerPage()) { return; }        // not configured yet: nothing to do
         if (!S._elapsed(S.FAIL_KEY, S.FAIL_MS)) { return; }
