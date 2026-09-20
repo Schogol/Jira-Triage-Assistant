@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.26.2
+// @version     3.26.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -15027,7 +15027,7 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-nadd { margin-left: auto; flex: 0 0 auto; font-weight: 400; }' +
                 '.jita-leadduty-view .ld-ncomp { margin-top: 8px; padding-top: 8px; border-top: 1px solid #2c333a; }' +
                 '.jita-leadduty-view .ld-nwho { color: #7a8694; font-size: 10px; margin-bottom: 5px; }' +
-                '.jita-leadduty-view .ld-nta { width: 100%; box-sizing: border-box; padding: 7px 9px; background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; font: 12px/1.5 inherit; resize: vertical; }' +
+                '.jita-leadduty-view .ld-nta { width: 100%; box-sizing: border-box; padding: 7px 9px; background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; font: 13px/1.6 inherit; resize: vertical; }' +
                 '.jita-leadduty-view .ld-nta:focus { outline: none; border-color: #4c9aff; }' +
                 '.jita-leadduty-view .ld-nrow { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }' +
                 '.jita-leadduty-view .ld-nvis-lbl { color: #7a8694; font-size: 10px; }' +
@@ -15038,13 +15038,23 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-nhint { color: #55606b; font-size: 10px; margin-left: auto; }' +
                 '.jita-leadduty-view .ld-note { padding: 6px 0; border-top: 1px solid #2c333a; }' +
                 '.jita-leadduty-view .ld-note:first-of-type { border-top: none; padding-top: 0; }' +
-                '.jita-leadduty-view .ld-ntext { color: #e6e6e6; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }' +
+                '.jita-leadduty-view .ld-ntext { color: #e6e6e6; font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }' +
                 '.jita-leadduty-view .ld-nby { color: #7a8694; font-size: 10px; margin-top: 3px; }' +
                 '.jita-leadduty-view .ld-qtabs { display: flex; gap: 6px; margin: 0 0 12px; flex-wrap: wrap; }' +
                 '.jita-leadduty-view .ld-qtab.on { background: #4c9aff; color: #fff; font-weight: 700; border-color: #4c9aff; }' +
-                '.jita-leadduty-view .ld-qa { margin-bottom: 12px; }' +
-                '.jita-leadduty-view .ld-q { color: #9aa6b2; font-size: 11px; margin-bottom: 4px; }' +
-                '.jita-leadduty-view .ld-a { color: #e6e6e6; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; background: #1b2025; border: 1px solid #2c333a; border-radius: 5px; padding: 8px 10px; }' +
+                // The reading measure. Left to fill the pane, an answer runs ~130 characters a line, and on
+                // the return sweep the eye loses which line it was on - which reads as "hard to read" long
+                // before anything about the size or the colour does. Capped in ch so it tracks the font size
+                // rather than a pixel count that stops being right the moment either changes. The notes block
+                // and its composer share the cap: same column, same reading.
+                '.jita-leadduty-view .ld-qpane, .jita-leadduty-view .ld-notes { max-width: 90ch; }' +
+                '.jita-leadduty-view .ld-qa { margin-bottom: 18px; }' +
+                // The questions are what you navigate by, so they are a heading, not fine print: brighter and
+                // heavier than the chrome around them, without competing with the answer for attention.
+                '.jita-leadduty-view .ld-q { color: #b9c4cf; font-size: 12px; font-weight: 600; line-height: 1.45; margin-bottom: 5px; }' +
+                // Bigger and airier than the rest of the overlay, deliberately. Everything else here is
+                // scanned; this is the only part anybody actually reads at length.
+                '.jita-leadduty-view .ld-a { color: #e6e6e6; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; background: #1b2025; border: 1px solid #2c333a; border-radius: 5px; padding: 10px 12px; }' +
                 '.jita-leadduty-view .ld-msg { width: 100%; box-sizing: border-box; min-height: 120px; margin: 2px 0 8px; padding: 8px 10px; background: #14181b; color: #cfd6dd; border: 1px solid #3a434d; border-radius: 5px; font: 12px/1.5 Consolas, "Courier New", monospace; resize: vertical; }' +
                 '.jita-leadduty-view .ld-msg:focus { outline: none; border-color: #4c9aff; }'
             );
