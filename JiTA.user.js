@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.23.0
+// @version     3.24.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14627,12 +14627,12 @@ JiTA.leadduty.ui = {
         var cached = st.qa[it.id];
         if (cached) { U._appActions($h, it, cached.actions); }
         $('<a class="ld-apps-open" target="_blank" rel="noopener">Open in VMS ↗</a>').attr('href', it.url).appendTo($h);
-        if (cached) { U._paintQa($d, cached.qa); return; }
+        if (cached) { U._paintNotes($d, cached.notes); U._paintQa($d, cached.qa); return; }
         $('<div class="ld-empty">Loading the application…</div>').appendTo($d);
         L.apps.detail(it.id).then(function (res) {
             // The cursor may have moved on while this was in flight - only paint the one still selected.
             if (!U.isOpen() || U._tab !== 'apps' || !U._apps || U._apps.items[U._apps.idx] !== it) { return; }
-            if (res.ok) { st.qa[it.id] = { qa: res.qa, actions: res.actions }; U._showApp(i); }
+            if (res.ok) { st.qa[it.id] = { qa: res.qa, actions: res.actions, notes: res.notes }; U._showApp(i); }
             else { $('#ld-apps-detail').find('.ld-empty').text(L.apps.line(res)); }
         }, function () {
             if (!U.isOpen() || U._tab !== 'apps') { return; }
@@ -14709,6 +14709,29 @@ JiTA.leadduty.ui = {
             });
             U._renderApps();
             U._status('✓ ' + it.name + ': ' + res.message);
+        });
+    },
+
+    // Above the answers, and visually separated: this is what somebody else already found out, and reading
+    // it after forming a view is worth much less than reading it before. An application with no notes says
+    // so explicitly rather than showing nothing - "nobody has commented" and "notes did not load" must not
+    // look the same on a screen that has a Decline button on it.
+    _paintNotes: function ($d, notes) {
+        var $box = $('<div class="ld-notes"></div>').appendTo($d);
+        if (!notes) {
+            $('<div class="ld-nhead warn">Notes could not be read for this application - check it in VMS before acting.</div>').appendTo($box);
+            return;
+        }
+        if (!notes.length) {
+            $('<div class="ld-nhead">No notes on this account.</div>').appendTo($box);
+            return;
+        }
+        $('<div class="ld-nhead"></div>').text('Notes on account (' + notes.length + ')').appendTo($box);
+        notes.forEach(function (n) {
+            var $n = $('<div class="ld-note"></div>').appendTo($box);
+            $('<div class="ld-ntext"></div>').text(n.text).appendTo($n);
+            var who = (n.by || 'unknown') + (n.at ? (' · ' + n.at) : '');
+            $('<div class="ld-nby"></div>').text(who).appendTo($n);
         });
     },
 
@@ -14869,6 +14892,13 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-warnbtn:hover { border-color: #f0b429; color: #f0b429; }' +
                 '.jita-leadduty-view .ld-apps-open { color: #6bd0dc; font-size: 11px; text-decoration: none; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-apps-open:hover { text-decoration: underline; }' +
+                '.jita-leadduty-view .ld-notes { border: 1px solid #3a434d; border-left: 3px solid #f0b429; border-radius: 5px; padding: 8px 10px; margin-bottom: 16px; background: #1f2329; }' +
+                '.jita-leadduty-view .ld-nhead { color: #f0b429; font-size: 11px; font-weight: 700; margin-bottom: 6px; }' +
+                '.jita-leadduty-view .ld-nhead.warn { color: #ff8f8f; }' +
+                '.jita-leadduty-view .ld-note { padding: 6px 0; border-top: 1px solid #2c333a; }' +
+                '.jita-leadduty-view .ld-note:first-of-type { border-top: none; padding-top: 0; }' +
+                '.jita-leadduty-view .ld-ntext { color: #e6e6e6; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }' +
+                '.jita-leadduty-view .ld-nby { color: #7a8694; font-size: 10px; margin-top: 3px; }' +
                 '.jita-leadduty-view .ld-qa { margin-bottom: 12px; }' +
                 '.jita-leadduty-view .ld-q { color: #9aa6b2; font-size: 11px; margin-bottom: 4px; }' +
                 '.jita-leadduty-view .ld-a { color: #e6e6e6; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; background: #1b2025; border: 1px solid #2c333a; border-radius: 5px; padding: 8px 10px; }' +
@@ -15047,8 +15077,38 @@ JiTA.leadduty.apps = {
             if (!qa.length) { return { ok: false, reason: /application-answer/i.test(body) ? 'norow' : 'unreadable' }; }
             // The controls come from the SAME fetch, so the buttons the overlay offers are the ones that
             // page rendered. They are read again at action time - this is what to show, not what to trust.
-            return { ok: true, qa: qa, actions: A._parseControls(body) };
+            return { ok: true, qa: qa, actions: A._parseControls(body), notes: A._parseNotes(body) };
         });
+    },
+
+    // Notes on the account, in document order (VMS renders newest first). These are the single most
+    // decision-relevant thing on the page - "background check flagged ... I would recommend declining" -
+    // and on the site they sit at the BOTTOM, below a long questionnaire. In the overlay they go on top,
+    // because they are what you want to have read before forming a view rather than after.
+    _parseNotes: function (body) {
+        var A = JiTA.leadduty.apps, out = [];
+        var list = /<ul\b[^>]*\bid\s*=\s*["']notesList["'][^>]*>([\s\S]*?)<\/ul>/i.exec(body || '');
+        if (!list) { return out; }
+        var li = /<li\b[^>]*>([\s\S]*?)<\/li>/gi, m;
+        while ((m = li.exec(list[1]))) {
+            var row = m[1];
+            // The body is everything in .noteText up to the byline, so a note with several paragraphs (or
+            // any nesting) survives whole rather than being cut at the first closing div.
+            var bm = /<div[^>]*class\s*=\s*["'][^"']*noteText[^"']*["'][^>]*>([\s\S]*?)<span[^>]*class\s*=\s*["'][^"']*date/i.exec(row);
+            var sm = /<span[^>]*class\s*=\s*["'][^"']*date[^"']*["'][^>]*>([\s\S]*?)<\/span>/i.exec(row);
+            var meta = sm ? sm[1] : '';
+            var am = /<a[^>]*>([^<]*)<\/a>/i.exec(meta);
+            var img = /<img[^>]*\btitle\s*=\s*["']([^"']*)["']/i.exec(row);
+            var when = /\bon\s+(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2})?)/i.exec(A._text(meta));
+            var text = A._text(bm ? bm[1] : row);
+            if (!text) { continue; }
+            out.push({
+                text: text,
+                by: A._text(am ? am[1] : (img ? img[1] : '')),
+                at: when ? when[1] : ''
+            });
+        }
+        return out;
     },
 
     // ---- acting on an application ---------------------------------------------------------------------
