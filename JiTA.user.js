@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.25.1
+// @version     3.25.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14765,7 +14765,8 @@ JiTA.leadduty.ui = {
         $('<span class="ld-nvis-lbl">Visible to</span>').appendTo($row);
         var $sel = $('<select class="ld-nvis"></select>').appendTo($row);
         target.states.forEach(function (s) { $('<option></option>').attr('value', s).text(s).appendTo($sel); });
-        $sel.val((draft && draft.vis && target.states.indexOf(draft.vis) >= 0) ? draft.vis : target.states[0]);
+        $sel.val((draft && draft.vis && target.states.indexOf(draft.vis) >= 0)
+            ? draft.vis : L.apps.noteDefaultState(target.states));
         var $post = $('<button class="jita-btn ld-mini">Post note</button>').appendTo($row);
         var $msg = $('<span class="ld-nmsg"></span>').appendTo($row);
         $('<span class="ld-nhint">Ctrl+Enter posts</span>').appendTo($row);
@@ -15211,6 +15212,18 @@ JiTA.leadduty.apps = {
     // shows on everything that person ever files. A page that renders no Add-note button offers no composer
     // here either: the same rule the action buttons follow. Resolves { name, states } or null.
     NOTE_STATES: ['Developers', 'Volunteers', 'Public'],
+    // The visibility a new note STARTS on. VMS's own modal defaults to its first option (Developers), but a
+    // Lead writing about an applicant is writing for the other volunteers, so that is where this starts.
+    // It is only ever a preference: a page that does not offer it falls back to the first option that is
+    // NOT Public, because the one visibility that must never be arrived at by accident is the one the
+    // applicant themselves can read.
+    NOTE_DEFAULT_STATE: 'Volunteers',
+    noteDefaultState: function (states) {
+        var A = JiTA.leadduty.apps, list = states || [];
+        if (list.indexOf(A.NOTE_DEFAULT_STATE) >= 0) { return A.NOTE_DEFAULT_STATE; }
+        for (var i = 0; i < list.length; i++) { if (!/public/i.test(list[i])) { return list[i]; } }
+        return list[0] || A.NOTE_DEFAULT_STATE;
+    },
     _parseNoteTarget: function (body) {
         var A = JiTA.leadduty.apps;
         var btn = /<button\b([^>]*\bdata-target\s*=\s*["']#add-note-modal["'][^>]*)>/i.exec(body || '');
