@@ -8617,6 +8617,24 @@ JiTA.menu = {
                     });
                 });
 
+                // Publishing is automatic but DETACHED (a 20s debounce after a ledger write), so when the page
+                // disagrees with the overlay there is nothing to look at. This rewrites it now and says what
+                // happened - written, skipped and why, or the actual error.
+                var $pub = $('<button class="jita-btn" title="Rewrite the ledger page from the ledger now, and report what happened">Republish page</button>').appendTo($ldAct);
+                $pub.on('click', function () {
+                    $pub.prop('disabled', true);
+                    $ldStatus.text('Publishing the ledger page…');
+                    JiTA.leadduty.report.publish(true).then(function () {
+                        if (!document.getElementById('jita-menu')) { return; }
+                        $pub.prop('disabled', false);
+                        $ldStatus.text(JiTA.leadduty.report.lastLine() + ' · reload the Confluence page to see it');
+                    }, function () {
+                        if (!document.getElementById('jita-menu')) { return; }
+                        $pub.prop('disabled', false);
+                        $ldStatus.text(JiTA.leadduty.report.lastLine());
+                    });
+                });
+
                 var $wipe = $('<button class="jita-btn" title="Delete both shared ledgers and this browser\'s local mirror, so the month is cut fresh">Clear ledger</button>').appendTo($ldAct);
                 $wipe.on('click', function () {
                     var page = JiTA.leadduty.ledgerPage();
@@ -8669,6 +8687,10 @@ JiTA.menu = {
                     if (!document.getElementById('jita-menu') || $ldStatus.text()) { return; }
                     var line = who;
                     if (raw && raw.pages) { line = JiTA.leadduty._poolLine(JiTA.leadduty.pool._applyExclusions(raw)) + ' · ' + who; }
+                    // A failed publish is otherwise invisible: it happens 20s after a ledger write with no UI
+                    // attached, and the only symptom is a page that quietly stops matching the ledger.
+                    var lp = JiTA.leadduty.report._last;
+                    if (lp && lp.error) { line += ' · ' + JiTA.leadduty.report.lastLine(); }
                     if (JiTA.leadduty._dry()) { line += ' · DRY RUN is on'; }
                     $ldStatus.text(line);
                 }).catch(function () { $ldStatus.text(who); });
@@ -13707,6 +13729,7 @@ JiTA.leadduty = {
         _timer: null,
         _busy: false,
         _busyAt: 0,
+        _last: null,           // outcome of the most recent publish attempt - see lastLine()
 
         // Used as `.then(JiTA.leadduty.report.tap)` on a ledger write: republish when something actually
         // changed, and pass the mutate result through untouched.
@@ -13720,8 +13743,21 @@ JiTA.leadduty = {
             if (R._timer) { clearTimeout(R._timer); }
             R._timer = setTimeout(function () {
                 R._timer = null;
-                R.publish(false).catch(function () { /* cosmetic - never surfaced from a background write */ });
+                R.publish(false).catch(function () { /* recorded in _last; read it with report.lastLine() */ });
             }, R.DEBOUNCE_MS);
+        },
+
+        // One line saying what the last publish actually did, for the Settings status and the console. The
+        // whole point is that "the page is out of date" stops being something you have to notice by reading
+        // the page and comparing it against the overlay.
+        lastLine: function () {
+            var l = JiTA.leadduty.report._last;
+            if (!l) { return 'the ledger page has not been published from this tab yet'; }
+            var when = new Date(l.at).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+            if (l.error) { return 'last publish FAILED (' + when + '): ' + l.error; }
+            var r = l.result || {};
+            if (r.written) { return 'ledger page published ' + when + (r.version ? (' as v' + r.version) : ''); }
+            return 'last publish (' + when + ') wrote nothing: ' + (r.skipped || 'unknown');
         },
 
         // Resolves { written, skipped, version } - `skipped` naming why nothing was written. Nothing in the
@@ -13738,8 +13774,12 @@ JiTA.leadduty = {
             if (R._busy && (Date.now() - R._busyAt) < R.BUSY_MAX_MS) { return Promise.resolve({ skipped: 'already publishing' }); }
             R._busy = true;
             R._busyAt = Date.now();
-            var done = function (v) { R._busy = false; return v; };
-            var fail = function (e) { R._busy = false; throw e; };
+            // Record the outcome either way. A publish is triggered 20 seconds after a ledger write, detached
+            // from whatever the Lead is doing, so a failure has nowhere to surface and the page just quietly
+            // stops matching the ledger - which is precisely how three separate defects went unnoticed until
+            // Schogol read the page and spotted an assignment that no longer existed.
+            var done = function (v) { R._busy = false; R._last = { at: Date.now(), result: v }; return v; };
+            var fail = function (e) { R._busy = false; R._last = { at: Date.now(), error: String(e && e.message || e) }; throw e; };
             return Promise.all([
                 L.ledger.read(L.LEDGER_KEY),
                 L.ledger.read(L.QC_LEDGER_KEY).catch(function () { return { value: null }; }),
