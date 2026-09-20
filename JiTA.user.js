@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.26.1
+// @version     3.26.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14756,10 +14756,13 @@ JiTA.leadduty.ui = {
         var $toggle = $('<button class="jita-btn ld-mini ld-nadd"></button>')
             .attr('title', 'Write a note on ' + target.name + "'s account").appendTo($head);
         var $c = $('<div class="ld-ncomp"></div>').appendTo($box);
-        // Said plainly and every time. A note written from an application screen reads as being about that
-        // application; it is not, and somebody should know that before they write "declined, see part two".
+        // Said plainly and every time, both halves. A note written from an application screen reads as being
+        // about that application; it is not, and somebody should know that before they write "declined, see
+        // part two". And VMS offers no edit and no delete - confirmed against the live page and main.js, which
+        // carries NoteAdd and nothing else - so the only correction for a note is another note.
         $('<div class="ld-nwho"></div>')
-            .text('Goes on ' + target.name + "'s account, so it shows on every application they file.").appendTo($c);
+            .text('Goes on ' + target.name + "'s account, so it shows on every application they file. " +
+                'VMS cannot edit or delete a note once it is posted.').appendTo($c);
         var $ta = $('<textarea class="ld-nta" rows="4" spellcheck="false" placeholder="Text to be included in the note"></textarea>')
             .val((draft && draft.text) || '').appendTo($c);
         var $row = $('<div class="ld-nrow"></div>').appendTo($c);
