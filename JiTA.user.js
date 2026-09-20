@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.22.1
+// @version     3.23.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14623,19 +14623,92 @@ JiTA.leadduty.ui = {
         if (it.state) { $('<span class="ld-st"></span>').text(it.state).appendTo($h); }
         $('<span class="ld-meta"></span>')
             .text('applied ' + (it.applied || '?') + (L.apps.age(it.applied) ? (' · waiting ' + L.apps.age(it.applied)) : '')).appendTo($h);
-        $('<a class="ld-apps-open" target="_blank" rel="noopener">Act on this in VMS ↗</a>').attr('href', it.url).appendTo($h);
         U._status((i + 1) + ' of ' + st.items.length);
         var cached = st.qa[it.id];
-        if (cached) { U._paintQa($d, cached); return; }
+        if (cached) { U._appActions($h, it, cached.actions); }
+        $('<a class="ld-apps-open" target="_blank" rel="noopener">Open in VMS ↗</a>').attr('href', it.url).appendTo($h);
+        if (cached) { U._paintQa($d, cached.qa); return; }
         $('<div class="ld-empty">Loading the application…</div>').appendTo($d);
         L.apps.detail(it.id).then(function (res) {
             // The cursor may have moved on while this was in flight - only paint the one still selected.
             if (!U.isOpen() || U._tab !== 'apps' || !U._apps || U._apps.items[U._apps.idx] !== it) { return; }
-            if (res.ok) { st.qa[it.id] = res.qa; U._showApp(i); }
+            if (res.ok) { st.qa[it.id] = { qa: res.qa, actions: res.actions }; U._showApp(i); }
             else { $('#ld-apps-detail').find('.ld-empty').text(L.apps.line(res)); }
         }, function () {
             if (!U.isOpen() || U._tab !== 'apps') { return; }
             $('#ld-apps-detail').find('.ld-empty').text('Could not load this application - open it in VMS.');
+        });
+    },
+
+    // The controls VMS rendered for THIS application, in its own words. Nothing is offered that its page
+    // did not offer, and what is shown here is re-read from a fresh fetch before anything is sent.
+    _appActions: function ($h, it, actions) {
+        var L = JiTA.leadduty, U = L.ui;
+        var keys = Object.keys(actions || {});
+        if (!keys.length) { return; }
+        var $bar = $('<span class="ld-aacts"></span>').appendTo($h);
+        keys.forEach(function (key) {
+            var a = actions[key];
+            var $b = $('<button class="jita-btn ld-mini"></button>')
+                .addClass(key === 'decline' ? 'ld-danger' : (key === 'reset' ? 'ld-warnbtn' : ''))
+                .text(a.label).appendTo($bar);
+            $b.on('click', function () { U._armApp(it, key, a, $b); });
+        });
+    },
+
+    // Two presses, always. One keystroke away from telling a real person no is not a margin worth having,
+    // and the wording names which of the two it is - declining notifies the applicant, resetting does not.
+    ARM_MS: 6000,
+    _armApp: function (it, key, a, $b) {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps, armed = st._armed;
+        if (armed && armed.id === it.id && armed.key === key && (Date.now() - armed.at) < U.ARM_MS) {
+            st._armed = null;
+            U._runApp(it, key, $b);
+            return;
+        }
+        st._armed = { id: it.id, key: key, at: Date.now() };
+        $('.ld-aacts .jita-btn').removeClass('armed');
+        $b.addClass('armed');
+        var msg;
+        if (key === 'decline') {
+            msg = '⚠ Decline ' + it.name + "'s application? They WILL be told. Press " + a.label + ' again to confirm.';
+        } else if (key === 'reset') {
+            msg = '⚠ Reset ' + it.name + "'s application? They are not told. Press " + a.label + ' again to confirm.';
+        } else {
+            msg = '⚠ "' + a.label + '" for ' + it.name + '? Press it again to confirm.';
+        }
+        U._status(msg);
+        setTimeout(function () {
+            if (!st._armed || st._armed.id !== it.id || st._armed.key !== key) { return; }
+            st._armed = null;
+            $b.removeClass('armed');
+            if (U.isOpen() && U._tab === 'apps' && st.items.length) { U._status((st.idx + 1) + ' of ' + st.items.length); }
+        }, U.ARM_MS);
+    },
+
+    _runApp: function (it, key, $b) {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps;
+        $b.prop('disabled', true).removeClass('armed');
+        U._status('Sending to VMS…');
+        L.apps.act(it.id, key).then(function (res) {
+            if (!U.isOpen() || U._tab !== 'apps' || U._apps !== st) { return; }
+            $b.prop('disabled', false);
+            // Anything short of an explicit Success leaves the row exactly where it is. The queue must never
+            // shrink on an outcome we could not read - that is how an application silently goes missing.
+            if (!res.ok) { U._status('✗ ' + res.message); return; }
+            var i = st.items.indexOf(it);
+            if (i !== -1) {
+                st.items.splice(i, 1);
+                delete st.qa[it.id];
+                if (st.idx > i) { st.idx--; }
+            }
+            L.apps.adopt({ ok: true, partial: st.partial, items: st.items }).then(function (rec) {
+                if (!rec) { return; }
+                U._paintApps();
+                try { L.reminder.mount(); } catch (e) { /* ignore */ }
+            });
+            U._renderApps();
+            U._status('✓ ' + it.name + ': ' + res.message);
         });
     },
 
@@ -14790,7 +14863,11 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-astage { background: #3a434d; color: #cfd6dd; border-radius: 3px; padding: 0 5px; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-ahead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px solid #2c333a; margin-bottom: 10px; }' +
                 '.jita-leadduty-view .ld-ahead .ld-title { font-weight: 700; font-size: 14px; }' +
-                '.jita-leadduty-view .ld-apps-open { margin-left: auto; color: #6bd0dc; font-size: 11px; text-decoration: none; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-aacts { display: flex; gap: 6px; flex: 0 0 auto; margin-left: auto; }' +
+                '.jita-leadduty-view .ld-aacts .jita-btn.armed { border-color: #f0b429; color: #f0b429; font-weight: 700; }' +
+                '.jita-leadduty-view .ld-danger:hover { border-color: #ff8f8f; color: #ff8f8f; }' +
+                '.jita-leadduty-view .ld-warnbtn:hover { border-color: #f0b429; color: #f0b429; }' +
+                '.jita-leadduty-view .ld-apps-open { color: #6bd0dc; font-size: 11px; text-decoration: none; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-apps-open:hover { text-decoration: underline; }' +
                 '.jita-leadduty-view .ld-qa { margin-bottom: 12px; }' +
                 '.jita-leadduty-view .ld-q { color: #9aa6b2; font-size: 11px; margin-bottom: 4px; }' +
@@ -14968,8 +15045,125 @@ JiTA.leadduty.apps = {
                 if (q) { qa.push({ q: q, a: a }); }
             }
             if (!qa.length) { return { ok: false, reason: /application-answer/i.test(body) ? 'norow' : 'unreadable' }; }
-            return { ok: true, qa: qa };
+            // The controls come from the SAME fetch, so the buttons the overlay offers are the ones that
+            // page rendered. They are read again at action time - this is what to show, not what to trust.
+            return { ok: true, qa: qa, actions: A._parseControls(body) };
         });
+    },
+
+    // ---- acting on an application ---------------------------------------------------------------------
+    // The site's own buttons call ApproveApplication / DeclineApplication, which POST JSON to an ASMX
+    // service. We replay the same calls rather than inventing an API:
+    //   /services/ApplicationService.asmx/ApplicationAccept   {token, applicationId, state}
+    //   /services/ApplicationService.asmx/ApplicationDecline  {token, applicationId, sendMessage, reset}
+    // The CSRF token is <body data-csrf="...">, so it comes from the very page fetch that also tells us
+    // which actions that application currently offers - there is no stale copy to keep anywhere.
+    //
+    // Nothing here is ever assumed. "Proceed to PartTwo" exists only because the application is in New, so
+    // the available actions, the target state, the id and the token are ALL read from a fresh fetch of that
+    // application immediately before posting. A queue that moved underneath us then refuses instead of
+    // acting on the wrong record or the wrong transition.
+    ACTION_URL: 'https://volunteers.eveonline.com/services/ApplicationService.asmx/',
+    ACTIONS: {
+        // `notifies` drives the wording of the confirm. Declining tells a real person no; resetting does
+        // not. That distinction is the single most important thing on this screen and must never be
+        // flattened into "are you sure?".
+        accept:  { btn: 'btn-approve', method: 'ApplicationAccept',  notifies: false, verb: 'move on' },
+        decline: { btn: 'btn-decline', method: 'ApplicationDecline', notifies: true,  verb: 'decline' },
+        reset:   { btn: 'btn-reset',   method: 'ApplicationDecline', notifies: false, verb: 'reset' }
+    },
+
+    // What a specific application currently offers, read from its own page. Resolves
+    // { ok, token, appId, actions: { key: { label, state } } } or { ok: false, reason }.
+    inspect: function (id) {
+        var A = JiTA.leadduty.apps;
+        return A._get(A.DETAIL_URL + id).then(function (r) {
+            var bad = A._unusable(r);
+            if (bad) { return bad; }
+            var body = r.body || '';
+            var tok = /<body[^>]*\sdata-csrf\s*=\s*["']([^"']+)["']/i.exec(body);
+            var app = /data-applicationid\s*=\s*["']([0-9a-f-]{36})["']/i.exec(body);
+            if (!tok || !app) { return { ok: false, reason: 'noform' }; }
+            return { ok: true, token: tok[1], appId: app[1], actions: A._parseControls(body) };
+        });
+    },
+
+    // Which of the three controls this page actually renders, and what the accept button would move it to.
+    // An action that is not on the page is not offered, which is the whole verification.
+    _parseControls: function (body) {
+        var A = JiTA.leadduty.apps, actions = {};
+        Object.keys(A.ACTIONS).forEach(function (key) {
+            var cfg = A.ACTIONS[key];
+            var re = new RegExp('<a\\b([^>]*\\bid\\s*=\\s*["\']' + cfg.btn + '["\'][^>]*)>([\\s\\S]*?)<\\/a>', 'i');
+            var m = re.exec(body);
+            if (!m) { return; }
+            var st = /\bdata-state\s*=\s*["']([^"']*)["']/i.exec(m[1]);
+            actions[key] = { label: A._text(m[2]) || key, state: st ? st[1] : null };
+        });
+        return actions;
+    },
+
+    // Re-verify, then post. Resolves { ok: true, message } or { ok: false, reason, message } - never throws,
+    // because every caller has to be able to say what happened rather than swallow it.
+    act: function (id, key) {
+        var A = JiTA.leadduty.apps, cfg = A.ACTIONS[key];
+        if (!cfg) { return Promise.resolve({ ok: false, reason: 'unknown', message: 'Unknown action.' }); }
+        return A.inspect(id).then(function (info) {
+            if (!info.ok) { return { ok: false, reason: info.reason, message: A.line(info) }; }
+            var offered = info.actions[key];
+            // The action vanished between the queue being listed and this click: somebody else handled it,
+            // or its state moved. Refusing is the only safe answer - the button that is there NOW may mean
+            // something entirely different from the one that was there when the list was drawn.
+            if (!offered) {
+                return { ok: false, reason: 'gone',
+                    message: 'VMS no longer offers that action on this application - it has moved on or somebody else handled it. Refresh the queue.' };
+            }
+            if (info.appId !== id) {
+                return { ok: false, reason: 'mismatch', message: 'The application page did not match the one requested - nothing was sent.' };
+            }
+            var payload = (key === 'accept')
+                ? { token: info.token, applicationId: id, state: offered.state }
+                : { token: info.token, applicationId: id, sendMessage: key === 'decline', reset: key === 'reset' };
+            return A._post(cfg.method, payload);
+        });
+    },
+
+    _post: function (method, payload) {
+        var A = JiTA.leadduty.apps;
+        return new Promise(function (resolve) {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                resolve({ ok: false, reason: 'nogm', message: 'Actions are unavailable in this browser.' });
+                return;
+            }
+            try {
+                GM_xmlhttpRequest({
+                    method: 'POST', url: A.ACTION_URL + method, timeout: A.TIMEOUT_MS,
+                    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json' },
+                    data: JSON.stringify(payload),
+                    onload: function (r) { resolve(A._postResult(r)); },
+                    onerror: function () { resolve({ ok: false, reason: 'net', message: 'The request did not reach VMS - nothing was changed.' }); },
+                    ontimeout: function () { resolve({ ok: false, reason: 'net', message: 'VMS did not answer in time. Check the application in VMS before retrying.' }); }
+                });
+            } catch (e) { resolve({ ok: false, reason: 'net', message: String(e && e.message || e) }); }
+        });
+    },
+
+    // The service answers HTTP 200 with { d: { Success: false } } when it REFUSES, so "the request worked"
+    // is emphatically not "the action happened". Anything we cannot read as an explicit Success is reported
+    // as a failure the Lead has to go and check, never as a success.
+    _postResult: function (r) {
+        if (!r || r.status < 200 || r.status >= 300) {
+            return { ok: false, reason: (r && (r.status === 401 || r.status === 403)) ? 'login' : 'net',
+                message: 'VMS rejected the request (HTTP ' + ((r && r.status) || '?') + ') - nothing was changed.' };
+        }
+        var d = null;
+        try { d = JSON.parse(r.responseText || '{}').d; } catch (e) { d = null; }
+        if (!d || typeof d.Success !== 'boolean') {
+            return { ok: false, reason: 'unreadable',
+                message: 'VMS answered in a shape this could not read. Check the application in VMS - it may or may not have changed.' };
+        }
+        if (!d.Success) { return { ok: false, reason: 'refused', message: d.Message || 'VMS refused the action.' }; }
+        return { ok: true, message: d.Message || 'Done.' };
     },
 
     // HTML fragment -> readable text, keeping the paragraph breaks that carry a long answer's structure.
@@ -15058,6 +15252,7 @@ JiTA.leadduty.apps = {
         if (rec.reason === 'login') { return 'log in to VMS to see applications' + stale; }
         if (rec.reason === 'nogm') { return 'applications cannot be read from this browser'; }
         if (rec.reason === 'norow') { return 'VMS has no ' + A.TEAM + ' row - open it to check' + stale; }
+        if (rec.reason === 'noform') { return 'the application page did not carry its controls - act on it in VMS'; }
         return 'could not read the VMS dashboard - open it to check' + stale;
     },
 
