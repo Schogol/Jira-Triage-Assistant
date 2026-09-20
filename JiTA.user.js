@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.21.0
+// @version     3.22.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14126,6 +14126,7 @@ JiTA.leadduty.ui = {
         $('<button class="ld-tab" data-tab="wiki">Wiki review</button>').appendTo($tabs);
         $('<button class="ld-tab" data-tab="qc">Quality control</button>').appendTo($tabs);
         $('<button class="ld-tab" data-tab="flags" title="Everything any Lead flagged during quality control and nobody has closed out yet">Follow-ups</button>').appendTo($tabs);
+        $('<button class="ld-tab" data-tab="apps" title="Read the applications waiting in VMS here instead of clicking through the site. Read-only - acting on one still happens in VMS.">Applications</button>').appendTo($tabs);
         $tabs.on('click', '.ld-tab', function () { U._tab = $(this).attr('data-tab'); U._render(); });
         $('<div class="ld-scroll" id="ld-body"></div>').appendTo(ov.$menu);
         var $foot = $('<div class="ld-foot"></div>').appendTo(ov.$menu);
@@ -14144,6 +14145,8 @@ JiTA.leadduty.ui = {
                 U._load(true);
                 L.apps.refresh(true).then(function () { U._paintApps(); }, function () { U._paintApps(); });
             }).appendTo($foot);
+        U._wireKeys();
+        U._apps = null;   // applicant answers are never kept across an open (see the _apps comment)
         U._render();
         U._load(false);
         // Resolve the QC month alongside the wiki queue rather than waiting for the tab to be clicked, so
@@ -14170,6 +14173,8 @@ JiTA.leadduty.ui = {
             var $a = $('#ld-apps');
             if (!U.isOpen() || !$a.length) { return; }
             $a.text('VMS: ' + L.apps.line(rec)).toggleClass('warn', !!(rec && !rec.ok));
+            $('#jita-menu.jita-leadduty-view .ld-tab[data-tab="apps"]')
+                .text((rec && rec.ok && rec.total) ? ('Applications (' + rec.total + ')') : 'Applications');
         });
     },
 
@@ -14178,6 +14183,7 @@ JiTA.leadduty.ui = {
         if (!U.isOpen()) { return; }
         if (U._tab === 'wiki') { U._loadWiki(force); }
         else if (U._tab === 'flags') { U._loadFlags(force); }
+        else if (U._tab === 'apps') { U._loadApps(force); }
         else { U._loadQc(force); }
     },
 
@@ -14536,6 +14542,127 @@ JiTA.leadduty.ui = {
             ' · ' + done.length + ' recently resolved' + (L._dry() ? ' · DRY RUN - nothing is written' : ''));
     },
 
+    // ---- Applications: read the VMS queue here instead of clicking through the site --------------------
+    // Read-only. Acting on an application still happens in VMS (the link on every row), because a POST into
+    // CCP's live recruitment system is a different risk class from reading one.
+    //
+    // NOTHING here is persisted. `_apps` holds the list and the answers in the tab's memory for as long as
+    // the overlay is open and is dropped on the next open - these are somebody's answers to personal
+    // questions, and the rest of this script's storage is for our own data, not theirs.
+    _apps: null,
+
+    _loadApps: function () {
+        var L = JiTA.leadduty, U = L.ui;
+        U._status('Reading the VMS queue…');
+        U._body().empty().append($('<div class="ld-empty">Fetching applications from VMS…</div>'));
+        L.apps.list().then(function (res) {
+            if (!U.isOpen() || U._tab !== 'apps') { return; }
+            if (!res.ok) {
+                U._body().empty().append($('<div class="ld-empty"></div>').text(L.apps.line(res)));
+                U._status('');
+                return;
+            }
+            U._apps = { items: res.items, idx: 0, qa: {}, rows: [], partial: !!res.partial };
+            U._renderApps();
+        }, function (e) {
+            if (!U.isOpen() || U._tab !== 'apps') { return; }
+            U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
+            U._status('');
+        });
+    },
+
+    _renderApps: function () {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps;
+        if (!st || !U.isOpen()) { return; }
+        var $b = U._body().empty();
+        $('<div class="ld-sub"></div>')
+            .text(st.items.length + ' application' + (st.items.length === 1 ? '' : 's') + ' waiting on ' + L.apps.TEAM +
+                ' · oldest first · ↑/↓ to move').appendTo($b);
+        if (st.partial) {
+            $b.append($('<div class="ld-warn">One of the two queues could not be read, so this list may be short - open VMS to be sure.</div>'));
+        }
+        if (!st.items.length) {
+            $b.append($('<div class="ld-empty">Nothing waiting. 🎉</div>'));
+            U._status('');
+            return;
+        }
+        var $wrap = $('<div class="ld-apps-wrap"></div>').appendTo($b);
+        var $list = $('<div class="ld-apps-list"></div>').appendTo($wrap);
+        $('<div class="ld-apps-detail" id="ld-apps-detail"></div>').appendTo($wrap);
+        st.rows = [];
+        st.items.forEach(function (it, i) {
+            var $r = $('<div class="ld-arow"></div>').appendTo($list);
+            $('<div class="ld-aname"></div>').text(it.name).appendTo($r);
+            var $m = $('<div class="ld-ameta"></div>').appendTo($r);
+            $('<span class="ld-astage"></span>').text(it.state || '').appendTo($m);
+            $('<span></span>').text(L.apps.age(it.applied)).appendTo($m);
+            $r.on('click', function () { U._showApp(i); });
+            st.rows.push($r);
+        });
+        U._showApp(st.idx);
+    },
+
+    _showApp: function (i) {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps;
+        if (!st || !st.items.length || !U.isOpen()) { return; }
+        i = Math.max(0, Math.min(st.items.length - 1, i));
+        st.idx = i;
+        (st.rows || []).forEach(function ($r, n) { $r.toggleClass('on', n === i); });
+        var it = st.items[i], $d = $('#ld-apps-detail');
+        if (!$d.length) { return; }
+        $d.empty();
+        var $h = $('<div class="ld-ahead"></div>').appendTo($d);
+        $('<a class="ld-title" target="_blank" rel="noopener"></a>').attr('href', it.url).text(it.name).appendTo($h);
+        if (it.state) { $('<span class="ld-st"></span>').text(it.state).appendTo($h); }
+        $('<span class="ld-meta"></span>')
+            .text('applied ' + (it.applied || '?') + (L.apps.age(it.applied) ? (' · waiting ' + L.apps.age(it.applied)) : '')).appendTo($h);
+        $('<a class="ld-apps-open" target="_blank" rel="noopener">Act on this in VMS ↗</a>').attr('href', it.url).appendTo($h);
+        U._status((i + 1) + ' of ' + st.items.length);
+        var cached = st.qa[it.id];
+        if (cached) { U._paintQa($d, cached); return; }
+        $('<div class="ld-empty">Loading the application…</div>').appendTo($d);
+        L.apps.detail(it.id).then(function (res) {
+            // The cursor may have moved on while this was in flight - only paint the one still selected.
+            if (!U.isOpen() || U._tab !== 'apps' || !U._apps || U._apps.items[U._apps.idx] !== it) { return; }
+            if (res.ok) { st.qa[it.id] = res.qa; U._showApp(i); }
+            else { $('#ld-apps-detail').find('.ld-empty').text(L.apps.line(res)); }
+        }, function () {
+            if (!U.isOpen() || U._tab !== 'apps') { return; }
+            $('#ld-apps-detail').find('.ld-empty').text('Could not load this application - open it in VMS.');
+        });
+    },
+
+    _paintQa: function ($d, qa) {
+        qa.forEach(function (p) {
+            var $w = $('<div class="ld-qa"></div>').appendTo($d);
+            $('<div class="ld-q"></div>').text(p.q).appendTo($w);
+            $('<div class="ld-a"></div>').text(p.a || '(no answer)').appendTo($w);
+        });
+    },
+
+    // Arrow keys on the applications tab. Delegated once and gated on the tab being open, so there is no
+    // teardown to get wrong; Escape is left alone so the overlay still closes on it.
+    _wireKeys: function () {
+        var U = JiTA.leadduty.ui;
+        if (U._keysWired) { return; }
+        U._keysWired = true;
+        document.addEventListener('keydown', function (e) {
+            if (!U.isOpen() || U._tab !== 'apps') { return; }
+            if (e.ctrlKey || e.metaKey || e.altKey) { return; }
+            if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') { return; }
+            var t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
+            var st = U._apps;
+            if (!st || !st.items || !st.items.length) { return; }
+            e.preventDefault();
+            U._showApp(st.idx + (e.key === 'ArrowDown' ? 1 : -1));
+            var $r = (st.rows || [])[st.idx];
+            if ($r && $r[0]) {
+                try { $r[0].scrollIntoView({ block: 'nearest' }); } catch (x) { $r[0].scrollIntoView(false); }
+            }
+        }, true);
+    },
+
     // Copy to the clipboard, falling back to the old selection + execCommand path where the async API is
     // unavailable or refused (it needs a secure context and a user gesture; a button click is one, but a
     // browser policy can still say no). Rejects so the caller can show the text and let Ctrl+C finish it.
@@ -14643,6 +14770,24 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-ghead { display: flex; align-items: center; gap: 10px; padding: 7px 0; }' +
                 '.jita-leadduty-view .ld-gname { color: #e6e6e6; font-weight: 700; font-size: 13px; }' +
                 '.jita-leadduty-view .ld-gcount { color: #7a8694; font-size: 11px; flex: 1 1 auto; }' +
+                // Applications: a list beside the answers, each scrolling on its own, so walking the queue
+                // never moves the reading pane's scroll position out from under you.
+                '.jita-leadduty-view .ld-apps-wrap { display: flex; gap: 14px; height: 62vh; }' +
+                '.jita-leadduty-view .ld-apps-list { flex: 0 0 240px; overflow-y: auto; overflow-x: hidden; border-right: 1px solid #2c333a; padding-right: 6px; }' +
+                '.jita-leadduty-view .ld-apps-detail { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding-right: 4px; }' +
+                '.jita-leadduty-view .ld-arow { padding: 7px 8px; border: 1px solid transparent; border-bottom: 1px solid #262c32; cursor: pointer; }' +
+                '.jita-leadduty-view .ld-arow:hover { background: #22272b; }' +
+                '.jita-leadduty-view .ld-arow.on { background: rgba(76,154,255,.15); border-color: #4c9aff; border-radius: 5px; }' +
+                '.jita-leadduty-view .ld-aname { color: #e6e6e6; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }' +
+                '.jita-leadduty-view .ld-ameta { display: flex; align-items: center; gap: 6px; margin-top: 4px; color: #7a8694; font-size: 10px; }' +
+                '.jita-leadduty-view .ld-astage { background: #3a434d; color: #cfd6dd; border-radius: 3px; padding: 0 5px; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-ahead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px solid #2c333a; margin-bottom: 10px; }' +
+                '.jita-leadduty-view .ld-ahead .ld-title { font-weight: 700; font-size: 14px; }' +
+                '.jita-leadduty-view .ld-apps-open { margin-left: auto; color: #6bd0dc; font-size: 11px; text-decoration: none; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-apps-open:hover { text-decoration: underline; }' +
+                '.jita-leadduty-view .ld-qa { margin-bottom: 12px; }' +
+                '.jita-leadduty-view .ld-q { color: #9aa6b2; font-size: 11px; margin-bottom: 4px; }' +
+                '.jita-leadduty-view .ld-a { color: #e6e6e6; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; background: #1b2025; border: 1px solid #2c333a; border-radius: 5px; padding: 8px 10px; }' +
                 '.jita-leadduty-view .ld-msg { width: 100%; box-sizing: border-box; min-height: 120px; margin: 2px 0 8px; padding: 8px 10px; background: #14181b; color: #cfd6dd; border: 1px solid #3a434d; border-radius: 5px; font: 12px/1.5 Consolas, "Courier New", monospace; resize: vertical; }' +
                 '.jita-leadduty-view .ld-msg:focus { outline: none; border-color: #4c9aff; }'
             );
@@ -14708,30 +14853,137 @@ JiTA.leadduty.apps = {
 
     _fetch: function () {
         var A = JiTA.leadduty.apps;
+        return A._get(A.URL).then(function (r) { return A._parse(r.body, r.finalUrl, r.status); });
+    },
+
+    // One GET against VMS, shared by the dashboard count, the queue list and an application's detail.
+    // Always resolves { body, finalUrl, status } or { failed: true } - callers decide what a failure means.
+    _get: function (url) {
+        var A = JiTA.leadduty.apps;
         return new Promise(function (resolve) {
-            if (typeof GM_xmlhttpRequest !== 'function') { resolve({ ok: false, reason: 'nogm' }); return; }
+            if (typeof GM_xmlhttpRequest !== 'function') { resolve({ failed: true, reason: 'nogm' }); return; }
             try {
                 GM_xmlhttpRequest({
-                    method: 'GET', url: A.URL, timeout: A.TIMEOUT_MS,
-                    onload: function (r) { resolve(A._parse(r.responseText || '', r.finalUrl || '', r.status)); },
-                    onerror: function () { resolve({ ok: false, reason: 'net' }); },
-                    ontimeout: function () { resolve({ ok: false, reason: 'net' }); }
+                    method: 'GET', url: url, timeout: A.TIMEOUT_MS,
+                    onload: function (r) { resolve({ body: r.responseText || '', finalUrl: r.finalUrl || '', status: r.status }); },
+                    onerror: function () { resolve({ failed: true, reason: 'net' }); },
+                    ontimeout: function () { resolve({ failed: true, reason: 'net' }); }
                 });
-            } catch (e) { resolve({ ok: false, reason: 'net' }); }
+            } catch (e) { resolve({ failed: true, reason: 'net' }); }
         });
+    },
+
+    // Shared preamble for every parse: the reasons a response cannot be read at all. Returns a failure
+    // object, or null when the body is worth looking at.
+    _unusable: function (r) {
+        if (!r || r.failed) { return { ok: false, reason: (r && r.reason) || 'net' }; }
+        if (r.status && (r.status < 200 || r.status >= 300)) {
+            return { ok: false, reason: (r.status === 401 || r.status === 403) ? 'login' : 'net' };
+        }
+        // GM follows redirects, so an expired session shows up as having LANDED on the SSO login page.
+        if (/login\.eveonline\.com|\/account\/(login|signin)|\/oauth2?\/authorize/i.test(r.finalUrl || '')) {
+            return { ok: false, reason: 'login' };
+        }
+        return null;
+    },
+
+    // ---- the queue: the applications themselves ------------------------------------------------------
+    // Deliberately NOT cached anywhere. Everything else this script stores is ours - defect text, page ids,
+    // counts - but these are somebody's answers to personal questions, so they live in the tab's memory for
+    // as long as the overlay is open and nowhere else.
+    LIST_URL: 'https://volunteers.eveonline.com/admin/applications/',      // + stage + '/' + TEAM
+    DETAIL_URL: 'https://volunteers.eveonline.com/Admin/Application/',     // + id
+
+    // Both stages we count, merged and tagged, oldest first - the person who has waited longest is the one
+    // to answer next. Resolves { ok, items } or { ok: false, reason }.
+    list: function () {
+        var A = JiTA.leadduty.apps;
+        return Promise.all(A.STAGES.map(function (s) {
+            return A._get(A.LIST_URL + s.path + '/' + A.TEAM).then(function (r) { return A._parseList(r, s); });
+        })).then(function (parts) {
+            var items = [], bad = null;
+            for (var i = 0; i < parts.length; i++) {
+                if (!parts[i].ok) { bad = bad || parts[i]; continue; }
+                items = items.concat(parts[i].items);
+            }
+            // One stage failing while the other worked still hides applications, so say so rather than
+            // presenting a short list as the whole queue.
+            if (bad && !items.length) { return bad; }
+            items.sort(function (a, b) { return (a.applied || '') < (b.applied || '') ? -1 : 1; });
+            return { ok: true, items: items, partial: !!bad };
+        });
+    },
+
+    // Rows are found by the REVIEW link - href="/Admin/Application/<guid>" - so a reordered table or an
+    // added column changes nothing. The cells are then read positionally within that row only.
+    _parseList: function (r, stage) {
+        var A = JiTA.leadduty.apps, bad = A._unusable(r);
+        if (bad) { return bad; }
+        var body = r.body || '', items = [], chunks = body.split(/<tr\b/i);
+        for (var i = 1; i < chunks.length; i++) {
+            var row = chunks[i];
+            var idm = /href\s*=\s*["']\/Admin\/Application\/([0-9a-f-]{36})["']/i.exec(row);
+            if (!idm) { continue; }
+            var cells = [], cm, cre = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+            while ((cm = cre.exec(row))) { cells.push(A._text(cm[1])); }
+            var dates = [];
+            for (var c = 0; c < cells.length; c++) {
+                if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(cells[c])) { dates.push(cells[c]); }
+            }
+            var st = /<span class="state">([^<]*)<\/span>/i.exec(row);
+            items.push({
+                id: idm[1],
+                name: cells[0] || '(unnamed)',
+                state: st ? A._text(st[1]) : (stage ? stage.one : ''),
+                stage: stage ? stage.key : '',
+                applied: dates[0] || '',
+                updated: dates[1] || dates[0] || '',
+                url: A.DETAIL_URL + idm[1]
+            });
+        }
+        // An applications page with no rows is a real answer (nobody waiting); a page that is not the
+        // applications page at all is not, and must not read as an empty queue.
+        if (!items.length && !/\/Admin\/Application|applications/i.test(body)) { return { ok: false, reason: 'unreadable' }; }
+        return { ok: true, items: items };
+    },
+
+    // One application's questions and answers, in document order. The questionnaire has changed over the
+    // years and a re-applicant's page carries both sets, so nothing here assumes a fixed list of questions.
+    detail: function (id) {
+        var A = JiTA.leadduty.apps;
+        return A._get(A.DETAIL_URL + id).then(function (r) {
+            var bad = A._unusable(r);
+            if (bad) { return bad; }
+            var body = r.body || '', qa = [], m;
+            var re = /<dt\b[^>]*>([\s\S]*?)<\/dt>\s*<dd\b[^>]*class\s*=\s*["'][^"']*application-answer[^"']*["'][^>]*>([\s\S]*?)<\/dd>/gi;
+            while ((m = re.exec(body))) {
+                var q = A._text(m[1]), a = A._text(m[2]);
+                if (q) { qa.push({ q: q, a: a }); }
+            }
+            if (!qa.length) { return { ok: false, reason: /application-answer/i.test(body) ? 'norow' : 'unreadable' }; }
+            return { ok: true, qa: qa };
+        });
+    },
+
+    // HTML fragment -> readable text, keeping the paragraph breaks that carry a long answer's structure.
+    _text: function (html) {
+        return String(html == null ? '' : html)
+            .replace(/<\s*br\s*\/?>/gi, '\n')
+            .replace(/<\/\s*(p|div|li)\s*>/gi, '\n\n')
+            .replace(/<[^>]*>/g, '')
+            .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0*39;|&apos;/gi, "'")
+            .replace(/[ \t]+/g, ' ')
+            .replace(/\n{3,}/g, '\n\n')
+            .replace(/^\s+|\s+$/g, '');
     },
 
     // Resolves { ok, fresh, second, total } or { ok: false, reason }. Split out so a harness can drive it
     // against real captured markup instead of the live site.
     _parse: function (body, finalUrl, status) {
         var A = JiTA.leadduty.apps;
-        if (status && (status < 200 || status >= 300)) {
-            return { ok: false, reason: (status === 401 || status === 403) ? 'login' : 'net' };
-        }
-        // GM follows redirects, so an expired session shows up as having LANDED on the SSO login page.
-        if (/login\.eveonline\.com|\/account\/(login|signin)|\/oauth2?\/authorize/i.test(finalUrl || '')) {
-            return { ok: false, reason: 'login' };
-        }
+        var bad = A._unusable({ body: body, finalUrl: finalUrl, status: status });
+        if (bad) { return bad; }
         var out = { ok: true, total: 0 };
         for (var i = 0; i < A.STAGES.length; i++) {
             var s = A.STAGES[i];
@@ -14750,6 +15002,18 @@ JiTA.leadduty.apps = {
     },
 
     // One human line for the overlay and the chip.
+    // How long somebody has been waiting. The queue holds applications from 2017, and "9y" says that far
+    // more usefully than a date does.
+    age: function (iso) {
+        var t = Date.parse(String(iso || '').replace(' ', 'T') + 'Z');
+        if (isNaN(t)) { return ''; }
+        var d = Math.floor((Date.now() - t) / 86400000);
+        if (d < 1) { return 'today'; }
+        if (d < 60) { return d + 'd'; }
+        if (d < 730) { return Math.round(d / 30) + 'mo'; }
+        return Math.round(d / 365) + 'y';
+    },
+
     line: function (rec) {
         var A = JiTA.leadduty.apps;
         if (!rec) { return 'applications have not been checked yet'; }
