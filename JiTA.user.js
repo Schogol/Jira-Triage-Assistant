@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.26.0
+// @version     3.26.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14847,9 +14847,15 @@ JiTA.leadduty.ui = {
         var $btns = [];
         sections.forEach(function (s, n) {
             var $b = $('<button class="jita-btn ld-mini ld-qtab"></button>')
+                // Numbered rather than titled. VMS calls them "Application" and "Application part 2", which
+                // reads as one thing and its appendix; they are two questionnaires, and the number is what a
+                // Lead actually thinks in. The position is as structural as the heading was, so a third one
+                // still numbers itself. The page's own name stays on the tooltip, where it costs nothing and
+                // is the quickest way to tell whether the split still tracks what VMS renders.
                 // The count is on the label so the tab you are NOT on still says whether there is anything
                 // over there - a part two with two answers is worth a glance, an empty one is not.
-                .text(s.title + ' (' + s.qa.length + ')')
+                .text('Questionnaire ' + (n + 1) + ' (' + s.qa.length + ')')
+                .attr('title', s.title)
                 .on('click', function () {
                     sel = n;
                     if (st && st.qtab && it) { st.qtab[it.id] = n; }   // survives navigating away and back
