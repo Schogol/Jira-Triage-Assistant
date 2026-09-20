@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.20.5
+// @version     3.21.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -24,6 +24,7 @@
 // @connect     atlassian.com
 // @connect     translate.googleapis.com
 // @connect     clients5.google.com
+// @connect     volunteers.eveonline.com
 // ==/UserScript==
 /* global $ */
 
@@ -13740,11 +13741,13 @@ JiTA.leadduty = {
         }).catch(function () { /* best effort */ });
     },
 
-    // Outstanding counts for the chip, entirely from local state (no network).
+    // Outstanding counts for the chip, entirely from local state (no network). `apps` is the VMS cache the
+    // scheduler refills on its own schedule - read here, never fetched here, so the chip never waits on a
+    // third-party site to paint.
     outstanding: function () {
         var L = JiTA.leadduty;
         var wym = L._ym(), qym = L._prevYm();
-        return Promise.all([L.local.get(L.wiki.localKey(wym)), L.local.get(L.qc.localKey(qym))]).then(function (r) {
+        return Promise.all([L.local.get(L.wiki.localKey(wym)), L.local.get(L.qc.localKey(qym)), L.apps.read()]).then(function (r) {
             var w = r[0], q = r[1];
             function left(rec, field) {
                 if (!rec || !rec[field]) { return null; }          // not computed yet this month
@@ -13752,7 +13755,7 @@ JiTA.leadduty = {
                 for (var i = 0; i < total; i++) { if (rec.done && rec.done[rec[field][i]]) { done++; } }
                 return total - done;
             }
-            return { pages: left(w, 'pageIds'), checks: left(q, 'items'), known: !!(w || q) };
+            return { pages: left(w, 'pageIds'), checks: left(q, 'items'), apps: r[2], known: !!(w || q) };
         });
     },
 
@@ -14127,11 +14130,20 @@ JiTA.leadduty.ui = {
         $('<div class="ld-scroll" id="ld-body"></div>').appendTo(ov.$menu);
         var $foot = $('<div class="ld-foot"></div>').appendTo(ov.$menu);
         $('<span class="ld-muted" id="ld-status"></span>').appendTo($foot);
+        // Applications live in VMS, not in the ledger, so they get a link rather than a tab: there is
+        // nothing here to mark done. It sits in the footer so it is visible from every tab.
+        $('<a class="ld-apps" id="ld-apps" target="_blank" rel="noopener"></a>')
+            .attr('href', L.apps.URL).attr('title', 'Open the volunteer management dashboard').appendTo($foot);
+        U._paintApps();
+        L.apps.refresh(false).then(function () { U._paintApps(); }, function () { U._paintApps(); });
         // No "publish" button: the ledger PAGE is rewritten automatically after any change (report.tap ->
         // a 20s debounce, so a run of marks makes one page version), and the scheduler republishes on its
         // own tick as the backstop. A button that only duplicates that is one more thing to explain.
         $('<button class="jita-btn" id="ld-refresh" title="Re-read the shared ledger and rebuild THIS tab (the wiki tab also re-scans the page tree). Changes nothing for anyone else.">Refresh</button>')
-            .on('click', function () { U._load(true); }).appendTo($foot);
+            .on('click', function () {
+                U._load(true);
+                L.apps.refresh(true).then(function () { U._paintApps(); }, function () { U._paintApps(); });
+            }).appendTo($foot);
         U._render();
         U._load(false);
         // Resolve the QC month alongside the wiki queue rather than waiting for the tab to be clicked, so
@@ -14148,6 +14160,18 @@ JiTA.leadduty.ui = {
         if (el) { el.textContent = msg || ''; }
     },
     _body: function () { return $('#ld-body'); },
+
+    // The VMS line in the footer. Painted from the cache, so it is instant; whatever refresh is in flight
+    // repaints it when it lands. `warn` is anything we could not read - never a number we guessed.
+    _paintApps: function () {
+        var L = JiTA.leadduty, U = L.ui;
+        if (!U.isOpen()) { return; }
+        L.apps.read().then(function (rec) {
+            var $a = $('#ld-apps');
+            if (!U.isOpen() || !$a.length) { return; }
+            $a.text('VMS: ' + L.apps.line(rec)).toggleClass('warn', !!(rec && !rec.ok));
+        });
+    },
 
     _load: function (force) {
         var L = JiTA.leadduty, U = L.ui;
@@ -14582,6 +14606,9 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-scroll { flex: 1 1 auto; min-height: 0; max-height: 70vh; overflow-y: auto; padding: 10px 16px; }' +
                 '.jita-leadduty-view .ld-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #3a434d; background: #282d33; }' +
                 '.jita-leadduty-view .ld-muted, .jita-leadduty-view #ld-status { color: #9aa6b2; font-size: 11px; flex: 1; }' +
+                '.jita-leadduty-view .ld-apps { color: #6bd0dc; font-size: 11px; text-decoration: none; flex: 0 0 auto; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-apps:hover { text-decoration: underline; }' +
+                '.jita-leadduty-view .ld-apps.warn { color: #f0b429; }' +
                 '.jita-leadduty-view .ld-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
                 '.jita-leadduty-view .ld-warn { color: #f0b429; font-size: 11px; padding: 6px 0 10px; }' +
                 '.jita-leadduty-view .ld-sub { color: #9aa6b2; font-size: 12px; font-weight: 600; margin: 4px 0 8px; }' +
@@ -14624,6 +14651,128 @@ JiTA.leadduty.ui = {
 };
 
 
+/* ---- Lead duties: applications waiting in VMS --------------------------------------------------------
+ * The third duty: new applications and returned questionnaires sitting in the volunteer management system
+ * (volunteers.eveonline.com). Unlike the other two this is READ-ONLY and deliberately carries NO LEDGER
+ * ENTRY (Schogol's call) - it is visibility, not accountability. So there is no month to freeze, nothing
+ * shared between Leads, and nothing that can be written wrongly: each Lead's tab reads with their own
+ * session and nobody inherits anybody else's answer.
+ *
+ * VMS is a different origin, so this goes through GM_xmlhttpRequest (declared in @connect), which carries
+ * the Lead's existing volunteer session cookie. No credential is stored and nothing leaves the browser.
+ *
+ * The counts are read by LINK TARGET, not by column position. The dashboard renders each one as
+ * <a href="/admin/applications/<stage>/ECAID">N</a>, and those paths name the stage, so a reordered or
+ * newly-added column changes nothing - which matters for a third-party page we do not control.
+ *
+ * A count we cannot find is NEVER reported as zero. A false zero on somebody's application is worse than
+ * no number at all: an expired session says "log in to VMS", an unreadable page says "open VMS", and the
+ * last good numbers are kept and labelled stale rather than quietly replaced by a plausible-looking 0.
+ */
+JiTA.leadduty.apps = {
+    URL: 'https://volunteers.eveonline.com/Admin',
+    TEAM: 'ECAID',
+    CACHE_KEY: 'leadduty:apps',
+    TTL_MS: 60 * 60 * 1000,      // the poll runs every minute; this is what actually caps the request rate
+    TIMEOUT_MS: 20000,
+    // The two stages where a player is waiting on ECAID. "Waiting on player" is theirs, not ours, and the
+    // background-check / NDA stages are deliberately out (Schogol's call) - they are a different step.
+    STAGES: [
+        { key: 'fresh',  path: 'new',     one: 'new application',        many: 'new applications' },
+        { key: 'second', path: 'parttwo', one: 'returned questionnaire', many: 'returned questionnaires' }
+    ],
+    _busy: null,
+
+    read: function () { return JiTA.db.getMeta(JiTA.leadduty.apps.CACHE_KEY).catch(function () { return null; }); },
+
+    // Cached for TTL_MS, so the once-a-minute poll costs one meta read and the dashboard sees one request
+    // an hour. `force` is the overlay's Refresh.
+    refresh: function (force) {
+        var A = JiTA.leadduty.apps;
+        if (A._busy) { return A._busy; }
+        var done = function (v) { A._busy = null; return v; };
+        A._busy = A.read().then(function (cached) {
+            if (!force && cached && (Date.now() - (cached.at || 0)) < A.TTL_MS) { return cached; }
+            return A._fetch().then(function (res) {
+                res.at = Date.now();
+                // Keep the last GOOD numbers through a blip, flagged as stale rather than presented as
+                // current - the alternative is the count vanishing every time the network hiccups.
+                if (!res.ok && cached && cached.ok) {
+                    res.last = { fresh: cached.fresh, second: cached.second, total: cached.total, at: cached.at };
+                }
+                return JiTA.db.setMeta(A.CACHE_KEY, res).then(function () { return res; }, function () { return res; });
+            });
+        }).then(done, function (e) { done(); throw e; });
+        return A._busy;
+    },
+
+    _fetch: function () {
+        var A = JiTA.leadduty.apps;
+        return new Promise(function (resolve) {
+            if (typeof GM_xmlhttpRequest !== 'function') { resolve({ ok: false, reason: 'nogm' }); return; }
+            try {
+                GM_xmlhttpRequest({
+                    method: 'GET', url: A.URL, timeout: A.TIMEOUT_MS,
+                    onload: function (r) { resolve(A._parse(r.responseText || '', r.finalUrl || '', r.status)); },
+                    onerror: function () { resolve({ ok: false, reason: 'net' }); },
+                    ontimeout: function () { resolve({ ok: false, reason: 'net' }); }
+                });
+            } catch (e) { resolve({ ok: false, reason: 'net' }); }
+        });
+    },
+
+    // Resolves { ok, fresh, second, total } or { ok: false, reason }. Split out so a harness can drive it
+    // against real captured markup instead of the live site.
+    _parse: function (body, finalUrl, status) {
+        var A = JiTA.leadduty.apps;
+        if (status && (status < 200 || status >= 300)) {
+            return { ok: false, reason: (status === 401 || status === 403) ? 'login' : 'net' };
+        }
+        // GM follows redirects, so an expired session shows up as having LANDED on the SSO login page.
+        if (/login\.eveonline\.com|\/account\/(login|signin)|\/oauth2?\/authorize/i.test(finalUrl || '')) {
+            return { ok: false, reason: 'login' };
+        }
+        var out = { ok: true, total: 0 };
+        for (var i = 0; i < A.STAGES.length; i++) {
+            var s = A.STAGES[i];
+            var re = new RegExp('href\\s*=\\s*["\'][^"\']*/admin/applications/' + s.path + '/' + A.TEAM +
+                '["\'][^>]*>\\s*([\\d,]+)\\s*<', 'i');
+            var m = re.exec(body);
+            // No match: say so. Guessing zero here is the one outcome that must never happen, because it
+            // reads exactly like "nothing to do" and an applicant waits.
+            if (!m) {
+                return { ok: false, reason: /Unresolved applications/i.test(body) ? 'norow' : 'unreadable' };
+            }
+            out[s.key] = parseInt(m[1].replace(/,/g, ''), 10) || 0;
+            out.total += out[s.key];
+        }
+        return out;
+    },
+
+    // One human line for the overlay and the chip.
+    line: function (rec) {
+        var A = JiTA.leadduty.apps;
+        if (!rec) { return 'applications have not been checked yet'; }
+        if (rec.ok) {
+            var bits = [];
+            for (var i = 0; i < A.STAGES.length; i++) {
+                var s = A.STAGES[i], n = rec[s.key] || 0;
+                if (n) { bits.push(n + ' ' + (n === 1 ? s.one : s.many)); }
+            }
+            return bits.length ? bits.join(', ') : 'nothing waiting on ' + A.TEAM;
+        }
+        var stale = rec.last ? (' (last seen: ' + rec.last.total + ' waiting, ' +
+            new Date(rec.last.at).toISOString().slice(0, 10) + ')') : '';
+        if (rec.reason === 'login') { return 'log in to VMS to see applications' + stale; }
+        if (rec.reason === 'nogm') { return 'applications cannot be read from this browser'; }
+        if (rec.reason === 'norow') { return 'VMS has no ' + A.TEAM + ' row - open it to check' + stale; }
+        return 'could not read the VMS dashboard - open it to check' + stale;
+    },
+
+    _noop: null
+};
+
+
 /* ---- Lead duties: the ambient monthly reminder -------------------------------------------------------
  * A chip that comes BACK every 24h until the month's duties are done, rather than a permanent badge (a
  * once-a-month task behind an always-lit badge becomes wallpaper within a week) or a one-shot monthly
@@ -14644,8 +14793,12 @@ JiTA.leadduty.reminder = {
         if (!R.shouldShow()) { R.remove(); return; }
         L.outstanding().then(function (o) {
             if (!R.shouldShow()) { R.remove(); return; }
-            // Nothing outstanding for a month we HAVE computed: stay quiet entirely.
-            if (o.known && o.pages === 0 && o.checks === 0) { R.remove(); return; }
+            // Nothing outstanding for a month we HAVE computed: stay quiet entirely. Applications count as
+            // outstanding only when we actually READ a non-zero number - an unreadable VMS must never be
+            // able to raise the chip on its own, or a Lead who simply is not logged in gets nagged daily
+            // about a queue nobody can see.
+            var appsDue = !!(o.apps && o.apps.ok && o.apps.total);
+            if (o.known && !o.pages && !o.checks && !appsDue) { R.remove(); return; }
             R._paint('📋 Lead duties: ' + R._summary(o));
         }).catch(function () { /* ignore */ });
     },
@@ -14656,6 +14809,13 @@ JiTA.leadduty.reminder = {
         var bits = [];
         if (o.pages) { bits.push(o.pages + ' page review' + (o.pages === 1 ? '' : 's')); }
         if (o.checks) { bits.push(o.checks + ' QC check' + (o.checks === 1 ? '' : 's')); }
+        if (o.apps && o.apps.ok && o.apps.total) {
+            bits.push(o.apps.total + ' application' + (o.apps.total === 1 ? '' : 's'));
+        } else if (o.apps && !o.apps.ok && o.apps.reason === 'login' && bits.length) {
+            // Only ever an ADDITION to a chip that is already up for real work (see mount): worth telling a
+            // Lead the applications number is missing, never worth summoning the chip to say it.
+            bits.push('VMS needs a login');
+        }
         return bits.length ? bits.join(', ') : 'due this month';
     },
 
@@ -14765,6 +14925,11 @@ JiTA.leadduty.sched = {
         var L = JiTA.leadduty, S = L.sched;
         if (!L.isLead()) { return; }
         try { L.reminder.mount(); } catch (e) { /* ignore */ }   // cheap, and re-arms the chip across a day boundary
+        // The VMS count, on its own (hourly) clock rather than the six-hourly ledger one: an applicant
+        // waiting to hear back is a faster-moving thing than a monthly page review. apps.refresh is a meta
+        // read until its TTL is up, so the once-a-minute poll costs nothing. Re-mount so the chip picks up
+        // a changed number; a failure is silent by design (see reminder.mount).
+        try { L.apps.refresh(false).then(function () { try { L.reminder.mount(); } catch (e2) { /* ignore */ } }, function () { /* ignore */ }); } catch (e3) { /* ignore */ }
         if (S._running) { return; }
         if (!L.rootPage() || !L.ledgerPage()) { return; }        // not configured yet: nothing to do
         if (!S._elapsed(S.FAIL_KEY, S.FAIL_MS)) { return; }
