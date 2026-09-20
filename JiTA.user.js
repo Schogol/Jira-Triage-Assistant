@@ -8699,8 +8699,14 @@ JiTA.menu = {
                     if (raw && raw.pages) { line = JiTA.leadduty._poolLine(JiTA.leadduty.pool._applyExclusions(raw)) + ' · ' + who; }
                     // A failed publish is otherwise invisible: it happens 20s after a ledger write with no UI
                     // attached, and the only symptom is a page that quietly stops matching the ledger.
+                    // A REFUSED publish needs saying for the same reason, and for a worse one: a tab that
+                    // keeps declining to publish a degraded pool would otherwise look exactly like a tab
+                    // with nothing to publish. "unchanged" is the healthy idle case and stays quiet.
                     var lp = JiTA.leadduty.report._last;
-                    if (lp && lp.error) { line += ' · ' + JiTA.leadduty.report.lastLine(); }
+                    var lpskip = lp && lp.result && lp.result.skipped;
+                    if ((lp && lp.error) || (lpskip && lpskip !== 'unchanged')) {
+                        line += ' · ' + JiTA.leadduty.report.lastLine();
+                    }
                     if (JiTA.leadduty._dry()) { line += ' · DRY RUN is on'; }
                     $ldStatus.text(line);
                 }).catch(function () { $ldStatus.text(who); });
@@ -13884,6 +13890,23 @@ JiTA.leadduty = {
             ]).then(function (r) {
                 var wiki = r[0].value, qc = r[1].value, pool = r[2];
                 if (!wiki && !qc) { return { skipped: 'nothing in the ledger yet' }; }
+                // Reading may degrade; PUBLISHING may not. A pool whose ancestry did not fully resolve reads
+                // as "excluded by nothing", so it silently ADDS pages to the rotation - and the page is the
+                // section's shared truth, read as fact by every Lead. Schogol, 2026-09-21: the ledger page
+                // carried "31 pages in rotation" and listed "ECAID Newsletter - February 2025" as never
+                // reviewed, against a Settings line on his own tab already saying 30. Exactly one page
+                // differed, and it is the one whose ancestry runs through a FOLDER.
+                //
+                // That is worse than a stale page: the Coverage table and the Review log are what a Lead
+                // checks to decide whether the rotation is healthy, and a page nobody should ever review
+                // sitting there as "never reviewed" is work invented out of a broken parent chain. With
+                // three browsers publishing to one page, a degraded tab also ping-pongs against the healthy
+                // ones - each tick sees the other's hash, disagrees, and rewrites. Keep the last good page
+                // and let a tab that can trace the whole tree write the next one.
+                if (pool && pool.verified === false) {
+                    return { skipped: 'the page tree came back incomplete (' + pool.holes +
+                        ' page(s) could not be traced to the root), so the page was left as it was' };
+                }
                 // Hash the CONTENT, not the rendered page: the "generated at" stamp changes every minute, so
                 // hashing it made "unchanged" unreachable and every tick wrote a new page version.
                 var body = R._content(wiki, qc, pool);
