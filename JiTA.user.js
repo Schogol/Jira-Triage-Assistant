@@ -8607,9 +8607,18 @@ JiTA.menu = {
                         gmSet(JiTA.leadduty.sched.LAST_KEY, 0);
                         gmSet(JiTA.leadduty.sched.FAIL_KEY, 0);
                         JiTA.leadduty.ui._wiki = null;
-                        if (!document.getElementById('jita-menu')) { return; }
-                        $rescan.prop('disabled', false);
-                        $ldStatus.text(JiTA.leadduty._poolLine(pool) + ' · the chip re-counts within a minute');
+                        // ...and republish HERE rather than leaving it to that tick. The page's Coverage and
+                        // Review log are rendered FROM the pool, so a re-scan changes what the page should
+                        // say while writing nothing to the ledger - which is the one thing that normally
+                        // triggers a publish. Schogol caught the gap as a page reading "31 pages in rotation"
+                        // against a Settings line already saying 30.
+                        var line = JiTA.leadduty._poolLine(pool);
+                        return JiTA.leadduty.report.publish(false).catch(function () { /* reported below */ })
+                            .then(function () {
+                                if (!document.getElementById('jita-menu')) { return; }
+                                $rescan.prop('disabled', false);
+                                $ldStatus.text(line + ' · ' + JiTA.leadduty.report.lastLine());
+                            });
                     }, function (e) {
                         if (!document.getElementById('jita-menu')) { return; }
                         $rescan.prop('disabled', false);
