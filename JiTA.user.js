@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.25.0
+// @version     3.25.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14562,9 +14562,12 @@ JiTA.leadduty.ui = {
                 U._status('');
                 return;
             }
-            // `drafts` keeps a half-written note alive while you click between applications. Memory only,
-            // like everything else here - it is dropped with the rest on the next open.
-            U._apps = { items: res.items, idx: 0, qa: {}, drafts: {}, rows: [], partial: !!res.partial };
+            // `drafts` keeps a half-written note alive while you click between applications, and across a
+            // Refresh - which rebuilds this whole object, so the drafts have to be carried over by hand or
+            // the one button named "Refresh" silently throws away the paragraph you were typing. Memory
+            // only, like everything else here: dropped with the rest on the next open of the overlay.
+            var drafts = (U._apps && U._apps.drafts) || {};
+            U._apps = { items: res.items, idx: 0, qa: {}, drafts: drafts, rows: [], partial: !!res.partial };
             U._renderApps();
             // The live list is the freshest count there is - let the tab, the footer and the chip catch up
             // rather than keep quoting an hour-old dashboard number beside it.
