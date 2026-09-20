@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.20.3
+// @version     3.20.4
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -13728,16 +13728,22 @@ JiTA.leadduty = {
     // flagged issue is visible to the Leads who did not raise it.
     //
     // Every publish creates a page version, so this is change-detected on a hash of the rendered HTML kept
-    // in the wiki ledger. A Lead marking five pages in a row produces one page version, not five, and a
-    // scheduler tick that changes nothing produces none.
+    // in the wiki ledger: a scheduler tick that changes nothing produces no version at all.
+    //
+    // Publishing is IMMEDIATE (Schogol's call, 2026-09-20). It was debounced 20s so that a Lead working
+    // through their queue produced one page version instead of five - but the timer was trailing, so the
+    // wait was measured from the LAST mark, and closing the tab straight after the last one meant nothing
+    // published at all. Marking a page and seeing the page say so beats a tidy version history; the cost is
+    // one page version per mark.
     report: {
         HASH_KEY: 'reportHash',
-        DEBOUNCE_MS: 20000,
+        DEBOUNCE_MS: 0,        // deliberately immediate - see above. Kept as a knob, not a magic number.
         MAX_LOG_ROWS: 500,
         BUSY_MAX_MS: 120000,   // past this a publish is presumed hung, not running (see the guard in publish)
         _timer: null,
         _busy: false,
         _busyAt: 0,
+        _again: false,         // a publish was asked for while one was in flight - re-run when it lands
         _last: null,           // outcome of the most recent publish attempt - see lastLine()
 
         // Used as `.then(JiTA.leadduty.report.tap)` on a ledger write: republish when something actually
@@ -13780,15 +13786,25 @@ JiTA.leadduty = {
             // The in-flight guard is time-boxed. JiTA.conf._ajax has no timeout, so a request that never
             // settles would leave this latched forever - and every later publish would return "already
             // publishing" in silence, leaving the page frozen at whatever it last said with nothing to see.
-            if (R._busy && (Date.now() - R._busyAt) < R.BUSY_MAX_MS) { return Promise.resolve({ skipped: 'already publishing' }); }
+            // Coming second is no longer rare now that publishing is immediate: a mark landing while the
+            // previous mark's publish is still in flight used to be dropped on the floor, and its review
+            // reached the page only on the next tick. Remember that it asked, and re-run once this one lands.
+            if (R._busy && (Date.now() - R._busyAt) < R.BUSY_MAX_MS) {
+                R._again = true;
+                return Promise.resolve({ skipped: 'already publishing' });
+            }
             R._busy = true;
             R._busyAt = Date.now();
+            R._again = false;
             // Record the outcome either way. A publish is triggered 20 seconds after a ledger write, detached
             // from whatever the Lead is doing, so a failure has nowhere to surface and the page just quietly
             // stops matching the ledger - which is precisely how three separate defects went unnoticed until
             // Schogol read the page and spotted an assignment that no longer existed.
-            var done = function (v) { R._busy = false; R._last = { at: Date.now(), result: v }; return v; };
-            var fail = function (e) { R._busy = false; R._last = { at: Date.now(), error: String(e && e.message || e) }; throw e; };
+            // A publish that was asked for mid-flight is re-run here, after _busy drops. It cannot loop: the
+            // re-run clears _again, and only a fresh request can set it again.
+            var rerun = function () { if (R._again) { R._again = false; R.schedule(); } };
+            var done = function (v) { R._busy = false; R._last = { at: Date.now(), result: v }; rerun(); return v; };
+            var fail = function (e) { R._busy = false; R._last = { at: Date.now(), error: String(e && e.message || e) }; rerun(); throw e; };
             return Promise.all([
                 L.ledger.read(L.LEDGER_KEY),
                 L.ledger.read(L.QC_LEDGER_KEY).catch(function () { return { value: null }; }),
