@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.20.2
+// @version     3.20.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8607,13 +8607,40 @@ JiTA.menu = {
                         gmSet(JiTA.leadduty.sched.LAST_KEY, 0);
                         gmSet(JiTA.leadduty.sched.FAIL_KEY, 0);
                         JiTA.leadduty.ui._wiki = null;
-                        if (!document.getElementById('jita-menu')) { return; }
-                        $rescan.prop('disabled', false);
-                        $ldStatus.text(JiTA.leadduty._poolLine(pool) + ' · the chip re-counts within a minute');
+                        // ...and republish HERE rather than leaving it to that tick. The page's Coverage and
+                        // Review log are rendered FROM the pool, so a re-scan changes what the page should
+                        // say while writing nothing to the ledger - which is the one thing that normally
+                        // triggers a publish. Schogol caught the gap as a page reading "31 pages in rotation"
+                        // against a Settings line already saying 30.
+                        var line = JiTA.leadduty._poolLine(pool);
+                        return JiTA.leadduty.report.publish(false).catch(function () { /* reported below */ })
+                            .then(function () {
+                                if (!document.getElementById('jita-menu')) { return; }
+                                $rescan.prop('disabled', false);
+                                $ldStatus.text(line + ' · ' + JiTA.leadduty.report.lastLine());
+                            });
                     }, function (e) {
                         if (!document.getElementById('jita-menu')) { return; }
                         $rescan.prop('disabled', false);
                         $ldStatus.text(String(e && e.message || e));
+                    });
+                });
+
+                // Publishing is automatic but DETACHED (a 20s debounce after a ledger write), so when the page
+                // disagrees with the overlay there is nothing to look at. This rewrites it now and says what
+                // happened - written, skipped and why, or the actual error.
+                var $pub = $('<button class="jita-btn" title="Rewrite the ledger page from the ledger now, and report what happened">Republish page</button>').appendTo($ldAct);
+                $pub.on('click', function () {
+                    $pub.prop('disabled', true);
+                    $ldStatus.text('Publishing the ledger page…');
+                    JiTA.leadduty.report.publish(true).then(function () {
+                        if (!document.getElementById('jita-menu')) { return; }
+                        $pub.prop('disabled', false);
+                        $ldStatus.text(JiTA.leadduty.report.lastLine() + ' · reload the Confluence page to see it');
+                    }, function () {
+                        if (!document.getElementById('jita-menu')) { return; }
+                        $pub.prop('disabled', false);
+                        $ldStatus.text(JiTA.leadduty.report.lastLine());
                     });
                 });
 
@@ -8669,6 +8696,10 @@ JiTA.menu = {
                     if (!document.getElementById('jita-menu') || $ldStatus.text()) { return; }
                     var line = who;
                     if (raw && raw.pages) { line = JiTA.leadduty._poolLine(JiTA.leadduty.pool._applyExclusions(raw)) + ' · ' + who; }
+                    // A failed publish is otherwise invisible: it happens 20s after a ledger write with no UI
+                    // attached, and the only symptom is a page that quietly stops matching the ledger.
+                    var lp = JiTA.leadduty.report._last;
+                    if (lp && lp.error) { line += ' · ' + JiTA.leadduty.report.lastLine(); }
                     if (JiTA.leadduty._dry()) { line += ' · DRY RUN is on'; }
                     $ldStatus.text(line);
                 }).catch(function () { $ldStatus.text(who); });
@@ -12940,7 +12971,7 @@ JiTA.leadduty = {
                         };
                         v.months[ym] = created;
                         return v;
-                    }).then(function (res) {
+                    }).then(L.report.tap).then(function (res) {   // a fresh cut must reach the page now, not at the next 6h tick
                         var val2 = res.value || { months: {} };
                         var rec = (val2.months && val2.months[ym]) || created;
                         return { record: rec, ledgerValue: val2, pool: pool, frozen: !!res.written };
@@ -13328,7 +13359,7 @@ JiTA.leadduty = {
                                 if (v.months[ym]) { stored = v.months[ym]; return null; }
                                 v.months[ym] = rec;
                                 return v;
-                            }).then(function (r) {
+                            }).then(L.report.tap).then(function (r) {   // as in wiki.claimMonth: publish the fresh sample now
                                 return Q._hydrate(ym, (r.value && r.value.months && r.value.months[ym]) || stored, r.value, true, pool);
                             }, function () {
                                 return Q._hydrate(ym, rec, val, false, pool);
@@ -13703,8 +13734,11 @@ JiTA.leadduty = {
         HASH_KEY: 'reportHash',
         DEBOUNCE_MS: 20000,
         MAX_LOG_ROWS: 500,
+        BUSY_MAX_MS: 120000,   // past this a publish is presumed hung, not running (see the guard in publish)
         _timer: null,
         _busy: false,
+        _busyAt: 0,
+        _last: null,           // outcome of the most recent publish attempt - see lastLine()
 
         // Used as `.then(JiTA.leadduty.report.tap)` on a ledger write: republish when something actually
         // changed, and pass the mutate result through untouched.
@@ -13718,8 +13752,21 @@ JiTA.leadduty = {
             if (R._timer) { clearTimeout(R._timer); }
             R._timer = setTimeout(function () {
                 R._timer = null;
-                R.publish(false).catch(function () { /* cosmetic - never surfaced from a background write */ });
+                R.publish(false).catch(function () { /* recorded in _last; read it with report.lastLine() */ });
             }, R.DEBOUNCE_MS);
+        },
+
+        // One line saying what the last publish actually did, for the Settings status and the console. The
+        // whole point is that "the page is out of date" stops being something you have to notice by reading
+        // the page and comparing it against the overlay.
+        lastLine: function () {
+            var l = JiTA.leadduty.report._last;
+            if (!l) { return 'the ledger page has not been published from this tab yet'; }
+            var when = new Date(l.at).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+            if (l.error) { return 'last publish FAILED (' + when + '): ' + l.error; }
+            var r = l.result || {};
+            if (r.written) { return 'ledger page published ' + when + (r.version ? (' as v' + r.version) : ''); }
+            return 'last publish (' + when + ') wrote nothing: ' + (r.skipped || 'unknown');
         },
 
         // Resolves { written, skipped, version } - `skipped` naming why nothing was written. Nothing in the
@@ -13730,10 +13777,18 @@ JiTA.leadduty = {
             var L = JiTA.leadduty, R = L.report;
             if (L._dry()) { return Promise.resolve({ skipped: 'dry run' }); }
             if (!L.ledgerPage()) { return Promise.resolve({ skipped: 'no ledger page' }); }
-            if (R._busy) { return Promise.resolve({ skipped: 'already publishing' }); }
+            // The in-flight guard is time-boxed. JiTA.conf._ajax has no timeout, so a request that never
+            // settles would leave this latched forever - and every later publish would return "already
+            // publishing" in silence, leaving the page frozen at whatever it last said with nothing to see.
+            if (R._busy && (Date.now() - R._busyAt) < R.BUSY_MAX_MS) { return Promise.resolve({ skipped: 'already publishing' }); }
             R._busy = true;
-            var done = function (v) { R._busy = false; return v; };
-            var fail = function (e) { R._busy = false; throw e; };
+            R._busyAt = Date.now();
+            // Record the outcome either way. A publish is triggered 20 seconds after a ledger write, detached
+            // from whatever the Lead is doing, so a failure has nowhere to surface and the page just quietly
+            // stops matching the ledger - which is precisely how three separate defects went unnoticed until
+            // Schogol read the page and spotted an assignment that no longer existed.
+            var done = function (v) { R._busy = false; R._last = { at: Date.now(), result: v }; return v; };
+            var fail = function (e) { R._busy = false; R._last = { at: Date.now(), error: String(e && e.message || e) }; throw e; };
             return Promise.all([
                 L.ledger.read(L.LEDGER_KEY),
                 L.ledger.read(L.QC_LEDGER_KEY).catch(function () { return { value: null }; }),
@@ -13741,10 +13796,12 @@ JiTA.leadduty = {
             ]).then(function (r) {
                 var wiki = r[0].value, qc = r[1].value, pool = r[2];
                 if (!wiki && !qc) { return { skipped: 'nothing in the ledger yet' }; }
-                var html = R.render(wiki, qc, pool);
-                var hash = JiTA.util.hash(html);
+                // Hash the CONTENT, not the rendered page: the "generated at" stamp changes every minute, so
+                // hashing it made "unchanged" unreachable and every tick wrote a new page version.
+                var body = R._content(wiki, qc, pool);
+                var hash = JiTA.util.hash(body);
                 if (!force && wiki && wiki[R.HASH_KEY] === hash) { return { skipped: 'unchanged' }; }
-                return R._write(html).then(function (res) {
+                return R._write(R._stamp() + '\n' + body).then(function (res) {
                     // Remember what we published so the next tick can skip. Deliberately NOT tapped: this
                     // write is a consequence of publishing, not a reason to publish again.
                     return L.ledger.mutate(L.LEDGER_KEY, function (v) {
@@ -13791,22 +13848,34 @@ JiTA.leadduty = {
             return h + '</tbody></table>';
         },
 
-        render: function (wiki, qc, pool) {
+        // The "generated at" line, which changes every minute whether or not anything else did. It is kept
+        // OUT of _content for exactly that reason: publish() hashes the content to decide whether to write,
+        // and hashing this line made every hash unique, so "unchanged" could never be true and the page
+        // collected a new version on every scheduler tick forever.
+        _stamp: function () {
+            return '<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant on ' +
+                JiTA.leadduty.report._when(new Date().toISOString()) + ' UTC. Anything typed on this page by ' +
+                'hand is replaced on the next update - record work through the Lead duties overlay in Jira ' +
+                'instead.</em></p>';
+        },
+
+        // Everything that actually comes from the ledger. This is what gets hashed.
+        _content: function (wiki, qc, pool) {
             var L = JiTA.leadduty, R = L.report;
             var ym = L._ym(), pym = L._prevYm();
             var byId = pool ? L.pool.byId(pool) : {};
-            var out = [];
+            return [
+                R._flagsSection(qc),
+                R._wikiSection(wiki, ym, byId, pool),
+                R._qcSection(qc, pym),
+                R._coverageSection(wiki, pool),
+                R._logSection(wiki, pool)
+            ].join('\n');
+        },
 
-            out.push('<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant on ' +
-                R._when(new Date().toISOString()) + ' UTC. Anything typed on this page by hand is replaced on ' +
-                'the next update - record work through the Lead duties overlay in Jira instead.</em></p>');
-
-            out.push(R._flagsSection(qc));
-            out.push(R._wikiSection(wiki, ym, byId, pool));
-            out.push(R._qcSection(qc, pym));
-            out.push(R._coverageSection(wiki, pool));
-            out.push(R._logSection(wiki, pool));
-            return out.join('\n');
+        render: function (wiki, qc, pool) {
+            var R = JiTA.leadduty.report;
+            return R._stamp() + '\n' + R._content(wiki, qc, pool);
         },
 
         // The point of the whole exercise: a flag raised by one Lead is now visible to all of them.
