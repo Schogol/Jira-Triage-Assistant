@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.25.2
+// @version     3.26.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14567,7 +14567,8 @@ JiTA.leadduty.ui = {
             // the one button named "Refresh" silently throws away the paragraph you were typing. Memory
             // only, like everything else here: dropped with the rest on the next open of the overlay.
             var drafts = (U._apps && U._apps.drafts) || {};
-            U._apps = { items: res.items, idx: 0, qa: {}, drafts: drafts, rows: [], partial: !!res.partial };
+            var qtab = (U._apps && U._apps.qtab) || {};
+            U._apps = { items: res.items, idx: 0, qa: {}, drafts: drafts, qtab: qtab, rows: [], partial: !!res.partial };
             U._renderApps();
             // The live list is the freshest count there is - let the tab, the footer and the chip catch up
             // rather than keep quoting an hour-old dashboard number beside it.
@@ -14632,12 +14633,12 @@ JiTA.leadduty.ui = {
         var cached = st.qa[it.id];
         if (cached) { U._appActions($h, it, cached.actions); }
         $('<a class="ld-apps-open" target="_blank" rel="noopener">Open in VMS ↗</a>').attr('href', it.url).appendTo($h);
-        if (cached) { U._paintNotes($d, cached.notes, it, cached.note); U._paintQa($d, cached.qa); return; }
+        if (cached) { U._paintNotes($d, cached.notes, it, cached.note); U._paintQa($d, cached.sections, it); return; }
         $('<div class="ld-empty">Loading the application…</div>').appendTo($d);
         L.apps.detail(it.id).then(function (res) {
             // The cursor may have moved on while this was in flight - only paint the one still selected.
             if (!U.isOpen() || U._tab !== 'apps' || !U._apps || U._apps.items[U._apps.idx] !== it) { return; }
-            if (res.ok) { st.qa[it.id] = { qa: res.qa, actions: res.actions, notes: res.notes, note: res.note }; U._showApp(i); }
+            if (res.ok) { st.qa[it.id] = { sections: res.sections, actions: res.actions, notes: res.notes, note: res.note }; U._showApp(i); }
             else { $('#ld-apps-detail').find('.ld-empty').text(L.apps.line(res)); }
         }, function () {
             if (!U.isOpen() || U._tab !== 'apps') { return; }
@@ -14817,12 +14818,49 @@ JiTA.leadduty.ui = {
         });
     },
 
-    _paintQa: function ($d, qa) {
-        qa.forEach(function (p) {
-            var $w = $('<div class="ld-qa"></div>').appendTo($d);
-            $('<div class="ld-q"></div>').text(p.q).appendTo($w);
-            $('<div class="ld-a"></div>').text(p.a || '(no answer)').appendTo($w);
+    // The questionnaires. A part-two application carries both, and part one is usually settled by the time
+    // part two is being read - so they get a tab each rather than one long scroll, and the one that opens is
+    // the one this application is actually waiting on. The other stays one click away, because "usually
+    // settled" is not "never worth checking".
+    //
+    // A single questionnaire gets NO tab strip: a row of tabs you can never switch is just furniture.
+    _paintQa: function ($d, sections, it) {
+        var U = JiTA.leadduty.ui, st = U._apps;
+        sections = sections || [];
+        if (!sections.length) { return; }
+        var $pane = $('<div class="ld-qpane"></div>');
+        function paint(n) {
+            $pane.empty();
+            (sections[n].qa || []).forEach(function (p) {
+                var $w = $('<div class="ld-qa"></div>').appendTo($pane);
+                $('<div class="ld-q"></div>').text(p.q).appendTo($w);
+                $('<div class="ld-a"></div>').text(p.a || '(no answer)').appendTo($w);
+            });
+        }
+        if (sections.length === 1) { $pane.appendTo($d); paint(0); return; }
+        // Which questionnaire this application is waiting on comes from the QUEUE it was listed in, not from
+        // reading a status string off the page - so rewording "Second questionnaire returned" cannot break it.
+        var fallback = (it && it.stage === 'second') ? sections.length - 1 : 0;
+        var saved = (st && st.qtab && st.qtab[it.id]);
+        var sel = (typeof saved === 'number' && saved >= 0 && saved < sections.length) ? saved : fallback;
+        var $tabs = $('<div class="ld-qtabs"></div>').appendTo($d);
+        var $btns = [];
+        sections.forEach(function (s, n) {
+            var $b = $('<button class="jita-btn ld-mini ld-qtab"></button>')
+                // The count is on the label so the tab you are NOT on still says whether there is anything
+                // over there - a part two with two answers is worth a glance, an empty one is not.
+                .text(s.title + ' (' + s.qa.length + ')')
+                .on('click', function () {
+                    sel = n;
+                    if (st && st.qtab && it) { st.qtab[it.id] = n; }   // survives navigating away and back
+                    $btns.forEach(function ($x, k) { $x.toggleClass('on', k === n); });
+                    paint(n);
+                }).appendTo($tabs);
+            $btns.push($b);
         });
+        $btns.forEach(function ($x, k) { $x.toggleClass('on', k === sel); });
+        $pane.appendTo($d);
+        paint(sel);
     },
 
     // Arrow keys on the applications tab. Delegated once and gated on the tab being open, so there is no
@@ -14993,6 +15031,8 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-note:first-of-type { border-top: none; padding-top: 0; }' +
                 '.jita-leadduty-view .ld-ntext { color: #e6e6e6; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }' +
                 '.jita-leadduty-view .ld-nby { color: #7a8694; font-size: 10px; margin-top: 3px; }' +
+                '.jita-leadduty-view .ld-qtabs { display: flex; gap: 6px; margin: 0 0 12px; flex-wrap: wrap; }' +
+                '.jita-leadduty-view .ld-qtab.on { background: #4c9aff; color: #fff; font-weight: 700; border-color: #4c9aff; }' +
                 '.jita-leadduty-view .ld-qa { margin-bottom: 12px; }' +
                 '.jita-leadduty-view .ld-q { color: #9aa6b2; font-size: 11px; margin-bottom: 4px; }' +
                 '.jita-leadduty-view .ld-a { color: #e6e6e6; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; background: #1b2025; border: 1px solid #2c333a; border-radius: 5px; padding: 8px 10px; }' +
@@ -15155,25 +15195,59 @@ JiTA.leadduty.apps = {
         return { ok: true, items: items };
     },
 
-    // One application's questions and answers, in document order. The questionnaire has changed over the
-    // years and a re-applicant's page carries both sets, so nothing here assumes a fixed list of questions.
+    // One application's questions and answers, split into the questionnaires VMS itself splits them into,
+    // plus a flat `qa` across all of them. The questionnaire has changed over the years and a part-two
+    // application carries both sets, so nothing here assumes a fixed list of questions.
     detail: function (id) {
         var A = JiTA.leadduty.apps;
         return A._get(A.DETAIL_URL + id).then(function (r) {
             var bad = A._unusable(r);
             if (bad) { return bad; }
-            var body = r.body || '', qa = [], m;
-            var re = /<dt\b[^>]*>([\s\S]*?)<\/dt>\s*<dd\b[^>]*class\s*=\s*["'][^"']*application-answer[^"']*["'][^>]*>([\s\S]*?)<\/dd>/gi;
-            while ((m = re.exec(body))) {
-                var q = A._text(m[1]), a = A._text(m[2]);
-                if (q) { qa.push({ q: q, a: a }); }
-            }
+            var body = r.body || '';
+            var sections = A._parseSections(body), qa = [];
+            sections.forEach(function (s) { qa = qa.concat(s.qa); });
             if (!qa.length) { return { ok: false, reason: /application-answer/i.test(body) ? 'norow' : 'unreadable' }; }
             // The controls come from the SAME fetch, so the buttons the overlay offers are the ones that
             // page rendered. They are read again at action time - this is what to show, not what to trust.
-            return { ok: true, qa: qa, actions: A._parseControls(body), notes: A._parseNotes(body),
-                note: A._parseNoteTarget(body) };
+            return { ok: true, qa: qa, sections: sections, actions: A._parseControls(body),
+                notes: A._parseNotes(body), note: A._parseNoteTarget(body) };
         });
+    },
+
+    // The questionnaires, split the way VMS splits them: one accordion panel each, titled by its own
+    // <h4 class="panel-title"> ("Application", "Application part 2"). Keyed on that STRUCTURE and never on
+    // the questions, which are the one thing here guaranteed to change - so a renamed questionnaire simply
+    // relabels its tab, a third one appears as a third tab, and a merge back to one loses the tab strip,
+    // all without a line changing here. Panels holding no answers (the notes panel) fall out on their own.
+    // Resolves [{ title, qa: [{ q, a }] }] in document order.
+    _parseSections: function (body) {
+        var A = JiTA.leadduty.apps, src = body || '', out = [];
+        var heads = [], hm, hre = /<h4\b[^>]*\bclass\s*=\s*["'][^"']*\bpanel-title\b[^"']*["'][^>]*>([\s\S]*?)<\/h4>/gi;
+        while ((hm = hre.exec(src))) { heads.push({ title: A._text(hm[1]), at: hm.index + hm[0].length }); }
+        for (var i = 0; i < heads.length; i++) {
+            var end = (i + 1 < heads.length) ? heads[i + 1].at : src.length;
+            var qa = A._pairs(src.slice(heads[i].at, end));
+            if (qa.length) { out.push({ title: heads[i].title || ('Part ' + (out.length + 1)), qa: qa }); }
+        }
+        // A page whose panel headings moved must still be READABLE. Falling back to the whole body as one
+        // untitled set costs the tabs; failing to find the headings and showing nothing would cost the
+        // answers, and an application you cannot read is worse than one you cannot tab through.
+        if (!out.length) {
+            var all = A._pairs(src);
+            if (all.length) { out.push({ title: 'Application', qa: all }); }
+        }
+        return out;
+    },
+
+    // Every question/answer pair in a chunk of the page, in document order.
+    _pairs: function (chunk) {
+        var A = JiTA.leadduty.apps, qa = [], m;
+        var re = /<dt\b[^>]*>([\s\S]*?)<\/dt>\s*<dd\b[^>]*class\s*=\s*["'][^"']*application-answer[^"']*["'][^>]*>([\s\S]*?)<\/dd>/gi;
+        while ((m = re.exec(chunk || ''))) {
+            var q = A._text(m[1]), a = A._text(m[2]);
+            if (q) { qa.push({ q: q, a: a }); }
+        }
+        return qa;
     },
 
     // Notes on the account, in document order (VMS renders newest first). These are the single most
