@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.24.0
+// @version     3.25.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14562,7 +14562,9 @@ JiTA.leadduty.ui = {
                 U._status('');
                 return;
             }
-            U._apps = { items: res.items, idx: 0, qa: {}, rows: [], partial: !!res.partial };
+            // `drafts` keeps a half-written note alive while you click between applications. Memory only,
+            // like everything else here - it is dropped with the rest on the next open.
+            U._apps = { items: res.items, idx: 0, qa: {}, drafts: {}, rows: [], partial: !!res.partial };
             U._renderApps();
             // The live list is the freshest count there is - let the tab, the footer and the chip catch up
             // rather than keep quoting an hour-old dashboard number beside it.
@@ -14627,12 +14629,12 @@ JiTA.leadduty.ui = {
         var cached = st.qa[it.id];
         if (cached) { U._appActions($h, it, cached.actions); }
         $('<a class="ld-apps-open" target="_blank" rel="noopener">Open in VMS ↗</a>').attr('href', it.url).appendTo($h);
-        if (cached) { U._paintNotes($d, cached.notes); U._paintQa($d, cached.qa); return; }
+        if (cached) { U._paintNotes($d, cached.notes, it, cached.note); U._paintQa($d, cached.qa); return; }
         $('<div class="ld-empty">Loading the application…</div>').appendTo($d);
         L.apps.detail(it.id).then(function (res) {
             // The cursor may have moved on while this was in flight - only paint the one still selected.
             if (!U.isOpen() || U._tab !== 'apps' || !U._apps || U._apps.items[U._apps.idx] !== it) { return; }
-            if (res.ok) { st.qa[it.id] = { qa: res.qa, actions: res.actions, notes: res.notes }; U._showApp(i); }
+            if (res.ok) { st.qa[it.id] = { qa: res.qa, actions: res.actions, notes: res.notes, note: res.note }; U._showApp(i); }
             else { $('#ld-apps-detail').find('.ld-empty').text(L.apps.line(res)); }
         }, function () {
             if (!U.isOpen() || U._tab !== 'apps') { return; }
@@ -14716,22 +14718,98 @@ JiTA.leadduty.ui = {
     // it after forming a view is worth much less than reading it before. An application with no notes says
     // so explicitly rather than showing nothing - "nobody has commented" and "notes did not load" must not
     // look the same on a screen that has a Decline button on it.
-    _paintNotes: function ($d, notes) {
+    _paintNotes: function ($d, notes, it, target) {
+        var U = JiTA.leadduty.ui;
         var $box = $('<div class="ld-notes"></div>').appendTo($d);
+        var $head = $('<div class="ld-nhead"></div>').appendTo($box);
+        var $label = $('<span></span>').appendTo($head);
         if (!notes) {
-            $('<div class="ld-nhead warn">Notes could not be read for this application - check it in VMS before acting.</div>').appendTo($box);
-            return;
+            $head.addClass('warn');
+            $label.text('Notes could not be read for this application - check it in VMS before acting.');
+        } else if (!notes.length) {
+            $label.text('No notes on this account.');
+        } else {
+            $label.text('Notes on account (' + notes.length + ')');
         }
-        if (!notes.length) {
-            $('<div class="ld-nhead">No notes on this account.</div>').appendTo($box);
-            return;
-        }
-        $('<div class="ld-nhead"></div>').text('Notes on account (' + notes.length + ')').appendTo($box);
-        notes.forEach(function (n) {
+        (notes || []).forEach(function (n) {
             var $n = $('<div class="ld-note"></div>').appendTo($box);
             $('<div class="ld-ntext"></div>').text(n.text).appendTo($n);
             var who = (n.by || 'unknown') + (n.at ? (' · ' + n.at) : '');
             $('<div class="ld-nby"></div>').text(who).appendTo($n);
+        });
+        // The composer is offered only when VMS itself rendered an Add-note control for this page. A note
+        // still goes UNDER the existing ones: they are the context you write against.
+        if (it && target) { U._noteComposer($box, $head, it, target); }
+    },
+
+    // Writing a note. Deliberately NOT armed the way Decline is: a note is additive and correctable, and
+    // making it feel as dangerous as declining somebody would devalue the confirm that actually matters.
+    // What it does get instead is an explicit visibility on screen, because an internal note going out
+    // Public is the one mistake here that cannot be taken back.
+    _noteComposer: function ($box, $head, it, target) {
+        var L = JiTA.leadduty, U = L.ui, st = U._apps;
+        var draft = (st && st.drafts && st.drafts[it.id]) || null;
+        var $toggle = $('<button class="jita-btn ld-mini ld-nadd"></button>')
+            .attr('title', 'Write a note on ' + target.name + "'s account").appendTo($head);
+        var $c = $('<div class="ld-ncomp"></div>').appendTo($box);
+        // Said plainly and every time. A note written from an application screen reads as being about that
+        // application; it is not, and somebody should know that before they write "declined, see part two".
+        $('<div class="ld-nwho"></div>')
+            .text('Goes on ' + target.name + "'s account, so it shows on every application they file.").appendTo($c);
+        var $ta = $('<textarea class="ld-nta" rows="4" spellcheck="false" placeholder="Text to be included in the note"></textarea>')
+            .val((draft && draft.text) || '').appendTo($c);
+        var $row = $('<div class="ld-nrow"></div>').appendTo($c);
+        $('<span class="ld-nvis-lbl">Visible to</span>').appendTo($row);
+        var $sel = $('<select class="ld-nvis"></select>').appendTo($row);
+        target.states.forEach(function (s) { $('<option></option>').attr('value', s).text(s).appendTo($sel); });
+        $sel.val((draft && draft.vis && target.states.indexOf(draft.vis) >= 0) ? draft.vis : target.states[0]);
+        var $post = $('<button class="jita-btn ld-mini">Post note</button>').appendTo($row);
+        var $msg = $('<span class="ld-nmsg"></span>').appendTo($row);
+        $('<span class="ld-nhint">Ctrl+Enter posts</span>').appendTo($row);
+
+        function remember() {
+            if (!st || !st.drafts) { return; }
+            var t = $ta.val() || '';
+            if (t.replace(/^\s+|\s+$/g, '')) { st.drafts[it.id] = { text: t, vis: $sel.val(), open: true }; }
+            else { delete st.drafts[it.id]; }
+        }
+        function open(on) {
+            $c.toggle(on);
+            $toggle.text(on ? 'Cancel' : '+ Write a note');
+            if (on) { $ta.trigger('focus'); }
+        }
+        open(!!draft);   // a half-written note reopens where it was left, rather than hiding behind the button
+
+        function post() {
+            var text = ($ta.val() || '').replace(/^\s+|\s+$/g, '');
+            if (!text) { $msg.addClass('warn').text('Write something first.'); return; }
+            var vis = $sel.val();
+            $post.prop('disabled', true);
+            $msg.removeClass('warn').text('Sending to VMS…');
+            L.apps.addNote(it.id, text, vis).then(function (res) {
+                if (!U.isOpen() || U._tab !== 'apps' || U._apps !== st) { return; }
+                $post.prop('disabled', false);
+                // The text stays exactly where it is on a failure. Losing a paragraph somebody just wrote
+                // because their session expired would be a worse bug than not having the feature at all.
+                if (!res.ok) { $msg.addClass('warn').text('✗ ' + res.message); return; }
+                $ta.val('');
+                if (st.drafts) { delete st.drafts[it.id]; }
+                U._status('✓ Note added on ' + (res.name || target.name) + "'s account.");
+                // Re-read the application so the list shows what VMS actually stored, rather than an
+                // optimistic copy of what we sent - the same rule the action buttons follow.
+                delete st.qa[it.id];
+                U._showApp(st.idx);
+            });
+        }
+        $toggle.on('click', function () { open(!$c.is(':visible')); if (!$c.is(':visible')) { remember(); } });
+        $post.on('click', post);
+        $ta.on('input', remember);
+        $sel.on('change', remember);
+        // Handled AT the box and stopped there: Escape must close the composer, never tear the whole overlay
+        // down, and the arrow keys must stay ordinary text navigation while the caret is in here.
+        $ta.on('keydown', function (e) {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); e.stopPropagation(); post(); }
+            else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); remember(); open(false); }
         });
     },
 
@@ -14893,8 +14971,20 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-apps-open { color: #6bd0dc; font-size: 11px; text-decoration: none; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-apps-open:hover { text-decoration: underline; }' +
                 '.jita-leadduty-view .ld-notes { border: 1px solid #3a434d; border-left: 3px solid #f0b429; border-radius: 5px; padding: 8px 10px; margin-bottom: 16px; background: #1f2329; }' +
-                '.jita-leadduty-view .ld-nhead { color: #f0b429; font-size: 11px; font-weight: 700; margin-bottom: 6px; }' +
+                '.jita-leadduty-view .ld-nhead { display: flex; align-items: center; gap: 8px; color: #f0b429; font-size: 11px; font-weight: 700; margin-bottom: 6px; }' +
                 '.jita-leadduty-view .ld-nhead.warn { color: #ff8f8f; }' +
+                '.jita-leadduty-view .ld-nadd { margin-left: auto; flex: 0 0 auto; font-weight: 400; }' +
+                '.jita-leadduty-view .ld-ncomp { margin-top: 8px; padding-top: 8px; border-top: 1px solid #2c333a; }' +
+                '.jita-leadduty-view .ld-nwho { color: #7a8694; font-size: 10px; margin-bottom: 5px; }' +
+                '.jita-leadduty-view .ld-nta { width: 100%; box-sizing: border-box; padding: 7px 9px; background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; font: 12px/1.5 inherit; resize: vertical; }' +
+                '.jita-leadduty-view .ld-nta:focus { outline: none; border-color: #4c9aff; }' +
+                '.jita-leadduty-view .ld-nrow { display: flex; align-items: center; gap: 8px; margin-top: 6px; flex-wrap: wrap; }' +
+                '.jita-leadduty-view .ld-nvis-lbl { color: #7a8694; font-size: 10px; }' +
+                '.jita-leadduty-view .ld-nvis { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 3px 6px; font-size: 11px; color-scheme: dark; }' +
+                '.jita-leadduty-view .ld-nvis:focus { outline: none; border-color: #4c9aff; }' +
+                '.jita-leadduty-view .ld-nmsg { color: #9aa6b2; font-size: 11px; }' +
+                '.jita-leadduty-view .ld-nmsg.warn { color: #ff8f8f; }' +
+                '.jita-leadduty-view .ld-nhint { color: #55606b; font-size: 10px; margin-left: auto; }' +
                 '.jita-leadduty-view .ld-note { padding: 6px 0; border-top: 1px solid #2c333a; }' +
                 '.jita-leadduty-view .ld-note:first-of-type { border-top: none; padding-top: 0; }' +
                 '.jita-leadduty-view .ld-ntext { color: #e6e6e6; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }' +
@@ -15077,7 +15167,8 @@ JiTA.leadduty.apps = {
             if (!qa.length) { return { ok: false, reason: /application-answer/i.test(body) ? 'norow' : 'unreadable' }; }
             // The controls come from the SAME fetch, so the buttons the overlay offers are the ones that
             // page rendered. They are read again at action time - this is what to show, not what to trust.
-            return { ok: true, qa: qa, actions: A._parseControls(body), notes: A._parseNotes(body) };
+            return { ok: true, qa: qa, actions: A._parseControls(body), notes: A._parseNotes(body),
+                note: A._parseNoteTarget(body) };
         });
     },
 
@@ -15111,19 +15202,46 @@ JiTA.leadduty.apps = {
         return out;
     },
 
+    // Who a note would be written about, and which visibilities VMS offers - both read from the page's own
+    // Add-note control, which carries the character name in data-character (exactly what the site's modal
+    // reads). The note is keyed on the CHARACTER NAME, not the application, so it lands on the ACCOUNT and
+    // shows on everything that person ever files. A page that renders no Add-note button offers no composer
+    // here either: the same rule the action buttons follow. Resolves { name, states } or null.
+    NOTE_STATES: ['Developers', 'Volunteers', 'Public'],
+    _parseNoteTarget: function (body) {
+        var A = JiTA.leadduty.apps;
+        var btn = /<button\b([^>]*\bdata-target\s*=\s*["']#add-note-modal["'][^>]*)>/i.exec(body || '');
+        if (!btn) { return null; }
+        var nm = /\bdata-character\s*=\s*["']([^"']+)["']/i.exec(btn[1]);
+        if (!nm) { return null; }
+        // The visibility list is read from the modal's own <select>, so a fourth option added later appears
+        // without a code change here. The known three are a fallback for a page that renders the button but
+        // not the modal - never an override of what the page actually offers.
+        var sel = /<select\b[^>]*note-modal-viewstate[^>]*>([\s\S]*?)<\/select>/i.exec(body || '');
+        var states = [], om, ore = /<option\b[^>]*\bvalue\s*=\s*["']([^"']*)["']/gi;
+        while (sel && (om = ore.exec(sel[1]))) { if (om[1]) { states.push(om[1]); } }
+        return { name: A._text(nm[1]), states: states.length ? states : A.NOTE_STATES.slice() };
+    },
+
     // ---- acting on an application ---------------------------------------------------------------------
-    // The site's own buttons call ApproveApplication / DeclineApplication, which POST JSON to an ASMX
-    // service. We replay the same calls rather than inventing an API:
-    //   /services/ApplicationService.asmx/ApplicationAccept   {token, applicationId, state}
-    //   /services/ApplicationService.asmx/ApplicationDecline  {token, applicationId, sendMessage, reset}
+    // The site's own buttons call ApproveApplication / DeclineApplication / NoteAdd, which POST JSON to two
+    // ASMX services. We replay the same calls rather than inventing an API:
+    //   /services/ApplicationService.asmx/ApplicationAccept    {token, applicationId, state}
+    //   /services/ApplicationService.asmx/ApplicationDecline   {token, applicationId, sendMessage, reset}
+    //   /services/AdministratorService.asmx/NoteAdd            {token, characterName, content, viewState}
+    // Note the SECOND service: a note is written about a person, not about an application, so it does not
+    // live on ApplicationService at all.
+    //
     // The CSRF token is <body data-csrf="...">, so it comes from the very page fetch that also tells us
     // which actions that application currently offers - there is no stale copy to keep anywhere.
     //
     // Nothing here is ever assumed. "Proceed to PartTwo" exists only because the application is in New, so
-    // the available actions, the target state, the id and the token are ALL read from a fresh fetch of that
-    // application immediately before posting. A queue that moved underneath us then refuses instead of
-    // acting on the wrong record or the wrong transition.
-    ACTION_URL: 'https://volunteers.eveonline.com/services/ApplicationService.asmx/',
+    // the available actions, the target state, the id, the note's subject and the token are ALL read from a
+    // fresh fetch of that application immediately before posting. A queue that moved underneath us then
+    // refuses instead of acting on the wrong record, the wrong transition, or the wrong person.
+    SERVICES_URL: 'https://volunteers.eveonline.com/services/',
+    APP_SERVICE: 'ApplicationService',
+    NOTE_SERVICE: 'AdministratorService',
     ACTIONS: {
         // `notifies` drives the wording of the confirm. Declining tells a real person no; resetting does
         // not. That distinction is the single most important thing on this screen and must never be
@@ -15134,7 +15252,7 @@ JiTA.leadduty.apps = {
     },
 
     // What a specific application currently offers, read from its own page. Resolves
-    // { ok, token, appId, actions: { key: { label, state } } } or { ok: false, reason }.
+    // { ok, token, appId, actions: { key: { label, state } }, note } or { ok: false, reason }.
     inspect: function (id) {
         var A = JiTA.leadduty.apps;
         return A._get(A.DETAIL_URL + id).then(function (r) {
@@ -15144,7 +15262,7 @@ JiTA.leadduty.apps = {
             var tok = /<body[^>]*\sdata-csrf\s*=\s*["']([^"']+)["']/i.exec(body);
             var app = /data-applicationid\s*=\s*["']([0-9a-f-]{36})["']/i.exec(body);
             if (!tok || !app) { return { ok: false, reason: 'noform' }; }
-            return { ok: true, token: tok[1], appId: app[1], actions: A._parseControls(body) };
+            return { ok: true, token: tok[1], appId: app[1], actions: A._parseControls(body), note: A._parseNoteTarget(body) };
         });
     },
 
@@ -15184,11 +15302,44 @@ JiTA.leadduty.apps = {
             var payload = (key === 'accept')
                 ? { token: info.token, applicationId: id, state: offered.state }
                 : { token: info.token, applicationId: id, sendMessage: key === 'decline', reset: key === 'reset' };
-            return A._post(cfg.method, payload);
+            return A._post(A.APP_SERVICE, cfg.method, payload);
         });
     },
 
-    _post: function (method, payload) {
+    // Write a note on the applicant's ACCOUNT, with the same discipline as act(): the subject's character
+    // name, the visibilities on offer and the CSRF token are all re-read from a fresh fetch of this
+    // application immediately before posting, so a note can never land on whoever happened to be on screen
+    // when the queue was drawn. Resolves { ok, message } and never throws.
+    addNote: function (id, text, viewState) {
+        var A = JiTA.leadduty.apps;
+        var content = String(text == null ? '' : text).replace(/^\s+|\s+$/g, '');
+        if (!content) { return Promise.resolve({ ok: false, reason: 'empty', message: 'The note is empty - nothing was sent.' }); }
+        return A.inspect(id).then(function (info) {
+            if (!info.ok) { return { ok: false, reason: info.reason, message: A.line(info) }; }
+            if (info.appId !== id) {
+                return { ok: false, reason: 'mismatch', message: 'The application page did not match the one requested - nothing was sent.' };
+            }
+            if (!info.note) {
+                return { ok: false, reason: 'gone',
+                    message: 'VMS no longer offers an Add-note control on this application - write the note in VMS.' };
+            }
+            // Visibility is never inferred or passed through unchecked. An unrecognised value would be sent
+            // verbatim, and the single mistake here that cannot be taken back is an internal note going out
+            // Public - so anything the page did not itself offer is refused before a request is made.
+            if (info.note.states.indexOf(viewState) < 0) {
+                return { ok: false, reason: 'visibility',
+                    message: 'VMS does not offer "' + viewState + '" as a visibility on this page - nothing was sent.' };
+            }
+            return A._post(A.NOTE_SERVICE, 'NoteAdd', {
+                token: info.token, characterName: info.note.name, content: content, viewState: viewState
+            }).then(function (res) {
+                if (res.ok) { res.name = info.note.name; }
+                return res;
+            });
+        });
+    },
+
+    _post: function (service, method, payload) {
         var A = JiTA.leadduty.apps;
         return new Promise(function (resolve) {
             if (typeof GM_xmlhttpRequest !== 'function') {
@@ -15197,7 +15348,7 @@ JiTA.leadduty.apps = {
             }
             try {
                 GM_xmlhttpRequest({
-                    method: 'POST', url: A.ACTION_URL + method, timeout: A.TIMEOUT_MS,
+                    method: 'POST', url: A.SERVICES_URL + service + '.asmx/' + method, timeout: A.TIMEOUT_MS,
                     headers: { 'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json' },
                     data: JSON.stringify(payload),
                     onload: function (r) { resolve(A._postResult(r)); },
