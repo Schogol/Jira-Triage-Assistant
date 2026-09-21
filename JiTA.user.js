@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.26.3
+// @version     3.27.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8699,8 +8699,14 @@ JiTA.menu = {
                     if (raw && raw.pages) { line = JiTA.leadduty._poolLine(JiTA.leadduty.pool._applyExclusions(raw)) + ' · ' + who; }
                     // A failed publish is otherwise invisible: it happens 20s after a ledger write with no UI
                     // attached, and the only symptom is a page that quietly stops matching the ledger.
+                    // A REFUSED publish needs saying for the same reason, and for a worse one: a tab that
+                    // keeps declining to publish a degraded pool would otherwise look exactly like a tab
+                    // with nothing to publish. "unchanged" is the healthy idle case and stays quiet.
                     var lp = JiTA.leadduty.report._last;
-                    if (lp && lp.error) { line += ' · ' + JiTA.leadduty.report.lastLine(); }
+                    var lpskip = lp && lp.result && lp.result.skipped;
+                    if ((lp && lp.error) || (lpskip && lpskip !== 'unchanged')) {
+                        line += ' · ' + JiTA.leadduty.report.lastLine();
+                    }
                     if (JiTA.leadduty._dry()) { line += ' · DRY RUN is on'; }
                     $ldStatus.text(line);
                 }).catch(function () { $ldStatus.text(who); });
@@ -12734,7 +12740,12 @@ JiTA.leadduty = {
         if (pool.excludedCount) { bits.push(pool.excludedCount + ' excluded of ' + pool.rawCount + ' crawled'); }
         bits.push(L.wiki.perLead(pool.pages.length, L.ROSTER().length) + ' per Lead per month (' + L.eyes() +
             ' different Leads on every page every ' + L.coverageMonths() + ' months)');
-        if (pool.fetchedAt) { bits.push('scanned ' + new Date(pool.fetchedAt).toISOString().slice(0, 10)); }
+        // To the MINUTE, and in the same format as the page's own "Page tree last scanned" row. The date
+        // alone made the two surfaces impossible to compare: when they disagreed about the pool size there
+        // was no way to see which of them was describing the older crawl.
+        if (pool.fetchedAt) {
+            bits.push('scanned ' + new Date(pool.fetchedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC');
+        }
         if (pool.truncated) { bits.push('tree deeper than ' + JiTA.conf.MAX_DEPTH + ' levels - some pages may be missing'); }
         // An incomplete crawl is otherwise invisible: the untraceable pages just look un-excluded.
         if (pool.verified === false) {
@@ -12801,12 +12812,30 @@ JiTA.leadduty = {
                         return out;   // nothing better to serve; `verified: false` stops it cutting a month
                     }
                     return JiTA.db.setMeta(L.pool.CACHE_KEY, rec)
-                        .then(function () { return out; }, function () { return out; });
+                        .then(function () { return L.pool._crawled(out); }, function () { return L.pool._crawled(out); });
                 }, function (e) {
                     if (usable) { return L.pool._applyExclusions(cached); }   // keep serving the last good list through an outage
                     throw e;
                 });
             });
+        },
+
+        // A new crawl landed, so the ledger PAGE is now out of date - its Coverage table and Review log are
+        // rendered FROM the pool, and a crawl writes nothing to the ledger, so report.tap never fires. That
+        // is the gap behind a page reading "31 pages in rotation" against a Settings line already saying 30:
+        // the numbers are the same expression (pool.pages.length) read at two different moments.
+        //
+        // The Re-scan button already closed this for itself, but it is not the only door: the overlay's
+        // Refresh re-crawls too (_loadWiki passes force), and so does the first open after the 24h cache
+        // expires. Closing it HERE covers all three and any door added later - this is the one place that
+        // knows the pool the page describes has just changed.
+        //
+        // schedule() is debounced and publish() skips on an unchanged hash, so a crawl that found nothing
+        // new costs one hash comparison, not a page version. It cannot recurse: publish() calls
+        // ensureFresh(false), which by then reads a fresh cache and never reaches this line.
+        _crawled: function (out) {
+            try { JiTA.leadduty.report.schedule(); } catch (e) { /* publishing is cosmetic - never fail the crawl */ }
+            return out;
         },
 
         // ONE crawl at a time, however many callers ask at once. Clear ledger empties the cache, and the
@@ -13786,6 +13815,11 @@ JiTA.leadduty = {
     // one page version per mark.
     report: {
         HASH_KEY: 'reportHash',
+        // Who published the page last: { v, by, at }. This is leader election for the ledger PAGE, and the
+        // ledger itself has to be the medium - the three Leads are three PEOPLE on three machines, so there
+        // is no BroadcastChannel and no Web Lock between them the way there is between tabs of one browser
+        // (see JiTA.worker). The shared Confluence property is the only channel all three touch.
+        PUB_KEY: 'reportPub',
         DEBOUNCE_MS: 0,        // deliberately immediate - see above. Kept as a knob, not a magic number.
         MAX_LOG_ROWS: 500,
         BUSY_MAX_MS: 120000,   // past this a publish is presumed hung, not running (see the guard in publish)
@@ -13861,17 +13895,53 @@ JiTA.leadduty = {
             ]).then(function (r) {
                 var wiki = r[0].value, qc = r[1].value, pool = r[2];
                 if (!wiki && !qc) { return { skipped: 'nothing in the ledger yet' }; }
+                // Reading may degrade; PUBLISHING may not. A pool whose ancestry did not fully resolve reads
+                // as "excluded by nothing", so it silently ADDS pages to the rotation - and the page is the
+                // section's shared truth, read as fact by every Lead. Schogol, 2026-09-21: the ledger page
+                // carried "31 pages in rotation" and listed "ECAID Newsletter - February 2025" as never
+                // reviewed, against a Settings line on his own tab already saying 30. Exactly one page
+                // differed, and it is the one whose ancestry runs through a FOLDER.
+                //
+                // That is worse than a stale page: the Coverage table and the Review log are what a Lead
+                // checks to decide whether the rotation is healthy, and a page nobody should ever review
+                // sitting there as "never reviewed" is work invented out of a broken parent chain. With
+                // three browsers publishing to one page, a degraded tab also ping-pongs against the healthy
+                // ones - each tick sees the other's hash, disagrees, and rewrites. Keep the last good page
+                // and let a tab that can trace the whole tree write the next one.
+                if (pool && pool.verified === false) {
+                    return { skipped: 'the page tree came back incomplete (' + pool.holes +
+                        ' page(s) could not be traced to the root), so the page was left as it was' };
+                }
                 // Hash the CONTENT, not the rendered page: the "generated at" stamp changes every minute, so
                 // hashing it made "unchanged" unreachable and every tick wrote a new page version.
                 var body = R._content(wiki, qc, pool);
                 var hash = JiTA.util.hash(body);
                 if (!force && wiki && wiki[R.HASH_KEY] === hash) { return { skipped: 'unchanged' }; }
+                // An OLDER build never overwrites a page a newer one published. Three Leads means three
+                // browsers, and Tampermonkey applies an update on the next page load - so a tab left open
+                // across a release keeps rendering this page from last week's code indefinitely. Where the
+                // two builds disagree they take turns rewriting the page, each tick seeing the other's hash;
+                // the page then says whatever the last tick happened to say, which is the worst of both.
+                //
+                // Deliberately AFTER the hash check, so this only ever bites a build that would actually
+                // CHANGE the page - an old tab that agrees with what is already there still skips quietly as
+                // "unchanged" and reports nothing. The version is a proxy for correctness, not a proof, but
+                // it is the same proxy the worker's leader election already runs on, and it breaks the tie in
+                // the one direction that gets better over time. An unknown version (no GM_info) gates
+                // nothing: a build that cannot name itself must not be able to lock everyone else out.
+                var pub = (wiki && wiki[R.PUB_KEY]) || null;
+                if (pub && pub.v && JiTA.SCRIPT_VERSION && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, pub.v) < 0) {
+                    return { skipped: 'this tab runs v' + JiTA.SCRIPT_VERSION + ' and the page was last published by v' +
+                        pub.v + (pub.by ? (' on ' + pub.by + "'s tab") : '') +
+                        ' - an older build does not overwrite a newer one. Reload this tab to pick up the update.' };
+                }
                 return R._write(R._stamp() + '\n' + body).then(function (res) {
                     // Remember what we published so the next tick can skip. Deliberately NOT tapped: this
                     // write is a consequence of publishing, not a reason to publish again.
                     return L.ledger.mutate(L.LEDGER_KEY, function (v) {
                         if (!v) { return null; }
                         v[R.HASH_KEY] = hash;
+                        v[R.PUB_KEY] = { v: JiTA.SCRIPT_VERSION || '', by: (L.me() && L.me().handle) || '', at: new Date().toISOString() };
                         return v;
                     }).then(function () { return { written: true, version: res.version }; },
                         function () { return { written: true, version: res.version }; });
@@ -13918,8 +13988,13 @@ JiTA.leadduty = {
         // and hashing this line made every hash unique, so "unchanged" could never be true and the page
         // collected a new version on every scheduler tick forever.
         _stamp: function () {
-            return '<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant on ' +
-                JiTA.leadduty.report._when(new Date().toISOString()) + ' UTC. Anything typed on this page by ' +
+            var L = JiTA.leadduty, me = (L.me() && L.me().handle) || '';
+            // Naming the publisher costs nothing here (the stamp is outside the hash, so it updates on a real
+            // write and never causes one) and answers the question that took an evening to answer by hand:
+            // when three browsers write one page, WHICH one wrote what is on screen, and on what build.
+            var who = 'v' + (JiTA.SCRIPT_VERSION || '?') + (me ? (' on ' + me + "'s tab") : '');
+            return '<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant (' + who +
+                ') on ' + L.report._when(new Date().toISOString()) + ' UTC. Anything typed on this page by ' +
                 'hand is replaced on the next update - record work through the Lead duties overlay in Jira ' +
                 'instead.</em></p>';
         },
@@ -14140,7 +14215,7 @@ JiTA.leadduty.ui = {
         // No "publish" button: the ledger PAGE is rewritten automatically after any change (report.tap ->
         // a 20s debounce, so a run of marks makes one page version), and the scheduler republishes on its
         // own tick as the backstop. A button that only duplicates that is one more thing to explain.
-        $('<button class="jita-btn" id="ld-refresh" title="Re-read the shared ledger and rebuild THIS tab (the wiki tab also re-scans the page tree). Changes nothing for anyone else.">Refresh</button>')
+        $('<button class="jita-btn" id="ld-refresh" title="Re-read the shared ledger and rebuild THIS tab. On the wiki tab it also re-scans the page tree - and because the ledger page reports the pool, a scan that finds a change republishes it. Nobody is assigned anything new.">Refresh</button>')
             .on('click', function () {
                 U._load(true);
                 L.apps.refresh(true).then(function () { U._paintApps(); }, function () { U._paintApps(); });
