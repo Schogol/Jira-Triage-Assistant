@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.26.4
+// @version     3.27.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -13815,6 +13815,11 @@ JiTA.leadduty = {
     // one page version per mark.
     report: {
         HASH_KEY: 'reportHash',
+        // Who published the page last: { v, by, at }. This is leader election for the ledger PAGE, and the
+        // ledger itself has to be the medium - the three Leads are three PEOPLE on three machines, so there
+        // is no BroadcastChannel and no Web Lock between them the way there is between tabs of one browser
+        // (see JiTA.worker). The shared Confluence property is the only channel all three touch.
+        PUB_KEY: 'reportPub',
         DEBOUNCE_MS: 0,        // deliberately immediate - see above. Kept as a knob, not a magic number.
         MAX_LOG_ROWS: 500,
         BUSY_MAX_MS: 120000,   // past this a publish is presumed hung, not running (see the guard in publish)
@@ -13912,12 +13917,31 @@ JiTA.leadduty = {
                 var body = R._content(wiki, qc, pool);
                 var hash = JiTA.util.hash(body);
                 if (!force && wiki && wiki[R.HASH_KEY] === hash) { return { skipped: 'unchanged' }; }
+                // An OLDER build never overwrites a page a newer one published. Three Leads means three
+                // browsers, and Tampermonkey applies an update on the next page load - so a tab left open
+                // across a release keeps rendering this page from last week's code indefinitely. Where the
+                // two builds disagree they take turns rewriting the page, each tick seeing the other's hash;
+                // the page then says whatever the last tick happened to say, which is the worst of both.
+                //
+                // Deliberately AFTER the hash check, so this only ever bites a build that would actually
+                // CHANGE the page - an old tab that agrees with what is already there still skips quietly as
+                // "unchanged" and reports nothing. The version is a proxy for correctness, not a proof, but
+                // it is the same proxy the worker's leader election already runs on, and it breaks the tie in
+                // the one direction that gets better over time. An unknown version (no GM_info) gates
+                // nothing: a build that cannot name itself must not be able to lock everyone else out.
+                var pub = (wiki && wiki[R.PUB_KEY]) || null;
+                if (pub && pub.v && JiTA.SCRIPT_VERSION && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, pub.v) < 0) {
+                    return { skipped: 'this tab runs v' + JiTA.SCRIPT_VERSION + ' and the page was last published by v' +
+                        pub.v + (pub.by ? (' on ' + pub.by + "'s tab") : '') +
+                        ' - an older build does not overwrite a newer one. Reload this tab to pick up the update.' };
+                }
                 return R._write(R._stamp() + '\n' + body).then(function (res) {
                     // Remember what we published so the next tick can skip. Deliberately NOT tapped: this
                     // write is a consequence of publishing, not a reason to publish again.
                     return L.ledger.mutate(L.LEDGER_KEY, function (v) {
                         if (!v) { return null; }
                         v[R.HASH_KEY] = hash;
+                        v[R.PUB_KEY] = { v: JiTA.SCRIPT_VERSION || '', by: (L.me() && L.me().handle) || '', at: new Date().toISOString() };
                         return v;
                     }).then(function () { return { written: true, version: res.version }; },
                         function () { return { written: true, version: res.version }; });
@@ -13964,8 +13988,13 @@ JiTA.leadduty = {
         // and hashing this line made every hash unique, so "unchanged" could never be true and the page
         // collected a new version on every scheduler tick forever.
         _stamp: function () {
-            return '<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant on ' +
-                JiTA.leadduty.report._when(new Date().toISOString()) + ' UTC. Anything typed on this page by ' +
+            var L = JiTA.leadduty, me = (L.me() && L.me().handle) || '';
+            // Naming the publisher costs nothing here (the stamp is outside the hash, so it updates on a real
+            // write and never causes one) and answers the question that took an evening to answer by hand:
+            // when three browsers write one page, WHICH one wrote what is on screen, and on what build.
+            var who = 'v' + (JiTA.SCRIPT_VERSION || '?') + (me ? (' on ' + me + "'s tab") : '');
+            return '<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant (' + who +
+                ') on ' + L.report._when(new Date().toISOString()) + ' UTC. Anything typed on this page by ' +
                 'hand is replaced on the next update - record work through the Lead duties overlay in Jira ' +
                 'instead.</em></p>';
         },
