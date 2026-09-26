@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.30.0
+// @version     3.31.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -12322,6 +12322,7 @@ JiTA.dv = {
     _runJql: null,      // the JQL the loaded list belongs to
     _runAt: 0,
     _seekTag: null,     // "<gen>:<key>" already searched for, so the open issue is looked for once per query
+    _firstFor: null,    // { gen, from }: a filter was just picked - open its first issue when page one lands
     _host: null,        // the issue layout element we pad (kept while it is connected - see _findHost)
     _ro: null,
     _mounted: false,
@@ -12749,6 +12750,7 @@ JiTA.dv = {
             D._renderFoot();
             D._renderCrumbNav();
             if (D._issues.length <= D.CACHE_ISSUES + D.PAGE_SIZE) { D._saveCache(); }
+            if (first) { D._openFirst(gen); }
             D._seek();
         }, function (e) {
             if (gen !== D._gen) { return; }
@@ -12792,6 +12794,18 @@ JiTA.dv = {
                 D._page(gen).then(more);
             })();
         }, function () { /* a key JQL does not know (moved, deleted) - simply not in the list */ });
+    },
+
+    // A filter was just picked, so open the first issue of its list, as Jira's old detail view did: the issue on
+    // screen belongs to the list that was there before. Once per pick, only for the query that pick started (a
+    // query typed or re-sorted before page one lands is the user's own, and gets no jump), and only while the
+    // user is still on the issue they picked it from - anyone who has already moved on stays where they went.
+    _openFirst: function (gen) {
+        var D = JiTA.dv, want = D._firstFor;
+        if (!want || want.gen !== gen) { return; }
+        D._firstFor = null;
+        if (!D._mounted || !D._issues.length || D._locKey() !== want.from) { return; }
+        D._select(D._issues[0].key, 'click');
     },
 
     _saveCache: function () {
@@ -13414,6 +13428,7 @@ JiTA.dv = {
         D._renderHead();
         D._markSidebar();
         D._run(false);
+        D._firstFor = { gen: D._gen, from: D._locKey() };   // page one answers asynchronously, so this is in time
     },
 
     // ---- Jira's own filter links ------------------------------------------------------------------------------
