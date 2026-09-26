@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.28.2
+// @version     3.28.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -353,6 +353,61 @@ function ensureButtonsPresent() {
     addButtons();
 }
 
+// ---- JiTA's corner pills: the ISD credits badge, the Lead-duties chip and the credits progress toast ----
+// Their layer. Atlassian's own scale (@atlaskit/theme layers) keeps page chrome at 200 and below - the sidebar
+// sits at 2 - and puts everything that opens OVER the page above that: inline dialogs 300, dropdowns and popups
+// 400, modals 510, flags 600, tooltips 9999. The pills sit between the two, so they stay above the sidebar they
+// overlap but under every menu, dialog and flag Jira opens. At 9000 they used to cover all of those.
+var JITA_PILL_Z = 250;
+var JITA_PILL_IDS = ['jita-credits-badge', 'jita-leadduty-chip', 'jita-credits-progress'];
+
+// The one layer no z-index can fix: the sidebar's flyouts ("More spaces" and friends) render INSIDE the sidebar,
+// at its own z-index of 2, so anything drawn beneath them is beneath the whole sidebar too and a pill there would
+// just vanish. So a pill steps aside instead - visibility, not display, so nothing reflows - while an open menu or
+// dialog overlaps it. Atlaskit mounts a layer on open and unmounts it on close, so the shared DOM observer sees
+// both; the check itself runs at most once a frame.
+var jitaPillCheck = false;
+function jitaPillsYieldSoon() {
+    if (jitaPillCheck) { return; }
+    jitaPillCheck = true;
+    (window.requestAnimationFrame || setTimeout)(function () { jitaPillCheck = false; jitaPillsYield(); });
+}
+
+// A layer only counts when it floats: the element or one of its three nearest ancestors is fixed / absolute.
+// That keeps a menu sitting in the page's normal flow (a nav list that happens to carry role="menu") from
+// hiding a pill for good.
+function jitaFloats(el) {
+    for (var n = el, i = 0; n && n !== document.body && i < 4; n = n.parentElement, i++) {
+        var pos = window.getComputedStyle(n).position;
+        if (pos === 'fixed' || pos === 'absolute') { return true; }
+    }
+    return false;
+}
+
+function jitaPillsYield() {
+    var pills = [], i;
+    for (i = 0; i < JITA_PILL_IDS.length; i++) {
+        var p = document.getElementById(JITA_PILL_IDS[i]);
+        if (p) { pills.push(p); }
+    }
+    if (!pills.length) { return; }
+    var layers = [], found = document.querySelectorAll('[role="dialog"], [role="menu"], [role="listbox"]');
+    for (i = 0; i < found.length; i++) {
+        if (found[i].closest('[id^="jita"], #gpanel, .jdv-pop, #jdv-bar, #jdv-col, #jdv-rail')) { continue; }   // our own UI
+        var r = found[i].getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && jitaFloats(found[i])) { layers.push(r); }
+    }
+    for (i = 0; i < pills.length; i++) {
+        var pr = pills[i].getBoundingClientRect(), hit = false;
+        for (var k = 0; k < layers.length && !hit; k++) {
+            var l = layers[k];
+            hit = l.left < pr.right && l.right > pr.left && l.top < pr.bottom && l.bottom > pr.top;
+        }
+        var want = hit ? 'hidden' : '';
+        if (pills[i].style.visibility !== want) { pills[i].style.visibility = want; }
+    }
+}
+
 // Throttle: a single issue-view re-render fires a burst of mutations, so we coalesce them and run the
 // (cheap, early-exiting) check at most once every 200ms rather than on every individual mutation.
 var jitaButtonGuardScheduled = false;
@@ -360,6 +415,7 @@ var jitaButtonObserver = new MutationObserver(function () {
     // Synchronous first (before the 200ms debounce below): if a re-render just wiped our field/section hides,
     // re-assert them THIS microtask so they never flash back into view. Cheap - early-exits when nothing's hidden.
     try { if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.reassertFast(); } } catch (e0) { /* ignore */ }
+    try { jitaPillsYieldSoon(); } catch (e1) { /* ignore */ }   // a menu or flyout opening over a corner pill: step the pill aside
     if (jitaButtonGuardScheduled) { return; }
     jitaButtonGuardScheduled = true;
     setTimeout(function () {
@@ -8966,7 +9022,7 @@ JiTA.credits = {
             if (!el) {
                 el = document.createElement('div');
                 el.id = 'jita-credits-progress';
-                el.style.cssText = 'position:fixed;z-index:2147483647;right:16px;bottom:16px;max-width:360px;' +
+                el.style.cssText = 'position:fixed;z-index:' + JITA_PILL_Z + ';right:16px;bottom:16px;max-width:360px;' +
                     'background:#1a1c1f;color:#e8e8ea;border:1px solid #34373d;border-radius:8px;padding:9px 13px;' +
                     'font:12px/1.45 "Segoe UI",Roboto,Arial,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.45);' +
                     'white-space:pre-line;pointer-events:none;';
@@ -9230,7 +9286,7 @@ JiTA.credits = {
             if (!el) {
                 el = document.createElement('div');
                 el.id = 'jita-credits-badge';
-                el.style.cssText = 'position:fixed;z-index:9000;left:16px;bottom:16px;cursor:pointer;' +
+                el.style.cssText = 'position:fixed;z-index:' + JITA_PILL_Z + ';left:16px;bottom:16px;cursor:pointer;' +
                     'background:#1a1c1f;color:#e8e8ea;border:1px solid #34373d;border-radius:16px;padding:6px 12px;' +
                     'font:12px/1 "Segoe UI",Roboto,Arial,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.4);user-select:none;';
                 el.title = 'ISD credits this month - click for the leaderboard';
@@ -9251,7 +9307,7 @@ JiTA.credits = {
                 }
                 // fallback: derive from the full-leaderboard cache until the first self compute lands
                 JiTA.credits.getCached(ym).then(function (res) {
-                    if (!res) { el.textContent = '📊 credits: —'; return; }
+                    if (!res) { el.textContent = '📊 credits: -'; return; }
                     JiTA.link.currentUser().then(function (me) {
                         var d = JiTA.credits._derive(res, me);
                         el.textContent = d.myRow ? ('📊 ' + d.myRow[8] + ' Credits · #' + d.myRank + '/' + d.total) : '📊 credits: n/a';
@@ -16995,7 +17051,7 @@ JiTA.leadduty.reminder = {
         if (!el) {
             el = document.createElement('div');
             el.id = R.ID;
-            el.style.cssText = 'position:fixed;z-index:9000;left:16px;bottom:56px;cursor:pointer;display:flex;align-items:center;gap:8px;' +
+            el.style.cssText = 'position:fixed;z-index:' + JITA_PILL_Z + ';left:16px;bottom:56px;cursor:pointer;display:flex;align-items:center;gap:8px;' +
                 'background:#1a1c1f;color:#e8e8ea;border:1px solid #34373d;border-radius:16px;padding:6px 8px 6px 12px;' +
                 'font:12px/1 "Segoe UI",Roboto,Arial,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.4);user-select:none;';
             el.title = 'Your monthly Lead duties - click to open';
