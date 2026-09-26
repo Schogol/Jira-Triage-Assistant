@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.28.1
+// @version     3.28.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -12962,15 +12962,31 @@ JiTA.dv = {
         h.appendChild(sb); h.appendChild(db); h.appendChild(rb); h.appendChild(D._el('span', 'jdv-gap')); h.appendChild(cb);
     },
 
-    // Previous / next beside the breadcrumb, as the old view had them. Lives in Jira's breadcrumb list, so it
-    // is re-inserted whenever Jira re-renders that list without it.
+    // Where previous / next go: straight after the current issue's item in the breadcrumb ROW. The row is found
+    // by geometry rather than by tag - it is the first container around the key that reaches well to the LEFT
+    // of it, i.e. the one that also holds the earlier crumbs. Guessing the tag (an <li>) missed on Jira's
+    // markup and fell back to the key's own wrapper, which stacks vertically: the buttons sat UNDER the key
+    // and pushed it up. The margin is wide enough to step over the key's icon and gap, which sit in that
+    // wrapper too. Resolves { row, after } or null - and null means no buttons at all, never buttons
+    // somewhere odd.
+    CRUMB_REACH: 60,
+    _crumbSlot: function (a) {
+        var ar = a.getBoundingClientRect(), item = a;
+        for (var p = a.parentElement; p && p !== document.body && p !== document.documentElement; item = p, p = p.parentElement) {
+            if (p.getBoundingClientRect().left < ar.left - JiTA.dv.CRUMB_REACH) { return { row: p, after: item }; }
+        }
+        return null;
+    },
+
+    // Previous / next beside the breadcrumb, as the old view had them. Lives in Jira's breadcrumb row, so it
+    // is re-inserted whenever Jira re-renders that row without it.
     _renderCrumbNav: function () {
         var D = JiTA.dv, nav = document.getElementById('jdv-crumbnav');
         var a = (D._mounted && !D._collapsed()) ? document.querySelector(issueItem) : null;
-        var li = a ? (a.closest('li') || a.parentNode) : null;
-        if (!li || !li.parentNode) { if (nav && nav.parentNode) { nav.parentNode.removeChild(nav); } return; }
+        var slot = a ? D._crumbSlot(a) : null;
+        if (!slot) { if (nav && nav.parentNode) { nav.parentNode.removeChild(nav); } return; }
         if (!nav) {
-            nav = document.createElement(li.tagName === 'LI' ? 'li' : 'span');
+            nav = document.createElement('span');
             nav.id = 'jdv-crumbnav';
             var up = D._btn('jdv-icon', '', D.ICON.up, 'Previous issue in the list (Up arrow)');
             var dn = D._btn('jdv-icon', '', D.ICON.down, 'Next issue in the list (Down arrow)');
@@ -12978,7 +12994,7 @@ JiTA.dv = {
             dn.onclick = function () { D._step(1); };
             nav.appendChild(up); nav.appendChild(dn);
         }
-        if (nav.parentNode !== li.parentNode || nav.previousSibling !== li) { li.parentNode.insertBefore(nav, li.nextSibling); }
+        if (nav.parentNode !== slot.row || nav.previousSibling !== slot.after) { slot.row.insertBefore(nav, slot.after.nextSibling); }
         var i = D._index[D._activeKey];
         nav.firstChild.disabled = !(i > 0);
         nav.lastChild.disabled = (i == null) ? !D._issues.length : !(i < D._issues.length - 1 || D._more);
@@ -13422,7 +13438,7 @@ JiTA.dv = {
             '.jdv-optl { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
             '.jdv-opt2 { flex: none; font-size: 12px; color: var(--ds-text-subtlest, #626F86); }' +
             '.jdv-optmsg { padding: 6px 12px; color: var(--ds-text-subtlest, #626F86); font-size: 13px; }' +
-            '#jdv-crumbnav { display: inline-flex; align-items: center; gap: 2px; margin-left: 8px; list-style: none; }' +
+            '#jdv-crumbnav { display: inline-flex; flex: none; align-items: center; align-self: center; vertical-align: middle; gap: 2px; margin-left: 8px; list-style: none; }' +
             '#jdv-crumbnav .jdv-btn { width: 24px; height: 24px; padding: 0; background: transparent; color: var(--ds-icon, #44546F); }' +
             '#jdv-crumbnav .jdv-btn:hover:not(:disabled) { background: var(--ds-background-neutral-subtle-hovered, #091E420F); }'
         );
