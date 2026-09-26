@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.31.0
+// @version     3.32.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8448,6 +8448,19 @@ JiTA.menu = {
         $feat.append(JiTA.menu._toggleRow('Detail view', 6, function () {
             if (!JITA_NO_JIRA_UI) { JiTA.dv.ensure(); }
         }));
+        // Its sub-option, shown only while the detail view is on: take a filter click on every Jira page, not only
+        // while the list is on screen (a GM flag of its own - it is not a savedVariables feature).
+        if (flagOn('detailView')) {
+            var $take = $('<div class="jita-menu-row" style="padding-left:18px;"></div>');
+            $('<span class="lbl">Open filters in the detail view</span>')
+                .append($('<span class="sub"></span>').text('A filter clicked anywhere in Jira opens its first issue with the list beside it, instead of the Jira search page'))
+                .appendTo($take);
+            var $takeSw = $('<div class="jita-sw"><span class="knob"></span></div>');
+            if (gmGet(JiTA.dv.TAKE_KEY, false)) { $takeSw.addClass('on'); }
+            $takeSw.on('click', function () { gmSet(JiTA.dv.TAKE_KEY, !gmGet(JiTA.dv.TAKE_KEY, false)); refreshMenu(); });
+            $take.append($takeSw);
+            $feat.append($take);
+        }
         $p.append($feat);
 
 
@@ -12266,6 +12279,8 @@ JiTA.dupfind = {
  * top (Basic filters or raw JQL, plus your starred filters), the matching issues down the left, and Jira's OWN
  * issue view on the right, so editing, comments, transitions and every app panel keep working as they are.
  * A filter clicked in Jira's own sidebar (Starred, Recent, Default filters) loads into the list the same way.
+ * With the "Open filters in the detail view" option on, that works from any Jira page: the filter's first issue
+ * opens, with its list beside it.
  *
  * Nothing is inserted into Jira's React tree. The bar and the column are fixed-position elements of our own,
  * laid over the issue layout's box, and the layout is padded to make room through an attribute plus CSS
@@ -12281,6 +12296,8 @@ JiTA.dv = {
     STATE_KEY: 'jitaDvState',       // { mode, jql, basic, filterName, collapsed } - one query, reused on every /browse/ page
     CACHE_KEY: 'jitaDvCache',       // { jql, at, total, issues } - the first pages, painted instantly after a page load
     SPA_FAIL_KEY: 'jitaDvSpaFail',  // sessionStorage: router fallbacks in a row in this tab
+    TAKE_KEY: 'jitaDvTakeFilters',  // the "Open filters in the detail view" option (off by default)
+    TAKE_TOAST_MS: 600,             // a filter taken off an issue page says so when page one is slow to come
     CACHE_MAX_MS: 30 * 60 * 1000,
     CACHE_ISSUES: 200,
     PAGE_SIZE: 50,
@@ -13427,8 +13444,9 @@ JiTA.dv = {
         D._renderBar();
         D._renderHead();
         D._markSidebar();
-        D._run(false);
+        var p = D._run(false);
         D._firstFor = { gen: D._gen, from: D._locKey() };   // page one answers asynchronously, so this is in time
+        return p;
     },
 
     // ---- Jira's own filter links ------------------------------------------------------------------------------
@@ -13436,6 +13454,10 @@ JiTA.dv = {
     // view is up, clicking one loads it INTO the list instead of leaving the issue for Jira's navigator - the
     // same issues, just beside the one being read. Only a plain left click is taken: a modified click (new tab,
     // new window) and any link that cannot become a list keep doing whatever Jira does with them.
+    //
+    // With the "Open filters in the detail view" option on, the same click is taken on EVERY Jira page - the
+    // search page, a dashboard, the Filters list. There is no list on screen to load it into there, so page one
+    // is fetched first and its first issue opened; the detail view then mounts beside it with the list loaded.
     //
     // The "Default filters" are Jira's system filters. They have negative ids and no saved record behind them,
     // so their JQL is Jira's own, written out here. "All work items" (-4) is left out on purpose: it restricts
@@ -13468,9 +13490,12 @@ JiTA.dv = {
 
     // Registered on the window in the capture phase, so it runs before Jira's router: a click we take never
     // becomes a navigation, and one we leave alone reaches Jira untouched.
+    // The option itself. Off by default: it changes where every filter link in Jira goes, for everyone who has it.
+    _takeAll: function () { return !JITA_NO_JIRA_UI && flagOn('detailView') && !!gmGet(JiTA.dv.TAKE_KEY, false); },
+
     _onLinkClick: function (e) {
         var D = JiTA.dv;
-        if (!D._mounted || e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; }
+        if ((!D._mounted && !D._takeAll()) || e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; }
         var t = e.target;
         if (t && t.nodeType !== 1) { t = t.parentElement; }
         var a = (t && t.closest) ? t.closest('a[href]') : null;
@@ -13489,14 +13514,35 @@ JiTA.dv = {
     _openLink: function (link, name, href) {
         var D = JiTA.dv, seq = ++D._linkSeq;
         if (D._collapsed()) { D._toggleCollapse(); }   // a filter was asked for, so show the list it lands in
-        if (link.jql) { D._useFilter({ jql: link.jql, name: '' }); return Promise.resolve(); }
+        if (link.jql) { D._take({ jql: link.jql, name: '' }, href, seq); return Promise.resolve(); }
         var sys = D.SYSTEM_FILTERS[link.id];
-        if (sys) { D._useFilter({ jql: sys[1], name: sys[0], id: link.id }); return Promise.resolve(); }
+        if (sys) { D._take({ jql: sys[1], name: sys[0], id: link.id }, href, seq); return Promise.resolve(); }
         return D._get('/rest/api/3/filter/' + encodeURIComponent(link.id)).then(function (f) {
             if (!f || !f.jql) { throw new Error('no JQL'); }
-            if (seq === D._linkSeq) { D._useFilter({ jql: f.jql, name: f.name || name, id: (f.id != null) ? f.id : link.id }); }
+            if (seq === D._linkSeq) { D._take({ jql: f.jql, name: f.name || name, id: (f.id != null) ? f.id : link.id }, href, seq); }
         }).catch(function () {
             if (seq === D._linkSeq) { location.assign(href); }
+        });
+    },
+
+    // Load a filter that was clicked. With the list on screen that is all (_openFirst then opens its first issue).
+    // Off an issue page - the option above - there is no list to load it into, so page one is fetched here, its first
+    // issue opened, and the detail view mounts beside it with the list already in memory. A filter with nothing in
+    // it has no issue to open, so that one goes to Jira's search page after all, as does one that fails to load.
+    _take: function (f, href, seq) {
+        var D = JiTA.dv;
+        if (D._mounted) { D._useFilter(f); return; }
+        D._activeKey = null;   // the issue last open belongs to no list now: never go paging for it
+        var slow = setTimeout(function () {
+            if (seq === D._linkSeq && JiTA.ui && JiTA.ui.toast) { JiTA.ui.toast('Opening "' + (f.name || 'the filter') + '" in the detail view…'); }
+        }, D.TAKE_TOAST_MS);
+        Promise.resolve(D._useFilter(f)).then(function () {
+            clearTimeout(slow);
+            if (seq !== D._linkSeq || D._mounted || D._locKey()) { return; }   // a newer click, or the user reached an issue on their own
+            var first = D._issues[0];
+            if (!first) { location.assign(href); return; }
+            D._activeKey = first.key;   // _nav records the key as already seen, so the highlight is set here
+            D._nav(first.key);
         });
     },
 
@@ -17905,6 +17951,7 @@ if (JITA_IS_WIKI) {
 (function () {
     if (JITA_NO_JIRA_UI) { return; }      // Forge iframe runs only the responses dropdown; Confluence only Lead duties (above)
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
+    try { JiTA.dv._bindGlobal(); } catch (eDv) { /* swallow */ }   // the detail view's click hook works off /browse/ too (see _takeAll)
     var scheduled = false;
     var observer = new MutationObserver(function () {
         // Synchronous first: if Jira just wiped our sidebar group, put it back THIS tick (with cached content)
