@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.28.3
+// @version     3.29.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -12265,6 +12265,7 @@ JiTA.dupfind = {
  * left, the selected one open beside it. This puts it back on the issue page itself - a filter bar across the
  * top (Basic filters or raw JQL, plus your starred filters), the matching issues down the left, and Jira's OWN
  * issue view on the right, so editing, comments, transitions and every app panel keep working as they are.
+ * A filter clicked in Jira's own sidebar (Starred, Recent, Default filters) loads into the list the same way.
  *
  * Nothing is inserted into Jira's React tree. The bar and the column are fixed-position elements of our own,
  * laid over the issue layout's box, and the layout is padded to make room through an attribute plus CSS
@@ -12650,6 +12651,7 @@ JiTA.dv = {
         document.addEventListener('keydown', D._onKey, false);        // bubble: a key Jira already handled stays Jira's
         document.addEventListener('keydown', D._onKeyCapture, true);  // capture: Esc closes our popover before Jira sees it
         document.addEventListener('mousedown', D._onDocDown, true);
+        window.addEventListener('click', D._onLinkClick, true);      // window capture: a sidebar filter is ours before Jira's router sees it
         window.addEventListener('popstate', function () { setTimeout(function () { try { D.ensure(); } catch (e) { /* ignore */ } }, 0); });
         window.addEventListener('resize', function () { try { D._place(); } catch (e) { /* ignore */ } });
     },
@@ -13406,6 +13408,75 @@ JiTA.dv = {
         D._renderBar();
         D._renderHead();
         D._run(false);
+    },
+
+    // ---- Jira's own filter links ------------------------------------------------------------------------------
+    // People already keep their filters in Jira's sidebar (Starred, Recent, Default filters). While the detail
+    // view is up, clicking one loads it INTO the list instead of leaving the issue for Jira's navigator - the
+    // same issues, just beside the one being read. Only a plain left click is taken: a modified click (new tab,
+    // new window) and any link that cannot become a list keep doing whatever Jira does with them.
+    //
+    // The "Default filters" are Jira's system filters. They have negative ids and no saved record behind them,
+    // so their JQL is Jira's own, written out here. "All work items" (-4) is left out on purpose: it restricts
+    // nothing, Jira's search API refuses an unbounded query, and the list could never show it - so that one
+    // still opens Jira's navigator, which can.
+    SYSTEM_FILTERS: {
+        '-1': ['My open work items', 'assignee = currentUser() AND resolution = Unresolved ORDER BY priority DESC, updated DESC'],
+        '-2': ['Reported by me', 'reporter = currentUser() ORDER BY created DESC'],
+        '-3': ['Viewed recently', 'issuekey IN issueHistory() ORDER BY lastViewed DESC'],
+        '-5': ['Open work items', 'resolution = Unresolved ORDER BY priority DESC, updated DESC'],
+        '-6': ['Created recently', 'created >= -1w ORDER BY created DESC'],
+        '-7': ['Resolved recently', 'resolutiondate >= -1w ORDER BY updated DESC'],
+        '-8': ['Updated recently', 'updated >= -1w ORDER BY updated DESC'],
+        '-9': ['Done work items', 'statusCategory = Done ORDER BY updated DESC']
+    },
+    _linkSeq: 0,
+
+    // A same-origin link that carries a query: { jql } for a raw one (it wins when a link carries both - that is
+    // a saved filter somebody edited), { id } for a saved or system filter, null for anything else. An issue
+    // link never counts, whatever its query string says.
+    _filterLink: function (href) {
+        var u;
+        try { u = new URL(href, location.href); } catch (e) { return null; }
+        if (u.origin !== location.origin || /^\/browse\//i.test(u.pathname)) { return null; }
+        var jql = String(u.searchParams.get('jql') || '').trim(), id = String(u.searchParams.get('filter') || '');
+        if (jql) { return { jql: jql }; }
+        if (/^-?\d+$/.test(id)) { return { id: id }; }
+        return null;
+    },
+
+    // Registered on the window in the capture phase, so it runs before Jira's router: a click we take never
+    // becomes a navigation, and one we leave alone reaches Jira untouched.
+    _onLinkClick: function (e) {
+        var D = JiTA.dv;
+        if (!D._mounted || e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; }
+        var t = e.target;
+        if (t && t.nodeType !== 1) { t = t.parentElement; }
+        var a = (t && t.closest) ? t.closest('a[href]') : null;
+        if (!a || (a.target && a.target !== '_self')) { return; }
+        if (a.closest('#jdv-bar, #jdv-col, #jdv-rail, .jdv-pop')) { return; }   // our own cards go through _onListClick
+        var link = D._filterLink(a.href);
+        if (!link || (link.id && link.id.charAt(0) === '-' && !D.SYSTEM_FILTERS[link.id])) { return; }
+        e.preventDefault();
+        e.stopPropagation();
+        D._openLink(link, String(a.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80), a.href);
+    },
+
+    // Turn a taken link into JQL and load it. A saved filter is read from Jira, since the sidebar only carries its
+    // id; one that cannot be read (deleted, or not shared with you) still gets an answer - Jira's navigator, which
+    // is where the click was going and which can say why. A newer click always wins over an older one's read.
+    _openLink: function (link, name, href) {
+        var D = JiTA.dv, seq = ++D._linkSeq;
+        if (D._collapsed()) { D._toggleCollapse(); }   // a filter was asked for, so show the list it lands in
+        if (link.jql) { D._useFilter({ jql: link.jql, name: '' }); return Promise.resolve(); }
+        var sys = D.SYSTEM_FILTERS[link.id];
+        if (sys) { D._useFilter({ jql: sys[1], name: sys[0] }); return Promise.resolve(); }
+        return D._get('/rest/api/3/filter/' + encodeURIComponent(link.id)).then(function (f) {
+            if (!f || !f.jql) { throw new Error('no JQL'); }
+            if (seq === D._linkSeq) { D._useFilter({ jql: f.jql, name: f.name || name }); }
+        }).catch(function () {
+            if (seq === D._linkSeq) { location.assign(href); }
+        });
     },
 
     // ---- styles -----------------------------------------------------------------------------------------------
