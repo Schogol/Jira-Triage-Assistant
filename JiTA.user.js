@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.27.0
+// @version     3.28.0
 // @author      ISD BH Schogol, ISD Tulwar
-// @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it
+// @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
 // @downloadURL https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
 // @match       https://fenriscreations.atlassian.net/jira*
@@ -147,13 +147,13 @@ function gmSet(key, val) {
 // so an existing install's orphaned "dropdowns" value is ignored and credits simply defaults on. The index of
 // each feature is now recorded ONCE in the FLAG map below and read via flagOn(name) - so if a slot ever moves,
 // only FLAG needs updating (not scattered numeric reads); the persisted gm key per slot must still stay stable.
-var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""]];
+var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""]];
 
 // Named accessors over savedVariables (the [gmKey, enabled] pairs above): map a stable feature name to its
 // fixed index so a wrong index breaks loudly at one named site instead of silently misreading a slot. flagOn
 // reads, setFlag writes - both go through the SAME savedVariables + GM persistence, so behavior is unchanged.
 // Index 0 ("key") is a reserved legacy slot with no boolean feature and is deliberately omitted.
-var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5 };
+var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6 };
 function flagOn(name) { var i = FLAG[name]; return i != null && !!savedVariables[i][1]; }
 function setFlag(name, val) {
     var i = FLAG[name];
@@ -8388,6 +8388,10 @@ JiTA.menu = {
             if (!flagOn('credits')) { JiTA.credits.badge.remove(); }
             else if (!JITA_NO_JIRA_UI) { JiTA.credits.badge.mount(); JiTA.credits.sched.start(); }
         }));
+        // Detail view: ensure() mounts it on an issue page when switched on and unmounts it when switched off.
+        $feat.append(JiTA.menu._toggleRow('Detail view', 6, function () {
+            if (!JITA_NO_JIRA_UI) { JiTA.dv.ensure(); }
+        }));
         $p.append($feat);
 
 
@@ -12198,6 +12202,1185 @@ JiTA.dupfind = {
         } catch (e) { /* ignore */ }
     }
 };
+
+
+/* ---- Detail view: Jira's removed split layout, rebuilt on /browse/ pages --------------------------------------
+ * Atlassian removed the issue navigator's "detail view": every issue in the current search listed down the
+ * left, the selected one open beside it. This puts it back on the issue page itself - a filter bar across the
+ * top (Basic filters or raw JQL, plus your starred filters), the matching issues down the left, and Jira's OWN
+ * issue view on the right, so editing, comments, transitions and every app panel keep working as they are.
+ *
+ * Nothing is inserted into Jira's React tree. The bar and the column are fixed-position elements of our own,
+ * laid over the issue layout's box, and the layout is padded to make room through an attribute plus CSS
+ * variables (React leaves both alone). So Jira re-rendering or swapping the issue can never wipe the list.
+ *
+ * Switching issue does not reload the page: the URL is pushed and Jira's router is told with a synthetic
+ * popstate, which is what it does itself for an in-app link. That is not a public API, so every switch has a
+ * fallback - if the breadcrumb has not reached the new key within NAV_FALLBACK_MS it becomes an ordinary page
+ * load, and after SPA_FAIL_MAX of those in a row the tab stops trying. The list survives a page load (the
+ * query is persisted and the first pages are cached), so the worst case is slower, never broken.
+ */
+JiTA.dv = {
+    STATE_KEY: 'jitaDvState',       // { mode, jql, basic, filterName, collapsed } - one query, reused on every /browse/ page
+    CACHE_KEY: 'jitaDvCache',       // { jql, at, total, issues } - the first pages, painted instantly after a page load
+    SPA_FAIL_KEY: 'jitaDvSpaFail',  // sessionStorage: router fallbacks in a row in this tab
+    CACHE_MAX_MS: 30 * 60 * 1000,
+    CACHE_ISSUES: 200,
+    PAGE_SIZE: 50,
+    FIND_MAX: 500,                  // how deep to page for the open issue when the query holds it but it is not loaded yet
+    NAV_FALLBACK_MS: 4000,
+    SPA_FAIL_MAX: 2,
+    STEP_MS: 180,                   // a held arrow key moves the highlight on every repeat but navigates at most this often
+    TEXT_DEBOUNCE_MS: 600,
+    RUN_DEBOUNCE_MS: 350,           // ticking several boxes in a filter runs one query, not one per box
+    RAIL_W: 22,
+    BAR_H: 48,
+    FIELDS: ['summary', 'issuetype', 'assignee'],
+    // Offered in the sort menu. Anything else a JQL orders by still shows, under its own name.
+    SORTS: [['created', 'Created'], ['updated', 'Updated'], ['priority', 'Priority'], ['status', 'Status'],
+        ['key', 'Key'], ['assignee', 'Assignee'], ['summary', 'Summary'], ['rank', 'Rank']],
+    PICKS: [['project', 'Project'], ['assignee', 'Assignee'], ['type', 'Type'], ['status', 'Status']],
+    ICON: {
+        down: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        up: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 10l4-4 4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        left: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 4L6 8l4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        right: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        asc: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M4.5 6.5L8 3l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        desc: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M4.5 9.5L8 13l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        refresh: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.46-3.54M13 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        search: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10.2 10.2L13.5 13.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+        nobody: '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" style="fill:var(--ds-background-neutral,#091E420F)"/><circle cx="12" cy="9.5" r="3.5" style="fill:var(--ds-icon-subtle,#626F86)"/><path d="M5.5 19c1.2-3 3.7-4.5 6.5-4.5s5.3 1.5 6.5 4.5z" style="fill:var(--ds-icon-subtle,#626F86)"/></svg>'
+    },
+
+    _state: null,
+    _issues: [],        // [{ key, summary, type, icon, who, avatar }] in list order
+    _index: {},         // key -> position in _issues
+    _total: null,       // approximate size of the whole query (null = not known yet)
+    _token: null,       // nextPageToken of the next page (null = none left)
+    _more: false,
+    _pages: 0,          // pages loaded for the current query
+    _loading: null,     // the in-flight page promise: pages chain on nextPageToken, so one at a time
+    _error: null,
+    _gen: 0,            // query generation - a newer query discards every response of an older one
+    _runJql: null,      // the JQL the loaded list belongs to
+    _runAt: 0,
+    _seekTag: null,     // "<gen>:<key>" already searched for, so the open issue is looked for once per query
+    _host: null,        // the issue layout element we pad (kept while it is connected - see _findHost)
+    _ro: null,
+    _mounted: false,
+    _bound: false,
+    _placed: '',        // last geometry written, so an unchanged layout costs no style writes
+    _activeKey: null,   // the highlighted card; leads the URL while an arrow key is held
+    _lastLoc: null,     // the last URL key we reacted to
+    _stepTimer: null,
+    _target: null,
+    _lastNav: 0,
+    _navTimer: null,
+    _runTimer: null,
+    _pop: null,         // the open popover element (one at a time)
+    _popFor: null,      // what it belongs to: a filter field, 'sort' or 'saved'
+    _optCache: {},
+
+    // ---- query text -------------------------------------------------------------------------------------------
+    // A JQL string literal. Everything user-picked goes through here, so a status or a name with a quote in it
+    // can never break out of its clause.
+    _q: function (s) { return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'; },
+
+    // Split a query at its ORDER BY, ignoring one that sits inside a quoted string. The sort menu edits only
+    // the order half and the Basic filters only the other, so neither can clobber the rest.
+    _splitOrder: function (jql) {
+        var s = String(jql || ''), q = null;
+        for (var i = 0; i < s.length; i++) {
+            var c = s.charAt(i);
+            if (q) { if (c === '\\') { i++; } else if (c === q) { q = null; } continue; }
+            if (c === '"' || c === "'") { q = c; continue; }
+            if ((c === 'o' || c === 'O') && (i === 0 || /[\s)]/.test(s.charAt(i - 1)))) {
+                var m = /^order\s+by\b/i.exec(s.slice(i));
+                if (m) { return { where: s.slice(0, i).trim(), order: s.slice(i + m[0].length).trim() }; }
+            }
+        }
+        return { where: s.trim(), order: '' };
+    },
+
+    _join: function (where, order) {
+        where = String(where || '').trim(); order = String(order || '').trim();
+        return where + (order ? (where ? ' ' : '') + 'ORDER BY ' + order : '');
+    },
+
+    _withSort: function (jql, field, dir) { return JiTA.dv._join(JiTA.dv._splitOrder(jql).where, field + ' ' + dir); },
+
+    // The first ORDER BY term, for the sort button: { field, dir, label }, or null when the query has no order.
+    _sortOf: function (jql) {
+        var o = JiTA.dv._splitOrder(jql).order;
+        if (!o) { return null; }
+        var m = /^\s*("(?:[^"\\]|\\.)*"|[^\s,]+)(?:\s+(asc|desc)\b)?/i.exec(o);
+        if (!m) { return null; }
+        var field = m[1], lc = field.toLowerCase(), label = null, S = JiTA.dv.SORTS;
+        for (var i = 0; i < S.length; i++) { if (S[i][0] === lc) { label = S[i][1]; field = lc; break; } }
+        if (!label) { label = field.charAt(0) === '"' ? field.slice(1, -1) : field; }
+        return { field: field, dir: (m[2] || 'ASC').toUpperCase(), label: label };
+    },
+
+    _emptyBasic: function () { return { text: '', project: [], assignee: [], type: [], status: [] }; },
+    _basicEmpty: function (b) {
+        return !b || (!String(b.text || '').trim() && !(b.project || []).length && !(b.assignee || []).length &&
+            !(b.type || []).length && !(b.status || []).length);
+    },
+
+    // Basic filters -> JQL. Values are always quoted, except the two assignee functions JQL knows by name.
+    _buildWhere: function (b) {
+        var D = JiTA.dv, out = [];
+        function list(field, arr, raw) {
+            if (!arr || !arr.length) { return; }
+            out.push(field + ' in (' + arr.map(function (o) { return raw && raw[o.v] ? o.v : D._q(o.v); }).join(', ') + ')');
+        }
+        b = b || {};
+        list('project', b.project);
+        list('assignee', b.assignee, { 'currentUser()': 1, 'EMPTY': 1 });
+        list('issuetype', b.type);
+        list('status', b.status);
+        var t = String(b.text || '').trim();
+        if (t) { out.push('text ~ ' + D._q(t)); }
+        return out.join(' AND ');
+    },
+
+    // ---- persisted query --------------------------------------------------------------------------------------
+    // First run starts on the bug hunters' standard backlog - the same query Triage mode opens on.
+    _load: function () {
+        var D = JiTA.dv;
+        if (D._state) { return D._state; }
+        var s = gmGet(D.STATE_KEY, null);
+        if (!s || typeof s !== 'object' || typeof s.jql !== 'string') {
+            s = { mode: 'jql', jql: JiTA.triage.DEFAULT_JQL + ' ORDER BY created DESC', basic: null, filterName: '', collapsed: false };
+        }
+        var b = (s.basic && typeof s.basic === 'object') ? s.basic : {}, e = D._emptyBasic();
+        for (var k in e) {
+            if (k === 'text') { if (typeof b.text !== 'string') { b.text = ''; } }
+            else if (!Array.isArray(b[k])) { b[k] = []; }
+        }
+        s.basic = b;
+        if (s.mode !== 'basic' && s.mode !== 'jql') { s.mode = 'jql'; }
+        D._state = s;
+        return s;
+    },
+    _save: function () { gmSet(JiTA.dv.STATE_KEY, JiTA.dv._state); },
+    _collapsed: function () { return !!JiTA.dv._load().collapsed; },
+
+    // ---- where we are -----------------------------------------------------------------------------------------
+    _locKey: function () {
+        var m = /^\/browse\/([A-Za-z][A-Za-z0-9_]*-\d+)(?:\/|$)/.exec(location.pathname || '');
+        return m ? m[1].toUpperCase() : null;
+    },
+    _crumbKey: function () {
+        var a = document.querySelector(issueItem);
+        return a ? String(a.textContent || '').trim() : '';
+    },
+
+    // The element to pad: the lowest box holding both the breadcrumb and the Details panel (the two-column
+    // issue layout), widened to its outermost wrapper with the SAME box. Once chosen it is KEPT while it is
+    // connected: re-measuring against our own padding would pick an inner box and the two would oscillate.
+    _findHost: function () {
+        var D = JiTA.dv, h = D._host, bc = document.querySelector(issueItem);
+        if (h && h.isConnected && (!bc || h.contains(bc))) { return h; }
+        if (h) { D._release(h); D._host = null; }
+        var slot = document.querySelector('[data-vc="issue-view-context-items-details-panel-slot"]') ||
+            document.querySelector(SELECTORS.VC_DETAILS_GROUP);
+        if (!bc || !slot) { return null; }
+        var a = bc.parentElement;
+        while (a && !a.contains(slot)) { a = a.parentElement; }
+        if (!a || a === document.body || a === document.documentElement) { return null; }
+        var r = a.getBoundingClientRect();
+        for (var p = a.parentElement; p && p !== document.body && p !== document.documentElement; p = p.parentElement) {
+            var pr = p.getBoundingClientRect();
+            if (Math.abs(pr.left - r.left) > 1 || Math.abs(pr.top - r.top) > 1 || Math.abs(pr.width - r.width) > 1) { break; }
+            a = p;
+        }
+        return a;
+    },
+
+    // ---- lifecycle --------------------------------------------------------------------------------------------
+    // Called from the page observer (debounced) and on every popstate. Mounts on an issue page, unmounts off
+    // one. A breadcrumb that is briefly missing mid-switch does NOT unmount - only leaving /browse/ does.
+    ensure: function () {
+        var D = JiTA.dv;
+        if (JITA_NO_JIRA_UI || !flagOn('detailView') || !D._locKey()) { if (D._mounted) { D.unmount(); } return; }
+        var host = D._findHost();
+        if (!host) { return; }   // issue view still rendering - the next observer tick retries
+        if (!D._mounted) { D._mount(); }
+        D._adopt(host);
+        D._place();
+        D._syncFromLocation();
+        D._renderCrumbNav();
+    },
+
+    // Synchronous path from the observer: Jira replaced the layout we pad, so re-pad THIS tick rather than
+    // after the debounce - otherwise the issue slides under the list for a moment.
+    _fast: function () {
+        var D = JiTA.dv;
+        if (D._mounted && D._host && !D._host.isConnected) { D.ensure(); }
+    },
+
+    unmount: function () {
+        var D = JiTA.dv;
+        D._mounted = false;
+        D._placed = '';
+        D._closePop();
+        ['jdv-bar', 'jdv-col', 'jdv-rail', 'jdv-crumbnav'].forEach(function (id) {
+            var e = document.getElementById(id);
+            if (e && e.parentNode) { e.parentNode.removeChild(e); }
+        });
+        if (D._host) { D._release(D._host); D._host = null; }
+        var root = document.documentElement.style;
+        root.removeProperty('--jdv-w');
+        root.removeProperty('--jdv-h');
+        clearTimeout(D._navTimer);
+        clearTimeout(D._stepTimer);
+        D._stepTimer = null;
+    },
+
+    _mount: function () {
+        var D = JiTA.dv;
+        D._injectCss();
+        D._mounted = true;
+        D._placed = '';
+        var bar = D._el('div'); bar.id = 'jdv-bar';
+        var col = D._el('div'); col.id = 'jdv-col';
+        var head = D._el('div'); head.id = 'jdv-head';
+        var list = D._el('div'); list.id = 'jdv-list';
+        var foot = D._el('div'); foot.id = 'jdv-foot';
+        col.appendChild(head); col.appendChild(list); col.appendChild(foot);
+        var rail = D._el('div'); rail.id = 'jdv-rail'; rail.hidden = true;
+        var ex = D._btn('jdv-sub jdv-icon', '', D.ICON.right, 'Show the issue list');
+        ex.onclick = D._toggleCollapse;
+        rail.appendChild(ex);
+        list.addEventListener('click', D._onListClick);
+        list.addEventListener('scroll', D._onListScroll, { passive: true });
+        document.body.appendChild(bar);
+        document.body.appendChild(col);
+        document.body.appendChild(rail);
+        D._bindGlobal();
+        D._renderBar();
+        D._renderHead();
+        var s = D._load();
+        if (D._runJql === s.jql && D._issues.length && Date.now() - D._runAt < D.CACHE_MAX_MS) {
+            D._renderList(); D._renderFoot();   // back on an issue page in the same tab: the list is still in memory
+            return;
+        }
+        var c = gmGet(D.CACHE_KEY, null);
+        if (D._cacheOk(c, s.jql)) {
+            D._issues = c.issues.slice(); D._reindex(); D._total = (typeof c.total === 'number') ? c.total : null;
+            D._runJql = s.jql;
+            D._renderList(); D._renderFoot();
+            D._run(true);   // quiet: the cached rows stay on screen until the fresh first page replaces them
+        } else {
+            D._run(false);
+        }
+    },
+
+    _adopt: function (host) {
+        var D = JiTA.dv;
+        if (D._host === host) { return; }
+        if (D._host) { D._release(D._host); }
+        D._host = host;
+        D._placed = '';
+        // Remember the layout's own padding so ours is ADDED to it, not swapped for it.
+        var cs = window.getComputedStyle(host);
+        host.style.setProperty('--jdv-pl0', cs.paddingLeft || '0px');
+        host.style.setProperty('--jdv-pt0', cs.paddingTop || '0px');
+        host.setAttribute('data-jita-dv-host', '1');
+        if (window.ResizeObserver) {
+            D._ro = new ResizeObserver(function () { D._place(); });
+            try { D._ro.observe(host, { box: 'border-box' }); } catch (e) { D._ro.observe(host); }
+        }
+    },
+
+    _release: function (h) {
+        var D = JiTA.dv;
+        try {
+            h.removeAttribute('data-jita-dv-host');
+            h.style.removeProperty('--jdv-pl0');
+            h.style.removeProperty('--jdv-pt0');
+        } catch (e) { /* detached */ }
+        if (D._ro) { D._ro.disconnect(); D._ro = null; }
+    },
+
+    _colW: function () { return Math.round(Math.max(240, Math.min(340, (window.innerWidth || 1600) * 0.17))); },
+
+    // Lay the bar and the column over the host's box and pad the host by the same amounts.
+    _place: function () {
+        var D = JiTA.dv, h = D._host;
+        if (!D._mounted || !h) { return; }
+        var r = h.getBoundingClientRect(), vh = window.innerHeight || document.documentElement.clientHeight;
+        var coll = D._collapsed(), w = coll ? D.RAIL_W : D._colW(), bh = coll ? 0 : D.BAR_H;
+        var top = Math.max(0, Math.round(r.top)), left = Math.round(r.left), width = Math.round(r.width);
+        var bottom = Math.min(vh, Math.round(r.bottom));
+        var sig = [top, left, width, bottom, w, bh].join(',');
+        if (sig === D._placed) { return; }
+        D._placed = sig;
+        var root = document.documentElement.style;
+        root.setProperty('--jdv-w', w + 'px');
+        root.setProperty('--jdv-h', bh + 'px');
+        var bar = document.getElementById('jdv-bar'), col = document.getElementById('jdv-col'), rail = document.getElementById('jdv-rail');
+        var box = 'left:' + left + 'px;top:' + (top + bh) + 'px;width:' + w + 'px;height:' + Math.max(0, bottom - top - bh) + 'px;';
+        if (bar) { bar.hidden = coll; bar.style.cssText = 'left:' + left + 'px;top:' + top + 'px;width:' + width + 'px;height:' + bh + 'px;'; }
+        if (col) { col.hidden = coll; col.style.cssText = box; }
+        if (rail) { rail.hidden = !coll; rail.style.cssText = box; }
+        if (D._pop && D._popFor) { D._anchorPop(document.querySelector('[data-f="' + D._popFor + '"]')); }
+    },
+
+    _toggleCollapse: function () {
+        var D = JiTA.dv, s = D._load();
+        s.collapsed = !s.collapsed;
+        D._save();
+        D._closePop();
+        D._placed = '';
+        D._place();
+        D._renderCrumbNav();
+        if (!s.collapsed) { D._syncActive(true); }
+    },
+
+    _bindGlobal: function () {
+        var D = JiTA.dv;
+        if (D._bound) { return; }
+        D._bound = true;
+        document.addEventListener('keydown', D._onKey, false);        // bubble: a key Jira already handled stays Jira's
+        document.addEventListener('keydown', D._onKeyCapture, true);  // capture: Esc closes our popover before Jira sees it
+        document.addEventListener('mousedown', D._onDocDown, true);
+        window.addEventListener('popstate', function () { setTimeout(function () { try { D.ensure(); } catch (e) { /* ignore */ } }, 0); });
+        window.addEventListener('resize', function () { try { D._place(); } catch (e) { /* ignore */ } });
+    },
+
+    // ---- fetching ---------------------------------------------------------------------------------------------
+    _errText: function (xhr) {
+        var j = xhr && xhr.responseJSON, m = [];
+        if (j && j.errorMessages) { m = m.concat(j.errorMessages); }
+        if (j && j.errors) { for (var k in j.errors) { m.push(j.errors[k]); } }
+        if (m.length) { return m.join(' '); }
+        if (xhr && (xhr.status === 401 || xhr.status === 403)) { return 'Jira refused the request (HTTP ' + xhr.status + ') - are you still logged in?'; }
+        return 'Jira did not answer (HTTP ' + (xhr ? xhr.status : '?') + ').';
+    },
+    _ajax: function (type, path, body) {
+        var D = JiTA.dv;
+        return new Promise(function (resolve, reject) {
+            (function attempt(n) {
+                var o = { url: JiTA.HOST + path, type: type, dataType: 'json', headers: { 'X-Atlassian-Token': 'no-check' } };
+                if (body) { o.contentType = 'application/json'; o.data = JSON.stringify(body); }
+                $.ajax(o).done(function (d) { resolve(d == null ? {} : d); }).fail(function (xhr) {
+                    if (xhr && xhr.status === 429 && n > 0) {
+                        var ra = parseInt(xhr.getResponseHeader('Retry-After'), 10);
+                        setTimeout(function () { attempt(n - 1); }, (isNaN(ra) ? 3 : ra) * 1000);
+                        return;
+                    }
+                    reject(new Error(D._errText(xhr)));
+                });
+            })(2);
+        });
+    },
+    _post: function (path, body) { return JiTA.dv._ajax('POST', path, body); },
+    _get: function (path) { return JiTA.dv._ajax('GET', path, null); },
+
+    _map: function (it) {
+        var f = (it && it.fields) || {}, t = f.issuetype || {}, a = f.assignee || null, av = (a && a.avatarUrls) || {};
+        return { key: it.key, summary: f.summary || '', type: t.name || '', icon: t.iconUrl || '',
+            who: a ? (a.displayName || '') : '', avatar: av['24x24'] || av['32x32'] || '' };
+    },
+    _add: function (list) {
+        var D = JiTA.dv;
+        for (var i = 0; i < list.length; i++) {
+            if (!list[i] || !list[i].key || D._index[list[i].key] != null) { continue; }
+            D._index[list[i].key] = D._issues.length;
+            D._issues.push(list[i]);
+        }
+    },
+    _reindex: function () {
+        var D = JiTA.dv;
+        D._index = {};
+        for (var i = 0; i < D._issues.length; i++) { D._index[D._issues[i].key] = i; }
+    },
+
+    // Start the current query from page one. quiet = keep whatever is on screen until page one arrives
+    // (refresh, and the cached list after a page load), so the list never flashes empty.
+    _run: function (quiet) {
+        var D = JiTA.dv, s = D._load(), gen = ++D._gen;
+        clearTimeout(D._runTimer); D._runTimer = null;
+        D._runJql = s.jql; D._runAt = Date.now();
+        D._token = null; D._more = false; D._pages = 0; D._loading = null; D._error = null; D._seekTag = null; D._total = null;
+        if (!quiet) { D._issues = []; D._index = {}; }
+        if (!D._splitOrder(s.jql).where) {
+            D._issues = []; D._index = {};
+            D._error = 'Pick a filter to list issues - Jira will not list every issue at once.';
+            D._renderList(); D._renderFoot(); D._renderCrumbNav();
+            return Promise.resolve();
+        }
+        D._count(gen);
+        var p = D._page(gen);
+        if (!quiet) { D._renderList(); }
+        return p;
+    },
+
+    _page: function (gen) {
+        var D = JiTA.dv;
+        if (gen !== D._gen) { return Promise.resolve(); }
+        if (D._loading) { return D._loading; }
+        if (D._pages > 0 && !D._token) { return Promise.resolve(); }   // nothing left to load
+        var body = { jql: D._runJql, fields: D.FIELDS, maxResults: D.PAGE_SIZE };
+        if (D._token) { body.nextPageToken = D._token; }
+        var p = D._post('/rest/api/3/search/jql', body).then(function (d) {
+            if (gen !== D._gen) { return; }
+            D._loading = null;
+            var first = D._pages === 0, from = first ? 0 : D._issues.length;
+            if (first) { D._issues = []; D._index = {}; }
+            D._add((d.issues || []).map(D._map));
+            D._pages++;
+            D._token = d.nextPageToken || null;
+            D._more = !!D._token;
+            D._error = null;
+            if (first) { D._renderList(); } else { D._appendRows(from); }
+            D._renderFoot();
+            D._renderCrumbNav();
+            if (D._issues.length <= D.CACHE_ISSUES + D.PAGE_SIZE) { D._saveCache(); }
+            D._seek();
+        }, function (e) {
+            if (gen !== D._gen) { return; }
+            D._loading = null;
+            if (D._pages === 0) {
+                D._issues = []; D._index = {};
+                D._error = (e && e.message) || String(e);
+                D._renderList();
+            }
+            D._renderFoot();
+        });
+        D._loading = p;
+        D._renderFoot();
+        return p;
+    },
+
+    _count: function (gen) {
+        var D = JiTA.dv;
+        D._post('/rest/api/3/search/approximate-count', { jql: D._splitOrder(D._runJql).where }).then(function (d) {
+            if (gen !== D._gen) { return; }
+            D._total = (d && typeof d.count === 'number') ? d.count : null;
+            D._renderFoot();
+        }, function () { /* the footer just counts what is loaded */ });
+    },
+
+    // The open issue is in the query but not in the pages loaded so far (a /browse/ link, or a Back into the
+    // list): ask Jira ONCE whether the query holds it at all, and only then page on until it turns up.
+    _seek: function () {
+        var D = JiTA.dv, key = D._activeKey, gen = D._gen;
+        if (!key || D._index[key] != null || !D._more || D._loading) { return; }
+        var tag = gen + ':' + key;
+        if (D._seekTag === tag) { return; }
+        D._seekTag = tag;
+        var where = D._splitOrder(D._runJql).where;
+        D._post('/rest/api/3/search/approximate-count', { jql: '(' + where + ') AND key = ' + D._q(key) }).then(function (d) {
+            if (gen !== D._gen || !(d && d.count)) { return; }
+            (function more() {
+                if (gen !== D._gen || D._activeKey !== key) { return; }
+                if (D._index[key] != null) { D._syncActive(true); return; }
+                if (!D._more || D._issues.length >= D.FIND_MAX) { return; }
+                D._page(gen).then(more);
+            })();
+        }, function () { /* a key JQL does not know (moved, deleted) - simply not in the list */ });
+    },
+
+    _saveCache: function () {
+        var D = JiTA.dv;
+        if (!D._issues.length) { return; }
+        gmSet(D.CACHE_KEY, { jql: D._runJql, at: Date.now(), total: D._total, issues: D._issues.slice(0, D.CACHE_ISSUES) });
+    },
+    _cacheOk: function (c, jql) {
+        return !!(c && c.jql === jql && Array.isArray(c.issues) && c.issues.length && typeof c.at === 'number' &&
+            Date.now() - c.at < JiTA.dv.CACHE_MAX_MS);
+    },
+
+    // ---- moving between issues --------------------------------------------------------------------------------
+    // Our own URL change: the router takes it from here. Anything else that moves the URL (Back, a linked
+    // issue, Jira's own links) arrives through _syncFromLocation instead.
+    _nav: function (key) {
+        var D = JiTA.dv, path = '/browse/' + encodeURIComponent(key);
+        D._lastNav = Date.now();
+        if (key === D._locKey()) { return; }
+        D._lastLoc = key;
+        var fails = 0;
+        try { fails = parseInt(sessionStorage.getItem(D.SPA_FAIL_KEY), 10) || 0; } catch (e) { /* no storage */ }
+        if (fails >= D.SPA_FAIL_MAX) { location.assign(path); return; }
+        try {
+            history.pushState(null, '', path);
+            window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+        } catch (e) { location.assign(path); return; }
+        clearTimeout(D._navTimer);
+        D._navTimer = setTimeout(function () {
+            if (D._locKey() !== key) { return; }   // the user has moved on - nothing to rescue
+            if (D._crumbKey() === key) {
+                try { sessionStorage.removeItem(D.SPA_FAIL_KEY); } catch (e) { /* ignore */ }
+                return;
+            }
+            try { sessionStorage.setItem(D.SPA_FAIL_KEY, String(fails + 1)); } catch (e) { /* ignore */ }
+            location.assign(path);   // the router ignored us: an ordinary page load it is
+        }, D.NAV_FALLBACK_MS);
+    },
+
+    // how: 'click' navigates at once; 'key' is throttled so a held arrow key does not queue a load per repeat.
+    _select: function (key, how) {
+        var D = JiTA.dv;
+        if (!key) { return; }
+        D._activeKey = key;
+        D._syncActive(true);
+        if (how === 'key') { D._navSoon(key); return; }
+        clearTimeout(D._stepTimer); D._stepTimer = null; D._target = null;
+        D._nav(key);
+    },
+
+    // Leading edge navigates at once, then at most one trailing navigation per STEP_MS to wherever the
+    // highlight has got to by then.
+    _navSoon: function (key) {
+        var D = JiTA.dv;
+        D._target = key;
+        if (D._stepTimer) { return; }
+        if (Date.now() - D._lastNav >= D.STEP_MS) { D._nav(key); }
+        D._stepTimer = setTimeout(function () {
+            D._stepTimer = null;
+            var t = D._target;
+            D._target = null;
+            if (t && t !== D._locKey()) { D._nav(t); }
+        }, D.STEP_MS);
+    },
+
+    _step: function (delta) {
+        var D = JiTA.dv;
+        if (!D._issues.length) { return; }
+        var i = D._index[D._activeKey], ni = (i == null) ? 0 : i + delta;   // not in the list: either key starts at the top
+        if (ni < 0) { return; }
+        if (ni >= D._issues.length) {
+            if (D._more) {
+                D._page(D._gen).then(function () { if (D._issues[ni]) { D._select(D._issues[ni].key, 'key'); } });
+            }
+            return;
+        }
+        D._select(D._issues[ni].key, 'key');
+    },
+
+    _syncFromLocation: function () {
+        var D = JiTA.dv, loc = D._locKey();
+        if (!loc || loc === D._lastLoc) { return; }
+        D._lastLoc = loc;
+        if (D._stepTimer) { return; }   // mid-step: the highlight leads the URL on purpose
+        D._activeKey = loc;
+        D._syncActive(true);
+        D._seek();
+    },
+
+    // Arrow keys walk the list whenever nothing else on the page owns them: never from a field, a menu, a
+    // list box, a grid, a dialog, the attachment viewer or any JiTA overlay.
+    _keysFree: function (t) {
+        if (t && t.nodeType === 1) {
+            var tag = t.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) { return false; }
+            if (t.closest && t.closest('[role="menu"],[role="menubar"],[role="listbox"],[role="dialog"],[role="alertdialog"],' +
+                '[role="grid"],[role="treegrid"],[role="tree"],[role="tablist"],[role="combobox"],[role="slider"],' +
+                '[role="spinbutton"],[role="radiogroup"]')) { return false; }
+        }
+        if (document.querySelector('[role="dialog"][aria-modal="true"]')) { return false; }
+        if (JiTA.menu && JiTA.menu.isOpen()) { return false; }   // settings, Triage mode, duplicate finder, Lead duties
+        if (JiTA.ui && JiTA.ui._attachmentViewerOpen()) { return false; }
+        return true;
+    },
+
+    _onKey: function (e) {
+        var D = JiTA.dv;
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') { return; }
+        if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) { return; }
+        if (!D._mounted || D._collapsed() || D._pop) { return; }
+        if (!D._keysFree(e.target)) { return; }
+        e.preventDefault();
+        D._step(e.key === 'ArrowDown' ? 1 : -1);
+    },
+    _onKeyCapture: function (e) {
+        var D = JiTA.dv;
+        if (e.key === 'Escape' && D._pop) { e.preventDefault(); e.stopPropagation(); D._closePop(); }
+    },
+
+    // ---- rendering: list --------------------------------------------------------------------------------------
+    _el: function (tag, cls, text) {
+        var e = document.createElement(tag);
+        if (cls) { e.className = cls; }
+        if (text != null) { e.textContent = text; }
+        return e;
+    },
+    // A button. label goes in as TEXT; icon is one of our own static ICON strings.
+    _btn: function (cls, label, icon, title) {
+        var D = JiTA.dv, b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'jdv-btn' + (cls ? ' ' + cls : '');
+        if (label) { b.appendChild(D._el('span', 'jdv-lbl', label)); }
+        if (icon) { b.insertAdjacentHTML('beforeend', icon); }
+        if (title) { b.title = title; }
+        return b;
+    },
+
+    _card: function (it) {
+        var D = JiTA.dv, a = document.createElement('a');
+        a.className = 'jdv-card';
+        a.href = '/browse/' + it.key;
+        a.setAttribute('data-k', it.key);
+        a.setAttribute('draggable', 'false');
+        a.appendChild(D._el('div', 'jdv-sum', it.summary || it.key));
+        var meta = D._el('div', 'jdv-meta');
+        if (it.icon) {
+            var ic = D._el('img', 'jdv-ti');
+            ic.src = it.icon; ic.alt = ''; ic.title = it.type || '';
+            meta.appendChild(ic);
+        }
+        meta.appendChild(D._el('span', 'jdv-key', it.key));
+        var av;
+        if (it.avatar) { av = D._el('img', 'jdv-av'); av.src = it.avatar; av.alt = ''; }
+        else { av = D._el('span', 'jdv-av'); av.innerHTML = D.ICON.nobody; }
+        av.title = it.who ? ('Assignee: ' + it.who) : 'Unassigned';
+        meta.appendChild(av);
+        a.appendChild(meta);
+        return a;
+    },
+
+    _renderList: function () {
+        var D = JiTA.dv, box = document.getElementById('jdv-list');
+        if (!box) { return; }
+        var st = box.scrollTop;
+        box.innerHTML = '';
+        if (!D._issues.length) {
+            var msg = D._error || (D._loading ? 'Loading…' : 'No issues match this query.');
+            box.appendChild(D._el('div', 'jdv-empty' + (D._error ? ' err' : ''), msg));
+            D._renderCrumbNav();
+            return;
+        }
+        D._appendRows(0);
+        box.scrollTop = st;
+        D._syncActive(true);
+    },
+    _appendRows: function (from) {
+        var D = JiTA.dv, box = document.getElementById('jdv-list');
+        if (!box) { return; }
+        var frag = document.createDocumentFragment();
+        for (var i = from; i < D._issues.length; i++) { frag.appendChild(D._card(D._issues[i])); }
+        box.appendChild(frag);
+        D._syncActive(false);
+    },
+
+    _syncActive: function (reveal) {
+        var D = JiTA.dv, box = document.getElementById('jdv-list');
+        if (box) {
+            var prev = box.querySelector('a.jdv-card.on');
+            var cur = D._activeKey ? box.querySelector('a.jdv-card[data-k="' + D._activeKey + '"]') : null;
+            if (prev && prev !== cur) { prev.classList.remove('on'); }
+            if (cur) {
+                cur.classList.add('on');
+                if (reveal) {
+                    var top = cur.offsetTop, h = cur.offsetHeight;
+                    if (top < box.scrollTop + 4) { box.scrollTop = Math.max(0, top - 8); }
+                    else if (top + h > box.scrollTop + box.clientHeight - 4) { box.scrollTop = top + h - box.clientHeight + 8; }
+                }
+            }
+        }
+        D._renderCrumbNav();
+    },
+
+    _renderFoot: function () {
+        var D = JiTA.dv, f = document.getElementById('jdv-foot');
+        if (!f) { return; }
+        var n = D._issues.length, t = '';
+        if (n) {
+            t = (D._total != null && D._total >= n) ? (n + ' of ' + D._total) : (n + (D._more ? '+' : '') + (n === 1 ? ' issue' : ' issues'));
+            if (D._loading) { t += ' · loading…'; }
+        } else if (D._loading) { t = 'Loading…'; }
+        f.textContent = t;
+    },
+
+    _renderHead: function () {
+        var D = JiTA.dv, h = document.getElementById('jdv-head');
+        if (!h) { return; }
+        h.innerHTML = '';
+        var so = D._sortOf(D._load().jql);
+        var sb = D._btn('jdv-sub', so ? so.label : 'Sort', D.ICON.down, 'Sort the list');
+        sb.setAttribute('data-f', 'sort');
+        sb.onclick = function () { D._openSort(sb); };
+        var db = D._btn('jdv-sub jdv-icon', '', so && so.dir === 'DESC' ? D.ICON.desc : D.ICON.asc,
+            so ? (so.dir === 'DESC' ? 'Descending - click for ascending' : 'Ascending - click for descending') : 'Pick a sort field first');
+        db.disabled = !so;
+        db.onclick = function () { if (so) { D._setSort(so.field, so.dir === 'DESC' ? 'ASC' : 'DESC'); } };
+        var rb = D._btn('jdv-sub jdv-icon', '', D.ICON.refresh, 'Refresh the list');
+        rb.onclick = function () { D._run(true); };
+        var cb = D._btn('jdv-sub jdv-icon', '', D.ICON.left, 'Hide the issue list');
+        cb.onclick = D._toggleCollapse;
+        h.appendChild(sb); h.appendChild(db); h.appendChild(rb); h.appendChild(D._el('span', 'jdv-gap')); h.appendChild(cb);
+    },
+
+    // Previous / next beside the breadcrumb, as the old view had them. Lives in Jira's breadcrumb list, so it
+    // is re-inserted whenever Jira re-renders that list without it.
+    _renderCrumbNav: function () {
+        var D = JiTA.dv, nav = document.getElementById('jdv-crumbnav');
+        var a = (D._mounted && !D._collapsed()) ? document.querySelector(issueItem) : null;
+        var li = a ? (a.closest('li') || a.parentNode) : null;
+        if (!li || !li.parentNode) { if (nav && nav.parentNode) { nav.parentNode.removeChild(nav); } return; }
+        if (!nav) {
+            nav = document.createElement(li.tagName === 'LI' ? 'li' : 'span');
+            nav.id = 'jdv-crumbnav';
+            var up = D._btn('jdv-icon', '', D.ICON.up, 'Previous issue in the list (Up arrow)');
+            var dn = D._btn('jdv-icon', '', D.ICON.down, 'Next issue in the list (Down arrow)');
+            up.onclick = function () { D._step(-1); };
+            dn.onclick = function () { D._step(1); };
+            nav.appendChild(up); nav.appendChild(dn);
+        }
+        if (nav.parentNode !== li.parentNode || nav.previousSibling !== li) { li.parentNode.insertBefore(nav, li.nextSibling); }
+        var i = D._index[D._activeKey];
+        nav.firstChild.disabled = !(i > 0);
+        nav.lastChild.disabled = (i == null) ? !D._issues.length : !(i < D._issues.length - 1 || D._more);
+    },
+
+    _onListClick: function (e) {
+        var D = JiTA.dv, a = (e.target && e.target.closest) ? e.target.closest('a.jdv-card') : null;
+        if (!a || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) { return; }   // modified: new tab / window, the browser's call
+        e.preventDefault();
+        D._select(a.getAttribute('data-k'), 'click');
+    },
+    _onListScroll: function () {
+        var D = JiTA.dv, b = document.getElementById('jdv-list');
+        if (!b || !D._more || D._loading) { return; }
+        if (b.scrollTop + b.clientHeight >= b.scrollHeight - 300) { D._page(D._gen); }
+    },
+
+    // ---- rendering: filter bar --------------------------------------------------------------------------------
+    _renderBar: function () {
+        var D = JiTA.dv, s = D._load(), bar = document.getElementById('jdv-bar');
+        if (!bar) { return; }
+        bar.innerHTML = '';
+        var seg = D._el('div', 'jdv-seg');
+        var bB = D._btn(s.mode === 'basic' ? 'on' : '', 'Basic', '', 'Pick filters from lists');
+        var bJ = D._btn(s.mode === 'jql' ? 'on' : '', 'JQL', '', 'Write the query as JQL');
+        bB.onclick = function () { D._setMode('basic'); };
+        bJ.onclick = function () { D._setMode('jql'); };
+        seg.appendChild(bB); seg.appendChild(bJ);
+        bar.appendChild(seg);
+        if (s.mode === 'basic') {
+            var sw = D._el('div', 'jdv-search');
+            sw.insertAdjacentHTML('beforeend', D.ICON.search);
+            var inp = D._el('input');
+            inp.type = 'text'; inp.placeholder = 'Search work'; inp.value = s.basic.text || ''; inp.spellcheck = false;
+            var tt = null;
+            inp.addEventListener('input', function () { clearTimeout(tt); tt = setTimeout(function () { D._setText(inp.value, false); }, D.TEXT_DEBOUNCE_MS); });
+            inp.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') { clearTimeout(tt); D._setText(inp.value, true); }
+                else if (e.key === 'Escape') { inp.blur(); }
+            });
+            sw.appendChild(inp);
+            bar.appendChild(sw);
+            D.PICKS.forEach(function (p) { bar.appendChild(D._chip(p[0], p[1])); });
+            var clr = D._btn('jdv-link', 'Clear filters', '', 'Remove every basic filter');
+            clr.id = 'jdv-clear';
+            clr.hidden = D._basicEmpty(s.basic);
+            clr.onclick = function () { s.basic = D._emptyBasic(); D._applyBasic(); };
+            bar.appendChild(clr);
+        } else {
+            var wrap = D._el('div', 'jdv-jqlwrap');
+            var ta = D._el('textarea', 'jdv-jql');
+            ta.value = s.jql; ta.spellcheck = false; ta.rows = 1;
+            ta.setAttribute('aria-label', 'JQL query');
+            ta.addEventListener('focus', function () { ta.classList.add('open'); D._grow(ta); });
+            ta.addEventListener('blur', function () { ta.classList.remove('open'); ta.style.height = ''; ta.scrollTop = 0; });
+            ta.addEventListener('input', function () { D._grow(ta); });
+            ta.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); D._setJql(ta.value); ta.blur(); }
+                else if (e.key === 'Escape') { ta.value = D._load().jql; ta.blur(); }
+            });
+            wrap.appendChild(ta);
+            bar.appendChild(wrap);
+            var go = D._btn('jdv-primary', 'Search', '', 'Run this JQL (Enter)');
+            go.onclick = function () { D._setJql(ta.value); };
+            bar.appendChild(go);
+        }
+        bar.appendChild(D._el('span', 'jdv-gap'));
+        var sv = D._btn('jdv-sub', s.filterName || 'Saved filters', D.ICON.down, s.filterName ? ('Starred filter: ' + s.filterName) : 'Your starred filters');
+        sv.setAttribute('data-f', 'saved');
+        sv.onclick = function () { D._openSaved(sv); };
+        bar.appendChild(sv);
+        if (D._pop && D._popFor) { D._anchorPop(bar.querySelector('[data-f="' + D._popFor + '"]')); }
+    },
+
+    _grow: function (ta) {
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(ta.scrollHeight + 2, Math.round((window.innerHeight || 800) * 0.4)) + 'px';
+    },
+
+    _chip: function (field, label) {
+        var D = JiTA.dv, vals = D._load().basic[field] || [];
+        var txt = label + (vals.length ? (' = ' + vals[0].l + (vals.length > 1 ? ' +' + (vals.length - 1) : '')) : '');
+        var b = D._btn('jdv-chip' + (vals.length ? ' on' : ''), txt, D.ICON.down,
+            vals.length ? (label + ': ' + vals.map(function (o) { return o.l; }).join(', ')) : ('Filter by ' + label.toLowerCase()));
+        b.setAttribute('data-f', field);
+        b.onclick = function () { D._openPick(field, label, b); };
+        return b;
+    },
+
+    _setMode: function (mode) {
+        var D = JiTA.dv, s = D._load();
+        if (mode === s.mode) { return; }
+        if (mode === 'jql') {   // the JQL box simply shows the query the basic filters built
+            s.mode = 'jql'; D._save(); D._closePop(); D._renderBar();
+            return;
+        }
+        var sp = D._splitOrder(s.jql);
+        if (!sp.where) {
+            s.basic = D._emptyBasic();
+        } else if (sp.where !== D._buildWhere(s.basic)) {
+            // Free-form JQL has no basic-filter form. Say so, and only swap the query on a yes.
+            if (!window.confirm('This JQL cannot be shown as basic filters.\n\nSwitch to Basic anyway? The list will use your basic filters instead of this query.')) { return; }
+            s.jql = D._join(D._buildWhere(s.basic), sp.order || 'created DESC');
+            s.filterName = '';
+            s.mode = 'basic'; D._save(); D._closePop(); D._renderBar(); D._renderHead(); D._run(false);
+            return;
+        }
+        s.mode = 'basic'; D._save(); D._closePop(); D._renderBar();
+    },
+
+    _setJql: function (text) {
+        var D = JiTA.dv, s = D._load(), t = String(text || '').trim();
+        if (t !== s.jql) { s.jql = t; s.filterName = ''; D._save(); D._renderBar(); D._renderHead(); }
+        D._run(false);   // Enter on an unchanged query refreshes it
+    },
+
+    _setSort: function (field, dir) {
+        var D = JiTA.dv, s = D._load();
+        s.jql = D._withSort(s.jql, field, dir);
+        D._save();
+        D._renderBar();
+        D._renderHead();
+        D._run(false);
+    },
+
+    _setText: function (v, now) {
+        var D = JiTA.dv, s = D._load(), t = String(v || '').trim();
+        if (t === (s.basic.text || '')) { if (now) { D._run(false); } return; }
+        s.basic.text = t;
+        s.jql = D._join(D._buildWhere(s.basic), D._splitOrder(s.jql).order || 'created DESC');
+        s.filterName = '';
+        D._save();
+        var clr = document.getElementById('jdv-clear');
+        if (clr) { clr.hidden = D._basicEmpty(s.basic); }
+        D._run(false);   // the bar is NOT re-rendered: that would pull the box out from under the typing
+    },
+
+    _has: function (field, v) {
+        var arr = JiTA.dv._load().basic[field] || [];
+        for (var i = 0; i < arr.length; i++) { if (arr[i].v === v) { return true; } }
+        return false;
+    },
+    _toggleBasic: function (field, o, on) {
+        var D = JiTA.dv, s = D._load();
+        var arr = (s.basic[field] || []).filter(function (x) { return x.v !== o.v; });
+        if (on) { arr.push({ v: o.v, l: o.l }); }
+        s.basic[field] = arr;
+        D._applyBasic();
+    },
+    _applyBasic: function () {
+        var D = JiTA.dv, s = D._load();
+        s.jql = D._join(D._buildWhere(s.basic), D._splitOrder(s.jql).order || 'created DESC');
+        s.filterName = '';
+        D._save();
+        D._renderBar();
+        D._renderHead();
+        clearTimeout(D._runTimer);
+        D._runTimer = setTimeout(function () { D._runTimer = null; D._run(false); }, D.RUN_DEBOUNCE_MS);
+    },
+
+    // ---- popovers ---------------------------------------------------------------------------------------------
+    _popover: function (anchor, width, tag) {
+        var D = JiTA.dv;
+        D._closePop();
+        var p = D._el('div', 'jdv-pop');
+        p.style.width = width + 'px';
+        document.body.appendChild(p);
+        D._pop = p; D._popFor = tag;
+        D._anchorPop(anchor);
+        return p;
+    },
+    _anchorPop: function (anchor) {
+        var D = JiTA.dv, p = D._pop;
+        if (!p || !anchor) { return; }
+        var r = anchor.getBoundingClientRect(), w = p.offsetWidth || 260, vw = window.innerWidth || 1600, vh = window.innerHeight || 900;
+        p.style.left = Math.max(8, Math.min(Math.round(r.left), vw - w - 8)) + 'px';
+        p.style.top = Math.round(r.bottom + 4) + 'px';
+        p.style.maxHeight = Math.max(160, Math.round(vh - r.bottom - 16)) + 'px';
+    },
+    _togglePop: function (tag) {
+        var D = JiTA.dv;
+        if (D._pop && D._popFor === tag) { D._closePop(); return true; }
+        return false;
+    },
+    _closePop: function () {
+        var D = JiTA.dv;
+        if (D._pop && D._pop.parentNode) { D._pop.parentNode.removeChild(D._pop); }
+        D._pop = null; D._popFor = null;
+    },
+    _onDocDown: function (e) {
+        var D = JiTA.dv, t = e.target;
+        if (!D._pop || D._pop.contains(t)) { return; }
+        var own = (t && t.closest) ? t.closest('[data-f]') : null;
+        if (own && own.getAttribute('data-f') === D._popFor) { return; }   // its own button toggles it on click
+        D._closePop();
+    },
+
+    _openSort: function (anchor) {
+        var D = JiTA.dv;
+        if (D._togglePop('sort')) { return; }
+        var pop = D._popover(anchor, 200, 'sort'), so = D._sortOf(D._load().jql);
+        D.SORTS.forEach(function (s) {
+            var on = !!(so && so.field === s[0]);
+            var it = D._el('div', 'jdv-item' + (on ? ' on' : ''), s[1]);
+            it.onclick = function () {
+                D._closePop();
+                // A new field starts newest / highest first for the date and priority fields, A-Z for the rest.
+                D._setSort(s[0], on ? so.dir : (/^(created|updated|priority)$/.test(s[0]) ? 'DESC' : 'ASC'));
+            };
+            pop.appendChild(it);
+        });
+    },
+
+    _openPick: function (field, label, anchor) {
+        var D = JiTA.dv;
+        if (D._togglePop(field)) { return; }
+        var pop = D._popover(anchor, 280, field);
+        var q = D._el('input', 'jdv-q');
+        q.type = 'text'; q.placeholder = 'Search ' + label.toLowerCase(); q.spellcheck = false;
+        var box = D._el('div', 'jdv-opts');
+        pop.appendChild(q); pop.appendChild(box);
+        var gen = 0, tt = null;
+        function paint(opts, msg) {
+            box.innerHTML = '';
+            var sel = D._load().basic[field] || [], seen = {}, rows = [];
+            sel.forEach(function (o) { seen[o.v] = 1; rows.push(o); });   // what is ticked stays on top, whatever the search
+            (opts || []).forEach(function (o) { if (!seen[o.v]) { seen[o.v] = 1; rows.push(o); } });
+            rows.forEach(function (o) {
+                var row = D._el('label', 'jdv-opt'), cb = D._el('input');
+                cb.type = 'checkbox';
+                cb.checked = D._has(field, o.v);
+                cb.onchange = function () { D._toggleBasic(field, o, cb.checked); };
+                row.appendChild(cb);
+                if (o.icon) { var im = D._el('img'); im.src = o.icon; im.alt = ''; row.appendChild(im); }
+                row.appendChild(D._el('span', 'jdv-optl', o.l));
+                if (o.sub && o.sub !== o.l) { row.appendChild(D._el('span', 'jdv-opt2', o.sub)); }
+                box.appendChild(row);
+            });
+            if (msg) { box.appendChild(D._el('div', 'jdv-optmsg', msg)); }
+            else if (!rows.length) { box.appendChild(D._el('div', 'jdv-optmsg', 'No matches')); }
+        }
+        function load() {
+            var my = ++gen, qv = q.value.trim();
+            D._options(field, qv).then(function (opts) {
+                if (my === gen && D._pop === pop) { paint(opts, (field === 'assignee' && !qv) ? 'Type a name to find people' : ''); }
+            }, function (e) {
+                if (my === gen && D._pop === pop) { paint([], (e && e.message) || 'Could not load the options.'); }
+            });
+        }
+        q.addEventListener('input', function () { clearTimeout(tt); tt = setTimeout(load, 250); });
+        paint([], 'Loading…');
+        load();
+        setTimeout(function () { try { q.focus(); } catch (e) { /* ignore */ } }, 0);
+    },
+
+    _options: function (field, query) {
+        var D = JiTA.dv, ql = String(query || '').toLowerCase();
+        function match(o) { return !ql || o.l.toLowerCase().indexOf(ql) !== -1 || (!!o.sub && o.sub.toLowerCase().indexOf(ql) !== -1); }
+        if (field === 'project') {
+            return D._get('/rest/api/3/project/search?maxResults=50&orderBy=name&query=' + encodeURIComponent(query)).then(function (d) {
+                return ((d && d.values) || []).map(function (p) {
+                    return { v: p.key, l: p.name || p.key, sub: p.key, icon: (p.avatarUrls && p.avatarUrls['16x16']) || '' };
+                });
+            });
+        }
+        if (field === 'assignee') {
+            var fixed = [{ v: 'currentUser()', l: 'Current user' }, { v: 'EMPTY', l: 'Unassigned' }].filter(match);
+            if (!query) { return Promise.resolve(fixed); }
+            return D._get('/rest/api/3/user/search?maxResults=20&query=' + encodeURIComponent(query)).then(function (list) {
+                return fixed.concat((Array.isArray(list) ? list : []).filter(function (u) {
+                    return u && u.accountId && u.accountType === 'atlassian' && u.active !== false;
+                }).map(function (u) {
+                    return { v: u.accountId, l: u.displayName || u.accountId, icon: (u.avatarUrls && u.avatarUrls['16x16']) || '' };
+                }));
+            });
+        }
+        return D._typeStatus().then(function (ts) { return (field === 'type' ? ts.types : ts.statuses).filter(match); });
+    },
+
+    // Types and statuses, scoped to the picked projects when there are any (exactly what those projects can
+    // hold), tenant-wide otherwise. Deduplicated by NAME, because that is what the JQL matches on.
+    _typeStatus: function () {
+        var D = JiTA.dv, projects = (D._load().basic.project || []).map(function (o) { return o.v; }).sort();
+        var ck = 'ts:' + projects.join(',');
+        if (D._optCache[ck]) { return D._optCache[ck]; }
+        var p;
+        if (projects.length) {
+            p = Promise.all(projects.map(function (k) { return D._get('/rest/api/3/project/' + encodeURIComponent(k) + '/statuses'); })).then(function (all) {
+                var types = [], statuses = [];
+                all.forEach(function (arr) {
+                    (Array.isArray(arr) ? arr : []).forEach(function (it) {
+                        types.push({ name: it.name, icon: it.iconUrl });
+                        (it.statuses || []).forEach(function (st) { statuses.push({ name: st.name }); });
+                    });
+                });
+                return { types: D._uniq(types), statuses: D._uniq(statuses) };
+            });
+        } else {
+            p = Promise.all([D._get('/rest/api/3/issuetype'), D._get('/rest/api/3/status')]).then(function (r) {
+                return {
+                    types: D._uniq((Array.isArray(r[0]) ? r[0] : []).map(function (t) { return { name: t.name, icon: t.iconUrl }; })),
+                    statuses: D._uniq((Array.isArray(r[1]) ? r[1] : []).map(function (st) { return { name: st.name }; }))
+                };
+            });
+        }
+        p = p.catch(function (e) { delete D._optCache[ck]; throw e; });
+        D._optCache[ck] = p;
+        return p;
+    },
+    _uniq: function (arr) {
+        var seen = {}, out = [];
+        arr.forEach(function (x) {
+            var n = x && x.name;
+            if (!n || seen[n.toLowerCase()]) { return; }
+            seen[n.toLowerCase()] = 1;
+            out.push({ v: n, l: n, icon: x.icon || '' });
+        });
+        out.sort(function (a, b) { return a.l.localeCompare(b.l); });
+        return out;
+    },
+
+    _openSaved: function (anchor) {
+        var D = JiTA.dv;
+        if (D._togglePop('saved')) { return; }
+        var pop = D._popover(anchor, 300, 'saved');
+        var msg = D._el('div', 'jdv-optmsg', 'Loading…');
+        pop.appendChild(msg);
+        D._get('/rest/api/3/filter/favourite').then(function (list) {
+            if (D._pop !== pop) { return; }
+            pop.innerHTML = '';
+            list = (Array.isArray(list) ? list : []).filter(function (f) { return f && f.id; });
+            if (!list.length) { pop.appendChild(D._el('div', 'jdv-optmsg', 'No starred filters yet. Star a filter in Jira and it shows up here.')); return; }
+            list.sort(function (a, b) { return String(a.name || '').localeCompare(String(b.name || '')); });
+            var s = D._load();
+            list.forEach(function (f) {
+                var it = D._el('div', 'jdv-item' + (s.filterName === f.name && s.jql === String(f.jql || '').trim() ? ' on' : ''), f.name || ('Filter ' + f.id));
+                if (f.jql) { it.title = f.jql; }
+                it.onclick = function () {
+                    D._closePop();
+                    (f.jql ? Promise.resolve(f) : D._get('/rest/api/3/filter/' + encodeURIComponent(f.id))).then(D._useFilter, function () { /* ignore */ });
+                };
+                pop.appendChild(it);
+            });
+        }, function (e) { if (D._pop === pop) { msg.textContent = (e && e.message) || 'Could not load your filters.'; } });
+    },
+    _useFilter: function (f) {
+        var D = JiTA.dv, s = D._load();
+        if (!f || !f.jql) { return; }
+        s.mode = 'jql';
+        s.jql = String(f.jql).trim();
+        s.filterName = f.name || '';
+        D._save();
+        D._renderBar();
+        D._renderHead();
+        D._run(false);
+    },
+
+    // ---- styles -----------------------------------------------------------------------------------------------
+    // Atlassian design tokens throughout, so the view follows Jira's light / dark theme by itself. z-index 99/100
+    // keeps it under Jira's own menus, flags and modals (400+) and under every JiTA overlay (9000+); the bar sits one
+    // above the column so the JQL box, which grows downward when focused, is not painted under the list.
+    _css: false,
+    _injectCss: function () {
+        var D = JiTA.dv;
+        if (D._css) { return; }
+        D._css = true;
+        GM_addStyle(
+            '[data-jita-dv-host] { box-sizing: border-box !important; padding-left: calc(var(--jdv-pl0, 0px) + var(--jdv-w, 0px)) !important;' +
+            ' padding-top: calc(var(--jdv-pt0, 0px) + var(--jdv-h, 0px)) !important; }' +
+            '#jdv-bar, #jdv-col, #jdv-rail { position: fixed; z-index: 99; box-sizing: border-box; color: var(--ds-text, #172B4D);' +
+            ' font-family: var(--ds-font-family-body, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif); font-size: 14px; }' +
+            '#jdv-bar[hidden], #jdv-col[hidden], #jdv-rail[hidden], #jdv-clear[hidden] { display: none !important; }' +
+            '#jdv-bar { z-index: 100; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: var(--ds-surface, #FFFFFF);' +
+            ' border-bottom: 1px solid var(--ds-border, #091E4224); }' +
+            '#jdv-col { display: flex; flex-direction: column; background: var(--ds-surface-sunken, #F7F8F9); border-right: 1px solid var(--ds-border, #091E4224); }' +
+            '#jdv-rail { display: flex; flex-direction: column; align-items: center; padding-top: 8px; background: var(--ds-surface-sunken, #F7F8F9);' +
+            ' border-right: 1px solid var(--ds-border, #091E4224); }' +
+            '#jdv-rail .jdv-btn { width: 20px; padding: 0; }' +
+            '#jdv-head { display: flex; align-items: center; gap: 2px; padding: 8px 8px 6px; flex: none; }' +
+            '#jdv-list { position: relative; flex: 1 1 auto; overflow-y: auto; padding: 2px 8px 96px; }' +
+            '#jdv-foot { flex: none; padding: 6px 8px; text-align: center; font-size: 12px; color: var(--ds-text-subtlest, #626F86);' +
+            ' border-top: 1px solid var(--ds-border, #091E4224); }' +
+            '.jdv-gap { flex: 1 1 auto; }' +
+            '.jdv-empty { padding: 16px 8px; color: var(--ds-text-subtlest, #626F86); font-size: 13px; line-height: 18px; }' +
+            '.jdv-empty.err { color: var(--ds-text-danger, #AE2E24); }' +
+            'a.jdv-card { display: block; margin: 0 0 6px; padding: 8px 10px; border-radius: 4px; cursor: pointer; text-decoration: none !important;' +
+            ' color: var(--ds-text, #172B4D) !important; background: var(--ds-surface-raised, #FFFFFF);' +
+            ' box-shadow: var(--ds-shadow-raised, 0 1px 1px #091E4240, 0 0 1px #091E424F); outline: none; }' +
+            'a.jdv-card:hover { background: var(--ds-surface-raised-hovered, #F1F2F4); }' +
+            'a.jdv-card:focus-visible { box-shadow: 0 0 0 2px var(--ds-border-focused, #388BFF); }' +
+            'a.jdv-card.on { background: var(--ds-background-selected, #E9F2FF); }' +
+            'a.jdv-card.on .jdv-sum { color: var(--ds-text-selected, #0C66E4); }' +
+            '.jdv-sum { font-size: 14px; line-height: 20px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }' +
+            '.jdv-meta { display: flex; align-items: center; gap: 6px; margin-top: 6px; }' +
+            '.jdv-ti { width: 16px; height: 16px; flex: none; }' +
+            '.jdv-key { flex: 1 1 auto; font-size: 12px; color: var(--ds-text-subtle, #44546F); white-space: nowrap; }' +
+            '.jdv-av { width: 24px; height: 24px; border-radius: 50%; flex: none; display: inline-flex; }' +
+            '.jdv-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; height: 32px; padding: 0 10px; margin: 0;' +
+            ' border: none; border-radius: 3px; background: var(--ds-background-neutral, #091E420F); color: var(--ds-text, #172B4D);' +
+            ' font: inherit; font-size: 14px; font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer; flex: none; }' +
+            '.jdv-btn:hover:not(:disabled) { background: var(--ds-background-neutral-hovered, #091E4224); }' +
+            '.jdv-btn:disabled { opacity: .45; cursor: default; }' +
+            '.jdv-btn.on { background: var(--ds-background-selected, #E9F2FF); color: var(--ds-text-selected, #0C66E4); }' +
+            '.jdv-btn.on:hover { background: var(--ds-background-selected-hovered, #CCE0FF); }' +
+            '.jdv-btn.jdv-sub { background: transparent; color: var(--ds-text-subtle, #44546F); }' +
+            '.jdv-btn.jdv-sub:hover:not(:disabled) { background: var(--ds-background-neutral-subtle-hovered, #091E420F); }' +
+            '.jdv-btn.jdv-icon { width: 32px; padding: 0; }' +
+            '.jdv-btn.jdv-primary { background: var(--ds-background-brand-bold, #0C66E4); color: var(--ds-text-inverse, #FFFFFF); }' +
+            '.jdv-btn.jdv-primary:hover { background: var(--ds-background-brand-bold-hovered, #0055CC); }' +
+            '.jdv-btn.jdv-link { background: transparent; color: var(--ds-link, #0C66E4); padding: 0 4px; }' +
+            '.jdv-btn.jdv-link:hover { background: transparent; text-decoration: underline; }' +
+            '.jdv-btn .jdv-lbl { overflow: hidden; text-overflow: ellipsis; max-width: 220px; }' +
+            '.jdv-seg { display: inline-flex; flex: none; border: 1px solid var(--ds-border, #091E4224); border-radius: 4px; overflow: hidden; }' +
+            '.jdv-seg .jdv-btn { height: 30px; border-radius: 0; background: transparent; }' +
+            '.jdv-seg .jdv-btn.on { background: var(--ds-background-selected, #E9F2FF); color: var(--ds-text-selected, #0C66E4); }' +
+            '.jdv-search { position: relative; flex: 0 1 220px; min-width: 110px; }' +
+            '.jdv-search svg { position: absolute; left: 8px; top: 8px; color: var(--ds-icon-subtle, #626F86); pointer-events: none; }' +
+            '.jdv-search input, .jdv-pop input.jdv-q { width: 100%; height: 32px; box-sizing: border-box; padding: 0 8px 0 30px; font: inherit; font-size: 14px;' +
+            ' color: var(--ds-text, #172B4D); background: var(--ds-background-input, #FFFFFF); border: 1px solid var(--ds-border-input, #8590A2);' +
+            ' border-radius: 3px; outline: none; }' +
+            '.jdv-pop input.jdv-q { padding-left: 8px; }' +
+            '.jdv-search input:focus, .jdv-pop input.jdv-q:focus { border-color: var(--ds-border-focused, #388BFF); box-shadow: inset 0 0 0 1px var(--ds-border-focused, #388BFF); }' +
+            '.jdv-jqlwrap { position: relative; flex: 1 1 auto; height: 32px; min-width: 160px; }' +
+            'textarea.jdv-jql { position: absolute; top: 0; left: 0; right: 0; height: 32px; margin: 0; box-sizing: border-box; resize: none; overflow: hidden;' +
+            ' padding: 6px 8px; font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); font-size: 13px; line-height: 18px;' +
+            ' color: var(--ds-text, #172B4D); background: var(--ds-background-input, #FFFFFF); border: 1px solid var(--ds-border-input, #8590A2);' +
+            ' border-radius: 3px; outline: none; }' +
+            'textarea.jdv-jql.open { z-index: 2; overflow-y: auto; border-color: var(--ds-border-focused, #388BFF);' +
+            ' box-shadow: inset 0 0 0 1px var(--ds-border-focused, #388BFF), var(--ds-shadow-overlay, 0 8px 12px #091E4226, 0 0 1px #091E424F); }' +
+            '.jdv-pop { position: fixed; z-index: 400; display: flex; flex-direction: column; box-sizing: border-box; padding: 8px 0; overflow-y: auto;' +
+            ' color: var(--ds-text, #172B4D); background: var(--ds-surface-overlay, #FFFFFF); border-radius: 4px;' +
+            ' box-shadow: var(--ds-shadow-overlay, 0 8px 12px #091E4226, 0 0 1px #091E424F);' +
+            ' font-family: var(--ds-font-family-body, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif); font-size: 14px; }' +
+            '.jdv-pop input.jdv-q { margin: 0 8px 6px; width: calc(100% - 16px); flex: none; }' +
+            '.jdv-opts { overflow-y: auto; }' +
+            '.jdv-opt, .jdv-item { display: flex; align-items: center; gap: 8px; padding: 6px 12px; cursor: pointer; line-height: 20px; }' +
+            '.jdv-opt:hover, .jdv-item:hover { background: var(--ds-background-neutral-subtle-hovered, #091E420F); }' +
+            '.jdv-item.on { color: var(--ds-text-selected, #0C66E4); background: var(--ds-background-selected, #E9F2FF); }' +
+            '.jdv-opt input { margin: 0; flex: none; }' +
+            '.jdv-opt img { width: 16px; height: 16px; border-radius: 2px; flex: none; }' +
+            '.jdv-optl { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+            '.jdv-opt2 { flex: none; font-size: 12px; color: var(--ds-text-subtlest, #626F86); }' +
+            '.jdv-optmsg { padding: 6px 12px; color: var(--ds-text-subtlest, #626F86); font-size: 13px; }' +
+            '#jdv-crumbnav { display: inline-flex; align-items: center; gap: 2px; margin-left: 8px; list-style: none; }' +
+            '#jdv-crumbnav .jdv-btn { width: 24px; height: 24px; padding: 0; background: transparent; color: var(--ds-icon, #44546F); }' +
+            '#jdv-crumbnav .jdv-btn:hover:not(:disabled) { background: var(--ds-background-neutral-subtle-hovered, #091E420F); }'
+        );
+    }
+};
+
 
 
 /* ---- Confluence REST client (v2 only) -----------------------------------------------------------------
@@ -16481,6 +17664,7 @@ if (JITA_IS_WIKI) {
         // Synchronous first: if Jira just wiped our sidebar group, put it back THIS tick (with cached content)
         // so it never visibly vanishes. Cheap - a getElementById guard skips it whenever the group is present.
         try { JiTA.ui._reensureFast(); } catch (e0) { /* swallow */ }
+        try { JiTA.dv._fast(); } catch (e1) { /* swallow */ }   // Jira replaced the layout the detail view pads
         if (scheduled) { return; }
         scheduled = true;
         setTimeout(function () {
@@ -16488,6 +17672,7 @@ if (JITA_IS_WIKI) {
             try { JiTA.ui.ensure(); } catch (e) { /* swallow */ }
             try { JiTA.ui.updateVisibility(); } catch (e2) { /* swallow */ }   // hide while an attachment viewer is open
             try { JiTA.logsig.updateVisibility(); } catch (e3) { /* swallow */ }   // drop the "Defects in log" panel once the log viewer closes
+            try { JiTA.dv.ensure(); } catch (e4) { /* swallow */ }   // detail view: mount / follow the open issue / unmount off /browse/
         }, 300);
     });
     observer.observe(document.body, { childList: true, subtree: true });
