@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.29.0
+// @version     3.30.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -12418,6 +12418,7 @@ JiTA.dv = {
         }
         s.basic = b;
         if (s.mode !== 'basic' && s.mode !== 'jql') { s.mode = 'jql'; }
+        if (typeof s.filterId !== 'string') { s.filterId = ''; }   // saved before the sidebar highlight existed
         D._state = s;
         return s;
     },
@@ -12488,6 +12489,7 @@ JiTA.dv = {
         D._place();
         D._syncFromLocation();
         D._renderCrumbNav();
+        D._markSidebar();
     },
 
     // Synchronous path from the observer: Jira replaced the layout we pad, so re-pad THIS tick rather than
@@ -12502,6 +12504,7 @@ JiTA.dv = {
         D._mounted = false;
         D._placed = '';
         D._closePop();
+        D._markSidebar();   // the list is gone, so no sidebar entry is current any more
         ['jdv-bar', 'jdv-col', 'jdv-rail', 'jdv-crumbnav'].forEach(function (id) {
             var e = document.getElementById(id);
             if (e && e.parentNode) { e.parentNode.removeChild(e); }
@@ -12641,6 +12644,7 @@ JiTA.dv = {
         D._placed = '';
         D._place();
         D._renderCrumbNav();
+        D._markSidebar();
         if (!s.collapsed) { D._syncActive(true); }
     },
 
@@ -13156,7 +13160,7 @@ JiTA.dv = {
             // Free-form JQL has no basic-filter form. Say so, and only swap the query on a yes.
             if (!window.confirm('This JQL cannot be shown as basic filters.\n\nSwitch to Basic anyway? The list will use your basic filters instead of this query.')) { return; }
             s.jql = D._join(D._buildWhere(s.basic), sp.order || 'created DESC');
-            s.filterName = '';
+            s.filterName = ''; s.filterId = '';
             s.mode = 'basic'; D._save(); D._closePop(); D._renderBar(); D._renderHead(); D._run(false);
             return;
         }
@@ -13165,7 +13169,7 @@ JiTA.dv = {
 
     _setJql: function (text) {
         var D = JiTA.dv, s = D._load(), t = String(text || '').trim();
-        if (t !== s.jql) { s.jql = t; s.filterName = ''; D._save(); D._renderBar(); D._renderHead(); }
+        if (t !== s.jql) { s.jql = t; s.filterName = ''; s.filterId = ''; D._save(); D._renderBar(); D._renderHead(); }
         D._run(false);   // Enter on an unchanged query refreshes it
     },
 
@@ -13183,7 +13187,7 @@ JiTA.dv = {
         if (t === (s.basic.text || '')) { if (now) { D._run(false); } return; }
         s.basic.text = t;
         s.jql = D._join(D._buildWhere(s.basic), D._splitOrder(s.jql).order || 'created DESC');
-        s.filterName = '';
+        s.filterName = ''; s.filterId = '';
         D._save();
         var clr = document.getElementById('jdv-clear');
         if (clr) { clr.hidden = D._basicEmpty(s.basic); }
@@ -13205,7 +13209,7 @@ JiTA.dv = {
     _applyBasic: function () {
         var D = JiTA.dv, s = D._load();
         s.jql = D._join(D._buildWhere(s.basic), D._splitOrder(s.jql).order || 'created DESC');
-        s.filterName = '';
+        s.filterName = ''; s.filterId = '';
         D._save();
         D._renderBar();
         D._renderHead();
@@ -13404,9 +13408,11 @@ JiTA.dv = {
         s.mode = 'jql';
         s.jql = String(f.jql).trim();
         s.filterName = f.name || '';
+        s.filterId = (f.id != null) ? String(f.id) : '';
         D._save();
         D._renderBar();
         D._renderHead();
+        D._markSidebar();
         D._run(false);
     },
 
@@ -13470,13 +13476,43 @@ JiTA.dv = {
         if (D._collapsed()) { D._toggleCollapse(); }   // a filter was asked for, so show the list it lands in
         if (link.jql) { D._useFilter({ jql: link.jql, name: '' }); return Promise.resolve(); }
         var sys = D.SYSTEM_FILTERS[link.id];
-        if (sys) { D._useFilter({ jql: sys[1], name: sys[0] }); return Promise.resolve(); }
+        if (sys) { D._useFilter({ jql: sys[1], name: sys[0], id: link.id }); return Promise.resolve(); }
         return D._get('/rest/api/3/filter/' + encodeURIComponent(link.id)).then(function (f) {
             if (!f || !f.jql) { throw new Error('no JQL'); }
-            if (seq === D._linkSeq) { D._useFilter({ jql: f.jql, name: f.name || name }); }
+            if (seq === D._linkSeq) { D._useFilter({ jql: f.jql, name: f.name || name, id: (f.id != null) ? f.id : link.id }); }
         }).catch(function () {
             if (seq === D._linkSeq) { location.assign(href); }
         });
+    },
+
+    // The sidebar entry the list came from gets the highlight Jira gives the page you are on: the tinted row,
+    // the blue text and icon, and the notch at the left. Jira draws that from classes generated at build time,
+    // so it is re-created from the same design tokens rather than borrowed - and --notch-color is the variable
+    // Jira's own notch element (always present, invisible until set) paints with, so setting it lights that up.
+    // The row is the anchor's container when Jira's menu item wraps it (it carries data-selected), else the
+    // anchor itself. Only while the list is on screen, and only for a filter picked by id: a query typed by
+    // hand matches no sidebar entry, so nothing is highlighted rather than something misleading.
+    _markSidebar: function () {
+        var D = JiTA.dv, s = D._load(), keep = [], i;
+        var want = (D._mounted && !D._collapsed() && s.filterId) ? String(s.filterId) : '';
+        if (want) {
+            var links = document.querySelectorAll('a[href*="filter="]');
+            for (i = 0; i < links.length; i++) {
+                var a = links[i];
+                if (a.closest('#jdv-bar, #jdv-col, #jdv-rail, .jdv-pop')) { continue; }
+                var link = D._filterLink(a.href);
+                if (!link || link.id !== want) { continue; }
+                var p = a.parentElement;
+                keep.push((p && p.hasAttribute && p.hasAttribute('data-selected')) ? p : a);
+            }
+        }
+        var marked = document.querySelectorAll('[data-jita-dv-current]');
+        for (i = 0; i < marked.length; i++) {
+            if (keep.indexOf(marked[i]) < 0) { marked[i].removeAttribute('data-jita-dv-current'); }
+        }
+        for (i = 0; i < keep.length; i++) {
+            if (!keep[i].hasAttribute('data-jita-dv-current')) { keep[i].setAttribute('data-jita-dv-current', ''); }
+        }
     },
 
     // ---- styles -----------------------------------------------------------------------------------------------
@@ -13565,6 +13601,10 @@ JiTA.dv = {
             '.jdv-optl { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
             '.jdv-opt2 { flex: none; font-size: 12px; color: var(--ds-text-subtlest, #626F86); }' +
             '.jdv-optmsg { padding: 6px 12px; color: var(--ds-text-subtlest, #626F86); font-size: 13px; }' +
+            '[data-jita-dv-current] { background-color: var(--ds-background-selected, #E9F2FE) !important;' +
+            ' --notch-color: var(--ds-background-selected-bold, #1868DB); }' +
+            '[data-jita-dv-current]:hover { background-color: var(--ds-background-selected-hovered, #CFE1FD) !important; }' +
+            '[data-jita-dv-current], [data-jita-dv-current] * { color: var(--ds-text-selected, #1868DB) !important; }' +
             '#jdv-crumbnav { display: inline-flex; flex: none; align-items: center; align-self: center; vertical-align: middle; gap: 2px; margin-left: 8px; list-style: none; }' +
             '#jdv-crumbnav .jdv-btn { width: 24px; height: 24px; padding: 0; background: transparent; color: var(--ds-icon, #44546F); }' +
             '#jdv-crumbnav .jdv-btn:hover:not(:disabled) { background: var(--ds-background-neutral-subtle-hovered, #091E420F); }'
