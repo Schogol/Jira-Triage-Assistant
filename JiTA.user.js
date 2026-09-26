@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.33.0
+// @version     3.33.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -17083,19 +17083,49 @@ JiTA.leadduty.apps = {
 
     // HTML fragment -> readable text, keeping the paragraph breaks that carry a long answer's structure.
     _text: function (html) {
-        return String(html == null ? '' : html)
+        var s = String(html == null ? '' : html)
             // Comments FIRST. The applicant cell carries a commented-out avatar div, and stripping tags
             // before comments eats the "<!--" and the "</div>" but leaves the "-->" behind - which is how
             // every name in the queue came out reading "--> Makthrraaa".
             .replace(/<!--[\s\S]*?-->/g, ' ')
             .replace(/<\s*br\s*\/?>/gi, '\n')
             .replace(/<\/\s*(p|div|li)\s*>/gi, '\n\n')
-            .replace(/<[^>]*>/g, '')
-            .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')
-            .replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0*39;|&apos;/gi, "'")
+            .replace(/<[^>]*>/g, '');
+        // Entities only AFTER the tags are gone, so a decoded "<" is text and can never become markup.
+        return JiTA.leadduty.apps._entities(s)
             .replace(/[ \t]+/g, ' ')
             .replace(/\n{3,}/g, '\n\n')
             .replace(/^\s+|\s+$/g, '');
+    },
+
+    // Every entity, in ONE pass. VMS escapes anything beyond ASCII as a numeric entity - an answer read
+    // "espa&#241;ol" because only six named ones were ever decoded - and decoding them one after another
+    // also decoded twice: an applicant who typed "&lt;" got "&amp;lt;" back as "<". A single pass reads
+    // "&amp;lt;" as "&" followed by the text "lt;", which is what was written. A number that is no character
+    // (0, a lone surrogate half, past U+10FFFF) is left exactly as written rather than guessed at.
+    _ENT: { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' },
+    _entities: function (s) {
+        var A = JiTA.leadduty.apps;
+        return String(s).replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, function (m, body) {
+            if (body.charAt(0) !== '#') {
+                var named = A._ENT[body.toLowerCase()];
+                return named != null ? named : A._named(m);
+            }
+            var hex = body.charAt(1) === 'x' || body.charAt(1) === 'X';
+            var n = parseInt(body.slice(hex ? 2 : 1), hex ? 16 : 10);
+            if (!(n > 0) || n > 0x10FFFF || (n >= 0xD800 && n <= 0xDFFF)) { return m; }
+            return n === 0xA0 ? ' ' : String.fromCodePoint(n);   // a numeric nbsp reads like the named one
+        });
+    },
+    // Any other named entity (&eacute;, &hellip;, ...): the browser knows all two thousand of them. A detached
+    // <textarea> parses its content as plain text, so nothing in it can become an element - and the argument is
+    // one entity token anyway. Outside a browser it is left as written, never dropped.
+    _named: function (m) {
+        try {
+            var t = document.createElement('textarea');
+            t.innerHTML = m;
+            return t.value;
+        } catch (e) { return m; }
     },
 
     // Resolves { ok, fresh, second, total } or { ok: false, reason }. Split out so a harness can drive it
