@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.32.1
+// @version     3.33.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -12279,6 +12279,8 @@ JiTA.dupfind = {
  * top (Basic filters or raw JQL, plus your starred filters), the matching issues down the left, and Jira's OWN
  * issue view on the right, so editing, comments, transitions and every app panel keep working as they are.
  * A filter clicked in Jira's own sidebar (Starred, Recent, Default filters) loads into the list the same way.
+ * In Basic mode a filter's query - however complex - is kept whole as the SCOPE, and the search box and the
+ * basic filters narrow it, so a filter's list can be searched without rewriting it as JQL.
  * With the "Open filters in the detail view" option on, that works from any Jira page: the filter's first issue
  * opens, with its list beside it.
  *
@@ -12293,7 +12295,7 @@ JiTA.dupfind = {
  * query is persisted and the first pages are cached), so the worst case is slower, never broken.
  */
 JiTA.dv = {
-    STATE_KEY: 'jitaDvState',       // { mode, jql, basic, filterName, collapsed } - one query, reused on every /browse/ page
+    STATE_KEY: 'jitaDvState',       // { mode, jql, basic, scope, filterName, filterId, collapsed } - one query, reused on every /browse/ page
     CACHE_KEY: 'jitaDvCache',       // { jql, at, total, issues } - the first pages, painted instantly after a page load
     SPA_FAIL_KEY: 'jitaDvSpaFail',  // sessionStorage: router fallbacks in a row in this tab
     TAKE_KEY: 'jitaDvTakeFilters',  // the "Open filters in the detail view" option (on by default - see _takeOn)
@@ -12323,6 +12325,7 @@ JiTA.dv = {
         desc: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M4.5 9.5L8 13l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
         refresh: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.46-3.54M13 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>',
         search: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10.2 10.2L13.5 13.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+        close: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
         nobody: '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" style="fill:var(--ds-background-neutral,#091E420F)"/><circle cx="12" cy="9.5" r="3.5" style="fill:var(--ds-icon-subtle,#626F86)"/><path d="M5.5 19c1.2-3 3.7-4.5 6.5-4.5s5.3 1.5 6.5 4.5z" style="fill:var(--ds-icon-subtle,#626F86)"/></svg>'
     },
 
@@ -12420,6 +12423,21 @@ JiTA.dv = {
         return out.join(' AND ');
     },
 
+    // What Basic mode runs: the basic filters, narrowing the scope when there is one. The scope is a query they
+    // did not build (a filter's, or JQL typed by hand), wrapped whole so an OR inside it cannot swallow them.
+    _scopedWhere: function (s) {
+        var w = JiTA.dv._buildWhere(s.basic), sc = s.scope ? s.scope.where : '';
+        if (!sc) { return w; }
+        return w ? '(' + sc + ') AND ' + w : sc;
+    },
+    // Whose list it is after a basic edit. Inside a filter's scope it is still that filter, narrowed - the way a
+    // sorted filter is still that filter - so it keeps its name and its sidebar row. Without a scope the basic
+    // filters built the whole query, which is no saved filter's.
+    _scopeOwner: function (s) {
+        s.filterName = s.scope ? s.scope.name : '';
+        s.filterId = s.scope ? s.scope.id : '';
+    },
+
     // ---- persisted query --------------------------------------------------------------------------------------
     // First run starts on the bug hunters' standard backlog - the same query Triage mode opens on.
     _load: function () {
@@ -12427,7 +12445,7 @@ JiTA.dv = {
         if (D._state) { return D._state; }
         var s = gmGet(D.STATE_KEY, null);
         if (!s || typeof s !== 'object' || typeof s.jql !== 'string') {
-            s = { mode: 'jql', jql: JiTA.triage.DEFAULT_JQL + ' ORDER BY created DESC', basic: null, filterName: '', collapsed: false };
+            s = { mode: 'jql', jql: JiTA.triage.DEFAULT_JQL + ' ORDER BY created DESC', basic: null, scope: null, filterName: '', collapsed: false };
         }
         var b = (s.basic && typeof s.basic === 'object') ? s.basic : {}, e = D._emptyBasic();
         for (var k in e) {
@@ -12435,6 +12453,9 @@ JiTA.dv = {
             else if (!Array.isArray(b[k])) { b[k] = []; }
         }
         s.basic = b;
+        var sc = s.scope;   // saved before scopes existed, or damaged: no scope
+        s.scope = (sc && typeof sc === 'object' && typeof sc.where === 'string' && sc.where.trim()) ?
+            { where: sc.where.trim(), name: typeof sc.name === 'string' ? sc.name : '', id: typeof sc.id === 'string' ? sc.id : '' } : null;
         if (s.mode !== 'basic' && s.mode !== 'jql') { s.mode = 'jql'; }
         if (typeof s.filterId !== 'string') { s.filterId = ''; }   // saved before the sidebar highlight existed
         D._state = s;
@@ -12727,12 +12748,16 @@ JiTA.dv = {
     },
 
     // Start the current query from page one. quiet = keep whatever is on screen until page one arrives
-    // (refresh, and the cached list after a page load), so the list never flashes empty.
-    _run: function (quiet) {
+    // (refresh, and the cached list after a page load), so the list never flashes empty. edited = the user just
+    // changed the query (sort, filters, search, JQL, a filter pick): the issue already open was found in the list
+    // before, so the new list is NOT paged through looking for it - reversing a sort puts it at the far end, and
+    // the search would load FIND_MAX issues to get there. It is still highlighted if a loaded page holds it.
+    _run: function (quiet, edited) {
         var D = JiTA.dv, s = D._load(), gen = ++D._gen;
         clearTimeout(D._runTimer); D._runTimer = null;
         D._runJql = s.jql; D._runAt = Date.now();
-        D._token = null; D._more = false; D._pages = 0; D._loading = null; D._error = null; D._seekTag = null; D._total = null;
+        D._token = null; D._more = false; D._pages = 0; D._loading = null; D._error = null; D._total = null;
+        D._seekTag = (edited && D._activeKey) ? gen + ':' + D._activeKey : null;   // as if already looked for
         if (!quiet) { D._issues = []; D._index = {}; }
         if (!D._splitOrder(s.jql).where) {
             D._issues = []; D._index = {};
@@ -13118,10 +13143,19 @@ JiTA.dv = {
         seg.appendChild(bB); seg.appendChild(bJ);
         bar.appendChild(seg);
         if (s.mode === 'basic') {
+            if (s.scope) {   // what Basic is narrowing: the filter's name, its query on hover
+                var scw = D._el('span', 'jdv-scope');
+                var scb = D._btn('on', s.scope.name || 'JQL query', '', 'Searching within:\n' + s.scope.where + '\n\nClick to show it as JQL');
+                scb.onclick = function () { D._setMode('jql'); };
+                var scx = D._btn('on jdv-icon', '', D.ICON.close, 'Stop searching within ' + (s.scope.name ? '"' + s.scope.name + '"' : 'this query'));
+                scx.onclick = D._dropScope;
+                scw.appendChild(scb); scw.appendChild(scx);
+                bar.appendChild(scw);
+            }
             var sw = D._el('div', 'jdv-search');
             sw.insertAdjacentHTML('beforeend', D.ICON.search);
             var inp = D._el('input');
-            inp.type = 'text'; inp.placeholder = 'Search work'; inp.value = s.basic.text || ''; inp.spellcheck = false;
+            inp.type = 'text'; inp.placeholder = s.scope ? 'Search this list' : 'Search work'; inp.value = s.basic.text || ''; inp.spellcheck = false;
             var tt = null;
             inp.addEventListener('input', function () { clearTimeout(tt); tt = setTimeout(function () { D._setText(inp.value, false); }, D.TEXT_DEBOUNCE_MS); });
             inp.addEventListener('keydown', function (e) {
@@ -13177,31 +13211,28 @@ JiTA.dv = {
         return b;
     },
 
+    // Switching never changes the list. The JQL box simply shows the query Basic built. Going the other way, a
+    // query the basic filters did not build (a filter's, or JQL typed by hand) has no basic-filter form, so it
+    // becomes their scope: Basic starts from it with every filter off, and the search box and the chips narrow it.
     _setMode: function (mode) {
         var D = JiTA.dv, s = D._load();
         if (mode === s.mode) { return; }
-        if (mode === 'jql') {   // the JQL box simply shows the query the basic filters built
-            s.mode = 'jql'; D._save(); D._closePop(); D._renderBar();
-            return;
+        if (mode === 'basic') {
+            var where = D._splitOrder(s.jql).where;
+            if (where !== D._scopedWhere(s)) {
+                s.basic = D._emptyBasic();
+                if (!where) { s.scope = null; }
+                else if (s.scope && s.scope.where === where) { D._scopeOwner(s); }   // the narrowing was typed away: the filter's own list again
+                else { s.scope = { where: where, name: s.filterName || '', id: s.filterId || '' }; }
+            }
         }
-        var sp = D._splitOrder(s.jql);
-        if (!sp.where) {
-            s.basic = D._emptyBasic();
-        } else if (sp.where !== D._buildWhere(s.basic)) {
-            // Free-form JQL has no basic-filter form. Say so, and only swap the query on a yes.
-            if (!window.confirm('This JQL cannot be shown as basic filters.\n\nSwitch to Basic anyway? The list will use your basic filters instead of this query.')) { return; }
-            s.jql = D._join(D._buildWhere(s.basic), sp.order || 'created DESC');
-            s.filterName = ''; s.filterId = '';
-            s.mode = 'basic'; D._save(); D._closePop(); D._renderBar(); D._renderHead(); D._run(false);
-            return;
-        }
-        s.mode = 'basic'; D._save(); D._closePop(); D._renderBar();
+        s.mode = mode; D._save(); D._closePop(); D._renderBar();
     },
 
     _setJql: function (text) {
-        var D = JiTA.dv, s = D._load(), t = String(text || '').trim();
-        if (t !== s.jql) { s.jql = t; s.filterName = ''; s.filterId = ''; D._save(); D._renderBar(); D._renderHead(); }
-        D._run(false);   // Enter on an unchanged query refreshes it
+        var D = JiTA.dv, s = D._load(), t = String(text || '').trim(), edited = t !== s.jql;
+        if (edited) { s.jql = t; s.filterName = ''; s.filterId = ''; D._save(); D._renderBar(); D._renderHead(); }
+        D._run(false, edited);   // Enter on an unchanged query refreshes it
     },
 
     _setSort: function (field, dir) {
@@ -13210,19 +13241,19 @@ JiTA.dv = {
         D._save();
         D._renderBar();
         D._renderHead();
-        D._run(false);
+        D._run(false, true);
     },
 
     _setText: function (v, now) {
         var D = JiTA.dv, s = D._load(), t = String(v || '').trim();
         if (t === (s.basic.text || '')) { if (now) { D._run(false); } return; }
         s.basic.text = t;
-        s.jql = D._join(D._buildWhere(s.basic), D._splitOrder(s.jql).order || 'created DESC');
-        s.filterName = ''; s.filterId = '';
+        s.jql = D._join(D._scopedWhere(s), D._splitOrder(s.jql).order || 'created DESC');
+        D._scopeOwner(s);
         D._save();
         var clr = document.getElementById('jdv-clear');
         if (clr) { clr.hidden = D._basicEmpty(s.basic); }
-        D._run(false);   // the bar is NOT re-rendered: that would pull the box out from under the typing
+        D._run(false, true);   // the bar is NOT re-rendered: that would pull the box out from under the typing
     },
 
     _has: function (field, v) {
@@ -13239,13 +13270,19 @@ JiTA.dv = {
     },
     _applyBasic: function () {
         var D = JiTA.dv, s = D._load();
-        s.jql = D._join(D._buildWhere(s.basic), D._splitOrder(s.jql).order || 'created DESC');
-        s.filterName = ''; s.filterId = '';
+        s.jql = D._join(D._scopedWhere(s), D._splitOrder(s.jql).order || 'created DESC');
+        D._scopeOwner(s);
         D._save();
         D._renderBar();
         D._renderHead();
         clearTimeout(D._runTimer);
-        D._runTimer = setTimeout(function () { D._runTimer = null; D._run(false); }, D.RUN_DEBOUNCE_MS);
+        D._runTimer = setTimeout(function () { D._runTimer = null; D._run(false, true); }, D.RUN_DEBOUNCE_MS);
+    },
+    // The x on the scope pill: stop narrowing that query, and search all work with the same basic filters.
+    _dropScope: function () {
+        var D = JiTA.dv;
+        D._load().scope = null;
+        D._applyBasic();
     },
 
     // ---- popovers ---------------------------------------------------------------------------------------------
@@ -13436,15 +13473,18 @@ JiTA.dv = {
     _useFilter: function (f) {
         var D = JiTA.dv, s = D._load();
         if (!f || !f.jql) { return; }
-        s.mode = 'jql';
         s.jql = String(f.jql).trim();
         s.filterName = f.name || '';
         s.filterId = (f.id != null) ? String(f.id) : '';
+        // The mode is kept: in JQL its query is in the box, in Basic it is the scope the search box narrows.
+        var where = D._splitOrder(s.jql).where;
+        s.basic = D._emptyBasic();
+        s.scope = where ? { where: where, name: s.filterName, id: s.filterId } : null;
         D._save();
         D._renderBar();
         D._renderHead();
         D._markSidebar();
-        var p = D._run(false);
+        var p = D._run(false, true);
         D._firstFor = { gen: D._gen, from: D._locKey() };   // page one answers asynchronously, so this is in time
         return p;
     },
@@ -13636,6 +13676,9 @@ JiTA.dv = {
             '.jdv-seg { display: inline-flex; flex: none; border: 1px solid var(--ds-border, #091E4224); border-radius: 4px; overflow: hidden; }' +
             '.jdv-seg .jdv-btn { height: 30px; border-radius: 0; background: transparent; }' +
             '.jdv-seg .jdv-btn.on { background: var(--ds-background-selected, #E9F2FF); color: var(--ds-text-selected, #0C66E4); }' +
+            '.jdv-scope { display: inline-flex; flex: none; }' +
+            '.jdv-scope .jdv-btn { border-radius: 3px 0 0 3px; padding-right: 8px; }' +
+            '.jdv-scope .jdv-btn.jdv-icon { width: 28px; padding: 0; border-radius: 0 3px 3px 0; border-left: 1px solid var(--ds-border, #091E4224); }' +
             '.jdv-search { position: relative; flex: 0 1 220px; min-width: 110px; }' +
             '.jdv-search svg { position: absolute; left: 8px; top: 8px; color: var(--ds-icon-subtle, #626F86); pointer-events: none; }' +
             '.jdv-search input, .jdv-pop input.jdv-q { width: 100%; height: 32px; box-sizing: border-box; padding: 0 8px 0 30px; font: inherit; font-size: 14px;' +
