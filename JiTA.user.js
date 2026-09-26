@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.28.0
+// @version     3.28.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -12270,6 +12270,7 @@ JiTA.dv = {
     _mounted: false,
     _bound: false,
     _placed: '',        // last geometry written, so an unchanged layout costs no style writes
+    _geo: null,         // { left, top, width } of the last host box that was actually usable (see _place)
     _activeKey: null,   // the highlighted card; leads the URL while an arrow key is held
     _lastLoc: null,     // the last URL key we reacted to
     _stepTimer: null,
@@ -12398,6 +12399,24 @@ JiTA.dv = {
         return a;
     },
 
+    // An issue Jira has not loaded before renders a loading skeleton IN PLACE of the layout we pad, and the
+    // skeleton has no breadcrumb for _findHost to anchor on. So find whatever now occupies the SAME box as
+    // the last usable host - the skeleton's own container - and pad that, which lays the skeleton out beside
+    // the list exactly where the issue is about to appear. Anything whose box does not match is left alone,
+    // so a wrong guess costs nothing: the list simply stays where it was until the real view arrives.
+    _standIn: function () {
+        var D = JiTA.dv, g = D._geo;
+        if (!g || !document.elementFromPoint) { return null; }
+        var coll = D._collapsed(), w = coll ? D.RAIL_W : D._colW(), bh = coll ? 0 : D.BAR_H;
+        var el = document.elementFromPoint(g.left + w + (g.width - w) / 2, g.top + bh + 40);
+        for (var n = el; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+            if (n.closest && n.closest('#jdv-bar, #jdv-col, #jdv-rail, .jdv-pop')) { return null; }   // our own chrome is on top there
+            var r = n.getBoundingClientRect();
+            if (Math.abs(r.left - g.left) <= 2 && Math.abs(r.top - g.top) <= 2 && Math.abs(r.width - g.width) <= 2) { return n; }
+        }
+        return null;
+    },
+
     // ---- lifecycle --------------------------------------------------------------------------------------------
     // Called from the page observer (debounced) and on every popstate. Mounts on an issue page, unmounts off
     // one. A breadcrumb that is briefly missing mid-switch does NOT unmount - only leaving /browse/ does.
@@ -12405,6 +12424,7 @@ JiTA.dv = {
         var D = JiTA.dv;
         if (JITA_NO_JIRA_UI || !flagOn('detailView') || !D._locKey()) { if (D._mounted) { D.unmount(); } return; }
         var host = D._findHost();
+        if (!host && D._mounted) { host = D._standIn(); }   // a first-time issue is loading: pad its skeleton instead
         if (!host) { return; }   // issue view still rendering - the next observer tick retries
         if (!D._mounted) { D._mount(); }
         D._adopt(host);
@@ -12433,6 +12453,7 @@ JiTA.dv = {
         var root = document.documentElement.style;
         root.removeProperty('--jdv-w');
         root.removeProperty('--jdv-h');
+        root.removeProperty('--jdv-z');
         clearTimeout(D._navTimer);
         clearTimeout(D._stepTimer);
         D._stepTimer = null;
@@ -12455,9 +12476,11 @@ JiTA.dv = {
         rail.appendChild(ex);
         list.addEventListener('click', D._onListClick);
         list.addEventListener('scroll', D._onListScroll, { passive: true });
-        document.body.appendChild(bar);
+        // Order matters: all three share one z-index (see _rootZ), and at an equal z-index the later element
+        // paints on top - the bar has to, because the JQL box grows downward over the list when focused.
         document.body.appendChild(col);
         document.body.appendChild(rail);
+        document.body.appendChild(bar);
         D._bindGlobal();
         D._renderBar();
         D._renderHead();
@@ -12488,6 +12511,7 @@ JiTA.dv = {
         host.style.setProperty('--jdv-pl0', cs.paddingLeft || '0px');
         host.style.setProperty('--jdv-pt0', cs.paddingTop || '0px');
         host.setAttribute('data-jita-dv-host', '1');
+        document.documentElement.style.setProperty('--jdv-z', String(D._rootZ(host)));
         if (window.ResizeObserver) {
             D._ro = new ResizeObserver(function () { D._place(); });
             try { D._ro.observe(host, { box: 'border-box' }); } catch (e) { D._ro.observe(host); }
@@ -12504,6 +12528,24 @@ JiTA.dv = {
         if (D._ro) { D._ro.disconnect(); D._ro = null; }
     },
 
+    // The z-index the host competes with at the ROOT stacking level: that of its outermost ancestor carrying
+    // an explicit one (0 when none does). The bar and the list take exactly this level and no more. They sit
+    // over the host's own padding, so beating the host is all they need - and at an equal z-index the later
+    // element wins, which ours are (appended to <body> after Jira's root). Anything Jira raises ABOVE the issue
+    // view - the side nav's flyouts like "More spaces", the top bar's dropdowns - then stays above the list
+    // too. A fixed 99 put the list over the side nav's layer and hid its flyouts behind it.
+    _rootZ: function (el) {
+        var z = 0;
+        for (var n = el; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+            var cs = window.getComputedStyle(n), zi = parseInt(cs.zIndex, 10);
+            if (isNaN(zi)) { continue; }
+            var parent = n.parentElement ? window.getComputedStyle(n.parentElement) : null;
+            // z-index only takes effect on a positioned element, or on a flex / grid item
+            if (cs.position !== 'static' || (parent && /flex|grid/.test(parent.display || ''))) { z = zi; }
+        }
+        return Math.max(0, z);
+    },
+
     _colW: function () { return Math.round(Math.max(240, Math.min(340, (window.innerWidth || 1600) * 0.17))); },
 
     // Lay the bar and the column over the host's box and pad the host by the same amounts.
@@ -12511,6 +12553,12 @@ JiTA.dv = {
         var D = JiTA.dv, h = D._host;
         if (!D._mounted || !h) { return; }
         var r = h.getBoundingClientRect(), vh = window.innerHeight || document.documentElement.clientHeight;
+        // A host Jira has just swapped out reports an empty box - and the ResizeObserver fires on exactly
+        // that removal. Placing from it parked the bar at the top-left corner over Jira's own navigation and
+        // squeezed the list to no height, for as long as a first-time issue took to load. Keep the last good
+        // geometry instead; ensure() moves everything onto the new layout the moment it exists.
+        if (!h.isConnected || r.width < 1 || r.height < 1) { return; }
+        D._geo = { left: r.left, top: r.top, width: r.width };
         var coll = D._collapsed(), w = coll ? D.RAIL_W : D._colW(), bh = coll ? 0 : D.BAR_H;
         var top = Math.max(0, Math.round(r.top)), left = Math.round(r.left), width = Math.round(r.width);
         var bottom = Math.min(vh, Math.round(r.bottom));
@@ -13289,9 +13337,9 @@ JiTA.dv = {
     },
 
     // ---- styles -----------------------------------------------------------------------------------------------
-    // Atlassian design tokens throughout, so the view follows Jira's light / dark theme by itself. z-index 99/100
-    // keeps it under Jira's own menus, flags and modals (400+) and under every JiTA overlay (9000+); the bar sits one
-    // above the column so the JQL box, which grows downward when focused, is not painted under the list.
+    // Atlassian design tokens throughout, so the view follows Jira's light / dark theme by itself. The z-index is
+    // the host's own stacking level (--jdv-z, see _rootZ), which keeps the bar and the list under every menu,
+    // flyout, flag and modal Jira opens over the issue area, and under every JiTA overlay. Our popovers sit at 400.
     _css: false,
     _injectCss: function () {
         var D = JiTA.dv;
@@ -13300,10 +13348,10 @@ JiTA.dv = {
         GM_addStyle(
             '[data-jita-dv-host] { box-sizing: border-box !important; padding-left: calc(var(--jdv-pl0, 0px) + var(--jdv-w, 0px)) !important;' +
             ' padding-top: calc(var(--jdv-pt0, 0px) + var(--jdv-h, 0px)) !important; }' +
-            '#jdv-bar, #jdv-col, #jdv-rail { position: fixed; z-index: 99; box-sizing: border-box; color: var(--ds-text, #172B4D);' +
+            '#jdv-bar, #jdv-col, #jdv-rail { position: fixed; z-index: var(--jdv-z, 0); box-sizing: border-box; color: var(--ds-text, #172B4D);' +
             ' font-family: var(--ds-font-family-body, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif); font-size: 14px; }' +
             '#jdv-bar[hidden], #jdv-col[hidden], #jdv-rail[hidden], #jdv-clear[hidden] { display: none !important; }' +
-            '#jdv-bar { z-index: 100; display: flex; align-items: center; gap: 8px; padding: 0 12px; background: var(--ds-surface, #FFFFFF);' +
+            '#jdv-bar { display: flex; align-items: center; gap: 8px; padding: 0 12px; background: var(--ds-surface, #FFFFFF);' +
             ' border-bottom: 1px solid var(--ds-border, #091E4224); }' +
             '#jdv-col { display: flex; flex-direction: column; background: var(--ds-surface-sunken, #F7F8F9); border-right: 1px solid var(--ds-border, #091E4224); }' +
             '#jdv-rail { display: flex; flex-direction: column; align-items: center; padding-top: 8px; background: var(--ds-surface-sunken, #F7F8F9);' +
