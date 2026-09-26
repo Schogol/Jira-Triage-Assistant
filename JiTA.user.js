@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.32.0
+// @version     3.32.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8456,8 +8456,8 @@ JiTA.menu = {
                 .append($('<span class="sub"></span>').text('A filter clicked anywhere in Jira opens its first issue with the list beside it, instead of the Jira search page'))
                 .appendTo($take);
             var $takeSw = $('<div class="jita-sw"><span class="knob"></span></div>');
-            if (gmGet(JiTA.dv.TAKE_KEY, false)) { $takeSw.addClass('on'); }
-            $takeSw.on('click', function () { gmSet(JiTA.dv.TAKE_KEY, !gmGet(JiTA.dv.TAKE_KEY, false)); refreshMenu(); });
+            if (JiTA.dv._takeOn()) { $takeSw.addClass('on'); }
+            $takeSw.on('click', function () { gmSet(JiTA.dv.TAKE_KEY, !JiTA.dv._takeOn()); refreshMenu(); });
             $take.append($takeSw);
             $feat.append($take);
         }
@@ -12296,7 +12296,7 @@ JiTA.dv = {
     STATE_KEY: 'jitaDvState',       // { mode, jql, basic, filterName, collapsed } - one query, reused on every /browse/ page
     CACHE_KEY: 'jitaDvCache',       // { jql, at, total, issues } - the first pages, painted instantly after a page load
     SPA_FAIL_KEY: 'jitaDvSpaFail',  // sessionStorage: router fallbacks in a row in this tab
-    TAKE_KEY: 'jitaDvTakeFilters',  // the "Open filters in the detail view" option (off by default)
+    TAKE_KEY: 'jitaDvTakeFilters',  // the "Open filters in the detail view" option (on by default - see _takeOn)
     TAKE_TOAST_MS: 600,             // a filter taken off an issue page says so when page one is slow to come
     CACHE_MAX_MS: 30 * 60 * 1000,
     CACHE_ISSUES: 200,
@@ -13490,8 +13490,10 @@ JiTA.dv = {
 
     // Registered on the window in the capture phase, so it runs before Jira's router: a click we take never
     // becomes a navigation, and one we leave alone reaches Jira untouched.
-    // The option itself. Off by default: it changes where every filter link in Jira goes, for everyone who has it.
-    _takeAll: function () { return !JITA_NO_JIRA_UI && flagOn('detailView') && !!gmGet(JiTA.dv.TAKE_KEY, false); },
+    // The option itself, on unless it was switched off. The one place its default lives: Settings reads it here too,
+    // so the switch can never show one state while the click hook acts on the other.
+    _takeOn: function () { return !!gmGet(JiTA.dv.TAKE_KEY, true); },
+    _takeAll: function () { return !JITA_NO_JIRA_UI && flagOn('detailView') && JiTA.dv._takeOn(); },
 
     _onLinkClick: function (e) {
         var D = JiTA.dv;
