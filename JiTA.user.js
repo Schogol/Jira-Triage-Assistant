@@ -12627,7 +12627,7 @@ JiTA.trend = {
     note: function (r) {
         var T = JiTA.trend, bits = [];
         if (r.trend === 'new') { bits.push('new: none in the ' + T.BASE_DAYS + ' days before'); }
-        else { bits.push({ up: 'rising', steady: 'steady', down: 'falling' }[r.trend] + ', usually about ' + T.usual(r.base) + ' per ' + T.WINDOW_DAYS + ' days'); }
+        else { bits.push({ up: 'rising', steady: 'steady', down: 'falling' }[r.trend]); }
         if (r.afterFix >= T.AFTER_FIX_MIN) { bits.push('⚠ ' + r.afterFix + ' filed after the fix'); }
         return bits.join(' · ');
     },
