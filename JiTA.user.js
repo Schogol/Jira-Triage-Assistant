@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.35.1
+// @version     3.35.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -18973,6 +18973,11 @@ JiTA.ocr = {
         O._css();
         var L = document.createElement('div');
         L.id = 'jita-ocr-layer';
+        // Jira's media viewer wraps itself in react-focus-lock, which pulls the focus back into the viewer the
+        // moment it lands anywhere else: the card's language dropdown shut as soon as it opened, and the
+        // recognized-text box lost its focus the same way. The lock leaves focus alone inside a subtree marked
+        // data-no-focus-lock, and the card and the hint both live in this layer.
+        L.setAttribute('data-no-focus-lock', 'true');
         L.innerHTML = '<div class="jita-ocr-box"></div>' +
             '<div class="jita-ocr-hint">Drag a box tightly around the text to translate<button type="button" class="jita-ocr-exit" title="Exit (Esc)">Done</button></div>';
         document.body.appendChild(L);
