@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.36.0
+// @version     3.37.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -15145,13 +15145,17 @@ JiTA.leadduty = {
             var L = JiTA.leadduty;
             ym = ym || L._ym();
             var handle = (L.me() && L.me().handle) || '?';
-            var today = L._today(), nowIso = new Date().toISOString();
+            // One clock reading for both stamps, so the day stamped on the page is always the day of `at` -
+            // which is how an Undo recognises its own stamp (see _stillLatest).
+            var nowIso = new Date().toISOString(), today = nowIso.slice(0, 10);
             return L.ledger.mutate(L.LEDGER_KEY, function (v) {
                 v = v || { v: 1, lastReviewed: {}, prevReviewed: {}, reviewedBy: {}, months: {}, done: {} };
                 v.lastReviewed = v.lastReviewed || {};
                 v.prevReviewed = v.prevReviewed || {};
                 v.reviewedBy = v.reviewedBy || {};
                 v.done = v.done || {};
+                // What this review replaces, so an Undo can put the page's history back exactly (see unreview).
+                var was = { last: v.lastReviewed[pageId] || '', prev: v.prevReviewed[pageId] || '', by: v.reviewedBy[pageId] || '' };
                 // Keep the previous review's date so eyesIn() can see TWO readings. A repeat by the SAME Lead
                 // is not a second pair of eyes, so it overwrites their own stamp instead of shifting it down -
                 // otherwise one Lead reading a page twice would mark it fully covered on their own.
@@ -15161,7 +15165,7 @@ JiTA.leadduty = {
                 v.lastReviewed[pageId] = today;
                 v.reviewedBy[pageId] = handle;
                 v.done[ym] = v.done[ym] || {};
-                v.done[ym][pageId] = { by: handle, at: nowIso };
+                v.done[ym][pageId] = { by: handle, at: nowIso, was: was };
                 return v;
             }).then(L.report.tap);
         },
@@ -15180,6 +15184,50 @@ JiTA.leadduty = {
                 v.done[ym][pageId] = { by: handle, at: nowIso, skipped: true };
                 return v;
             }).then(L.report.tap);
+        },
+
+        // Take a review or a skip back - the Undo on a done row. Only your OWN mark, and only while the page's
+        // history still ends with it. A review re-stamps three shared maps (see markReviewed), which is what the
+        // four-eyes rule and next month's assignment read, so taking one back means putting all three back
+        // exactly as they were - the snapshot recorded with the mark is what makes that possible. A mark made
+        // before snapshots existed, or one another review has since built on, is left alone rather than guessed
+        // at (undoable() does not offer the button for either). A skip never touched the history, so it only
+        // has to leave the month.
+        unreview: function (pageId, ym) {
+            var L = JiTA.leadduty, W = L.wiki;
+            ym = ym || L._ym();
+            var handle = (L.me() && L.me().handle) || '?';
+            return L.ledger.mutate(L.LEDGER_KEY, function (v) {
+                var d = v && v.done && v.done[ym] && v.done[ym][pageId];
+                if (!d || d.by !== handle) { return null; }
+                if (!d.skipped) {
+                    if (!W._stillLatest(v, pageId, d, handle)) { return null; }
+                    v.prevReviewed = v.prevReviewed || {};
+                    W._restore(v.lastReviewed, pageId, d.was.last);
+                    W._restore(v.prevReviewed, pageId, d.was.prev);
+                    W._restore(v.reviewedBy, pageId, d.was.by);
+                }
+                delete v.done[ym][pageId];
+                return v;
+            }).then(L.report.tap);
+        },
+
+        // A review mark can be taken back exactly while it carries its snapshot AND is still the page's latest
+        // review: the same Lead, on the day it stamped.
+        _stillLatest: function (v, pageId, d, handle) {
+            return !!(d && d.was && v && v.reviewedBy && v.lastReviewed &&
+                v.reviewedBy[pageId] === handle && v.lastReviewed[pageId] === String(d.at || '').slice(0, 10));
+        },
+        // A value that was absent before the review goes back to absent, not to an empty string.
+        _restore: function (map, id, val) { if (val) { map[id] = val; } else { delete map[id]; } },
+
+        // Whether a done row offers Undo: your own skip, your own mark still waiting to reach Confluence, or your
+        // own review while unreview() can still restore it exactly.
+        undoable: function (done, ledgerValue, pageId) {
+            var me = (JiTA.leadduty.me() && JiTA.leadduty.me().handle) || null;
+            if (!done || !me || done.by !== me) { return false; }
+            if (done.skipped || done.local) { return true; }
+            return JiTA.leadduty.wiki._stillLatest(ledgerValue, pageId, done, me);
         },
 
         // Queue health for the footer: how the section stands against the four-eyes target. `single` is the
@@ -15630,6 +15678,12 @@ JiTA.leadduty = {
                 if (txt) { v.flags[key].outcome = txt; }
                 return v;
             }).then(L.report.tap);
+        },
+
+        // What a closed-out follow-up says: why it was raised, and what was done about it. Both - an outcome like
+        // "talked it through" means nothing without the reason it answers.
+        flagText: function (f) {
+            return { reason: (f && f.note) || '(no reason given)', outcome: (f && f.outcome) || '' };
         },
 
         // Open (unresolved) follow-ups, newest first. Reads whatever ledger value the caller already has.
@@ -16501,6 +16555,14 @@ JiTA.leadduty.ui = {
                 : ('last reviewed ' + last[id] + (by[id] ? (' by ' + by[id]) : '') + (age != null ? (' · ' + age + ' month' + (age === 1 ? '' : 's') + ' ago') : ''));
             $('<span class="ld-meta"></span>').text(meta).appendTo($row);
             var $act = $('<span class="ld-act"></span>').appendTo($row);
+            if (done && L.wiki.undoable(done, res.ledgerValue, id)) {
+                $('<button class="jita-btn ld-mini">Undo</button>')
+                    .attr('title', done.skipped ? 'Take the skip back - the page goes back on your list'
+                        : 'Take the review back - the page goes back on your list and its review history is restored')
+                    .on('click', function () {
+                        U._undoWiki(this, id, ym, (page && page.title) || ('page ' + id), !!done.local, function () { U._loadWiki(false); });
+                    }).appendTo($act);
+            }
             if (!done) {
                 $('<button class="jita-btn ld-mini">Mark reviewed</button>').on('click', function () {
                     U._act(this, L.wiki.markReviewed(id, ym), L.wiki.localKey(ym), id, function () { U._loadWiki(false); });
@@ -16516,6 +16578,7 @@ JiTA.leadduty.ui = {
         // looking for it: the Settings status line (_poolLine) and the Coverage table on the ledger page.
         var bits = [doneCount + ' of ' + ids.length + ' done'];
         if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
+        if (U._wikiNote) { bits.unshift(U._wikiNote); U._wikiNote = null; }   // what an Undo just did, first
         U._status(bits.join(' · '));
     },
 
@@ -16639,7 +16702,7 @@ JiTA.leadduty.ui = {
                 $('<button class="jita-btn ld-mini">Undo</button>')
                     .attr('title', done.verdict === 'flag' ? 'Take the flag back - it also withdraws the follow-up and its reason'
                         : 'Take this back - the item goes back on your list')
-                    .on('click', function () { U._undo(this, it, ym, done.verdict === 'flag', reload); })
+                    .on('click', function () { U._undo(this, it, ym, done.verdict === 'flag', !!done.local, reload); })
                     .appendTo($act);
             }
             if (!done) {
@@ -16766,7 +16829,9 @@ JiTA.leadduty.ui = {
                 $('<span class="ld-tick"></span>').text('✓').appendTo($row);
                 $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
                     .attr('href', JiTA.HOST + '/browse/' + k).text(k).appendTo($row);
-                $('<span class="ld-sum"></span>').text(f.outcome || f.note || '').appendTo($row);
+                var txt = L.qc.flagText(f);
+                var $sum = $('<span class="ld-sum"></span>').text(txt.reason).appendTo($row);
+                if (txt.outcome) { $('<span class="ld-outcome"></span>').text('Resolved: ' + txt.outcome).appendTo($sum); }
                 $('<span class="ld-meta"></span>')
                     .text('resolved by ' + (f.resolvedBy || '?') + ' · ' + String(f.resolvedAt || '').slice(0, 10)).appendTo($row);
             });
@@ -17182,21 +17247,35 @@ JiTA.leadduty.ui = {
     },
 
     // Take a QC verdict back. A flag asks first, because undoing it also withdraws a follow-up the other Leads
-    // can see; a plain Checked does not, since checking it again is one click. The local mirror is cleared
-    // whatever Confluence says - a mark that never reached the ledger lives only there - and a write that
-    // failed is reported rather than papered over: the reload then shows the verdict still standing.
-    // The outcome line is handed to the redraw (see the end of _renderQc) rather than written here, because the
-    // reload repaints the status line a moment later and would wipe it.
-    _qcNote: null,
-    _undo: function (btn, it, ym, wasFlag, after) {
+    // can see; a plain Checked does not, since checking it again is one click.
+    _undo: function (btn, it, ym, wasFlag, local, after) {
         var L = JiTA.leadduty, U = L.ui;
         if (wasFlag && !confirm('Take back the flag on ' + it.key + '? This also withdraws its follow-up, reason included.')) { return; }
+        U._takeBack(btn, L.qc.uncheck(it.key, ym), L.qc.localKey(ym), it.key, local, it.key + ' is back on your list', '_qcNote', after);
+    },
+
+    // Take a page review or skip back. No confirmation: marking it again is one click.
+    _undoWiki: function (btn, id, ym, title, local, after) {
+        var L = JiTA.leadduty, U = L.ui;
+        U._takeBack(btn, L.wiki.unreview(id, ym), L.wiki.localKey(ym), id, local, '"' + title + '" is back on your list', '_wikiNote', after);
+    },
+
+    // The shared tail of both Undo buttons. The local mirror is cleared whatever Confluence says - a mark that
+    // never reached the ledger lives only there - and the outcome is handed to the redraw (see the end of
+    // _renderWiki / _renderQc) rather than written here, because the reload repaints the status line a moment
+    // later and would wipe it. A write that failed, or one the ledger refused because it changed underneath,
+    // is said as such rather than papered over: the reload then shows the mark still standing.
+    _qcNote: null,
+    _wikiNote: null,
+    _takeBack: function (btn, write, localKey, id, local, okMsg, noteKey, after) {
+        var L = JiTA.leadduty, U = L.ui;
         $(btn).prop('disabled', true);
-        L.qc.uncheck(it.key, ym).then(function (r) { return r || {}; }, function (e) { return { error: e }; }).then(function (r) {
-            return L.local.unmark(L.qc.localKey(ym), it.key).then(function () {
-                if (r.error) { U._qcNote = 'Could not undo on Confluence - ' + String(r.error && r.error.message || r.error); }
-                else if (r.dry) { U._qcNote = 'DRY RUN - not written to Confluence'; }
-                else { U._qcNote = it.key + ' is back on your list'; }
+        write.then(function (r) { return r || {}; }, function (e) { return { error: e }; }).then(function (r) {
+            return L.local.unmark(localKey, id).then(function () {
+                if (r.error) { U[noteKey] = 'Could not undo on Confluence - ' + String(r.error && r.error.message || r.error); }
+                else if (r.dry) { U[noteKey] = 'DRY RUN - not written to Confluence'; }
+                else if (r.written || local) { U[noteKey] = okMsg; }
+                else { U[noteKey] = 'Could not undo - the ledger changed since this was marked, so it is shown as it stands now'; }
                 after();
                 try { L.reminder.mount(); } catch (e2) { /* ignore */ }
             });
@@ -17262,6 +17341,7 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-ghead { display: flex; align-items: center; gap: 10px; padding: 7px 0; }' +
                 '.jita-leadduty-view .ld-gname { color: #e6e6e6; font-weight: 700; font-size: 13px; }' +
                 '.jita-leadduty-view .ld-gcount { color: #7a8694; font-size: 11px; flex: 1 1 auto; }' +
+                '.jita-leadduty-view .ld-outcome { display: block; margin-top: 2px; color: #7fdca4; font-size: 11px; }' +
                 // Applications: a list beside the answers, each scrolling on its own, so walking the queue
                 // never moves the reading pane's scroll position out from under you.
                 '.jita-leadduty-view .ld-apps-wrap { display: flex; gap: 14px; height: 62vh; }' +
