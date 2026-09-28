@@ -1,0 +1,46 @@
+# The gate for main: every pull request runs the full set, and main may only change through a pull request
+# whose "checks" job passed (branch protection). The run on main after a merge repeats the fast part.
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # the version check compares against the base branch
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Static checks (syntax, LF endings, em dashes, version bump)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            node tests/ci-static.js --base "origin/$BASE_REF"
+          else
+            node tests/ci-static.js
+          fi
+
+      - name: Test files
+        run: node tests/run-checks.js
+
+      - name: Deliberate breakages
+        if: github.event_name == 'pull_request'
+        run: node tests/run-breakages.js

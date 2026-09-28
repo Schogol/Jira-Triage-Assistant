@@ -1,0 +1,34 @@
+# Early feedback on every push to a branch, before (or without) a pull request. Not required for merging:
+# the pull request's own "checks" run is the gate.
+name: branch
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: branch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  branch:
+    name: branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Static checks (syntax, LF endings, em dashes, version bump)
+        run: node tests/ci-static.js --base origin/main
+
+      - name: Test files
+        run: node tests/run-checks.js
