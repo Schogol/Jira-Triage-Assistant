@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.34.0
+// @version     3.35.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6474,6 +6474,7 @@ JiTA.ui = {
     modeOverride: null,        // null = automatic (prefer Hybrid); 'Hybrid' / 'Keyword' = user-forced this session
     reporterMode: false,       // EBR view: when on, the panel lists the reporter's OTHER reports instead of similar defects (session-only; reset on navigation)
     simReportsMode: false,     // EBR view: when on, the panel lists OTHER open reports semantically similar to this one (report<->report) instead of similar defects (session-only; reset on navigation; mutually exclusive with reporterMode)
+    trendMode: false,          // EBR view: when on, the panel lists the TRENDING defects (JiTA.trend) instead of similar defects (session-only; reset on navigation; mutually exclusive with the two report views)
     _filterTimer: null,
     _wireFilter: function () {
         if (JiTA.ui._filterWired) { return; }   // one set of delegated handlers survives chrome re-mounts
@@ -6509,6 +6510,44 @@ JiTA.ui = {
         if (!k) { return; }
         if (/^EBR-/.test(k)) { JiTA.ui.render(k); }
         else if (JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k); }
+    },
+    // Double-tap '#' (the launcher at the bottom of the file): flip the panel between the trending defects and the list
+    // it was showing - the funnel's "Trending defects" switch, on a key. The view exists on a bug report only, so
+    // anywhere else this declines (returns false) and the launcher opens the standalone list instead. A collapsed
+    // panel is opened and brought into view first, or the switch would happen where nobody can see it.
+    toggleTrend: function () {
+        var U = JiTA.ui;
+        if (!flagOn('similarDefects') || !/^EBR-/.test(U.currentKey || '') || !U._chromePresent()) { return false; }
+        U.trendMode = !U.trendMode;
+        if (U.trendMode) { U.reporterMode = false; U.simReportsMode = false; }   // mutually exclusive with the report views
+        U._closeFilterMenu();
+        U._reveal();
+        U._syncFilterBtn();
+        U._rerenderCurrent();
+        return true;
+    },
+    // Expand a collapsed panel (persisted, exactly as a click on its header would) and scroll it into view.
+    _reveal: function () {
+        var side = document.getElementById('jita-side-group');
+        if (side) {
+            if (side.classList.contains('collapsed')) {
+                side.classList.remove('collapsed');
+                JiTA.ui._setChevron(side, false);
+                var hdr = side.hasAttribute('aria-expanded') ? side : side.querySelector('[aria-expanded]');
+                if (hdr) { hdr.setAttribute('aria-expanded', 'true'); }
+                gmSet(JiTA.ui.SIDE_COLLAPSE_KEY, false);
+            }
+            try { side.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ }
+            return;
+        }
+        var p = document.getElementById('jita-sd-panel');
+        if (p && p.classList.contains('collapsed')) {
+            p.classList.remove('collapsed');
+            var c = document.getElementById('jita-sd-collapse');
+            if (c) { c.textContent = '–'; }
+            gmSet(JiTA.ui.COLLAPSE_KEY, false);
+            JiTA.ui._fitVertical();
+        }
     },
     // Toggle the session ranking-mode override (Hybrid <-> Keyword) and re-render. No-op (with a hint) when
     // semantic embeddings are unavailable, since Hybrid isn't possible then. `rerender` lets the triage
@@ -6558,7 +6597,7 @@ JiTA.ui = {
         var f = JiTA.ui.filters;
         if (!f) { return false; }
         var status = ctx ? !!ctx.status : /^EBR-/.test(JiTA.ui.currentKey || '');
-        if (!ctx && status && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode)) { return true; }   // a report<->report view (reporter's reports / similar reports) is active
+        if (!ctx && status && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode)) { return true; }   // a view (reporter's reports / similar reports / trending) is active
         return !!((status && f.status && f.status !== 'all') || f.createdDays > 0);
     },
 
@@ -6590,8 +6629,9 @@ JiTA.ui = {
         var menu = document.createElement('div');
         menu.id = 'jita-sd-filtermenu';
 
-        // EBR-view view-switches (both swap the similar-defects list for a report<->report view, and back). They
-        // are mutually exclusive, and while either is active the ranking filters below don't apply, so they're hidden.
+        // EBR-view view-switches. Each swaps the similar-defects list for another list, and back: two report<->report
+        // views, and the trending defects. They are mutually exclusive, and while any is active the ranking filters
+        // below don't apply, so they're hidden.
         if (views) {
             // Reporter's-other-reports (a LIVE Jira search for every other report by the same Original Reporter).
             var vb = document.createElement('button');
@@ -6600,7 +6640,7 @@ JiTA.ui = {
             vb.textContent = JiTA.ui.reporterMode ? '← Back to similar defects' : '⚑ This reporter’s other reports';
             vb.addEventListener('click', function () {
                 JiTA.ui.reporterMode = !JiTA.ui.reporterMode;
-                if (JiTA.ui.reporterMode) { JiTA.ui.simReportsMode = false; }   // the two report views are mutually exclusive
+                if (JiTA.ui.reporterMode) { JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false; }   // the views are mutually exclusive
                 JiTA.ui._closeFilterMenu();
                 syncBtn();
                 rerender();
@@ -6615,15 +6655,31 @@ JiTA.ui = {
             sb.textContent = JiTA.ui.simReportsMode ? '← Back to similar defects' : '⧉ Similar open reports';
             sb.addEventListener('click', function () {
                 JiTA.ui.simReportsMode = !JiTA.ui.simReportsMode;
-                if (JiTA.ui.simReportsMode) { JiTA.ui.reporterMode = false; }   // mutually exclusive with the reporter view
+                if (JiTA.ui.simReportsMode) { JiTA.ui.reporterMode = false; JiTA.ui.trendMode = false; }   // mutually exclusive with the other views
                 JiTA.ui._closeFilterMenu();
                 syncBtn();
                 rerender();
             });
             menu.appendChild(sb);
+
+            // Trending defects: every defect that several recently filed reports got attached to, most first (see
+            // JiTA.trend). Not a ranking against this report - it answers "what are players hitting right now".
+            var tb = document.createElement('button');
+            tb.type = 'button';
+            tb.className = 'jita-fm-view' + (JiTA.ui.trendMode ? ' on' : '');
+            tb.textContent = JiTA.ui.trendMode ? '← Back to similar defects' : '🔥 Trending defects';
+            tb.title = 'Double-tap # to switch to it and back';
+            tb.addEventListener('click', function () {
+                JiTA.ui.trendMode = !JiTA.ui.trendMode;
+                if (JiTA.ui.trendMode) { JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; }   // mutually exclusive with the report views
+                JiTA.ui._closeFilterMenu();
+                syncBtn();
+                rerender();
+            });
+            menu.appendChild(tb);
         }
 
-        if (!(views && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode))) {
+        if (!(views && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode))) {
         if (status) {
             var sl = document.createElement('div'); sl.className = 'jita-fm-label'; sl.textContent = 'Status'; menu.appendChild(sl);
             var seg = document.createElement('div'); seg.className = 'jita-fm-seg';
@@ -6678,7 +6734,7 @@ JiTA.ui = {
             rerender();
         });
         menu.appendChild(reset);
-        }   // end !reporterMode (ranking filters hidden while showing the reporter's other reports)
+        }   // end of the ranking filters (hidden while a view is on)
 
         document.body.appendChild(menu);
         // Position under the funnel, clamped to the viewport (flip above if it would overflow the bottom).
@@ -7679,11 +7735,14 @@ JiTA.ui = {
     // put). `action(key)` returns the trailing control ($ Mark-dup on the EBR view, Attach on the report view).
     // The staleNote / stale-class bits fire only for stale-demoted defect matches (undefined on reports), and
     // data-jita-key (read by the report view's incremental attach/slide-in) is harmless on the EBR view.
+    // opts.score replaces the relevance % with a text of its own (the trending view's report count); r.note is
+    // appended to the meta line. Every other row gets the 🔥 badge when its defect is trending.
     _row: function (r, target, action, opts) {
         var pct = (typeof r.pct === 'number') ? r.pct : 0;
         var meta = r.status || '';
         if (r.resolution) { meta += (meta ? ' · ' : '') + r.resolution; }
         if (r.staleNote) { meta += (meta ? ' · ' : '') + r.staleNote; }   // Feature A: explain the demotion
+        if (r.note) { meta += (meta ? ' · ' : '') + r.note; }             // trending: how the count compares, reports after a fix
         var $li = $('<li></li>').attr('data-jita-key', r.key);
         if (r.stale) { $li.addClass('jita-sd-stale'); }                    // Feature A: grey out stale-closed matches
         // Feature C: hover preview - a styled card (built in _showTip) showing the summary, full description
@@ -7691,7 +7750,12 @@ JiTA.ui = {
         $li.on('mouseenter', function () { JiTA.ui._showTip(r, this, meta); });
         $li.on('mouseleave', function () { JiTA.ui._hideTip(); });
         $('<a></a>').attr('href', '/browse/' + r.key).attr('target', target).text(r.key).appendTo($li);
-        if (!(opts && opts.noScore)) { $('<span class="jita-sd-score"></span>').text(pct + '%').appendTo($li); }   // reporter-list rows have no relevance score
+        if (opts && opts.score) { $('<span class="jita-sd-score"></span>').text(opts.score).appendTo($li); }
+        else {
+            var hot = JiTA.trend.badge(r.key);   // a defect players are hitting right now (nothing for a report key)
+            if (hot) { hot.appendTo($li); }
+            if (!(opts && opts.noScore)) { $('<span class="jita-sd-score"></span>').text(pct + '%').appendTo($li); }   // reporter-list rows have no relevance score
+        }
         action(r.key).appendTo($li);
         $('<div class="jita-sd-sum"></div>').text(r.summary || '').appendTo($li);
         if (meta) { $('<div class="jita-sd-meta"></div>').text(meta).appendTo($li); }
@@ -7714,6 +7778,13 @@ JiTA.ui = {
     // control, since you can't attach one report to another (both sides are reports).
     _simReportItem: function (r) {
         return JiTA.ui._row(r, '_blank', function () { return $(); });
+    },
+
+    // EBR "trending defects" row: link navigates in place, trailing control attaches the open report to it (it is a
+    // defect), and the report count stands where the relevance % would be.
+    _trendItem: function (r) {
+        return JiTA.ui._row(r, '_self', function (k) { return JiTA.ui._markDupButton(k); },
+            { score: r.count + ' in ' + JiTA.trend.WINDOW_DAYS + 'd' });
     },
 
     // Read the open issue's text from the DOM (reusing the Translate selectors); fall back to a REST GET.
@@ -7943,7 +8014,7 @@ JiTA.ui = {
         var s = JiTA.ui._snapshot;
         // Skip in the report<->report view modes: those views are computed/searched fresh (never snapshotted), so a
         // stale similar-defects snapshot would flash the wrong list before they clear it. Let them rebuild clean instead.
-        if (!s || s.key !== JiTA.ui.currentKey || JiTA.ui.reporterMode || JiTA.ui.simReportsMode) { return; }
+        if (!s || s.key !== JiTA.ui.currentKey || JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode) { return; }
         var list = document.getElementById('jita-sd-list');
         if (!list) { return; }
         list.innerHTML = s.list;
@@ -7979,12 +8050,16 @@ JiTA.ui = {
     // `background` (set only by scheduleRender, i.e. a data-driven refresh): keep the current list on screen
     // and only swap in the new results when they're ready, instead of emptying to a "Finding…" state first.
     render: function (key, background) {
-        // View-mode switches (both EBR-only funnel toggles): swap the similar-defects list for a report<->report
-        // view - the reporter's OTHER reports, or OPEN reports similar to this one. Every re-render path funnels
-        // through here, so the branches live here (one chokepoint) rather than at each caller.
+        // View-mode switches (all three EBR-only funnel toggles): swap the similar-defects list for another list -
+        // the reporter's OTHER reports, OPEN reports similar to this one, or the trending defects. Every re-render
+        // path funnels through here, so the branches live here (one chokepoint) rather than at each caller.
         if (JiTA.ui.reporterMode) { return JiTA.ui.renderReporterReports(key); }
         if (JiTA.ui.simReportsMode) { return JiTA.ui.renderSimilarReports(key, background); }
+        if (JiTA.ui.trendMode) { return JiTA.ui.renderTrending(key, background); }
         JiTA.ui._ensurePanel();
+        // The 🔥 badges come from a cached count. If it is missing or stale it is fetched now, and the list repaints
+        // once when it lands so the rows pick the badges up.
+        JiTA.trend.warm(function () { JiTA.ui.scheduleRender(); });
         JiTA.ui._syncFilterBtn();   // reflect any active session filters on the funnel
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Similar defects');   // reset title (the panel is shared with the EDR reports view)
@@ -8159,6 +8234,45 @@ JiTA.ui = {
         }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
     },
 
+    // EBR view, "trending defects" mode (funnel toggle): swap the similar defects for every defect that recently
+    // filed reports keep getting attached to, most first (see JiTA.trend). Not ranked against this report at all -
+    // it answers "what are players hitting right now" - so there is no ranking mode, and the ranking filters are
+    // hidden; the filter box still narrows it by key and summary. Each row keeps its Attach control, since these
+    // are defects and the open issue is a report. Like the report views it is never snapshotted.
+    renderTrending: function (key, background) {
+        var T = JiTA.trend;
+        JiTA.ui._ensurePanel();
+        JiTA.ui._syncFilterBtn();
+        var terms = JiTA.ui._filterTerms();
+        $('#jita-sd-title').text('Trending defects');
+        $('#jita-sd-mode').text('');                                  // no ranking mode in this view
+        $('#jita-sd-loglink').removeClass('has-hits').empty();        // similar-defects-only section
+        $('#jita-sd-exccluster').removeClass('has-hits').empty();     // defect-only section
+        if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Counting recently attached reports…'); }
+        T._injectCss();
+        T.rows(false).then(function (res) {
+            if (JiTA.ui.currentKey !== key || !JiTA.ui.trendMode) { return; }   // navigated / toggled off meanwhile
+            var rows = res.rows.filter(function (r) { return T.matches(r, terms); });
+            var $list = $('#jita-sd-list');
+            $list.empty();   // clear atomically right before filling (see render())
+            var when = 'updated ' + T.ago(res.at);
+            if (!rows.length) {
+                JiTA.ui.setStatus((res.rows.length ? 'No trending defect matches the filter'
+                    : 'No defect got ' + T.MIN + ' or more reports in the last ' + T.WINDOW_DAYS + ' days') + ' · ' + when);
+                return;
+            }
+            JiTA.ui.setStatus(rows.length + ' defect' + (rows.length === 1 ? '' : 's') + ' with ' + T.MIN + '+ reports in ' +
+                T.WINDOW_DAYS + ' days · ' + when);
+            for (var i = 0; i < rows.length; i++) { $list.append(JiTA.ui._trendItem(rows[i])); }
+            JiTA.ui._fitVertical();
+        }).catch(function (e) {
+            if (JiTA.ui.currentKey !== key || !JiTA.ui.trendMode) { return; }
+            JiTA.ui.setStatusAction('Could not count trending defects: ' + (e && e.message || e), 'Retry', function () {
+                T.ensure(true).then(function () { JiTA.ui._rerenderCurrent(); }, function () { JiTA.ui._rerenderCurrent(); });
+            });
+        });
+    },
+
     // Wrap a value as a JQL string literal (escape backslashes + double-quotes).
     _jqlQuote: function (s) { return '"' + String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'; },
 
@@ -8289,6 +8403,7 @@ JiTA.ui = {
         if (JiTA.ui.currentKey !== key) {
             JiTA.ui.reporterMode = false;    // new issue -> leave the reporter-reports view (its reporter is per-issue)
             JiTA.ui.simReportsMode = false;  // new issue -> leave the similar-open-reports view (session-only, per-issue)
+            JiTA.ui.trendMode = false;       // new issue -> back to its similar defects (the trending list is one funnel click away)
         }
         JiTA.ui.currentKey = key;
         if (isEbr) {
@@ -10409,9 +10524,11 @@ function jitaWorkerBody(cfg) {
  * as the sidebar panel), so stepping through the queue does no per-issue Jira navigation; the NEXT report's
  * matches are prefetched while you act on the current one, making ↓ effectively instant. The matches column
  * carries the panel's own controls (text box, funnel, ranking-mode badge) over the same JiTA.ui.filters /
- * modeOverride / reporterMode / simReportsMode, so the two behave identically - including the funnel's two
- * report<->report views (this reporter's other reports, similar open reports), which the bug-report queue
- * offers and the defect queue does not, since there the issue on screen is a defect.
+ * modeOverride / reporterMode / simReportsMode / trendMode, so the two behave identically - including the
+ * funnel's three views: two report<->report ones (this reporter's other reports, similar open reports) and the
+ * trending defects (JiTA.trend), which the bug-report queue offers and the defect queue does not, since there
+ * the issue on screen is a defect. Trending rows are defects, so the digits attach to them. Double-tap '#' switches to
+ * the trending view and back without opening the funnel.
  *
  * Actions (per Schogol): 1-9 attach to a ranked defect match (number row or numpad), T close as Won't Do, G convert to GM
  * support (category picked with 1-4; the optional internal GM note is page-DOM-bound and deliberately not
@@ -10489,7 +10606,7 @@ JiTA.triage = {
         T._injectCss();
         // Open on the defect matches whatever report<->report view the panel was last left in: these are
         // JiTA.ui's session flags, shared with the panel, and the head bar below is built from them.
-        JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false;
+        JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false;
         var ov = JiTA.menu._openOverlay({ title: 'Triage mode', wide: false });
         ov.$menu.addClass('jita-triage-view');
         var $m = ov.$menu;
@@ -10552,6 +10669,11 @@ JiTA.triage = {
         T._fetchQueue().then(function () {
             if (!T._trySeekResume()) { T._render(); T._prefetch(); }   // resume positions + renders itself when it can
         });
+        // The 🔥 badges on the matches come from a cached count. If it is missing or stale it is fetched now, and the
+        // report on screen repaints once when it lands - unless something is in progress on it.
+        JiTA.trend.warm(function () {
+            if (T._open && !T._busy && !T._armed && !T._gmPick && T._queue[T._idx]) { T._render(); }
+        });
     },
 
     close: function () { JiTA.menu.close(); },   // observer does the teardown
@@ -10569,7 +10691,7 @@ JiTA.triage = {
         if (T._filterTimer) { clearTimeout(T._filterTimer); T._filterTimer = null; }
         // The report<->report views are JiTA.ui's own session flags, shared with the panel - leaving one set
         // would hand the panel underneath a view the user turned on inside triage.
-        JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false;
+        JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false;
         T._flushPos();   // a debounced resume point still in flight must not be lost by closing the overlay
         // _rows holds a DOM node per queue item. The overlay is gone, but JiTA.triage is a singleton that
         // lives as long as the tab, so leaving them behind would keep thousands of detached nodes reachable
@@ -10718,6 +10840,15 @@ JiTA.triage = {
             if (view === 'reporter') {
                 return T._reporterResults(key).then(function (rr) {
                     return { rec: base.rec, text: base.text, mode: '', results: rr.rows, view: view, noId: rr.noId };
+                });
+            }
+            // Nor is the trending view: the same list for every report, most-reported first, narrowed only by the
+            // filter box. It is one cached count, so a neighbour's prefetch costs nothing.
+            if (view === 'trending') {
+                var tterms = JiTA.ui._filterTerms();
+                return JiTA.trend.rows(false).then(function (tr) {
+                    return { rec: base.rec, text: base.text, mode: '', view: view,
+                        results: tr.rows.filter(function (r) { return JiTA.trend.matches(r, tterms); }) };
                 });
             }
             // Bug-report mode ranks DEFECTS for the report (suggestBest); Defect mode - and the similar-open-
@@ -11053,14 +11184,19 @@ JiTA.triage = {
             $mat.empty();
             $('#jt-mode').text(res.mode || '');   // the head bar is a sibling of this list, so it survives the empty()
             // In either report<->report view the rows are REPORTS, so no digit can attach them (you cannot
-            // attach one report to another) and the reporter list carries no relevance score to show.
-            var view = res.view || null, noAttach = !!view;
+            // attach one report to another) and the reporter list carries no relevance score to show. The trending
+            // view lists DEFECTS, so its digits attach exactly as the ranked matches do.
+            var view = res.view || null, noAttach = view === 'reporter' || view === 'simreports';
             if (!res.results.length) {
                 var none;
                 if (view === 'reporter') { none = res.noId ? 'This report has no Original Reporter ID, so its reporter\'s other reports cannot be found.' : 'No other reports from this reporter.'; }
                 else if (view === 'simreports') { none = 'No similar open reports found.'; }
+                else if (view === 'trending') {
+                    none = JiTA.ui._filterTerms().length ? 'No trending defect matches the filter text above.'
+                        : 'No defect got ' + JiTA.trend.MIN + ' or more reports in the last ' + JiTA.trend.WINDOW_DAYS + ' days.';
+                }
                 else { none = T._mode === 'defect' ? 'No matching open bug reports found.' : 'No similar defects found.'; }
-                if (view !== 'reporter' && (JiTA.ui._filterTerms().length || JiTA.ui._filtersActive({ status: T._mode !== 'defect' }))) {
+                if (view !== 'reporter' && view !== 'trending' && (JiTA.ui._filterTerms().length || JiTA.ui._filtersActive({ status: T._mode !== 'defect' }))) {
                     none += ' The filters above are narrowing the candidates - clear them to widen the search.';
                 }
                 $('<div class="jt-empty"></div>').text(none).appendTo($mat);
@@ -11075,8 +11211,16 @@ JiTA.triage = {
                     if (noAttach) { $n.addClass('jt-n-nokey').attr('title', 'No hotkey - these are bug reports, and a report cannot be attached to another report'); }
                     else if (n > T.MATCH_KEYS) { $n.addClass('jt-n-nokey').attr('title', 'No hotkey - only matches 1-' + T.MATCH_KEYS + ' are digit-addressable'); }
                     $('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + r.key).text(r.key).appendTo($li);
-                    if (view !== 'reporter') { $('<span class="jt-pct"></span>').text((typeof r.pct === 'number' ? r.pct : 0) + '%').appendTo($li); }
+                    // The trending view shows each defect's report count where the relevance % would be; every other
+                    // row carries the 🔥 when its defect is trending.
+                    if (view === 'trending') { $('<span class="jt-pct"></span>').text(r.count + ' in ' + JiTA.trend.WINDOW_DAYS + 'd').appendTo($li); }
+                    else {
+                        var hot = JiTA.trend.badge(r.key);
+                        if (hot) { hot.appendTo($li); }
+                        if (view !== 'reporter') { $('<span class="jt-pct"></span>').text((typeof r.pct === 'number' ? r.pct : 0) + '%').appendTo($li); }
+                    }
                     var meta = r.status || ''; if (r.resolution) { meta += (meta ? ' · ' : '') + r.resolution; }
+                    if (r.note) { meta += (meta ? ' · ' : '') + r.note; }
                     // The reporter list is chronological rather than ranked, so WHEN each one was filed is
                     // the thing you read it by ("they have reported this three times since March").
                     if (view === 'reporter') {
@@ -11181,6 +11325,20 @@ JiTA.triage = {
     },
 
     // ---- key layer --------------------------------------------------------------------------------------------
+    // Double-tap '#': the trending defects, and back - the funnel's switch, on a key. The trending rows are defects to
+    // attach the report to, so the defect queue (whose issue on screen is itself a defect) has no use for it.
+    _lastHash: 0,
+    _hashKey: function () {
+        var T = JiTA.triage, U = JiTA.ui, now = Date.now();
+        if (now - T._lastHash >= 400) { T._lastHash = now; return; }   // the first tap only arms it, as on the page
+        T._lastHash = 0;
+        if (T._mode === 'defect') { T._setMsg('Trending defects go with the bug-report queue - press ← to switch to it.', true); return; }
+        U.trendMode = !U.trendMode;
+        if (U.trendMode) { U.reporterMode = false; U.simReportsMode = false; }   // mutually exclusive with the report views
+        try { U._closeFilterMenu(); } catch (e) { /* ignore */ }
+        T._onFilterChange();
+    },
+
     _onKey: function (e) {
         var T = JiTA.triage;
         if (!T._open) { return; }
@@ -11232,7 +11390,8 @@ JiTA.triage = {
         if (k === 'End') { T._goTo(Math.max(0, T._queue.length - 1)); return; }
         if (k === 'PageDown') { T._goTo(Math.min(Math.max(0, T._queue.length - 1), T._idx + 10)); return; }
         if (k === 'PageUp') { T._goTo(Math.max(0, T._idx - 10)); return; }
-        if (!item) { return; }   // end-of-queue: only navigation applies
+        if (k === '#') { T._hashKey(); return; }   // above the end-of-queue guard: switching the view works there too
+        if (!item) { return; }   // end-of-queue: only navigation and the view switch apply
         if (T._mode === 'defect' && (k === 't' || k === 'T' || k === 'g' || k === 'G' || k === 'e' || k === 'E')) { T._setMsg('T / G / E act on bug reports - press ← to switch to the bug-report queue.', true); return; }
         if (k === 'o' || k === 'O') { try { window.open('/browse/' + item.key, '_blank'); } catch (e2) { /* ignore */ } return; }
         if (k === 'e' || k === 'E') { T._toggleTranslate(); return; }
@@ -11241,8 +11400,10 @@ JiTA.triage = {
         if (k === 'g' || k === 'G') { T._gmKey(); return; }   // category picker (no pre-gate is possible - see _gmKey)
         if (k >= '1' && k <= '9') {
             // Both report<->report views list REPORTS, and a report cannot be attached to another report -
-            // so the digits have nothing to act on rather than something dangerous to act on.
-            if (T._view()) { T._setMsg('These rows are bug reports - a report can only be attached to a defect. Use the funnel to go back to the defect matches.', true); return; }
+            // so the digits have nothing to act on rather than something dangerous to act on. The trending view
+            // lists defects, so the digits work there.
+            var tv = T._view();
+            if (tv === 'reporter' || tv === 'simreports') { T._setMsg('These rows are bug reports - a report can only be attached to a defect. Use the funnel to go back to the defect matches.', true); return; }
             T._armAttach(parseInt(k, 10), k);   // number row AND numpad both yield '1'-'9' in e.key
             return;
         }
@@ -11257,7 +11418,7 @@ JiTA.triage = {
             if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== item.key) { return; }
             var m = r.results[n - 1];
             if (!m) { T._setMsg('No match #' + n + '.', true); return; }
-            T._arm({ type: 'attach', n: n, matchKey: m.key, label: (T._mode === 'defect' ? 'Attach ' + m.key + ' to this defect ' + item.key : 'Attach ' + item.key + ' to ' + m.key) + ' (#' + n + ', ' + (m.pct || 0) + '%)', again: pressedKey.toUpperCase() });
+            T._arm({ type: 'attach', n: n, matchKey: m.key, label: (T._mode === 'defect' ? 'Attach ' + m.key + ' to this defect ' + item.key : 'Attach ' + item.key + ' to ' + m.key) + ' (#' + n + ', ' + (m.count ? m.count + ' reports in ' + JiTA.trend.WINDOW_DAYS + ' days' : (m.pct || 0) + '%') + ')', again: pressedKey.toUpperCase() });
         }).catch(function () { T._setMsg('Ranking failed for this report - O opens it in Jira.', true); });
     },
 
@@ -11569,6 +11730,7 @@ JiTA.triage = {
         if (JiTA.triage._mode === 'defect') { return null; }   // the issue on screen is a defect: neither view applies
         if (JiTA.ui.reporterMode) { return 'reporter'; }
         if (JiTA.ui.simReportsMode) { return 'simreports'; }
+        if (JiTA.ui.trendMode) { return 'trending'; }
         return null;
     },
 
@@ -11576,6 +11738,7 @@ JiTA.triage = {
         var T = JiTA.triage, v = T._view();
         if (v === 'reporter') { return 'Reports by this reporter'; }
         if (v === 'simreports') { return 'Similar open reports'; }
+        if (v === 'trending') { return 'Trending defects'; }
         return T._mode === 'defect' ? 'Matching open bug reports' : 'Defect matches';
     },
 
@@ -11688,9 +11851,10 @@ JiTA.triage = {
         T._qGen++;
         T._stash[T._mode] = { queue: T._queue, idx: T._idx, done: T._queueDone, error: T._queueError };
         T._mode = to;
-        // Neither report<->report view survives the move to the defect queue: the issue on screen becomes a
-        // defect, which has no reporter of its own and nothing to match report-to-report against.
-        if (to === 'defect') { JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; }
+        // None of the funnel's views survives the move to the defect queue: the issue on screen becomes a defect,
+        // which has no reporter of its own, nothing to match report-to-report against, and nothing a trending
+        // defect could be attached to.
+        if (to === 'defect') { JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false; }
         T._syncModeUi(); T._renderLegend();
         var s = T._stash[T._mode];
         if (s && s.done && !s.error && s.queue.length) {
@@ -11721,7 +11885,7 @@ JiTA.triage = {
         if (!el) { return; }
         el.innerHTML = (T._mode === 'defect')
             ? '<span><b>1-9</b> Attach report #n to this defect (number row or numpad)</span><span><b>↑</b>/<b>↓</b> Prev/next (or K/J, or click a card)</span><span><b>←</b> Bug-report queue</span><span><b>O</b> Open in Jira</span><span><b>Esc</b> Exit</span>'
-            : '<span><b>1-9</b> Attach match #n (number row or numpad)</span><span><b>T</b> Trash (Won\'t Do)</span><span><b>G</b> To GM</span><span><b>E</b> Translate</span><span><b>↑</b>/<b>↓</b> Prev/next (or K/J, or click a card)</span><span><b>→</b> Defect queue</span><span><b>O</b> Open in Jira</span><span><b>Esc</b> Exit</span>';
+            : '<span><b>1-9</b> Attach match #n (number row or numpad)</span><span><b>T</b> Trash (Won\'t Do)</span><span><b>G</b> To GM</span><span><b>E</b> Translate</span><span><b>##</b> Trending defects</span><span><b>↑</b>/<b>↓</b> Prev/next (or K/J, or click a card)</span><span><b>→</b> Defect queue</span><span><b>O</b> Open in Jira</span><span><b>Esc</b> Exit</span>';
     },
 
     // ---- queue JQL editor (JQL button; edits whichever queue is on screen) ---------------------------------------
@@ -12275,6 +12439,385 @@ JiTA.dupfind = {
             );
         } catch (e) { /* ignore */ }
     }
+};
+
+
+/* ---- Trending defects: which defects are players hitting right now ------------------------------------------
+ * A defect that a lot of recently filed bug reports got attached to is the likeliest match for the next report,
+ * and a sudden jump is what is worth raising with the developers. Counted from Jira, not the local database:
+ * attaching a report closes it, and the local database keeps OPEN reports only, so an attached report is
+ * exactly the one it no longer has.
+ *
+ * One search does it: every report in status Attached created in the last WINDOW_DAYS + BASE_DAYS days, with its
+ * issue links, each counted against the defect it is linked to as a duplicate. Counted by when the report was
+ * CREATED, never when it was attached: attach dates follow our triage pace, so clearing an old backlog would look
+ * like a spike that never happened, while creation dates follow when players actually hit the bug. The price is
+ * a lag - a report nobody has triaged yet is not linked yet, so it does not count yet.
+ *
+ * Cached in the meta store for an hour and refreshed on use (the panel, triage, the list), under a cross-tab
+ * lease so several open tabs do not all run the same search. Shown in three places: a view in the funnel menu
+ * (panel and triage), which a double-tap of '#' also switches to and back; a standalone list with a per-day chart,
+ * which the same double-tap opens wherever there is no panel view to switch; and a 🔥 badge on every defect row
+ * that clears MIN.
+ */
+JiTA.trend = {
+    V: 1,                       // cached-record shape: a record of another shape is refetched, never misread
+    WINDOW_DAYS: 14,            // "recent": what a defect is listed, sorted and badged by
+    BASE_DAYS: 28,              // the stretch before it, which the trend compares against
+    MIN: 5,                     // reports in the window before a defect counts as trending
+    AFTER_FIX_MIN: 2,           // reports filed after a defect's fix before its row says so
+    TTL_MS: 60 * 60 * 1000,     // how long a count is served before it is redone
+    STALE_MS: 24 * 60 * 60 * 1000,   // older than this, no badge is drawn from it: yesterday's news is worse than none
+    FAIL_MS: 5 * 60 * 1000,     // after a failed count, wait this long before trying again on its own
+    LEASE_MS: 5 * 60 * 1000,
+    MAX_REPORTS: 5000,          // a search that runs away (a wrong status name, a mass import) stops here
+    CACHE_KEY: 'trending',
+    LEASE_KEY: 'trendLease',
+    DAY_MS: 24 * 60 * 60 * 1000,
+    DEFECT_RE: /^(EDR|EO|PLAT)-\d+$/,
+    LABEL: { 'new': '★ new', up: '↑ rising', steady: '→ steady', down: '↓ falling' },
+    _data: null,
+    _busy: null,
+    _error: null,
+    _failAt: 0,
+
+    _fresh: function (d) {
+        return !!(d && d.v === JiTA.trend.V && (Date.now() - d.at) < JiTA.trend.TTL_MS);
+    },
+    _leaseFree: function () {
+        var l = gmGet(JiTA.trend.LEASE_KEY, null);
+        return !l || !l.ts || (Date.now() - l.ts) > JiTA.trend.LEASE_MS || l.tabId === JiTA.sched.tabId;
+    },
+    _take: function () { gmSet(JiTA.trend.LEASE_KEY, { tabId: JiTA.sched.tabId, ts: Date.now() }); },
+    _release: function () {
+        var l = gmGet(JiTA.trend.LEASE_KEY, null);
+        if (l && l.tabId === JiTA.sched.tabId) { gmSet(JiTA.trend.LEASE_KEY, null); }
+    },
+
+    // The current count: from memory when fresh, else from the meta store (another tab may have refreshed it), else
+    // counted again. One count at a time per tab, and one per browser while the lease holds - a tab that finds
+    // another one counting serves what it already has. A failed count keeps serving the last good one.
+    ensure: function (force) {
+        var T = JiTA.trend;
+        if (!force && T._fresh(T._data)) { return Promise.resolve(T._data); }
+        if (T._busy) { return T._busy; }
+        var p = JiTA.db.getMeta(T.CACHE_KEY).catch(function () { return null; }).then(function (cached) {
+            if (cached && cached.v === T.V && (!T._data || cached.at > T._data.at)) { T._data = cached; }
+            if (!force && T._fresh(T._data)) { return T._data; }
+            if (!force && T._failAt && (Date.now() - T._failAt) < T.FAIL_MS) {
+                if (T._data) { return T._data; }
+                throw new Error(T._error || 'the last count failed');
+            }
+            if (!force && T._data && !T._leaseFree()) { return T._data; }   // another tab is counting right now
+            T._take();
+            return T._fetch().then(function (d) {
+                T._data = d; T._error = null; T._failAt = 0;
+                T._release();
+                return JiTA.db.setMeta(T.CACHE_KEY, d).then(function () { return d; }, function () { return d; });
+            }, function (e) {
+                T._release();
+                T._error = String(e && e.message || e);
+                T._failAt = Date.now();
+                if (T._data) { return T._data; }
+                throw e;
+            });
+        });
+        T._busy = p.then(function (d) { T._busy = null; return d; }, function (e) { T._busy = null; throw e; });
+        return T._busy;
+    },
+
+    _fetch: function () {
+        var T = JiTA.trend, days = T.WINDOW_DAYS + T.BASE_DAYS;
+        var jql = 'project = EBR AND status = Attached AND created >= -' + days + 'd ORDER BY created DESC';
+        return Promise.resolve(JiTA.link.dupInfo()).catch(function () { return null; }).then(function (info) {
+            var issues = [];
+            function page(token) {
+                var body = { jql: jql, fields: ['created', 'issuelinks'], maxResults: JiTA.PAGE_SIZE };
+                if (token) { body.nextPageToken = token; }
+                return JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
+                    var d = (r && r.data) || {};
+                    issues = issues.concat(d.issues || []);
+                    if (!d.nextPageToken || d.isLast || issues.length >= T.MAX_REPORTS) { return null; }
+                    return JiTA.util.delay(JiTA.PAGE_DELAY_MS).then(function () { return page(d.nextPageToken); });
+                });
+            }
+            return page(null).then(function () { return T._aggregate(issues, info && info.name, Date.now()); });
+        });
+    },
+
+    // Reports -> { v, at, reports, defects: { key: { key, summary, status, recent: [created...], base } } }. A report
+    // counts once per defect. The duplicate link is preferred, since that is what attaching creates; a report with
+    // none (attached through some other link type) falls back to every defect it links to, so it is not lost.
+    // Links to other bug reports never count. Only defects with a report in the window are kept.
+    _aggregate: function (issues, dupType, now) {
+        var T = JiTA.trend, win = T.WINDOW_DAYS * T.DAY_MS, span = (T.WINDOW_DAYS + T.BASE_DAYS) * T.DAY_MS;
+        var defects = {}, reports = 0, i, j, k;
+        for (i = 0; i < (issues || []).length; i++) {
+            var f = (issues[i] && issues[i].fields) || {}, t = Date.parse(f.created);
+            if (isNaN(t)) { continue; }
+            var age = Math.max(0, now - t);
+            if (age >= span) { continue; }
+            var dup = [], any = [], links = f.issuelinks || [];
+            for (j = 0; j < links.length; j++) {
+                var o = links[j].outwardIssue || links[j].inwardIssue;
+                if (!o || !T.DEFECT_RE.test(o.key || '')) { continue; }
+                any.push(o);
+                if (dupType && links[j].type && links[j].type.name === dupType) { dup.push(o); }
+            }
+            var use = dup.length ? dup : any, seen = {};
+            if (use.length) { reports++; }
+            for (k = 0; k < use.length; k++) {
+                var key = use[k].key;
+                if (seen[key]) { continue; }
+                seen[key] = true;
+                var of = use[k].fields || {};
+                var d = defects[key] || (defects[key] = {
+                    key: key, summary: of.summary || '', status: (of.status && of.status.name) || '', recent: [], base: 0
+                });
+                if (age < win) { d.recent.push(f.created); } else { d.base++; }
+            }
+        }
+        Object.keys(defects).forEach(function (key) { if (!defects[key].recent.length) { delete defects[key]; } });
+        return { v: T.V, at: now, reports: reports, defects: defects };
+    },
+
+    // How the window compares with the stretch before it, scaled to the same length. 'new' = none at all before.
+    trendOf: function (n, base) {
+        var usual = base * JiTA.trend.WINDOW_DAYS / JiTA.trend.BASE_DAYS;
+        if (!base) { return 'new'; }
+        if (n >= 2 * usual) { return 'up'; }
+        if (n <= usual / 2) { return 'down'; }
+        return 'steady';
+    },
+    usual: function (base) { return Math.round(base * JiTA.trend.WINDOW_DAYS / JiTA.trend.BASE_DAYS); },
+
+    // Every defect with MIN or more reports in the window: most reports first, then the most recent report, then key.
+    hot: function (data) {
+        var T = JiTA.trend, out = [], defs = (data && data.defects) || {};
+        Object.keys(defs).forEach(function (key) {
+            var d = defs[key], n = d.recent.length;
+            if (n < T.MIN) { return; }
+            var last = d.recent.reduce(function (a, b) { return a > b ? a : b; }, '');
+            out.push({ key: d.key, project: d.key.split('-')[0], summary: d.summary, status: d.status,
+                count: n, base: d.base, trend: T.trendOf(n, d.base), times: d.recent.slice(), last: last });
+        });
+        out.sort(function (a, b) {
+            if (a.count !== b.count) { return b.count - a.count; }
+            if (a.last !== b.last) { return a.last < b.last ? 1 : -1; }
+            return a.key < b.key ? -1 : 1;
+        });
+        return out;
+    },
+
+    // Reports per day across the window, oldest day first; the last bucket is the 24 hours before `at`.
+    days: function (times, at) {
+        var T = JiTA.trend, out = [], i;
+        for (i = 0; i < T.WINDOW_DAYS; i++) { out.push(0); }
+        (times || []).forEach(function (iso) {
+            var ago = Math.floor(Math.max(0, at - Date.parse(iso)) / T.DAY_MS);
+            if (ago < T.WINDOW_DAYS) { out[T.WINDOW_DAYS - 1 - ago]++; }
+        });
+        return out;
+    },
+
+    // Reports filed after the defect was resolved: a regression, or a fix that has not shipped yet. Only meaningful
+    // while the defect IS resolved - a reopened one is simply open again.
+    afterFix: function (r) {
+        if (!r.resolutiondate || !JiTA.util.isResolved(r.status, r.resolution)) { return 0; }
+        var fixed = Date.parse(r.resolutiondate);
+        if (isNaN(fixed)) { return 0; }
+        return (r.times || []).filter(function (iso) { return Date.parse(iso) > fixed; }).length;
+    },
+
+    note: function (r) {
+        var T = JiTA.trend, bits = [];
+        if (r.trend === 'new') { bits.push('new: none in the ' + T.BASE_DAYS + ' days before'); }
+        else { bits.push({ up: 'rising', steady: 'steady', down: 'falling' }[r.trend]); }
+        if (r.afterFix >= T.AFTER_FIX_MIN) { bits.push('⚠ ' + r.afterFix + ' filed after the fix'); }
+        return bits.join(' · ');
+    },
+
+    // The trending rows, enriched from the local database (description for the hover card, resolution for the
+    // after-the-fix count). Resolves { rows, at, reports }.
+    rows: function (force) {
+        var T = JiTA.trend;
+        return T.ensure(force).then(function (data) {
+            return Promise.all(T.hot(data).map(function (r) {
+                return JiTA.db.getDefect(r.key).then(function (rec) {
+                    if (rec) {
+                        r.description = rec.description; r.created = rec.created;
+                        r.resolution = rec.resolution; r.resolutiondate = rec.resolutiondate;
+                        if (rec.status) { r.status = rec.status; }
+                        if (!r.summary) { r.summary = rec.summary; }
+                    }
+                    return r;
+                }, function () { return r; });
+            })).then(function (rows) {
+                rows.forEach(function (r) { r.afterFix = T.afterFix(r); r.note = T.note(r); });
+                return { rows: rows, at: data.at, reports: data.reports || 0 };
+            });
+        });
+    },
+
+    matches: function (r, terms) {
+        if (!terms || !terms.length) { return true; }
+        return JiTA.rank._matchTerms((r.key + ' ' + (r.summary || '')).toLowerCase(), terms);
+    },
+
+    ago: function (at) {
+        var m = Math.round((Date.now() - at) / 60000);
+        if (m < 1) { return 'just now'; }
+        if (m < 90) { return m + ' min ago'; }
+        return Math.round(m / 60) + ' h ago';
+    },
+
+    // Make sure a count exists, and call onNew once if this produced a DIFFERENT one than was in memory - which is
+    // what lets a list repaint once so its rows pick the badges up, without a repaint loop.
+    warm: function (onNew) {
+        var T = JiTA.trend, before = T._data ? T._data.at : 0;
+        T._injectCss();
+        return T.ensure(false).then(function (d) {
+            if (d && d.at !== before && onNew) { try { onNew(); } catch (e) { /* ignore */ } }
+        }, function () { /* no count yet: rows simply carry no badge */ });
+    },
+
+    // The 🔥 on a defect row anywhere else. Nothing below MIN, and nothing from a count more than a day old.
+    countFor: function (key) {
+        var T = JiTA.trend, d = T._data;
+        if (!d || d.v !== T.V || (Date.now() - d.at) > T.STALE_MS) { return 0; }
+        var rec = d.defects && d.defects[key];
+        return rec ? rec.recent.length : 0;
+    },
+    badge: function (key) {
+        var T = JiTA.trend, n = T.countFor(key);
+        if (n < T.MIN) { return null; }
+        return $('<span class="jita-hot"></span>').text('🔥 ' + n)
+            .attr('title', n + ' bug reports filed in the last ' + T.WINDOW_DAYS + ' days are attached to this defect');
+    },
+
+    // The attached reports behind a count, as a Jira search (any link type, so it can show one or two more).
+    reportsUrl: function (key) {
+        var jql = 'issue in linkedIssues("' + key + '") AND project = EBR AND status = Attached AND created >= -' +
+            JiTA.trend.WINDOW_DAYS + 'd ORDER BY created DESC';
+        return JiTA.HOST + '/issues/?jql=' + encodeURIComponent(jql);
+    },
+
+    // ---- the standalone list (double-tap '#' off a bug report) -----------------------------------------------------
+    openView: function () {
+        var T = JiTA.trend;
+        if (JITA_NO_JIRA_UI || document.querySelector('#jita-menu.jita-trend-view')) { return; }
+        T._injectCss();
+        var ov = JiTA.menu._openOverlay({ title: 'Trending defects' });
+        ov.$menu.addClass('jita-trend-view');
+        $('<div class="jtr-scroll" id="jtr-body"></div>').appendTo(ov.$menu);
+        var $foot = $('<div class="jtr-foot"></div>').appendTo(ov.$menu);
+        $('<span class="jtr-muted" id="jtr-status"></span>').appendTo($foot);
+        $('<button class="jita-btn" id="jtr-refresh" title="Count again now instead of waiting for the hourly refresh">Refresh</button>')
+            .on('click', function () { T._paint(true); }).appendTo($foot);
+        T._paint(false);
+    },
+    _status: function (msg) {
+        var el = document.getElementById('jtr-status');
+        if (el) { el.textContent = msg || ''; }
+    },
+    _paint: function (force) {
+        var T = JiTA.trend;
+        if (!document.getElementById('jtr-body')) { return; }
+        $('#jtr-refresh').prop('disabled', true);
+        if (force || !T._fresh(T._data)) {
+            $('#jtr-body').empty().append($('<div class="jtr-empty"></div>')
+                .text('Counting the bug reports attached in the last ' + (T.WINDOW_DAYS + T.BASE_DAYS) + ' days…'));
+            T._status('');
+        }
+        T.rows(force).then(function (res) {
+            if (!document.getElementById('jtr-body')) { return; }
+            $('#jtr-refresh').prop('disabled', false);
+            T._renderView(res);
+        }, function (e) {
+            if (!document.getElementById('jtr-body')) { return; }
+            $('#jtr-refresh').prop('disabled', false);
+            $('#jtr-body').empty().append($('<div class="jtr-empty"></div>').text('Could not count trending defects: ' + (e && e.message || e)));
+        });
+    },
+    _renderView: function (res) {
+        var T = JiTA.trend, $b = $('#jtr-body');
+        if (!$b.length) { return; }
+        $b.empty();
+        $('<div class="jtr-intro"></div>').text('Bug reports filed in the last ' + T.WINDOW_DAYS + ' days and attached to a defect since, ' +
+            'counted by the day they were filed. A defect needs ' + T.MIN + ' or more to be listed; the trend compares with the ' +
+            T.BASE_DAYS + ' days before. A report nobody has triaged yet is not attached, so it does not count yet.').appendTo($b);
+        if (!res.rows.length) {
+            $('<div class="jtr-empty"></div>').text('No defect got ' + T.MIN + ' or more reports in the last ' + T.WINDOW_DAYS + ' days.').appendTo($b);
+        }
+        res.rows.forEach(function (r, i) { $b.append(T._viewRow(r, i + 1, res.at)); });
+        T._status(res.rows.length + ' trending · ' + res.reports + ' attached reports counted · updated ' + T.ago(res.at) +
+            (T._error ? ' · the last refresh failed: ' + T._error : ''));
+    },
+    _viewRow: function (r, n, at) {
+        var T = JiTA.trend, $row = $('<div class="jtr-row"></div>');
+        $('<span class="jtr-n"></span>').text(n).appendTo($row);
+        $('<a class="jtr-key" target="_blank" rel="noopener"></a>').attr('href', '/browse/' + r.key).text(r.key).appendTo($row);
+        $('<span class="jtr-count"></span>').text(r.count)
+            .attr('title', r.count + ' reports filed in the last ' + T.WINDOW_DAYS + ' days').appendTo($row);
+        $('<span class="jtr-trend"></span>').addClass(r.trend).text(T.LABEL[r.trend])
+            .attr('title', r.trend === 'new' ? ('None in the ' + T.BASE_DAYS + ' days before')
+                : ('Usually about ' + T.usual(r.base) + ' per ' + T.WINDOW_DAYS + ' days')).appendTo($row);
+        var days = T.days(r.times, at), max = Math.max.apply(null, days) || 1;
+        var $sp = $('<span class="jtr-spark"></span>').appendTo($row);
+        days.forEach(function (v, i) {
+            var ago = days.length - 1 - i;
+            $('<span></span>').toggleClass('zero', !v).css('height', Math.max(2, Math.round(v / max * 20)) + 'px')
+                .attr('title', v + ' filed ' + (ago === 0 ? 'in the last 24 hours' : ago + ' to ' + (ago + 1) + ' days ago')).appendTo($sp);
+        });
+        $('<span class="jtr-sum"></span>').text(r.summary || '').attr('title', r.summary || '').appendTo($row);
+        var st = (r.status || '') + (r.resolution ? ' · ' + r.resolution : '');
+        if (st) { $('<span class="jtr-st"></span>').text(st).appendTo($row); }
+        if (r.afterFix >= T.AFTER_FIX_MIN) {
+            $('<span class="jtr-fix"></span>').text('⚠ ' + r.afterFix + ' after the fix')
+                .attr('title', 'Filed after this defect was resolved: a regression, or a fix that has not shipped yet').appendTo($row);
+        }
+        $('<a class="jtr-rep" target="_blank" rel="noopener">reports ↗</a>').attr('href', T.reportsUrl(r.key))
+            .attr('title', 'The attached reports from the last ' + T.WINDOW_DAYS + ' days, in Jira').appendTo($row);
+        $row.on('mouseenter', function () { JiTA.ui._showTip(r, this, st); });
+        $row.on('mouseleave', function () { JiTA.ui._hideTip(); });
+        return $row;
+    },
+
+    _cssInjected: false,
+    _injectCss: function () {
+        if (JiTA.trend._cssInjected) { return; }
+        JiTA.trend._cssInjected = true;
+        try {
+            GM_addStyle(
+                '.jita-hot { font-size: 10px; font-weight: 700; color: #ffb547; margin-left: 6px; white-space: nowrap; }' +
+                '#jita-side-group .jita-hot { color: var(--ds-text-warning, #974f0c); }' +
+                '#jita-menu.jita-trend-view { width: 1180px; max-width: 96vw; display: flex; flex-direction: column; overflow: hidden; }' +
+                '.jita-trend-view .jtr-scroll { flex: 1 1 auto; min-height: 0; max-height: 70vh; overflow-y: auto; padding: 10px 16px; }' +
+                '.jita-trend-view .jtr-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #3a434d; background: #282d33; }' +
+                '.jita-trend-view .jtr-muted { color: #9aa6b2; font-size: 12px; flex: 1; }' +
+                '.jita-trend-view .jtr-intro { color: #9aa6b2; font-size: 12px; line-height: 1.5; margin: 2px 0 10px; }' +
+                '.jita-trend-view .jtr-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
+                '.jita-trend-view .jtr-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid #2c333a; font-size: 12px; }' +
+                '.jita-trend-view .jtr-n { flex: 0 0 22px; color: #7a8694; text-align: right; }' +
+                '.jita-trend-view .jtr-key { flex: 0 0 88px; color: #4c9aff; font-weight: 700; text-decoration: none; }' +
+                '.jita-trend-view .jtr-key:hover { text-decoration: underline; }' +
+                '.jita-trend-view .jtr-count { flex: 0 0 32px; color: #fff; font-weight: 800; font-size: 14px; text-align: right; }' +
+                '.jita-trend-view .jtr-trend { flex: 0 0 76px; font-size: 11px; font-weight: 700; color: #9aa6b2; }' +
+                '.jita-trend-view .jtr-trend.new, .jita-trend-view .jtr-trend.up { color: #ffb547; }' +
+                '.jita-trend-view .jtr-trend.down { color: #7fdca4; }' +
+                '.jita-trend-view .jtr-spark { flex: 0 0 auto; display: inline-flex; align-items: flex-end; gap: 1px; height: 20px; }' +
+                '.jita-trend-view .jtr-spark span { width: 5px; background: #4c9aff; border-radius: 1px 1px 0 0; }' +
+                '.jita-trend-view .jtr-spark span.zero { background: #2c333a; }' +
+                '.jita-trend-view .jtr-sum { flex: 1 1 auto; min-width: 0; color: #e6e6e6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '.jita-trend-view .jtr-st { flex: 0 0 auto; background: #3a434d; color: #cfd6dd; border-radius: 8px; padding: 0 7px; font-size: 10px; white-space: nowrap; }' +
+                '.jita-trend-view .jtr-fix { flex: 0 0 auto; color: #ffb547; font-size: 11px; white-space: nowrap; }' +
+                '.jita-trend-view .jtr-rep { flex: 0 0 auto; color: #6bd0dc; font-size: 11px; text-decoration: none; white-space: nowrap; }' +
+                '.jita-trend-view .jtr-rep:hover { text-decoration: underline; }'
+            );
+        } catch (e) { /* ignore */ }
+    },
+
+    _noop: null
 };
 
 
@@ -18820,13 +19363,15 @@ if (JITA_IS_WIKI) {
     }
     // Quick launcher: double-tap '<' (within 400ms, outside any text field) opens Triage mode from anywhere -
     // no menu round-trip. A single '<' stays inert, so it can't misfire while reading. open() itself guards
-    // the disabled-feature / already-open cases.
+    // the disabled-feature / already-open cases. Double-tap '>' opens the duplicate finder. Double-tap '#' switches the
+    // Triage Assistant panel to the trending defects and back on a bug report, and opens the standalone trending list
+    // anywhere else. (Inside Triage mode the overlay's own key layer handles '#', so it never reaches here.)
     if (!JITA_IS_FORGE_FRAME) {
         (function () {
-            var lastLt = 0, lastGt = 0;
+            var lastLt = 0, lastGt = 0, lastHash = 0;
             document.addEventListener('keydown', function (e) {
                 if (e.ctrlKey || e.metaKey || e.altKey) { return; }
-                if (e.key !== '<' && e.key !== '>') { return; }
+                if (e.key !== '<' && e.key !== '>' && e.key !== '#') { return; }
                 var t = e.target;
                 if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
                 if (typeof JiTA === 'undefined') { return; }
@@ -18835,6 +19380,14 @@ if (JITA_IS_WIKI) {
                     if (!JiTA.triage || JiTA.triage._open) { return; }
                     if (now - lastLt < 400) { lastLt = 0; try { JiTA.triage.open(); } catch (e2) { /* ignore */ } }
                     else { lastLt = now; }
+                    return;
+                }
+                if (e.key === '#') {   // double-tap '#' -> Trending defects
+                    if (!JiTA.trend || document.querySelector('#jita-menu.jita-trend-view')) { return; }
+                    if (now - lastHash >= 400) { lastHash = now; return; }
+                    lastHash = 0;
+                    // An open overlay covers the panel, so there is nothing on screen to switch: the list replaces it.
+                    try { if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) { JiTA.trend.openView(); } } catch (e4) { /* ignore */ }
                     return;
                 }
                 // double-tap '>' -> Duplicate-defect finder (Shift+'<' on QWERTZ - the hidden siblings share a key)
