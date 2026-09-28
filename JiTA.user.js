@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.33.1
+// @version     3.34.0
 // @author      ISD BH Schogol, ISD Tulwar
-// @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, and brings back Jira's detail view (the issue list beside the open issue)
+// @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
 // @downloadURL https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
 // @match       https://fenriscreations.atlassian.net/jira*
@@ -147,13 +147,13 @@ function gmSet(key, val) {
 // so an existing install's orphaned "dropdowns" value is ignored and credits simply defaults on. The index of
 // each feature is now recorded ONCE in the FLAG map below and read via flagOn(name) - so if a slot ever moves,
 // only FLAG needs updating (not scattered numeric reads); the persisted gm key per slot must still stay stable.
-var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""]];
+var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""], ["screenOcr", ""]];
 
 // Named accessors over savedVariables (the [gmKey, enabled] pairs above): map a stable feature name to its
 // fixed index so a wrong index breaks loudly at one named site instead of silently misreading a slot. flagOn
 // reads, setFlag writes - both go through the SAME savedVariables + GM persistence, so behavior is unchanged.
 // Index 0 ("key") is a reserved legacy slot with no boolean feature and is deliberately omitted.
-var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6 };
+var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7 };
 function flagOn(name) { var i = FLAG[name]; return i != null && !!savedVariables[i][1]; }
 function setFlag(name, val) {
     var i = FLAG[name];
@@ -8461,6 +8461,11 @@ JiTA.menu = {
             $take.append($takeSw);
             $feat.append($take);
         }
+        // Screenshot translation: the "Translate text" button on open image attachments (Jira's viewer and
+        // Triage mode's). ensure() mounts it on an open image when switched on and removes it when switched off.
+        $feat.append(JiTA.menu._toggleRow('Screenshot translation', 7, function () {
+            if (!JITA_NO_JIRA_UI) { JiTA.ocr.ensure(); }
+        }));
         $p.append($feat);
 
 
@@ -17987,6 +17992,745 @@ JiTA.declutter = {
 };
 
 
+/* ---- screenshot translation: read + translate the text in a region the user selects on an image ----
+ * Players often attach screenshots from a localized EVE client. While an image attachment is open - in
+ * Jira's media viewer or in Triage mode's own attachment viewer - a "Translate text" button appears. It
+ * switches to a selection mode: the user drags a box around the text they care about, and only that region
+ * (never the whole image) is cropped from the full-resolution image, recognized IN THE BROWSER with
+ * Tesseract.js (WASM, loaded lazily from jsdelivr like transformers.js - no server, no API key) and passed
+ * through the same free Google endpoint as the Translate button (jitaTranslateFree).
+ *
+ * Language: the report's client-language LABEL ("Russian", "Chinese", "Japanese", ...) picks the Tesseract
+ * model; no language label means English. The result card's dropdown overrides it (remembered per issue for
+ * this page session). English is always loaded as a second model because localized clients still show
+ * numbers, abbreviations and some names in English.
+ *
+ * Why four passes per selection: EVE draws light text on dark, semi-transparent panels, which Tesseract
+ * reads badly as-is (Russian: 14% of characters wrong raw vs 1% preprocessed). Each crop is recognized as
+ * up to four variants - 3x upscale + Otsu-binarised max(R,G,B) (keeps orange/green text bright), 3x + Otsu-
+ * binarised luma, 3x + inverted + contrast-stretched, and the raw crop - and the most confident read wins.
+ * Measured on real client screenshots (character error rate of the winning read): Russian ~1%, French ~3%,
+ * Korean ~4%, Japanese ~4%, Chinese ~13%. The small "best_int" models (1.5-3 MB per language, cached in
+ * IndexedDB by Tesseract.js after the first download) beat the larger standard ones on Chinese. What hurts
+ * most is icons inside the box - they turn into stray characters - hence the hint to select tightly.
+ */
+JiTA.ocr = {
+    LIB_URL: 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.esm.min.js',
+    // Client-language label (matched case-insensitively) -> Tesseract model. Order = dropdown order.
+    LANGS: [
+        { label: 'English',  code: 'eng',     name: 'English',  bcp: 'en' },
+        { label: 'German',   code: 'deu',     name: 'German',   bcp: 'de' },
+        { label: 'French',   code: 'fra',     name: 'French',   bcp: 'fr' },
+        { label: 'Spanish',  code: 'spa',     name: 'Spanish',  bcp: 'es' },
+        { label: 'Russian',  code: 'rus',     name: 'Russian',  bcp: 'ru' },
+        { label: 'Chinese',  code: 'chi_sim', name: 'Chinese',  bcp: 'zh-Hans' },
+        { label: 'Japanese', code: 'jpn',     name: 'Japanese', bcp: 'ja' },
+        { label: 'Korean',   code: 'kor',     name: 'Korean',   bcp: 'ko' }
+    ],
+    SCALE: 3,           // upscale factor for the preprocessed variants (small UI fonts read far better at 3x)
+    MAX_SIDE: 4000,     // ...but never beyond this many px on the long side (a huge selection would crawl)
+    BORDER: 20,         // white margin around each variant - helps Tesseract's layout analysis
+    GOOD_CONF: 94,      // a variant read this confidently is kept without trying the rest
+    MIN_SEL: 6,         // px; a smaller drag is treated as a stray click
+    IDLE_MS: 10 * 60 * 1000,   // terminate the OCR worker (tens of MB of WASM heap) after this long unused
+
+    _libP: null, _worker: null, _workerKey: '', _q: null, _idleT: 0,
+    _tgt: null, _btn: null, _layer: null, _box: null, _sel: null, _card: null, _drag: null,
+    _job: null, _runId: 0, _pix: null, _lang: null, _progress: null,
+    _labelCache: {}, _langOverride: {}, _cssDone: false,
+
+    // ---- language -------------------------------------------------------------------------------------------
+    _langByCode: function (code) {
+        var L = JiTA.ocr.LANGS;
+        for (var i = 0; i < L.length; i++) { if (L[i].code === code) { return L[i]; } }
+        return L[0];
+    },
+    // First label that names a client language wins; null when none does (-> English).
+    _langFromLabels: function (labels) {
+        var L = JiTA.ocr.LANGS;
+        for (var i = 0; i < (labels || []).length; i++) {
+            var lb = String(labels[i] || '').replace(/^\s+|\s+$/g, '').toLowerCase();
+            for (var j = 0; j < L.length; j++) { if (L[j].label.toLowerCase() === lb) { return L[j]; } }
+        }
+        return null;
+    },
+    _issueKey: function () {
+        var O = JiTA.ocr, T = JiTA.triage;
+        if (O._tgt && O._tgt.kind === 'triage' && T && T._queue && T._queue[T._idx]) { return T._queue[T._idx].key; }
+        var k = $.trim($(issueItem).first().text() || '');
+        if (/^[A-Z][A-Z0-9]+-\d+$/.test(k)) { return k; }
+        var m = /\/browse\/([A-Z][A-Z0-9]+-\d+)/.exec(location.pathname) || /[?&]selectedIssue=([A-Z][A-Z0-9]+-\d+)/.exec(location.search);
+        return m ? m[1] : '';
+    },
+    // The open report's labels. Triage mode already has them on the queue item; on an issue page they're one
+    // same-origin REST read (session cookie), cached per key for the page session.
+    _labels: function () {
+        var O = JiTA.ocr, T = JiTA.triage;
+        if (O._tgt && O._tgt.kind === 'triage' && T && T._queue && T._queue[T._idx]) {
+            var d = T._queue[T._idx].det;
+            return Promise.resolve(d && d.labels ? d.labels.split(/\s*,\s*/) : []);
+        }
+        var key = O._issueKey();
+        if (!key) { return Promise.resolve([]); }
+        if (O._labelCache[key]) { return O._labelCache[key]; }
+        var p = fetch('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=labels', { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+            .then(function (r) { if (!r.ok) { throw new Error('HTTP ' + r.status); } return r.json(); })
+            .then(function (j) { return (j && j.fields && j.fields.labels) || []; });
+        O._labelCache[key] = p;
+        p.then(null, function () { delete O._labelCache[key]; });   // don't cache a failure
+        return p;
+    },
+    // -> { code, why: 'label' | 'none' | 'picked', label }
+    _resolveLang: function () {
+        var O = JiTA.ocr, key = O._issueKey();
+        if (key && O._langOverride[key]) { return Promise.resolve({ code: O._langOverride[key], why: 'picked' }); }
+        return O._labels().then(null, function () { return []; }).then(function (labels) {
+            var L = O._langFromLabels(labels);
+            return L ? { code: L.code, why: 'label', label: L.label } : { code: 'eng', why: 'none' };
+        });
+    },
+
+    // ---- engine (Tesseract.js) ------------------------------------------------------------------------------
+    _lib: function () {
+        var O = JiTA.ocr;
+        if (!O._libP) {
+            O._libP = import(O.LIB_URL).then(function (m) {
+                var T = m && (m.default || m);
+                if (!T || typeof T.createWorker !== 'function') { throw new Error('Tesseract.js did not load'); }
+                return T;
+            });
+            O._libP.then(null, function () { O._libP = null; });   // allow a retry after a network blip
+        }
+        return O._libP;
+    },
+    // Extra createWorker options (workerPath / corePath / langPath). Empty = Tesseract.js's pinned jsdelivr
+    // defaults, which for OEM 1 already mean the small 4.0.0_best_int models. A test harness overrides this.
+    _workerOpts: function () { return {}; },
+    _langList: function (code) { return code === 'eng' ? ['eng'] : [code, 'eng']; },
+    // One worker for the page, re-initialised when the language changes. Only ever called from inside the
+    // _enqueue chain, so two initialisations can never race.
+    _engine: function (code) {
+        var O = JiTA.ocr, langs = O._langList(code), key = langs.join('+');
+        clearTimeout(O._idleT);
+        if (O._worker && O._workerKey === key) { return Promise.resolve(O._worker); }
+        return O._lib().then(function (T) {
+            if (O._worker) {
+                var w0 = O._worker;
+                O._workerKey = '';   // mid-switch: never reuse a half-initialised worker
+                return w0.reinitialize(langs, 1).then(function () { return w0; });
+            }
+            var opts = $.extend({ logger: function (m) { if (O._progress) { try { O._progress(m); } catch (e) { /* ignore */ } } } }, O._workerOpts());
+            return T.createWorker(langs, 1, opts);   // 1 = OEM.LSTM_ONLY
+        }).then(function (w) {
+            O._worker = w;
+            return w.setParameters({ tessedit_pageseg_mode: '6' }).then(function () { O._workerKey = key; return w; });   // 6 = one uniform block
+        });
+    },
+    _resetEngine: function () {
+        var O = JiTA.ocr, w = O._worker;
+        O._worker = null; O._workerKey = '';
+        clearTimeout(O._idleT);
+        if (w) { try { w.terminate(); } catch (e) { /* ignore */ } }
+    },
+    _armIdle: function () {
+        var O = JiTA.ocr;
+        clearTimeout(O._idleT);
+        O._idleT = setTimeout(function () { O._enqueue(function () { O._resetEngine(); }); }, O.IDLE_MS);
+    },
+    _enqueue: function (fn) {
+        var O = JiTA.ocr;
+        var p = (O._q || Promise.resolve()).then(fn);
+        O._q = p.then(null, function () { /* keep the chain alive */ });
+        return p;
+    },
+
+    // ---- pixels + preprocessing -----------------------------------------------------------------------------
+    // Something drawImage() accepts, at the image's full resolution. Blob/data/same-origin images are drawn
+    // straight from the <img>; Jira's signed media URL is cross-origin (it taints a canvas), so its bytes are
+    // fetched with GM_xmlhttpRequest (no CORS) and decoded. Cached for the image currently open.
+    _pixels: function (img) {
+        var O = JiTA.ocr, src = img.currentSrc || img.src;
+        if (O._pix && O._pix.src === src) { return Promise.resolve(O._pix); }
+        try {
+            var c = document.createElement('canvas'); c.width = 1; c.height = 1;
+            var g = c.getContext('2d');
+            g.drawImage(img, 0, 0, 1, 1);
+            g.getImageData(0, 0, 1, 1);   // throws SecurityError when the image tainted the canvas
+            O._pix = { src: src, img: img, w: img.naturalWidth, h: img.naturalHeight };
+            return Promise.resolve(O._pix);
+        } catch (e) { /* cross-origin -> fetch the bytes below */ }
+        return O._fetchBlob(src).then(function (blob) { return createImageBitmap(blob); }).then(function (bmp) {
+            O._pix = { src: src, img: bmp, w: bmp.width, h: bmp.height };
+            return O._pix;
+        });
+    },
+    _fetchBlob: function (url) {
+        return new Promise(function (resolve, reject) {
+            if (typeof GM_xmlhttpRequest !== 'function') {
+                fetch(url, { credentials: 'include' }).then(function (r) { return r.ok ? r.blob() : Promise.reject(new Error('HTTP ' + r.status)); }).then(resolve, reject);
+                return;
+            }
+            GM_xmlhttpRequest({
+                method: 'GET', url: url, responseType: 'blob', timeout: 60000,
+                onload: function (r) {
+                    if (r.status >= 200 && r.status < 300 && r.response) { resolve(r.response); }
+                    else { reject(new Error('HTTP ' + r.status)); }
+                },
+                onerror: function () { reject(new Error('network error')); },
+                ontimeout: function () { reject(new Error('timed out')); }
+            });
+        });
+    },
+    _crop: function (pix, r) {
+        var c = document.createElement('canvas');
+        c.width = r.w; c.height = r.h;
+        c.getContext('2d').drawImage(pix.img, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+        return c;
+    },
+    // Best-first order: the max-channel and luma binarisations win most often, so a confident early read
+    // skips the rest (GOOD_CONF).
+    _variants: function (crop) {
+        var O = JiTA.ocr;
+        var s = Math.max(1, Math.min(O.SCALE, O.MAX_SIDE / Math.max(crop.width, crop.height)));
+        var W = Math.round(crop.width * s), H = Math.round(crop.height * s);
+        var up = document.createElement('canvas');
+        up.width = W; up.height = H;
+        var g = up.getContext('2d');
+        g.imageSmoothingEnabled = true;
+        g.imageSmoothingQuality = 'high';
+        g.drawImage(crop, 0, 0, W, H);
+        var px = g.getImageData(0, 0, W, H).data, n = W * H;
+        var lum = new Uint8ClampedArray(n), mx = new Uint8ClampedArray(n);
+        for (var i = 0, j = 0; i < n; i++, j += 4) {
+            var r = px[j], gr = px[j + 1], b = px[j + 2];
+            lum[i] = 255 - (r * 299 + gr * 587 + b * 114 + 500) / 1000;   // inverted luma: dark text on light
+            mx[i] = 255 - Math.max(r, gr, b);                               // inverted brightest channel
+        }
+        return [
+            { id: 'max',  canvas: O._toCanvas(O._binarize(mx), W, H) },
+            { id: 'otsu', canvas: O._toCanvas(O._binarize(lum), W, H) },
+            { id: 'pre',  canvas: O._toCanvas(O._stretch(lum), W, H) },
+            { id: 'raw',  canvas: crop }
+        ];
+    },
+    _hist: function (a) {
+        var h = new Array(256), i;
+        for (i = 0; i < 256; i++) { h[i] = 0; }
+        for (i = 0; i < a.length; i++) { h[a[i]]++; }
+        return h;
+    },
+    _binarize: function (a) {
+        var h = JiTA.ocr._hist(a), tot = a.length, sum = 0, sb = 0, wb = 0, best = 0, t = 127, k;
+        for (k = 0; k < 256; k++) { sum += k * h[k]; }
+        for (k = 0; k < 256; k++) {   // Otsu: the threshold with the largest between-class variance
+            wb += h[k];
+            if (!wb) { continue; }
+            var wf = tot - wb;
+            if (!wf) { break; }
+            sb += k * h[k];
+            var mb = sb / wb, mf = (sum - sb) / wf, v = wb * wf * (mb - mf) * (mb - mf);
+            if (v > best) { best = v; t = k; }
+        }
+        var out = new Uint8ClampedArray(a.length);
+        for (k = 0; k < a.length; k++) { out[k] = a[k] > t ? 255 : 0; }
+        return out;
+    },
+    _stretch: function (a) {   // autocontrast: clip 1% at each end, stretch the rest to 0..255
+        var h = JiTA.ocr._hist(a), cut = a.length * 0.01, lo = 0, hi = 255, acc = 0, k;
+        for (k = 0; k < 256; k++) { acc += h[k]; if (acc > cut) { lo = k; break; } }
+        for (acc = 0, k = 255; k >= 0; k--) { acc += h[k]; if (acc > cut) { hi = k; break; } }
+        var out = new Uint8ClampedArray(a.length);
+        if (hi <= lo) { out.set(a); return out; }
+        var f = 255 / (hi - lo);
+        for (k = 0; k < a.length; k++) { out[k] = (a[k] - lo) * f; }
+        return out;
+    },
+    _toCanvas: function (a, W, H) {
+        var B = JiTA.ocr.BORDER, c = document.createElement('canvas');
+        c.width = W + 2 * B; c.height = H + 2 * B;
+        var g = c.getContext('2d');
+        g.fillStyle = '#fff';
+        g.fillRect(0, 0, c.width, c.height);
+        var id = g.createImageData(W, H), d = id.data;
+        for (var i = 0, j = 0; i < a.length; i++, j += 4) { d[j] = d[j + 1] = d[j + 2] = a[i]; d[j + 3] = 255; }
+        g.putImageData(id, B, B);
+        return c;
+    },
+
+    // ---- recognition ----------------------------------------------------------------------------------------
+    _recognize: function (code, variants, runId) {
+        var O = JiTA.ocr;
+        return O._enqueue(function () {
+            if (runId !== O._runId) { return null; }   // superseded before it started
+            var t0 = Date.now();
+            return O._engine(code).then(function (w) {
+                var best = null, i = 0;
+                function next() {
+                    if (runId !== O._runId) { return null; }
+                    if (i >= variants.length || (best && best.conf >= O.GOOD_CONF)) {
+                        if (best) { best.ms = Date.now() - t0; }
+                        return best;
+                    }
+                    var v = variants[i++];
+                    if (O._progress) { O._progress({ status: 'recognizing text', pass: i, of: variants.length }); }
+                    return w.recognize(v.canvas).then(function (res) {
+                        var d = (res && res.data) || {};
+                        var conf = typeof d.confidence === 'number' ? d.confidence : 0;
+                        if (!best || conf > best.conf) { best = { text: d.text || '', conf: conf, variant: v.id }; }
+                        return next();
+                    });
+                }
+                return next();
+            }).then(function (r) { O._armIdle(); return r; }, function (e) { O._resetEngine(); throw e; });
+        });
+    },
+    _isCjk: function (code) { return code === 'chi_sim' || code === 'jpn'; },
+    // Tesseract puts spaces between Chinese/Japanese characters; drop those (Korean spaces are real, keep them).
+    _clean: function (text, code) {
+        var lines = String(text || '').split(/\r?\n/).map(function (l) { return l.replace(/\s+/g, ' ').replace(/^ | $/g, ''); })
+            .filter(function (l) { return !!l; });
+        if (JiTA.ocr._isCjk(code)) {
+            var re = /([⺀-鿿豈-﫿＀-￯]) (?=[⺀-鿿豈-﫿＀-￯])/g;
+            lines = lines.map(function (l) { return l.replace(re, '$1'); });
+        }
+        return lines.join('\n');
+    },
+    _join: function (text, code) {
+        return String(text || '').split(/\n+/).join(JiTA.ocr._isCjk(code) ? '' : ' ');
+    },
+
+    // ---- viewer detection -----------------------------------------------------------------------------------
+    // The image open right now: Triage mode's viewer first (it sits above everything), else Jira's media
+    // viewer. Returns { img, kind, head } or null. A not-yet-loaded image re-runs ensure() once it loads.
+    _findTarget: function () {
+        var img = null, kind = '', head = null, v = document.getElementById('jt-viewer');
+        if (v) {
+            img = v.querySelector('img.jt-viewer-img');
+            kind = 'triage';
+            head = document.getElementById('jt-viewer-head');
+        } else {
+            var pop = document.querySelector('[data-testid="media-viewer-popup"]') || document.querySelector('[data-testid="media-viewer"]');
+            if (!pop) { return null; }
+            img = pop.querySelector('img[data-testid="media-viewer-image"]');
+            if (!img) {   // testid drifted: take the largest rendered image in the viewer
+                var all = pop.querySelectorAll('img'), bestA = 0;
+                for (var i = 0; i < all.length; i++) {
+                    var r = all[i].getBoundingClientRect(), a = r.width * r.height;
+                    if (a > bestA && r.width >= 200 && r.height >= 120) { bestA = a; img = all[i]; }
+                }
+            }
+            kind = 'jira';
+        }
+        if (!img) { return null; }
+        if (!img.complete || !img.naturalWidth) {
+            if (!img.getAttribute('data-jita-ocr-wait')) {
+                img.setAttribute('data-jita-ocr-wait', '1');
+                img.addEventListener('load', function () { img.removeAttribute('data-jita-ocr-wait'); JiTA.ocr.ensure(); }, { once: true });
+            }
+            return null;
+        }
+        return { img: img, kind: kind, head: head, src: img.currentSrc || img.src };
+    },
+    // Called from the page-wide mutation observer (debounced) and on toggle: mount the button while an image
+    // is open, follow a switch to another image, and tear everything down when the viewer closes.
+    ensure: function () {
+        var O = JiTA.ocr;
+        var t = flagOn('screenOcr') ? O._findTarget() : null;
+        if (!t) { if (O._tgt) { O._teardown(); } return; }
+        if (O._tgt && O._tgt.img === t.img && O._tgt.src === t.src) {
+            if (!O._btn || !document.body.contains(O._btn)) { O._mountButton(); }   // a re-render dropped it
+            return;
+        }
+        O._teardown();
+        O._tgt = t;
+        O._pix = null;
+        O._lang = null;
+        O._css();
+        O._mountButton();
+        // A src swap on the same <img> doesn't mutate the tree the observer watches; its load event does.
+        if (!t.img.getAttribute('data-jita-ocr-watch')) {
+            t.img.setAttribute('data-jita-ocr-watch', '1');
+            t.img.addEventListener('load', function () { JiTA.ocr.ensure(); });
+        }
+    },
+    _teardown: function () {
+        var O = JiTA.ocr;
+        O._exit();
+        if (O._btn && O._btn.parentNode) { O._btn.parentNode.removeChild(O._btn); }
+        O._btn = null; O._tgt = null; O._pix = null; O._lang = null;
+    },
+
+    // ---- selection mode -------------------------------------------------------------------------------------
+    _mountButton: function () {
+        var O = JiTA.ocr, t = O._tgt;
+        if (!t) { return; }
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.id = 'jita-ocr-btn';
+        b.title = 'Drag a box around text in this screenshot to read and translate it (Esc exits)';
+        b.innerHTML = '<span class="ic">文A</span><span class="tx">Translate text</span>';
+        b.addEventListener('click', function (e) {
+            e.preventDefault(); e.stopPropagation();
+            if (O._layer) { O._exit(); } else { O._enter(); }
+        });
+        if (t.kind === 'triage' && t.head) {
+            b.className = 'jita-ocr-inline';
+            t.head.insertBefore(b, t.head.querySelector('.jt-viewer-raw'));
+        } else {
+            b.className = 'jita-ocr-float';
+            document.body.appendChild(b);
+        }
+        O._btn = b;
+    },
+    _enter: function () {
+        var O = JiTA.ocr;
+        if (!O._tgt || O._layer) { return; }
+        O._css();
+        var L = document.createElement('div');
+        L.id = 'jita-ocr-layer';
+        L.innerHTML = '<div class="jita-ocr-box"></div>' +
+            '<div class="jita-ocr-hint">Drag a box tightly around the text to translate<button type="button" class="jita-ocr-exit" title="Exit (Esc)">Done</button></div>';
+        document.body.appendChild(L);
+        O._layer = L;
+        O._box = L.querySelector('.jita-ocr-box');
+        L.querySelector('.jita-ocr-exit').addEventListener('click', function (e) { e.stopPropagation(); O._exit(); });
+        L.addEventListener('mousedown', O._onDown);
+        window.addEventListener('keydown', O._onKey, true);   // window capture runs before Jira's + Triage's handlers
+        window.addEventListener('resize', O._placeBox);
+        if (O._btn) { O._btn.classList.add('active'); }
+        O._placeBox();
+        // Warm up while the user drags: resolve the language and start loading the engine + its model.
+        var cur = O._tgt;
+        O._resolveLang().then(function (lang) {
+            if (O._tgt !== cur) { return; }
+            if (!O._lang) { O._lang = lang; }
+            O._enqueue(function () { return O._engine(O._lang.code).then(function () { O._armIdle(); }); }).then(null, function () { /* surfaced on the real run */ });
+        });
+    },
+    _exit: function () {
+        var O = JiTA.ocr;
+        O._runId++;   // cancels any pending passes
+        O._job = null; O._drag = null; O._progress = null;
+        window.removeEventListener('keydown', O._onKey, true);
+        window.removeEventListener('resize', O._placeBox);
+        window.removeEventListener('mousemove', O._onMove, true);
+        window.removeEventListener('mouseup', O._onUp, true);
+        if (O._layer && O._layer.parentNode) { O._layer.parentNode.removeChild(O._layer); }
+        O._layer = null; O._box = null; O._sel = null; O._card = null;
+        if (O._btn) { O._btn.classList.remove('active'); }
+    },
+    _onKey: function (e) {
+        var O = JiTA.ocr;
+        if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); O._exit(); return; }
+        // Typing in the card (edit the recognized text) must not reach Jira's / Triage's viewer shortcuts;
+        // stopping propagation (not the default) keeps the keystroke working in the textarea.
+        if (O._card && O._card.contains(e.target)) {
+            e.stopImmediatePropagation();
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); O._translate(O._runId); }
+        }
+    },
+    // The image's drawn area in viewport px (object-fit aware), plus its on-screen part.
+    _contentBox: function () {
+        var O = JiTA.ocr, img = O._tgt && O._tgt.img;
+        if (!img || !document.body.contains(img)) { return null; }
+        var r = img.getBoundingClientRect(), nw = img.naturalWidth, nh = img.naturalHeight;
+        if (!r.width || !r.height || !nw || !nh) { return null; }
+        var x = r.left, y = r.top, w = r.width, h = r.height, fit = '';
+        try { fit = getComputedStyle(img).objectFit || ''; } catch (e) { /* ignore */ }
+        if (fit === 'contain' || fit === 'scale-down' || fit === 'cover') {
+            var s = fit === 'cover' ? Math.max(r.width / nw, r.height / nh) : Math.min(r.width / nw, r.height / nh);
+            if (fit === 'scale-down') { s = Math.min(s, 1); }
+            w = nw * s; h = nh * s;
+            x = r.left + (r.width - w) / 2; y = r.top + (r.height - h) / 2;
+        }
+        var vx0 = Math.max(x, r.left, 0), vy0 = Math.max(y, r.top, 0);
+        var vx1 = Math.min(x + w, r.right, window.innerWidth), vy1 = Math.min(y + h, r.bottom, window.innerHeight);
+        if (vx1 <= vx0 || vy1 <= vy0) { return null; }
+        return { x: x, y: y, w: w, h: h, vis: { x0: vx0, y0: vy0, x1: vx1, y1: vy1 } };
+    },
+    _placeBox: function () {
+        var O = JiTA.ocr, cb = O._contentBox();
+        if (!O._box) { return; }
+        if (!cb) { O._box.style.display = 'none'; return; }
+        var v = cb.vis, st = O._box.style;
+        st.display = 'block';
+        st.left = v.x0 + 'px'; st.top = v.y0 + 'px';
+        st.width = (v.x1 - v.x0) + 'px'; st.height = (v.y1 - v.y0) + 'px';
+    },
+    _onDown: function (e) {
+        var O = JiTA.ocr;
+        if (e.button !== 0) { return; }
+        if ((O._card && O._card.contains(e.target)) || (e.target.closest && e.target.closest('.jita-ocr-hint'))) { return; }
+        var cb = O._contentBox();
+        if (!cb) { return; }
+        var v = cb.vis;
+        if (e.clientX < v.x0 || e.clientX > v.x1 || e.clientY < v.y0 || e.clientY > v.y1) { return; }   // start on the image
+        e.preventDefault();
+        O._removeCard();   // a new box replaces the previous one
+        O._drag = { x0: e.clientX, y0: e.clientY, cb: cb };
+        if (!O._sel) {
+            O._sel = document.createElement('div');
+            O._sel.className = 'jita-ocr-sel';
+            O._layer.appendChild(O._sel);
+        }
+        O._drawSel(O._selRect(O._drag, e.clientX, e.clientY));
+        window.addEventListener('mousemove', O._onMove, true);
+        window.addEventListener('mouseup', O._onUp, true);
+    },
+    _onMove: function (e) {
+        var O = JiTA.ocr;
+        if (!O._drag) { return; }
+        e.preventDefault();
+        O._drawSel(O._selRect(O._drag, e.clientX, e.clientY));
+    },
+    _onUp: function (e) {
+        var O = JiTA.ocr, d = O._drag;
+        window.removeEventListener('mousemove', O._onMove, true);
+        window.removeEventListener('mouseup', O._onUp, true);
+        O._drag = null;
+        if (!d) { return; }
+        var r = O._selRect(d, e.clientX, e.clientY);
+        if (r.w < O.MIN_SEL || r.h < O.MIN_SEL) { if (O._sel) { O._sel.style.display = 'none'; } return; }
+        O._drawSel(r);
+        O._start(r, d.cb);
+    },
+    _selRect: function (d, x, y) {
+        var v = d.cb.vis;
+        x = Math.max(v.x0, Math.min(v.x1, x)); y = Math.max(v.y0, Math.min(v.y1, y));
+        return { x: Math.min(d.x0, x), y: Math.min(d.y0, y), w: Math.abs(x - d.x0), h: Math.abs(y - d.y0) };
+    },
+    _drawSel: function (r) {
+        var st = JiTA.ocr._sel.style;
+        st.display = 'block';
+        st.left = r.x + 'px'; st.top = r.y + 'px'; st.width = r.w + 'px'; st.height = r.h + 'px';
+    },
+    // Viewport box -> source-pixel rect (via fractions of the drawn image, so a fetched copy at a different
+    // resolution than the displayed one still crops the same area), then card + OCR.
+    _start: function (r, cb) {
+        var O = JiTA.ocr, tgt = O._tgt;
+        O._showCard(r);
+        O._status('Reading text…', 'busy');
+        O._pixels(tgt.img).then(function (pix) {
+            if (O._tgt !== tgt || !O._card) { return; }
+            // No extra margin around the box: tested, even 2 px pulls the edge of the neighbouring line in as junk.
+            var x0 = Math.floor((r.x - cb.x) / cb.w * pix.w), y0 = Math.floor((r.y - cb.y) / cb.h * pix.h);
+            var x1 = Math.ceil((r.x + r.w - cb.x) / cb.w * pix.w), y1 = Math.ceil((r.y + r.h - cb.y) / cb.h * pix.h);
+            x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(pix.w, x1); y1 = Math.min(pix.h, y1);
+            O._job = { pix: pix, rect: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, screen: r };
+            O._run();
+        }, function (e) {
+            O._status('Could not read the image (' + (e && e.message || e) + ').', 'err');
+        });
+    },
+    _run: function () {
+        var O = JiTA.ocr, job = O._job;
+        if (!job || !O._card) { return; }
+        var runId = ++O._runId;
+        O._status('Reading text…', 'busy');
+        O._setText('', '');
+        var langP = O._lang ? Promise.resolve(O._lang) : O._resolveLang().then(function (L) { O._lang = L; return L; });
+        langP.then(function (lang) {
+            if (runId !== O._runId) { return null; }
+            O._cardLang(lang);
+            var meta = O._langByCode(lang.code);
+            O._progress = function (m) {
+                if (runId !== O._runId || !m) { return; }
+                if (m.status === 'loading language traineddata' && m.progress < 1) {
+                    O._status('Downloading the ' + meta.name + ' model (first use only)… ' + Math.round((m.progress || 0) * 100) + '%', 'busy');
+                } else if (/tesseract core|initializ/i.test(m.status || '')) {
+                    O._status('Starting the text reader…', 'busy');
+                } else if (m.status === 'recognizing text' && m.pass) {
+                    O._status('Reading text… (pass ' + m.pass + ' of ' + m.of + ')', 'busy');
+                }
+            };
+            var variants = O._variants(O._crop(job.pix, job.rect));
+            return O._recognize(lang.code, variants, runId).then(function (best) {
+                if (!best || runId !== O._runId) { return null; }
+                job.best = best;
+                job.text = O._clean(best.text, lang.code);
+                O._setText(job.text, '');
+                O._meta('confidence ' + Math.round(best.conf) + '% · ' + (best.ms / 1000).toFixed(1) + ' s');
+                if (!job.text) {
+                    O._status('No text found. Try a tighter box around one line or block, or pick the client language.', 'err');
+                    return null;
+                }
+                return O._translate(runId);
+            });
+        }).then(null, function (e) {
+            if (runId !== O._runId) { return; }
+            O._status('Text reader failed: ' + (e && e.message || e), 'err');
+        });
+    },
+    _translate: function (runId) {
+        var O = JiTA.ocr, c = O._card;
+        if (!c || runId !== O._runId) { return Promise.resolve(); }
+        var code = (O._lang && O._lang.code) || 'eng';
+        var src = c.querySelector('.jo-src').value;
+        if (c.querySelector('.jo-join').checked) { src = O._join(src, code); }
+        if (!src.replace(/\s+/g, '')) { return Promise.resolve(); }
+        O._status('Translating…', 'busy');
+        return jitaTranslateFree(src).then(function (en) {
+            if (runId !== O._runId || O._card !== c) { return; }
+            if (en === null) { O._status('Translation failed - Google is rate-limiting. Try again in a moment.', 'err'); return; }
+            c.querySelector('.jo-tx').textContent = en;
+            O._status('', '');
+            O._placeCard();
+        });
+    },
+
+    // ---- result card ----------------------------------------------------------------------------------------
+    _showCard: function (r) {
+        var O = JiTA.ocr;
+        O._removeCard(true);   // keep the box just drawn - the card belongs to it
+        var c = document.createElement('div');
+        c.className = 'jita-ocr-card';
+        var opts = '';
+        for (var i = 0; i < O.LANGS.length; i++) { opts += '<option value="' + O.LANGS[i].code + '">' + O.LANGS[i].name + '</option>'; }
+        c.innerHTML =
+            '<div class="jo-head"><select class="jo-lang" title="Client language of the screenshot">' + opts + '</select>' +
+            '<span class="jo-why"></span><span class="jo-x" title="Close">×</span></div>' +
+            '<div class="jo-status"></div>' +
+            '<div class="jo-tx"></div>' +
+            '<div class="jo-lbl"><span>Recognized text</span><span class="jo-meta"></span></div>' +
+            '<textarea class="jo-src" rows="2" spellcheck="false" dir="auto" placeholder="Recognized text appears here - you can fix it and translate again"></textarea>' +
+            '<div class="jo-actions">' +
+                '<button type="button" class="jo-retx" title="Translate the text above again (Ctrl+Enter)">Translate again</button>' +
+                '<label class="jo-joinl" title="Treat the lines as one wrapped sentence"><input type="checkbox" class="jo-join">Join lines</label>' +
+                '<span class="jo-sp"></span>' +
+                '<button type="button" class="jo-copy" data-what="tx">Copy translation</button>' +
+                '<button type="button" class="jo-copy" data-what="src">Copy text</button>' +
+            '</div>';
+        c.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+        c.querySelector('.jo-x').addEventListener('click', function () { O._removeCard(); });
+        c.querySelector('.jo-lang').addEventListener('change', function () {
+            var code = this.value, key = O._issueKey();
+            if (key) { O._langOverride[key] = code; }
+            O._lang = { code: code, why: 'picked' };
+            O._run();
+        });
+        c.querySelector('.jo-retx').addEventListener('click', function () { O._translate(O._runId); });
+        c.querySelector('.jo-join').addEventListener('change', function () { O._translate(O._runId); });
+        var copies = c.querySelectorAll('.jo-copy');
+        for (var k = 0; k < copies.length; k++) {
+            copies[k].addEventListener('click', function () {
+                var btn = this, what = btn.getAttribute('data-what');
+                var txt = what === 'tx' ? c.querySelector('.jo-tx').textContent : c.querySelector('.jo-src').value;
+                O._copy(txt).then(function () {
+                    var was = btn.textContent;
+                    btn.textContent = 'Copied';
+                    setTimeout(function () { btn.textContent = was; }, 1200);
+                });
+            });
+        }
+        O._layer.appendChild(c);
+        O._card = c;
+        O._cardAt = r;
+        O._placeCard();
+    },
+    _removeCard: function (keepSel) {
+        var O = JiTA.ocr;
+        O._runId++;
+        O._job = null;
+        if (O._card && O._card.parentNode) { O._card.parentNode.removeChild(O._card); }
+        O._card = null;
+        if (O._sel && !keepSel) { O._sel.style.display = 'none'; }
+    },
+    // Below the box if it fits, else above, else pinned inside the viewport; re-run as the content grows.
+    _placeCard: function () {
+        var O = JiTA.ocr, c = O._card, r = O._cardAt;
+        if (!c || !r) { return; }
+        var ta = c.querySelector('.jo-src');
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(160, Math.max(40, ta.scrollHeight + 2)) + 'px';
+        var W = window.innerWidth, H = window.innerHeight, cw = c.offsetWidth, ch = c.offsetHeight, m = 8;
+        var left = Math.max(m, Math.min(W - cw - m, r.x));
+        var top = r.y + r.h + m;
+        if (top + ch > H - m) { top = r.y - ch - m; }
+        if (top < m) { top = Math.max(m, H - ch - m); }
+        c.style.left = left + 'px';
+        c.style.top = top + 'px';
+    },
+    _cardLang: function (lang) {
+        var O = JiTA.ocr, c = O._card;
+        if (!c) { return; }
+        c.querySelector('.jo-lang').value = lang.code;
+        c.querySelector('.jo-src').setAttribute('lang', O._langByCode(lang.code).bcp);
+        c.querySelector('.jo-why').textContent = lang.why === 'label' ? 'from the "' + lang.label + '" label'
+            : lang.why === 'picked' ? 'picked by you' : 'no language label - English';
+    },
+    _status: function (msg, kind) {
+        var c = JiTA.ocr._card;
+        if (!c) { return; }
+        var s = c.querySelector('.jo-status');
+        s.textContent = msg || '';
+        s.className = 'jo-status' + (kind ? ' ' + kind : '');
+        JiTA.ocr._placeCard();
+    },
+    _setText: function (src, tx) {
+        var c = JiTA.ocr._card;
+        if (!c) { return; }
+        c.querySelector('.jo-src').value = src;
+        c.querySelector('.jo-tx').textContent = tx;
+        if (!src) { c.querySelector('.jo-meta').textContent = ''; }
+        JiTA.ocr._placeCard();
+    },
+    _meta: function (t) { var c = JiTA.ocr._card; if (c) { c.querySelector('.jo-meta').textContent = t; } },
+    _copy: function (text) {
+        try { if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); } } catch (e) { /* fall through */ }
+        return new Promise(function (resolve) {
+            var ta = document.createElement('textarea');
+            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+            document.body.removeChild(ta);
+            resolve();
+        });
+    },
+
+    _css: function () {
+        var O = JiTA.ocr;
+        if (O._cssDone) { return; }
+        O._cssDone = true;
+        var css =
+            '#jita-ocr-btn { display: inline-flex; align-items: center; gap: 6px; box-sizing: border-box; border-radius: 6px; border: 1px solid #579dff; background: #0c66e4; color: #fff; cursor: pointer; font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; white-space: nowrap; }' +
+            '#jita-ocr-btn:hover { background: #0055cc; }' +
+            '#jita-ocr-btn .ic { font-weight: 700; letter-spacing: -.02em; }' +
+            '#jita-ocr-btn.jita-ocr-float { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2147483000; padding: 8px 14px; box-shadow: 0 2px 10px rgba(0,0,0,.45); }' +
+            '#jita-ocr-btn.jita-ocr-float.active { display: none; }' +   // the layer's hint bar takes its place
+            '#jita-ocr-btn.jita-ocr-inline { padding: 5px 10px; font-size: 12px; }' +
+            '#jita-ocr-layer { position: fixed; inset: 0; z-index: 2147483001; cursor: crosshair; }' +
+            '#jita-ocr-layer .jita-ocr-box { position: fixed; display: none; outline: 2px dashed rgba(87,157,255,.85); outline-offset: -2px; pointer-events: none; }' +
+            '#jita-ocr-layer .jita-ocr-hint { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 12px; padding: 7px 8px 7px 14px; border-radius: 6px; background: rgba(12,102,228,.96); color: #fff; font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; box-shadow: 0 2px 10px rgba(0,0,0,.45); cursor: default; white-space: nowrap; }' +
+            '#jita-ocr-layer .jita-ocr-exit { border: 1px solid rgba(255,255,255,.55); background: transparent; color: #fff; border-radius: 4px; padding: 4px 10px; font: inherit; cursor: pointer; }' +
+            '#jita-ocr-layer .jita-ocr-exit:hover { background: rgba(255,255,255,.15); }' +
+            '#jita-ocr-layer .jita-ocr-sel { position: fixed; display: none; border: 2px solid #579dff; background: rgba(87,157,255,.14); box-sizing: border-box; pointer-events: none; }' +
+            '#jita-ocr-layer .jita-ocr-card { position: fixed; width: 440px; max-width: calc(100vw - 16px); box-sizing: border-box; padding: 10px 12px 12px; border-radius: 8px; border: 1px solid #454f59; background: #1d2125; color: #dee4ea; box-shadow: 0 8px 28px rgba(0,0,0,.55); cursor: default; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }' +
+            '#jita-ocr-layer .jo-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }' +
+            '#jita-ocr-layer .jo-lang { background: #22272b; color: #dee4ea; border: 1px solid #454f59; border-radius: 4px; padding: 3px 6px; font: inherit; font-size: 12px; cursor: pointer; }' +
+            '#jita-ocr-layer .jo-why { flex: 1; color: #8c9bab; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+            '#jita-ocr-layer .jo-x { color: #8c9bab; font-size: 20px; line-height: 1; padding: 0 2px; cursor: pointer; }' +
+            '#jita-ocr-layer .jo-x:hover { color: #fff; }' +
+            '#jita-ocr-layer .jo-status { color: #8c9bab; font-size: 12px; }' +
+            '#jita-ocr-layer .jo-status:empty { display: none; }' +
+            '#jita-ocr-layer .jo-status.busy::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 7px; vertical-align: -1px; border: 2px solid #454f59; border-top-color: #579dff; border-radius: 50%; animation: jita-ocr-spin .8s linear infinite; }' +
+            '#jita-ocr-layer .jo-status.err { color: #fd9891; }' +
+            '#jita-ocr-layer .jo-tx { margin: 4px 0 10px; color: #fff; font-size: 14px; white-space: pre-wrap; word-break: break-word; }' +
+            '#jita-ocr-layer .jo-tx:empty { display: none; }' +
+            '#jita-ocr-layer .jo-lbl { display: flex; justify-content: space-between; gap: 8px; margin: 6px 0 4px; color: #8c9bab; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }' +
+            '#jita-ocr-layer .jo-meta { text-transform: none; letter-spacing: 0; font-weight: 400; }' +
+            '#jita-ocr-layer .jo-src { display: block; width: 100%; box-sizing: border-box; min-height: 40px; max-height: 160px; resize: vertical; padding: 6px 8px; border-radius: 4px; border: 1px solid #454f59; background: #161a1d; color: #dee4ea; font: 13px/1.45 "Segoe UI", "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", Meiryo, "Yu Gothic", "Malgun Gothic", "Noto Sans CJK KR", sans-serif; }' +
+            '#jita-ocr-layer .jo-src:focus { outline: none; border-color: #579dff; }' +
+            '#jita-ocr-layer .jo-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }' +
+            '#jita-ocr-layer .jo-actions button { padding: 4px 9px; border-radius: 4px; border: 1px solid #454f59; background: #2c333a; color: #dee4ea; font: inherit; font-size: 12px; cursor: pointer; }' +
+            '#jita-ocr-layer .jo-actions button:hover { background: #38414a; }' +
+            '#jita-ocr-layer .jo-joinl { display: inline-flex; align-items: center; gap: 5px; color: #b6c2cf; font-size: 12px; cursor: pointer; }' +
+            '#jita-ocr-layer .jo-sp { flex: 1; }' +
+            '@keyframes jita-ocr-spin { to { transform: rotate(360deg); } }';
+        try { GM_addStyle(css); } catch (e) { var st = document.createElement('style'); st.textContent = css; document.head.appendChild(st); }
+    }
+};
+
+
 /* ---- init: watch the DOM and (re)inject the panel across Atlassian's React re-renders / SPA nav ---- */
 // Mount the Lead-duties chip + menu command for a Lead. Shared by the Jira boot below and the Confluence
 // boot: the cached verdict (leadDutyMe) arms it synchronously on every load after the first, and resolveMe()
@@ -18041,6 +18785,7 @@ if (JITA_IS_WIKI) {
             try { JiTA.ui.updateVisibility(); } catch (e2) { /* swallow */ }   // hide while an attachment viewer is open
             try { JiTA.logsig.updateVisibility(); } catch (e3) { /* swallow */ }   // drop the "Defects in log" panel once the log viewer closes
             try { JiTA.dv.ensure(); } catch (e4) { /* swallow */ }   // detail view: mount / follow the open issue / unmount off /browse/
+            try { JiTA.ocr.ensure(); } catch (e5) { /* swallow */ }  // screenshot translation: button on an open image attachment
         }, 300);
     });
     observer.observe(document.body, { childList: true, subtree: true });
