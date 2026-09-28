@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.35.2
+// @version     3.36.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -15571,6 +15571,9 @@ JiTA.leadduty = {
                 v.done[ym] = v.done[ym] || {};
                 v.done[ym][key] = { by: handle, at: nowIso, verdict: verdict || 'ok' };
                 if (actor) { v.done[ym][key].actor = actor; }
+                // The reason is kept WITH the verdict as well as on the follow-up, so the month's table can show
+                // it for as long as the month is kept, whatever happens to the follow-up in the meantime.
+                if (verdict === 'flag' && txt) { v.done[ym][key].note = txt; }
                 if (verdict === 'flag') {
                     v.flags = v.flags || {};
                     v.flags[key] = {
@@ -15583,6 +15586,34 @@ JiTA.leadduty = {
                 }
                 return v;
             }).then(L.report.tap);
+        },
+
+        // Take back a verdict recorded by mistake - the Undo on a judged row. Only your OWN verdict: the QC tab
+        // lists nothing else, and a stale click must never erase another Lead's. A flag nobody has dealt with yet
+        // is withdrawn with it, reason and all. One that has already been resolved stays exactly as it is: it was
+        // followed up with a real person, and the record of that is not an accident to undo (undoable() does not
+        // offer the button for it; this is the guard behind that).
+        uncheck: function (key, ym) {
+            var L = JiTA.leadduty;
+            ym = ym || L._prevYm();
+            var handle = (L.me() && L.me().handle) || '?';
+            return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
+                var d = v && v.done && v.done[ym] && v.done[ym][key];
+                if (!d || d.by !== handle) { return null; }
+                var f = v.flags && v.flags[key];
+                if (f && f.ym === ym && f.resolvedAt) { return null; }
+                delete v.done[ym][key];
+                if (f && f.ym === ym) { delete v.flags[key]; }
+                return v;
+            }).then(L.report.tap);
+        },
+
+        // Whether a judged row offers Undo: your own verdict, unless it is a flag that has already been resolved.
+        // A mark still waiting to reach Confluence (made offline) is yours by definition and can always go.
+        undoable: function (done, flag, ym) {
+            var me = (JiTA.leadduty.me() && JiTA.leadduty.me().handle) || null;
+            if (!done || !me || done.by !== me) { return false; }
+            return !(flag && flag.ym === ym && flag.resolvedAt);
         },
 
         // Close out a follow-up. The flag is kept (resolved, not deleted) so the ledger page can show that it
@@ -15808,6 +15839,19 @@ JiTA.leadduty = {
                 var at = rec.pending.indexOf(id);
                 if (ok && at >= 0) { rec.pending.splice(at, 1); }
                 if (!ok && at < 0) { rec.pending.push(id); }
+                return JiTA.leadduty.local.put(key, rec).then(function () { return rec; });
+            });
+        },
+
+        // The inverse of mark, for an Undo. Both halves matter: every reload MERGES the mirror's marks back over
+        // the ledger's (that is how an offline mark survives), and flushPending() replays whatever is pending -
+        // so a verdict left in either would quietly come back after being taken back.
+        unmark: function (key, id) {
+            return JiTA.leadduty.local.get(key).then(function (rec) {
+                if (!rec) { return null; }
+                if (rec.done) { delete rec.done[id]; }
+                var at = (rec.pending || []).indexOf(id);
+                if (at >= 0) { rec.pending.splice(at, 1); }
                 return JiTA.leadduty.local.put(key, rec).then(function () { return rec; });
             });
         }
@@ -16184,12 +16228,19 @@ JiTA.leadduty = {
                 R._table(['Page', 'Assigned to', 'Status', 'When'], rows);
         },
 
+        // Why a sampled item was flagged: the reason stored with the verdict, or - for a verdict recorded before
+        // reasons were stored there - the note on that month's follow-up. Empty for anything not flagged.
+        _reason: function (d, flag, ym) {
+            if (!d || d.verdict !== 'flag') { return ''; }
+            return d.note || (flag && flag.ym === ym && flag.note) || '(no reason given)';
+        },
+
         _qcSection: function (qc, pym) {
             var R = JiTA.leadduty.report;
             var rec = (qc && qc.months && qc.months[pym]) || null;
             var h = '<h2>Quality control - ' + R._txt(pym) + '</h2>';
             if (!rec) { return h + '<p>Last month has not been sampled yet. The sample is drawn the first time any Lead opens the overlay.</p>'; }
-            var done = (qc.done && qc.done[pym]) || {};
+            var done = (qc.done && qc.done[pym]) || {}, flags = qc.flags || {};
             var rows = [], sum = [], total = 0, checked = 0, flagged = 0;
             Object.keys(rec.assign || {}).sort().forEach(function (lead) {
                 var n = 0, c = 0, f = 0;
@@ -16200,7 +16251,7 @@ JiTA.leadduty = {
                     if (d && d.verdict === 'flag') { f++; flagged++; }
                     rows.push([R._issue(key), R._txt(lead), R._txt((d && d.actor) || ''),
                         R._txt(!d ? 'Outstanding' : (d.verdict === 'flag' ? 'Flagged' : 'Checked')),
-                        R._when(d && d.at)]);
+                        R._when(d && d.at), R._txt(R._reason(d, flags[key], pym))]);
                 });
                 sum.push([R._txt(lead), String(n), String(c), String(f)]);
             });
@@ -16215,8 +16266,9 @@ JiTA.leadduty = {
                 R._table(['Lead', 'Sampled', 'Checked', 'Flagged'], sum) +
                 '<h3>Items</h3>' +
                 '<p>"Handled by" is whoever moved the report to Attached or Closed, or created the defect. ' +
-                'It is recorded with the verdict, so an item nobody has checked yet does not carry one.</p>' +
-                R._table(['Issue', 'Assigned to', 'Handled by', 'Verdict', 'When'], rows);
+                'It is recorded with the verdict, so an item nobody has checked yet does not carry one. ' +
+                '"Reason" is what the Lead wrote when flagging it.</p>' +
+                R._table(['Issue', 'Assigned to', 'Handled by', 'Verdict', 'When', 'Reason'], rows);
         },
 
         _coverageSection: function (wiki, pool) {
@@ -16529,6 +16581,7 @@ JiTA.leadduty.ui = {
         }
 
         var qcLocalDone = U._qcLocalDone || {};
+        var flags = (res.ledgerValue && res.ledgerValue.flags) || {};
         var doneCount = 0;
         res.items.forEach(function (it) {
             var done = res.done[it.key] || (qcLocalDone[it.key] ? { by: me, at: qcLocalDone[it.key], local: true } : null);
@@ -16578,11 +16631,18 @@ JiTA.leadduty.ui = {
             });
             $row.on('mouseleave', function () { try { JiTA.ui._hideTip(); } catch (e) { /* ignore */ } });
             var $act = $('<span class="ld-act"></span>').appendTo($row);
+            // Drop the hydrated cache before reloading: the ledger now carries (or has lost) a `done` entry
+            // this snapshot predates, and re-hydrating is cheap (the month is frozen, so it re-reads the
+            // ledger plus one targeted key lookup - it never re-crawls the pool).
+            var reload = function () { U._qc = null; U._loadQc(false); };
+            if (done && L.qc.undoable(done, flags[it.key], ym)) {
+                $('<button class="jita-btn ld-mini">Undo</button>')
+                    .attr('title', done.verdict === 'flag' ? 'Take the flag back - it also withdraws the follow-up and its reason'
+                        : 'Take this back - the item goes back on your list')
+                    .on('click', function () { U._undo(this, it, ym, done.verdict === 'flag', reload); })
+                    .appendTo($act);
+            }
             if (!done) {
-                // Drop the hydrated cache before reloading: the ledger now carries a `done` entry this
-                // snapshot predates, and re-hydrating is cheap (the month is frozen, so it re-reads the
-                // ledger plus one targeted key lookup - it never re-crawls the pool).
-                var reload = function () { U._qc = null; U._loadQc(false); };
                 $('<button class="jita-btn ld-mini">Checked</button>').on('click', function () {
                     U._act(this, L.qc.markChecked(it.key, 'ok', ym, null, it), L.qc.localKey(ym), it.key, reload);
                 }).appendTo($act);
@@ -16611,6 +16671,7 @@ JiTA.leadduty.ui = {
                 ' defect(s) created that month, so the floor of ' + res.record.minDefects + ' could not be met');
         }
         if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
+        if (U._qcNote) { bits.unshift(U._qcNote); U._qcNote = null; }   // what an Undo just did, first
         U._status(bits.join(' · '));
         U._tabCount(res.ledgerValue);
     },
@@ -17118,6 +17179,28 @@ JiTA.leadduty.ui = {
                 done();
             });
         }).catch(function () { $btn.prop('disabled', false); });
+    },
+
+    // Take a QC verdict back. A flag asks first, because undoing it also withdraws a follow-up the other Leads
+    // can see; a plain Checked does not, since checking it again is one click. The local mirror is cleared
+    // whatever Confluence says - a mark that never reached the ledger lives only there - and a write that
+    // failed is reported rather than papered over: the reload then shows the verdict still standing.
+    // The outcome line is handed to the redraw (see the end of _renderQc) rather than written here, because the
+    // reload repaints the status line a moment later and would wipe it.
+    _qcNote: null,
+    _undo: function (btn, it, ym, wasFlag, after) {
+        var L = JiTA.leadduty, U = L.ui;
+        if (wasFlag && !confirm('Take back the flag on ' + it.key + '? This also withdraws its follow-up, reason included.')) { return; }
+        $(btn).prop('disabled', true);
+        L.qc.uncheck(it.key, ym).then(function (r) { return r || {}; }, function (e) { return { error: e }; }).then(function (r) {
+            return L.local.unmark(L.qc.localKey(ym), it.key).then(function () {
+                if (r.error) { U._qcNote = 'Could not undo on Confluence - ' + String(r.error && r.error.message || r.error); }
+                else if (r.dry) { U._qcNote = 'DRY RUN - not written to Confluence'; }
+                else { U._qcNote = it.key + ' is back on your list'; }
+                after();
+                try { L.reminder.mount(); } catch (e2) { /* ignore */ }
+            });
+        });
     },
 
     _render: function () {
