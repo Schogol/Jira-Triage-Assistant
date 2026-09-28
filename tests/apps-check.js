@@ -456,20 +456,19 @@ ${name}
     ok('...and a name with an entity in it is decoded, not sent raw',
         A._parseNoteTarget(detailPage({ character: 'Test &amp; Co' })).name === 'Test & Co',
         A._parseNoteTarget(detailPage({ character: 'Test &amp; Co' })).name);
-    // A new note starts on Volunteers, not on VMS's own first option - the Leads write for the other
-    // volunteers. The fallbacks matter more than the default: nothing may ever land on Public by accident.
-    ok('a new note starts on Volunteers', A.noteDefaultState(['Developers', 'Volunteers', 'Public']) === 'Volunteers',
+    // A new note starts on Public, the widest level, so everyone who reads the account sees it (Schogol's call,
+    // 2026-09-28; it used to start on Volunteers) - not on VMS's own first option, Developers.
+    ok('a new note starts on Public', A.noteDefaultState(['Developers', 'Volunteers', 'Public']) === 'Public',
         A.noteDefaultState(['Developers', 'Volunteers', 'Public']));
-    ok('...even when VMS lists it somewhere else', A.noteDefaultState(['Public', 'Volunteers']) === 'Volunteers');
-    ok('a page without it falls back to the first NON-public option',
-        A.noteDefaultState(['Public', 'Developers']) === 'Developers', A.noteDefaultState(['Public', 'Developers']));
-    ok('Public is never chosen by default while anything else is on offer',
-        ['Developers,Volunteers,Public', 'Public,Developers', 'Developers', 'Leads,Public']
-            .every((s) => !/public/i.test(A.noteDefaultState(s.split(',')))));
-    ok('a page offering ONLY Public still yields something rather than nothing',
-        A.noteDefaultState(['Public']) === 'Public');
+    ok('...even when VMS lists it somewhere else', A.noteDefaultState(['Public', 'Developers', 'Volunteers']) === 'Public',
+        A.noteDefaultState(['Public', 'Developers', 'Volunteers']));
+    ok('a page without Public starts on the widest level it offers',
+        A.noteDefaultState(['Developers', 'Volunteers']) === 'Volunteers', A.noteDefaultState(['Developers', 'Volunteers']));
+    ok('...so a renamed widest level is still the one picked',
+        A.noteDefaultState(['Developers', 'Volunteers', 'Everyone']) === 'Everyone', A.noteDefaultState(['Developers', 'Volunteers', 'Everyone']));
+    ok('a page offering a single level starts on it', A.noteDefaultState(['Developers']) === 'Developers');
     ok('an empty list degrades to the configured default, never to undefined',
-        A.noteDefaultState([]) === 'Volunteers' && A.noteDefaultState(null) === 'Volunteers');
+        A.noteDefaultState([]) === 'Public' && A.noteDefaultState(null) === 'Public');
     ok('detail carries the note target alongside the notes', !!withNotes.note && withNotes.note.name === 'Testchar Alpha');
     ok('inspect carries it too, so the post can re-verify it', (await A.inspect(G1)).note.name === 'Testchar Alpha');
 

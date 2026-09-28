@@ -142,6 +142,15 @@ function cell(tbl, key, col) {
     ok("another month's resolved follow-up does not stop it", Q.undoable({ by: 'schogol', verdict: 'ok' }, { ym: '2020-01', resolvedAt: 'z' }, pym) === true);
     ok('nothing judged, nothing to undo', Q.undoable(null, null, pym) === false);
 
+    // ---- a resolved follow-up says why it was raised AND what was done (v3.37.0) ----
+    let ft = Q.flagText({ note: 'Wrong status', outcome: 'Talked it through with Bob', resolvedAt: 'z' });
+    ok('a resolved follow-up keeps its reason', ft.reason === 'Wrong status', JSON.stringify(ft));
+    ok('...beside what was done about it', ft.outcome === 'Talked it through with Bob', JSON.stringify(ft));
+    ft = Q.flagText({ note: 'Wrong status', resolvedAt: 'z' });
+    ok('no outcome written is just no outcome', ft.reason === 'Wrong status' && ft.outcome === '', JSON.stringify(ft));
+    ft = Q.flagText({ outcome: 'Fixed', resolvedAt: 'z' });
+    ok('a follow-up raised without a reason says so', ft.reason === '(no reason given)' && ft.outcome === 'Fixed', JSON.stringify(ft));
+
     // ---- the local mirror forgets it too ----
     meta.m = { ym: pym, items: ['A', 'B'], done: { A: 't1', B: 't2' }, pending: ['A'] };
     await L.local.unmark('m', 'A');

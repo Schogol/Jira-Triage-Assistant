@@ -15,7 +15,11 @@ const muts = [
     ['named lookup case-sensitive', 'var named = A._ENT[body.toLowerCase()];', 'var named = A._ENT[body];'],
     ['unknown name dropped', 'return named != null ? named : A._named(m);', "return named != null ? named : '';"],
     ['browser never asked', 'return named != null ? named : A._named(m);', 'return named != null ? named : m;'],
-    ['no browser: throws', '        } catch (e) { return m; }\n    },\n', '        } catch (e) { throw e; }\n    },\n']
+    ['no browser: throws', '        } catch (e) { return m; }\n    },\n', '        } catch (e) { throw e; }\n    },\n'],
+    // The note composer's starting visibility (v3.37.0: Public, the widest), which apps-check also covers.
+    ['notes start on Volunteers again', "NOTE_DEFAULT_STATE: 'Public',", "NOTE_DEFAULT_STATE: 'Volunteers',"],
+    ['without Public, the narrowest level is picked', 'return list.length ? list[list.length - 1] : A.NOTE_DEFAULT_STATE;', 'return list.length ? list[0] : A.NOTE_DEFAULT_STATE;'],
+    ['an empty list yields nothing', 'return list.length ? list[list.length - 1] : A.NOTE_DEFAULT_STATE;', 'return list[list.length - 1];']
 ];
 let allRed = true;
 muts.forEach(([name, a, b]) => {

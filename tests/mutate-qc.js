@@ -13,13 +13,15 @@ const muts = [
     [H, 'older flags lose their reason', "return d.note || (flag && flag.ym === ym && flag.note) || '(no reason given)';", "return d.note || '(no reason given)';"],
     [H, "another month's reason is borrowed", "return d.note || (flag && flag.ym === ym && flag.note) || '(no reason given)';", "return d.note || (flag && flag.note) || '(no reason given)';"],
     [H, 'a Checked item shows a reason', "            if (!d || d.verdict !== 'flag') { return ''; }\n            return d.note", "            if (!d) { return ''; }\n            return d.note"],
+    [H, 'the outcome replaces the reason', "return { reason: (f && f.note) || '(no reason given)',", "return { reason: (f && (f.outcome || f.note)) || '(no reason given)',"],
+    [H, 'the outcome is dropped', "outcome: (f && f.outcome) || '' };", "outcome: '' };"],
     // ---- Undo ----
-    [H, "another Lead's verdict can be undone", "                if (!d || d.by !== handle) { return null; }\n", "                if (!d) { return null; }\n"],
+    [H, "another Lead's verdict can be undone", "v.done[ym][key];\n                if (!d || d.by !== handle) { return null; }\n", "v.done[ym][key];\n                if (!d) { return null; }\n"],
     [H, 'a resolved flag can be undone', "                if (f && f.ym === ym && f.resolvedAt) { return null; }\n", ''],
     [H, 'the open follow-up survives an Undo', "                if (f && f.ym === ym) { delete v.flags[key]; }\n", ''],
     [H, "another month's follow-up is withdrawn", "                if (f && f.ym === ym) { delete v.flags[key]; }\n", "                if (f) { delete v.flags[key]; }\n"],
     [H, 'an Undo never reaches the page', "                if (f && f.ym === ym) { delete v.flags[key]; }\n                return v;\n            }).then(L.report.tap);", "                if (f && f.ym === ym) { delete v.flags[key]; }\n                return v;\n            });"],
-    [H, 'the button is offered on anyone\'s verdict', "            if (!done || !me || done.by !== me) { return false; }", "            if (!done || !me) { return false; }"],
+    [H, 'the button is offered on anyone\'s verdict', "undoable: function (done, flag, ym) {\n            var me = (JiTA.leadduty.me() && JiTA.leadduty.me().handle) || null;\n            if (!done || !me || done.by !== me) { return false; }", "undoable: function (done, flag, ym) {\n            var me = (JiTA.leadduty.me() && JiTA.leadduty.me().handle) || null;\n            if (!done || !me) { return false; }"],
     [H, 'the button is offered on a resolved flag', "            return !(flag && flag.ym === ym && flag.resolvedAt);", "            return true;"],
     [H, 'the mirror keeps the mark', "                if (rec.done) { delete rec.done[id]; }\n", ''],
     [H, 'the queued replay survives', "                if (at >= 0) { rec.pending.splice(at, 1); }\n                return JiTA.leadduty.local.put(key, rec).then(function () { return rec; });\n            });\n        }\n    },", "                return JiTA.leadduty.local.put(key, rec).then(function () { return rec; });\n            });\n        }\n    },"]
