@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.35.0
+// @version     3.35.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -15867,6 +15867,37 @@ JiTA.leadduty = {
                 function () { return true; });
     },
 
+    // Bring the local mirrors up to date with the SHARED ledger before anything counts from them. A mirror
+    // only learns about a completion made in THIS browser, when the overlay loads, or on the six-hourly
+    // refresh - so pages reviewed in another browser left it counting work that was already done, and the
+    // daily dialog (which fires 12s after load, before the scheduler's first tick) announced "2 page reviews"
+    // right before the overlay showed the month complete. Two small property reads fix that. Completions are
+    // only ever ADDED: a local-only mark the ledger has not accepted yet must survive, exactly as in the
+    // scheduler's own refresh. A mirror that does not exist yet is left for the scheduler to build, and a
+    // failed read leaves everything as it was. Resolves true when a mirror changed.
+    _syncing: null,
+    syncMirrors: function () {
+        var L = JiTA.leadduty;
+        if (L._syncing) { return L._syncing; }
+        var wym = L._ym(), qym = L._prevYm();
+        function merge(key, ledger, ym, field) {
+            return L.local.get(key).then(function (rec) {
+                if (!rec || !rec[field]) { return false; }
+                var done = (ledger && ledger.done && ledger.done[ym]) || {}, changed = false;
+                rec.done = rec.done || {};
+                rec[field].forEach(function (id) {
+                    if (done[id] && !rec.done[id]) { rec.done[id] = done[id].at || new Date().toISOString(); changed = true; }
+                });
+                return changed ? L.local.put(key, rec).then(function () { return true; }) : false;
+            });
+        }
+        L._syncing = Promise.all([L.ledger.read(L.LEDGER_KEY), L.ledger.read(L.QC_LEDGER_KEY)]).then(function (r) {
+            return Promise.all([merge(L.wiki.localKey(wym), r[0].value, wym, 'pageIds'), merge(L.qc.localKey(qym), r[1].value, qym, 'items')]);
+        }).then(function (c) { L._syncing = null; return !!(c[0] || c[1]); },
+            function () { L._syncing = null; return false; });
+        return L._syncing;
+    },
+
     // ---- publishing the ledger to the page itself ----------------------------------------------------
     // The JSON lives in a content property, which is invisible on the page - correct for machine state, and
     // useless for "who reviewed what" or "what did we flag". So the same data is rendered into the ledger
@@ -16356,7 +16387,7 @@ JiTA.leadduty.ui = {
                 // done so the row doesn't look unactioned until flushPending() gets through.
                 U._wikiLocalDone = rec.done;
                 return L.local.put(L.wiki.localKey(ym), rec);
-            }).then(function () { U._renderWiki(); });
+            }).then(function () { U._renderWiki(); try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
         }).catch(function (e) {
             if (!U.isOpen()) { return; }
             U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
@@ -16471,7 +16502,7 @@ JiTA.leadduty.ui = {
                 if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!rec.done[k]) { rec.done[k] = prev.done[k]; } }); }
                 U._qcLocalDone = rec.done;   // see the note in _loadWiki: shows marks the ledger hasn't taken yet
                 return L.local.put(L.qc.localKey(ym), rec);
-            }).then(function () { U._renderQc(); });
+            }).then(function () { U._renderQc(); try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
         }).catch(function (e) {
             if (!U.isOpen()) { return; }
             U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
@@ -17073,15 +17104,18 @@ JiTA.leadduty.ui = {
         var L = JiTA.leadduty, U = L.ui;
         var $btn = $(btn);
         $btn.prop('disabled', true);
+        // The chip counts from the mirror this just updated, so it reflects the mark at once - the last mark of
+        // the month turns it to "all done" while the overlay is still open, not a minute later.
+        function done() { after(); try { L.reminder.mount(); } catch (e2) { /* ignore */ } }
         promise.then(function (r) {
             return L.local.mark(localKey, id, !(r && r.dry)).then(function () {
                 if (r && r.dry) { U._status('DRY RUN - not written to Confluence'); }
-                after();
+                done();
             });
         }, function (e) {
             return L.local.mark(localKey, id, false).then(function () {
                 U._status('Saved locally only - ' + String(e && e.message || e) + ' It will be retried automatically.');
-                after();
+                done();
             });
         }).catch(function () { $btn.prop('disabled', false); });
     },
@@ -17754,9 +17788,10 @@ JiTA.leadduty.apps = {
 
 
 /* ---- Lead duties: the ambient monthly reminder -------------------------------------------------------
- * A chip that comes BACK every 24h until the month's duties are done, rather than a permanent badge (a
- * once-a-month task behind an always-lit badge becomes wallpaper within a week) or a one-shot monthly
- * dismissal (too easy to lose). It sits above the ISD credits badge, which owns bottom:16px.
+ * A chip that stays in the corner and says what is left this month - or that everything is done. It used to
+ * vanish once the month was finished, but a chip that disappears looks exactly like one that broke, and "all
+ * done" is worth seeing (Schogol, 2026-09-28). Its x still hides it for 24h. It sits above the ISD credits
+ * badge, which owns bottom:16px.
  */
 JiTA.leadduty.reminder = {
     ID: 'jita-leadduty-chip',
@@ -17773,18 +17808,23 @@ JiTA.leadduty.reminder = {
         if (!R.shouldShow()) { R.remove(); return; }
         L.outstanding().then(function (o) {
             if (!R.shouldShow()) { R.remove(); return; }
-            // Nothing outstanding for a month we HAVE computed: stay quiet entirely. Applications count as
-            // outstanding only when we actually READ a non-zero number - an unreadable VMS must never be
-            // able to raise the chip on its own, or a Lead who simply is not logged in gets nagged daily
-            // about a queue nobody can see.
-            var appsDue = !!(o.apps && o.apps.ok && o.apps.total);
-            if (o.known && !o.pages && !o.checks && !appsDue) { R.remove(); return; }
-            R._paint('📋 Lead duties: ' + R._summary(o));
+            R._paint(R._label(o));
         }).catch(function () { /* ignore */ });
     },
 
+    // What the chip says: the outstanding work, "all done" once both halves of the month are finished, or just
+    // its name while the counts are not known yet (the first minute of a month, before anything is frozen).
+    // Applications count only when a non-zero number was actually READ - an unreadable VMS must not turn a
+    // finished month back into open work.
+    _label: function (o) {
+        var s = JiTA.leadduty.reminder._summary(o);
+        if (s) { return '📋 Lead duties: ' + s; }
+        if (o.pages === 0 && o.checks === 0) { return '📋 Lead duties: all done ✓'; }
+        return '📋 Lead duties';
+    },
+
     // The one phrase both the chip and the nudge use, so they can never disagree about what is outstanding.
-    // Counts that are still unknown (a month nothing has frozen yet) fall back to the vaguer wording.
+    // Empty when nothing is known to be outstanding.
     _summary: function (o) {
         var bits = [];
         if (o.pages) { bits.push(o.pages + ' page review' + (o.pages === 1 ? '' : 's')); }
@@ -17796,7 +17836,7 @@ JiTA.leadduty.reminder = {
             // Lead the applications number is missing, never worth summoning the chip to say it.
             bits.push('VMS needs a login');
         }
-        return bits.length ? bits.join(', ') : 'due this month';
+        return bits.join(', ');
     },
 
     // ---- the once-a-day nudge --------------------------------------------------------------------------
@@ -17812,9 +17852,11 @@ JiTA.leadduty.reminder = {
         var L = JiTA.leadduty, R = L.reminder;
         if (R._nagged || JITA_IS_FORGE_FRAME || !L.isLead()) { return; }
         if (Date.now() < (gmGet(L.NAG_KEY, 0) || 0)) { return; }
-        L.outstanding().then(function (o) {
+        L.syncMirrors().then(function () { return L.outstanding(); }).then(function (o) {
             if (R._nagged) { return; }
-            if (o.known && o.pages === 0 && o.checks === 0) { return; }   // this month is already done
+            // Only for a real count of page reviews or QC checks. A finished month stays quiet, and so do counts
+            // that are not known yet - the next load, once the scheduler has frozen the month, can still nag.
+            if (!(o.pages > 0 || o.checks > 0)) { return; }
             if (JiTA.menu.isOpen()) { return; }   // never rip away an overlay the Lead is working in
             R._nagged = true;
             gmSet(L.NAG_KEY, Date.now() + R.SEEN_QUIET_MS);
@@ -19284,6 +19326,13 @@ function jitaArmLeadDuties() {
         if (mounted || !JiTA.leadduty.isLead()) { return; }
         mounted = true;
         try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }
+        // The chip just painted from the local mirror; check it against the shared ledger and repaint if a
+        // completion made in another browser was missing.
+        try {
+            JiTA.leadduty.syncMirrors().then(function (changed) {
+                if (changed) { try { JiTA.leadduty.reminder.mount(); } catch (e2) { /* swallow */ } }
+            });
+        } catch (e) { /* swallow */ }
         try { JiTA.leadduty.sched.start(); } catch (e) { /* swallow */ }
         // The once-a-day dialog, after the page has settled. It checks its own quiet-until stamp, so this
         // fires at most once per session and at most once a day however many tabs are opened.
