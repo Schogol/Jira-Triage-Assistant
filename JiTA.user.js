@@ -17048,8 +17048,8 @@ JiTA.leadduty.ui = {
 
     // Writing a note. Deliberately NOT armed the way Decline is: a note is additive and correctable, and
     // making it feel as dangerous as declining somebody would devalue the confirm that actually matters.
-    // What it does get instead is an explicit visibility on screen, because an internal note going out
-    // Public is the one mistake here that cannot be taken back.
+    // What it does get instead is its visibility in plain view beside Post, because a posted note cannot be
+    // edited or deleted - who it goes to has to be settled before it is sent.
     _noteComposer: function ($box, $head, it, target) {
         var L = JiTA.leadduty, U = L.ui, st = U._apps;
         var draft = (st && st.drafts && st.drafts[it.id]) || null;
@@ -17645,17 +17645,15 @@ JiTA.leadduty.apps = {
     // shows on everything that person ever files. A page that renders no Add-note button offers no composer
     // here either: the same rule the action buttons follow. Resolves { name, states } or null.
     NOTE_STATES: ['Developers', 'Volunteers', 'Public'],
-    // The visibility a new note STARTS on. VMS's own modal defaults to its first option (Developers), but a
-    // Lead writing about an applicant is writing for the other volunteers, so that is where this starts.
-    // It is only ever a preference: a page that does not offer it falls back to the first option that is
-    // NOT Public, because the one visibility that must never be arrived at by accident is the one the
-    // applicant themselves can read.
-    NOTE_DEFAULT_STATE: 'Volunteers',
+    // The visibility a new note STARTS on: Public, the widest, so everyone who reads the account sees it
+    // (Schogol's call, 2026-09-28; it used to start on Volunteers). VMS's own modal starts on its first option,
+    // Developers. It is only a starting point - the choice sits right beside Post - and a page that does not
+    // offer Public starts on the widest level it does offer: the last one, since VMS lists them narrowest first.
+    NOTE_DEFAULT_STATE: 'Public',
     noteDefaultState: function (states) {
         var A = JiTA.leadduty.apps, list = states || [];
         if (list.indexOf(A.NOTE_DEFAULT_STATE) >= 0) { return A.NOTE_DEFAULT_STATE; }
-        for (var i = 0; i < list.length; i++) { if (!/public/i.test(list[i])) { return list[i]; } }
-        return list[0] || A.NOTE_DEFAULT_STATE;
+        return list.length ? list[list.length - 1] : A.NOTE_DEFAULT_STATE;
     },
     _parseNoteTarget: function (body) {
         var A = JiTA.leadduty.apps;
@@ -17773,8 +17771,8 @@ JiTA.leadduty.apps = {
                     message: 'VMS no longer offers an Add-note control on this application - write the note in VMS.' };
             }
             // Visibility is never inferred or passed through unchecked. An unrecognised value would be sent
-            // verbatim, and the single mistake here that cannot be taken back is an internal note going out
-            // Public - so anything the page did not itself offer is refused before a request is made.
+            // verbatim, and a note cannot be edited or deleted once posted - so anything the page did not itself
+            // offer is refused before a request is made.
             if (info.note.states.indexOf(viewState) < 0) {
                 return { ok: false, reason: 'visibility',
                     message: 'VMS does not offer "' + viewState + '" as a visibility on this page - nothing was sent.' };
