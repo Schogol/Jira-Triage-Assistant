@@ -3,7 +3,7 @@
 // is already using, it keeps its OWN stamp (the chip's x must not suppress tomorrow's dialog), and it stays
 // silent on a month that is already done.
 const fs = require('fs');
-const src = fs.readFileSync((process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js')), 'utf8').replace(/\r\n/g, '\n');
+const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const rs = src.indexOf('JiTA.leadduty.reminder = {');
 const re = src.indexOf('\n};', rs) + 3;
 if (rs < 0 || re < 3) { throw new Error('could not slice JiTA.leadduty.reminder'); }
@@ -58,12 +58,14 @@ global.document = {
 };
 
 let outstanding = { pages: 2, checks: 10, known: true };
+let syncCalls = 0, syncImpl = () => Promise.resolve(false);
 global.JiTA = {
     menu: { isOpen: () => overlayOpen, close() { overlayOpen = false; }, _openOverlay() { overlayOpen = true; return { $menu: $stub(), close() { overlayOpen = false; } }; } },
     leadduty: {
         SNOOZE_KEY: 'leadDutySnoozeTs', NAG_KEY: 'leadDutyNagTs', SNOOZE_MS: DAY,
         isLead: () => true,
         outstanding: () => Promise.resolve(outstanding),
+        syncMirrors: () => { syncCalls++; return syncImpl(); },
         ui: { open() { uiOpened = true; overlayOpen = true; } }
     }
 };
@@ -79,7 +81,10 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     ok('QC checks are named as such', R._summary({ pages: 0, checks: 10 }) === '10 QC checks', R._summary({ pages: 0, checks: 10 }));
     ok('both halves read together', R._summary({ pages: 1, checks: 1 }) === '1 page review, 1 QC check',
         R._summary({ pages: 1, checks: 1 }));
-    ok('unknown counts degrade to the vague wording', R._summary({ pages: null, checks: null }) === 'due this month');
+    ok('nothing known to be outstanding is an empty phrase', R._summary({ pages: null, checks: null }) === '');
+    ok('the chip names the work', R._label({ pages: 2, checks: 0 }) === '📋 Lead duties: 2 page reviews');
+    ok('a finished month reads as all done', R._label({ pages: 0, checks: 0 }) === '📋 Lead duties: all done ✓', R._label({ pages: 0, checks: 0 }));
+    ok('unknown counts are not "all done"', R._label({ pages: 0, checks: null }) === '📋 Lead duties', R._label({ pages: 0, checks: null }));
 
     // ---- the chip ----
     reset();
@@ -90,7 +95,7 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     reset();
     outstanding = { pages: 0, checks: 0, known: true };
     R.mount(); await tick();
-    ok('a finished month paints no chip', !painted.length, painted.join(' | '));
+    ok('a finished month keeps the chip, saying so', painted.some((t) => t === '📋 Lead duties: all done ✓'), painted.join(' | '));
     outstanding = { pages: 2, checks: 10, known: true };
 
     // ---- the dialog ----
@@ -166,7 +171,8 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     reset();
     outstanding = { pages: 0, checks: 0, known: true, apps: { ok: false, reason: 'login' } };
     R.mount(); await tick();
-    ok('an unreadable VMS never summons the chip by itself', !painted.length, painted.join(' | '));
+    ok('an unreadable VMS does not turn a finished month into work',
+        painted.some((t) => t === '📋 Lead duties: all done ✓') && !painted.some((t) => /VMS/.test(t)), painted.join(' | '));
 
     reset();
     outstanding = { pages: 2, checks: 0, known: true, apps: { ok: false, reason: 'login' } };
@@ -177,13 +183,46 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     reset();
     outstanding = { pages: 0, checks: 0, known: true, apps: { ok: true, fresh: 0, second: 0, total: 0 } };
     R.mount(); await tick();
-    ok('an empty application queue is not work', !painted.length, painted.join(' | '));
+    ok('an empty application queue is not work', painted.some((t) => t === '📋 Lead duties: all done ✓'), painted.join(' | '));
 
     reset();
     outstanding = { pages: 0, checks: 0, known: true, apps: { ok: true, fresh: 7, second: 4, total: 11 } };
     R.nag(); await tick();
     ok('applications never raise the daily dialog', !overlayOpen && gm.leadDutyNagTs === undefined,
         'no ledger entry means no accountability nag');
+    outstanding = { pages: 2, checks: 10, known: true };
+
+    // ---- counts not known yet (the first minute of a month) ----
+    reset();
+    outstanding = { pages: null, checks: null, known: false };
+    R.mount(); await tick();
+    ok('unknown counts keep the chip up with just its name', painted.some((t) => t === '📋 Lead duties'), painted.join(' | '));
+    reset();
+    R.nag(); await tick();
+    ok('unknown counts raise no dialog', !overlayOpen && gm.leadDutyNagTs === undefined);
+    reset();
+    outstanding = { pages: 0, checks: null, known: true };
+    R.nag(); await tick();
+    ok('...nor does a half that is known to be done', !overlayOpen && gm.leadDutyNagTs === undefined);
+
+    // ---- the dialog checks the shared ledger before trusting the local copy ----
+    // The reported bug: pages reviewed in another browser left the local copy saying "2 page reviews", and the
+    // dialog announced them right before the overlay showed the month complete.
+    reset(); syncCalls = 0;
+    outstanding = { pages: 2, checks: 0, known: true };
+    syncImpl = () => { outstanding = { pages: 0, checks: 0, known: true }; return Promise.resolve(true); };
+    R.nag(); await tick();
+    ok('the dialog reads the shared ledger first', syncCalls === 1, String(syncCalls));
+    ok('...and stays quiet when it shows the work done', !overlayOpen && gm.leadDutyNagTs === undefined);
+    reset(); syncCalls = 0;
+    outstanding = { pages: 2, checks: 0, known: true };
+    syncImpl = () => Promise.resolve(false);
+    R.nag(); await tick();
+    ok('when the ledger has nothing new (or is unreachable) the local count still speaks', overlayOpen);
+    reset(); syncCalls = 0;
+    gm.leadDutyNagTs = Date.now() + DAY;
+    R.nag(); await tick();
+    ok('a quiet stamp skips the ledger read too', syncCalls === 0, String(syncCalls));
     outstanding = { pages: 2, checks: 10, known: true };
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'reminder checks passed.'));
