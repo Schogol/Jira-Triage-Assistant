@@ -1,0 +1,43 @@
+// mutate-changelog.js - breaks each guard of the changelog and its "What's new" pill (v3.38.0) and requires
+// changelog-check to go red. A crashed harness counts as red.
+const fs = require('fs');
+const { execSync } = require('child_process');
+const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const H = 'changelog-check.js';
+const ver = (/^\/\/ @version\s+(\S+)/m.exec(src) || [])[1] || '';
+const muts = [
+    // ---- the data has to match the release ----
+    [H, 'a release without an entry', '// @version     ' + ver + '\n', '// @version     ' + ver.replace(/(\d+)$/, (d) => String(+d + 1)) + '\n'],
+    // ---- what counts as new ----
+    [H, 'first sight shows the whole history as new', 'if (!seen) { return C.ENTRIES.slice(0, 1); }', 'if (!seen) { return C.ENTRIES.slice(); }'],
+    [H, 'the seen version still counts as new', 'return C.ENTRIES.filter(function (e) { return JiTA.worker._verCmp(e.v, seen) > 0; });', 'return C.ENTRIES.filter(function (e) { return JiTA.worker._verCmp(e.v, seen) >= 0; });'],
+    [H, 'seeing it is never remembered', 'gmSet(C.SEEN_KEY, C.latest().v);\n        C.remove();', 'C.remove();'],
+    [H, 'the oldest version is remembered as seen', 'gmSet(C.SEEN_KEY, C.latest().v);', 'gmSet(C.SEEN_KEY, C.ENTRIES[C.ENTRIES.length - 1].v);'],
+    [H, 'the pill never counts', 'if (fresh.length === 1) {', 'if (fresh.length >= 1) {'],
+    [H, 'shows inside the Zendesk frame', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseen().length > 0;', 'return JiTA.changelog.unseen().length > 0;'],
+    [H, 'shows with nothing new', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseen().length > 0;', 'return !JITA_IS_FORGE_FRAME;'],
+    [H, 'the date lands a month off', "JiTA.changelog.MONTHS[parseInt(p[1], 10) - 1]", "JiTA.changelog.MONTHS[parseInt(p[1], 10)]"],
+    [H, 'the day loses its leading zero', "return p[2] + ' ' + JiTA.changelog.MONTHS", "return parseInt(p[2], 10) + ' ' + JiTA.changelog.MONTHS"],
+    // ---- the pill ----
+    [H, 'the pill ignores whether anything is new', "        if (!C.shouldShow()) { C.remove(); return; }\n        var el = document.getElementById(C.PILL_ID);", "        var el = document.getElementById(C.PILL_ID);"],
+    [H, 'mounting twice makes two pills', "        if (!el) {\n            el = document.createElement('div');\n            el.id = C.PILL_ID;", "        if (true) {\n            el = document.createElement('div');\n            el.id = C.PILL_ID;"],
+    [H, 'the x only hides the pill', 'x.addEventListener(\'click\', function (e) { e.stopPropagation(); JiTA.changelog.markSeen(); });', 'x.addEventListener(\'click\', function (e) { e.stopPropagation(); JiTA.changelog.remove(); });'],
+    [H, 'the x also opens the list', 'x.addEventListener(\'click\', function (e) { e.stopPropagation(); JiTA.changelog.markSeen(); });', 'x.addEventListener(\'click\', function (e) { JiTA.changelog.markSeen(); });'],
+    [H, 'clicking the pill does nothing', "            el.addEventListener('click', function () { JiTA.changelog.openView(); });\n", "            el.addEventListener('click', function () {});\n"],
+    [H, 'the corner is not restacked', "        if (lbl) { lbl.textContent = C.label(C.unseen()); }\n        try { jitaStackPills(); } catch (e) { /* ignore */ }", "        if (lbl) { lbl.textContent = C.label(C.unseen()); }"]
+];
+let allRed = true;
+muts.forEach(([h, name, a, b]) => {
+    if (src.split(a).length !== 2) { console.log('ANCHOR ' + (src.split(a).length - 1) + 'x: ' + name); allRed = false; return; }
+    fs.writeFileSync('mutt.js', src.replace(a, () => b));
+    let out = '', crashed = false;
+    try { out = execSync('node ' + h, { env: Object.assign({}, process.env, { JITA_SRC: 'mutt.js' }), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
+    catch (e) { out = e.stdout || ''; crashed = !/FAILURE|passed/.test(out); }
+    const fails = out.split('\n').filter((l) => /^  FAIL  /.test(l));
+    const red = crashed || fails.length > 0 || /FAILURE/.test(out);
+    if (!red) { allRed = false; }
+    console.log((red ? 'RED   ' : 'GREEN ') + h.replace('-check.js', '') + '  ' + name + '  (' + fails.length + (crashed ? ', crashed' : '') + ')' +
+        (fails[0] ? '  e.g.' + fails[0].replace(/^  FAIL /, '').slice(0, 90) : ''));
+});
+if (fs.existsSync('mutt.js')) { fs.unlinkSync('mutt.js'); }
+console.log(allRed ? '\nevery mutation caught' : '\nSOME MUTATION SURVIVED');

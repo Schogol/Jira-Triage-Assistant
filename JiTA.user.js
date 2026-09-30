@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.37.0
+// @version     3.38.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -353,13 +353,28 @@ function ensureButtonsPresent() {
     addButtons();
 }
 
-// ---- JiTA's corner pills: the ISD credits badge, the Lead-duties chip and the credits progress toast ----
+// ---- JiTA's corner pills: the ISD credits badge, the Lead-duties chip, the "What's new" pill and the credits progress toast ----
 // Their layer. Atlassian's own scale (@atlaskit/theme layers) keeps page chrome at 200 and below - the sidebar
 // sits at 2 - and puts everything that opens OVER the page above that: inline dialogs 300, dropdowns and popups
 // 400, modals 510, flags 600, tooltips 9999. The pills sit between the two, so they stay above the sidebar they
 // overlap but under every menu, dialog and flag Jira opens. At 9000 they used to cover all of those.
 var JITA_PILL_Z = 250;
-var JITA_PILL_IDS = ['jita-credits-badge', 'jita-leadduty-chip', 'jita-credits-progress'];
+var JITA_PILL_IDS = ['jita-credits-badge', 'jita-leadduty-chip', 'jita-changelog-pill', 'jita-credits-progress'];
+
+// The bottom-left pills stack upward in this order, each counted only while it is on the page: the credits badge
+// at the bottom, then the Lead-duties chip, then the "What's new" pill. Re-run whenever one of them mounts or goes,
+// so no pill hovers over a slot kept for a neighbour that is not there - the chip used to sit at a fixed 56px,
+// which with credits switched off was a gap above nothing.
+var JITA_PILL_STACK = ['jita-credits-badge', 'jita-leadduty-chip', 'jita-changelog-pill'];
+function jitaStackPills() {
+    var bottom = 16;
+    for (var i = 0; i < JITA_PILL_STACK.length; i++) {
+        var p = document.getElementById(JITA_PILL_STACK[i]);
+        if (!p) { continue; }
+        p.style.bottom = bottom + 'px';
+        bottom += (p.offsetHeight || 26) + 14;
+    }
+}
 
 // The one layer no z-index can fix: the sidebar's flyouts ("More spaces" and friends) render INSIDE the sidebar,
 // at its own z-index of 2, so anything drawn beneath them is beneath the whole sidebar too and a pill there would
@@ -8908,6 +8923,15 @@ JiTA.menu = {
             $p.append($ld);
         }
 
+        // ---- About: the running version, and the changelog (the "What's new" pill's permanent home) ----
+        var $about = $('<div class="jita-menu-sect"></div>');
+        $('<h3>About</h3>').appendTo($about);
+        $('<div class="jita-menu-status"></div>').text('Jira Triage Assistant v' + (JiTA.SCRIPT_VERSION || '?')).appendTo($about);
+        var $aboutAct = $('<div class="jita-menu-actions"></div>').appendTo($about);
+        $('<button class="jita-btn">What\'s new</button>')
+            .on('click', function () { JiTA.changelog.openView(); }).appendTo($aboutAct);
+        $p.append($about);
+
         // ---- Debug (worker diagnostics + self-heal test) ----
         var $dbg = $('<div class="jita-menu-sect"></div>');
         $('<h3>Debug</h3>').appendTo($dbg);
@@ -9426,6 +9450,7 @@ JiTA.credits = {
                 el.addEventListener('click', function () { JiTA.credits.openView(); });
                 (document.body || document.documentElement).appendChild(el);
                 el.textContent = '📊 credits…';
+                try { jitaStackPills(); } catch (e) { /* ignore */ }
             }
             JiTA.credits.badge.refresh();
         },
@@ -9451,6 +9476,7 @@ JiTA.credits = {
         remove: function () {
             var el = document.getElementById('jita-credits-badge');
             if (el && el.parentNode) { el.parentNode.removeChild(el); }
+            try { jitaStackPills(); } catch (e) { /* ignore */ }
         }
     },
 
@@ -18068,6 +18094,7 @@ JiTA.leadduty.reminder = {
             });
             el.appendChild(x);
             (document.body || document.documentElement).appendChild(el);
+            try { jitaStackPills(); } catch (e3) { /* ignore */ }
         }
         var lbl = el.querySelector('[data-ld="label"]');
         if (lbl) { lbl.textContent = text; }
@@ -18076,6 +18103,7 @@ JiTA.leadduty.reminder = {
     remove: function () {
         var el = document.getElementById(JiTA.leadduty.reminder.ID);
         if (el && el.parentNode) { el.parentNode.removeChild(el); }
+        try { jitaStackPills(); } catch (e) { /* ignore */ }
     }
 };
 
@@ -19482,6 +19510,693 @@ JiTA.ocr = {
 };
 
 
+/* ---- Changelog: every version's changes, and a "What's new" pill after an update -------------------------
+ * ENTRIES is the whole history of the script, newest first, from its first version as "Enhanced Jira Features"
+ * (2023) to now. After an update a pill joins the others in the bottom-left corner until the update has been
+ * looked at: opening the list (click the pill) and closing the pill with its x both count, and it then stays
+ * away until the next update. The list itself is always in Settings, under About.
+ *
+ * Every version bump adds an entry at the top. tests/changelog-check.js fails the build when the newest entry is
+ * not the version in the @version header, so a release cannot ship without one.
+ */
+JiTA.changelog = {
+    SEEN_KEY: 'jitaChangelogSeen',   // the newest version whose changes this browser has been shown
+    PILL_ID: 'jita-changelog-pill',
+    RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
+    MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+    ENTRIES: [
+        { v: '3.38.0', date: '2026-09-30', items: [
+            "After an update, a \"What's new\" pill appears in the bottom-left corner. Click it to read what changed, or use its x to dismiss it until the next update.",
+            "The full history of changes, back to the first version in May 2023, is always available in Settings under About.",
+            "The pills in the bottom-left corner now stack neatly, with no empty gap when one of them is not shown."
+        ] },
+        { v: '3.37.0', date: '2026-09-29', items: [
+            "Lead duties: reviewed and skipped pages in the Wiki review tab get an Undo button that puts the page back on your list and restores its review history.",
+            "Undo appears only on your own marks, and on a review only while it is still the page's latest reading. Reviews marked before this version have no Undo.",
+            "Recently resolved follow-ups now show the reason they were raised, with the resolution on a line underneath.",
+            "A new note on a VMS application now starts on Public visibility, or on the widest level the page offers.",
+            "If the ledger changed in the meantime and refuses an Undo, the status line now says so instead of reporting success."
+        ] },
+        { v: '3.36.0', date: '2026-09-28', items: [
+            "Lead duties: checked and flagged items in the Quality control tab get an Undo button that puts a verdict marked by mistake back on your list.",
+            "Undoing a flag asks first, because it also withdraws the follow-up the other Leads can see. A flag that is already resolved cannot be undone.",
+            "The Quality control table on the ledger page gains a Reason column with what the Lead wrote when flagging, kept after the follow-up is resolved."
+        ] },
+        { v: '3.35.2', date: '2026-09-28', items: [
+            "Screenshot translation: the language dropdown no longer snaps shut straight away in Jira's attachment viewer.",
+            "The Recognized text box there now accepts typing, so you can correct the text before Translate again."
+        ] },
+        { v: '3.35.1', date: '2026-09-28', items: [
+            "The Lead duties pill no longer disappears when the month is done. It now reads 'all done' instead, and the x still hides it for a day.",
+            "The pill updates as soon as something is marked in the Lead duties window, so the month's last mark turns it to 'all done' right away.",
+            "Fixed a false reminder: the daily dialog now checks the shared ledger first, so pages you reviewed in another browser no longer count as due.",
+            "The daily dialog now appears only when there really are page reviews or QC checks left to do."
+        ] },
+        { v: '3.35.0', date: '2026-09-28', items: [
+            "New: Trending defects shows the defects that recent bug reports keep getting attached to, so you can see what players are hitting right now.",
+            "Pick it from the funnel menu in the Triage Assistant panel or Triage mode, where rows keep their Attach control, or double-tap # to switch to it and back.",
+            "Off a bug report, double-tap # opens a standalone trending list with a per-day chart.",
+            "Trending defects carry a 🔥 badge with their report count in the similar-defects list and in Triage mode's matches. Ranking is unchanged.",
+            "A defect trends at 5 or more reports created in the last 14 days. A resolved defect that keeps getting reports shows how many came after the fix."
+        ] },
+        { v: '3.34.0', date: '2026-09-28', items: [
+            "New: Screenshot translation. With an image attachment open, click Translate text and drag a box around text to read and translate just that part.",
+            "It works in Jira's attachment viewer and in Triage mode's viewer, and the text is read inside your browser.",
+            "The language comes from the report's client-language label, and a dropdown lets you change it per issue.",
+            "The result card shows the translation and the recognized text, which you can correct and translate again, join into one line, or copy.",
+            "It can be switched off in Settings under Screenshot translation."
+        ] },
+        { v: '3.33.1', date: '2026-09-26', items: [
+            "Lead duties: accented letters and non-Latin scripts in VMS applications, such as names, answers and notes, now show correctly instead of as raw codes.",
+            "Special characters an applicant typed are no longer decoded twice, so their text shows exactly as they wrote it."
+        ] },
+        { v: '3.33.0', date: '2026-09-26', items: [
+            "Detail view: switching a filter's list to Basic now searches within that filter instead of throwing it away.",
+            "The filter shows as a named pill in the bar. Click it to see its JQL, or click its x to search all work with the same basic filters.",
+            "Switching between Basic and JQL no longer asks for confirmation and never changes the list.",
+            "A filter picked while in Basic stays in Basic, and narrowing it keeps it highlighted in the sidebar.",
+            "Re-sorting or changing the search now loads one page instead of paging through thousands of issues looking for the open one."
+        ] },
+        { v: '3.32.1', date: '2026-09-26', items: [
+            "New: Detail view. On any /browse/ page, the list of matching issues sits on the left beside Jira's own issue view, like Jira's removed detail view.",
+            "A filter bar offers Basic filters, JQL and starred filters. Up and Down walk the list with no page load, and prev and next buttons sit by the issue key.",
+            "Clicking a filter in Jira's sidebar loads it into the list, highlights it in the sidebar, and opens its first issue.",
+            "Filters clicked anywhere in Jira now open in the detail view. Both this and the detail view itself can be switched off in Settings.",
+            "The ISD Credits badge and the Lead duties pill no longer cover Jira's dropdowns, dialogs and menus near the screen corners."
+        ] },
+        { v: '3.27.0', date: '2026-09-21', items: [
+            "Lead duties: the ledger page is never published from an incomplete scan of the wiki, so it can no longer list pages that should be excluded.",
+            "A browser on an older JiTA version no longer overwrites a ledger page written by a newer one, and says so instead.",
+            "Refresh in the Lead duties window and the daily wiki re-scan now update the ledger page too.",
+            "The ledger page footer names the JiTA version that last published it and whose tab it came from."
+        ] },
+        { v: '3.26.3', date: '2026-09-20', items: [
+            "Lead duties: new VMS applications and returned questionnaires now count on the Lead duties pill. If VMS cannot be read, it says so instead of showing zero.",
+            "A new Applications tab lists who is waiting, oldest first, beside the selected application's answers, with the notes on the account shown on top.",
+            "Accept, Decline or Reset an application from the window. Each needs a second press, and Decline says that it will message the applicant.",
+            "Write a note on an applicant's account from the window, with its visibility shown beside Post. Refresh no longer discards a half-written note.",
+            "Each questionnaire gets its own numbered tab, opening on the one the application is waiting on, and the answers are easier to read."
+        ] },
+        { v: '3.20.5', date: '2026-09-20', items: [
+            "Lead duties: a month's wiki reviews are never assigned from an incomplete scan of the wiki, so pages from excluded sections cannot slip into a list.",
+            "An incomplete scan is thrown away and the last complete one is used instead."
+        ] },
+        { v: '3.20.4', date: '2026-09-20', items: [
+            "Lead duties: the ledger page on the wiki now updates right after each mark, so closing the tab straight away no longer loses the update.",
+            "A mark made while the page is still being written is no longer held back until the six-hourly refresh."
+        ] },
+        { v: '3.20.3', date: '2026-09-20', items: [
+            "Lead duties: fixed several ways the ledger page on the wiki could quietly stop matching the ledger, including right after a new month was assigned.",
+            "A failed ledger page update now shows on the Settings status line instead of going unnoticed."
+        ] },
+        { v: '3.20.2', date: '2026-09-20', items: [
+            "Lead duties: the ledger page no longer lists pages from excluded wiki sections as outstanding work, matching the Lead duties window and pill.",
+            "The ledger page now says how many assigned pages dropped out because they sit in an excluded section."
+        ] },
+        { v: '3.20.1', date: '2026-09-20', items: [
+            "Triage mode now shows its queue as a list beside the open issue, with a Details column, so you can see what is coming and click to jump to any issue.",
+            "Up and Down move through the list. Left switches to the bug-report queue and Right to the open-defect queue.",
+            "The open-defect queue gets its own editable JQL filter, separate from the bug-report queue's.",
+            "The matches column gets the panel's filters: text search, the funnel with Status, Created within and both report views, and the ranking-mode badge.",
+            "Lead duties: pages inside a folder in an excluded wiki section are no longer assigned for review."
+        ] },
+        { v: '3.17.2', date: '2026-09-19', items: [
+            "On wide lists such as Lead duties and the Duplicate-defect finder, the hover preview now opens above or below the row instead of covering its buttons."
+        ] },
+        { v: '3.17.1', date: '2026-09-19', items: [
+            "Lead duties: the Wiki review footer now shows just your progress. Section-wide coverage numbers stay in Settings and on the ledger page."
+        ] },
+        { v: '3.17.0', date: '2026-09-19', items: [
+            "Lead duties: the flag prompt now says the reason is shown to the other Leads and also quoted to whoever handled the item.",
+            "Quality control rows stay lined up in their columns after they are checked.",
+            "The Feature Ideas and Discussion wiki section is no longer part of the review rotation.",
+            "Lead duties no longer adds its own Tampermonkey menu entry. Open it from the pill, the daily dialog or Settings."
+        ] },
+        { v: '3.16.0', date: '2026-09-19', items: [
+            "New for Leads: Lead duties, a monthly wiki-review rotation and quality-control sampling, split across the Leads without overlap. Others see nothing.",
+            "Wiki review hands each Lead a few pages a month, least-reviewed first, and every page gets read by two different Leads within 12 months.",
+            "Quality control samples last month's ISD-handled bug reports and defects, names who handled each, and lets you mark it checked or flag it with a reason.",
+            "Flags become follow-ups, grouped by Bug Hunter, each with a ready-to-paste message you can copy or edit first.",
+            "A ledger page on the wiki shows assignments, follow-ups and review history. The Lead duties pill and a daily reminder show what is left."
+        ] },
+        { v: '3.15.0', date: '2026-09-19', items: [
+            "Triage mode gets a second queue over open defects, switched with the Up and Down arrows. Each queue remembers where you left off.",
+            "In the defect queue, the matches are open bug reports for the defect on screen, and 1 to 9 attaches the picked report to it.",
+            "The bug-report queue's JQL can now be edited behind a JQL button. It defaults to the bug hunters' standard backlog filter."
+        ] },
+        { v: '3.14.2', date: '2026-09-16', items: [
+            "Triage mode no longer reports a GM conversion as failed just because the report closes slowly; it keeps checking in the background for up to a minute.",
+            "The warning about a missing or duplicate Zendesk ticket now only appears if the report is still open after that minute.",
+            "The bug report's title is shown again in Triage mode, between the header and the description."
+        ] },
+        { v: '3.14.1', date: '2026-09-13', items: [
+            "The minimum text similarity dropdown in the Duplicate-defect finder is now readable in Jira's light theme."
+        ] },
+        { v: '3.14.0', date: '2026-09-12', items: [
+            "New Duplicate-defect finder: double-tap > to list open defects that look like duplicates of each other but are not linked yet.",
+            "Pairs are found by similar text (adjustable minimum, 90% by default) or by sharing the same exception, and grouped into clusters with the evidence shown.",
+            "Ignore hides a pair from then on, and \"Show ignored\" brings dismissed pairs back so you can unignore them.",
+            "The finder only points out candidates; it never links or merges anything itself.",
+            "Stale copies of defects that were moved to another project are removed from local data, which also tidies up the similar defects list."
+        ] },
+        { v: '3.13.0', date: '2026-09-12', items: [
+            "New Triage mode: double-tap < to work through the open bug report backlog in a full-screen, keyboard-driven queue that remembers where you left off.",
+            "Press 1-9 to attach the report to a matching defect, T to close it as Won't Do, G to convert it to a GM support ticket, or E to show an English translation.",
+            "Every action needs a second key press to confirm and first re-checks that the report is still open and unassigned or yours.",
+            "Attachments open in a full-screen viewer, EVE logs open in the Log Parser, and the arrow keys step through them.",
+            "Hover previews can now be moved into and scrolled. The ISD Credits leaderboard now opens from its badge only, no longer from Settings or the Tampermonkey menu."
+        ] },
+        { v: '3.12.0', date: '2026-09-12', items: [
+            "New \"Similar open reports\" option in the Triage Assistant panel's filter menu lists all open bug reports similar to the one you are viewing.",
+            "Reports in other languages are included, matched through their English translation.",
+            "It replaces the \"Possible duplicate reports\" section and its toggle button."
+        ] },
+        { v: '3.11.0', date: '2026-09-12', items: [
+            "A bug report you attach to a defect now drops off that defect's list of matching bug reports right away, in every open tab."
+        ] },
+        { v: '3.10.8', date: '2026-08-30', items: [
+            "The ISD Credits window now opens straight to the leaderboard. The separate summary card is gone, and your own row is highlighted in the table."
+        ] },
+        { v: '3.10.7', date: '2026-08-26', items: [
+            "Background translation of foreign reports runs a little slower to stay under Google's rate limit, which means fewer pauses overall."
+        ] },
+        { v: '3.10.6', date: '2026-08-26', items: [
+            "Bug reports in other languages are now translated to English in the background, so they can be matched against English defects.",
+            "A closed or not yet translated foreign report is translated on the spot when you open it, so its similar defects are still found.",
+            "The Triage Assistant panel shows live progress while reports are checked and translated.",
+            "After updating, all reports are re-processed once in the background."
+        ] },
+        { v: '3.9.0', date: '2026-08-25', items: [
+            "Matching goes back to the previous English-only text model, as the multilingual experiment did not work out.",
+            "Browsers that ran 3.8 rebuild their matching data once in the background; everyone else is unaffected.",
+            "The live progress display and the Debug lines for the text model and GPU or CPU use are kept."
+        ] },
+        { v: '3.8.5', date: '2026-08-25', items: [
+            "Experimental: bug reports in other languages can now match English defects, using a new multilingual text model.",
+            "After updating, all open reports are re-processed once in the background; until that finishes, matching relies on keywords only.",
+            "The Triage Assistant panel shows live progress while reports are being re-processed.",
+            "The Debug section in Settings shows which text model is active and whether matching runs on the graphics card or the CPU."
+        ] },
+        { v: '3.7.3', date: '2026-08-24', items: [
+            "The \"Possible duplicate reports\" section now starts collapsed on every issue you open instead of staying open across issues and reloads."
+        ] },
+        { v: '3.7.2', date: '2026-08-24', items: [
+            "Safer local data upgrades: with many Jira tabs open, a future update can no longer hang or break the data stored in your browser."
+        ] },
+        { v: '3.7.1', date: '2026-08-24', items: [
+            "New \"Possible duplicate reports\" section on bug reports lists up to five closely matching open reports; turn it on with the new button beside the filter funnel.",
+            "\"Known defects in attached log\" now recognises more kinds of crash lines, so it finds more known defects.",
+            "When the panel has no local data yet or hits an error, it now offers a \"Sync now\" or \"Retry\" button right in the message.",
+            "Typing in comments is lighter, as the Log Parser no longer rescans the page on every keystroke."
+        ] },
+        { v: '3.6.3', date: '2026-08-24', items: [
+            "Internal cleanup, no visible change."
+        ] },
+        { v: '3.6.2', date: '2026-08-24', items: [
+            "Raw text no longer flashes before parsing when you open the DxDiag, PDM data, outstanding calls or last crashes files from the client's zip attachment."
+        ] },
+        { v: '3.6.0', date: '2026-08-24', items: [
+            "The Log Parser now handles very large logs, such as a multi-megabyte log from the client's zip attachment, which were silently left unparsed before.",
+            "Raw log text no longer flashes on screen before the parsed view appears."
+        ] },
+        { v: '3.5.3', date: '2026-08-24', items: [
+            "Internal cleanup that makes future Jira page changes quicker to fix, no visible change."
+        ] },
+        { v: '3.5.2', date: '2026-08-24', items: [
+            "Internal cleanup, no visible change."
+        ] },
+        { v: '3.5.1', date: '2026-08-24', items: [
+            "The \"Same exception\" section on defects no longer flickers when the Triage Assistant panel refreshes."
+        ] },
+        { v: '3.5.0', date: '2026-08-24', items: [
+            "ISD Credits are now always calculated in the shared background worker, so every tab counts them the same way.",
+            "If the background worker is down, a credits refresh now fails within seconds instead of hanging, and retries are spaced out.",
+            "Background credit refreshes stay quiet about errors, while a manual Refresh still tells you what went wrong."
+        ] },
+        { v: '3.4.0', date: '2026-08-24', items: [
+            "If the shared background worker crashes, it restarts itself or another tab takes over, instead of matching and ISD Credits timing out.",
+            "After a script update, a tab still running old code hands over to an updated one automatically, about 30 seconds after you reload any tab.",
+            "Settings has a new Debug section showing the worker's status and version, with a debug logging switch and a button to test crash recovery.",
+            "The Settings header now stays on top of the switches when you scroll."
+        ] },
+        { v: '3.2.4', date: '2026-08-24', items: [
+            "The \"Known defects in attached log\" section of the Triage Assistant panel no longer flickers when the panel refreshes."
+        ] },
+        { v: '3.2.3', date: '2026-08-23', items: [
+            "The Triage Assistant panel no longer empties and refills its list when it refreshes in the background.",
+            "The panel no longer disappears and reloads right after an issue opens.",
+            "Fields hidden with Declutter no longer flash back into view when Jira redraws the page."
+        ] },
+        { v: '3.2.0', date: '2026-08-23', items: [
+            "New Declutter: choose \"Declutter Jira fields\" in the Tampermonkey menu to hide fields and sections you never use on an issue.",
+            "Your choices are saved separately for bug reports and defects and applied automatically, even after Jira redraws the page.",
+            "The list shows what is on the issue you have open, so open another issue to see other options."
+        ] },
+        { v: '3.1.3', date: '2026-08-23', items: [
+            "The Translate button now switches to a second Google translation service when the first one is throttled, so it keeps working.",
+            "Brief network drops no longer break the reporter's other reports view, the defect sync or ISD Credits refreshes; the script simply retries."
+        ] },
+        { v: '3.1.1', date: '2026-08-22', items: [
+            "Titles of the ISD Credits window, the Convert to Support Ticket dialog and other pop-up windows are readable again in Jira's light theme."
+        ] },
+        { v: '3.1.0', date: '2026-08-21', items: [
+            "\"Assign to GM\" now opens a Convert to Support Ticket dialog: pick a category, add an optional note for the GMs, and the bug report closes automatically.",
+            "If the report has no linked Zendesk ticket, the dialog says so and offers to close the bug report instead.",
+            "ISD Credits now count a report converted to a support ticket as a reassignment only, and any other report you close as trashed.",
+            "ISD Credits refresh much faster."
+        ] },
+        { v: '3.0.0', date: '2026-08-21', items: [
+            "All open Jira tabs now share one background worker for matching and ISD Credits, which cuts memory and graphics card use with many tabs open.",
+            "ISD Credits refreshes no longer stall in background tabs, and two tabs no longer refresh the same month at once.",
+            "The full ISD Credits leaderboard is now visible to everyone, not just Leads.",
+            "The badge now reads \"Credits\", and months that have not been calculated yet are clearly labelled."
+        ] },
+        { v: '2.39.0', date: '2026-08-20', items: [
+            "New ISD Credits badge in the corner shows your credits and rank for the current month; click it to open the ISD Credits window.",
+            "The ISD Credits window has a month picker for the last 12 months. Leads see the full leaderboard, everyone else sees their own numbers and rank.",
+            "Your own numbers update about every 2 minutes and the full leaderboard about every 15 minutes, in the background.",
+            "Credits are split into Defects (created, resolved) and Bug reports (attached, trashed, reassigned); lead and mentor bonuses do not count.",
+            "Settings has a new ISD Credits section to open the leaderboard, refresh now or switch the feature off."
+        ] },
+        { v: '2.37.0', date: '2026-08-20', items: [
+            "First look at ISD Credits: a new Tampermonkey menu command works out your credits for the current month and shows your total and rank.",
+            "A small pill in the corner shows progress while your credits are being calculated."
+        ] },
+        { v: '2.36.0', date: '2026-08-19', items: [
+            "Internal renaming to match the new name, no visible change. Your settings and canned responses are kept.",
+            "The old Enhanced Jira Features script stays at this version and moves anyone still using it over to JiTA on their next update check."
+        ] },
+        { v: '2.35.0', date: '2026-08-19', items: [
+            "The script is now called Jira Triage Assistant (JiTA), and existing installs switch to it on their next update check.",
+            "Convert to Defect no longer creates two defects from one click, and it now takes you straight to the new defect.",
+            "The Extra Buttons no longer fire twice after Jira redraws the page or you move between issues."
+        ] },
+        { v: '2.34.0', date: '2026-08-12', items: [
+            "New \"This reporter's other reports\" button in the Triage Assistant filter menu lists every other report from the same reporter, newest first.",
+            "The list comes from a live Jira search, so it also includes closed and GM-team reports; closed ones are greyed out.",
+            "Use \"Back to similar defects\" to return; the view also resets when you move to another issue."
+        ] },
+        { v: '2.33.0', date: '2026-08-12', items: [
+            "Bug reports assigned to the EO - GameMasters team no longer show up under \"Matching bug reports\" on defects.",
+            "Already-synced reports are refreshed once automatically so the change applies to them too."
+        ] },
+        { v: '2.32.0', date: '2026-08-10', items: [
+            "After you click Translate, the Triage Assistant searches again using the English text, so foreign-language reports find better matches."
+        ] },
+        { v: '2.31.0', date: '2026-08-10', items: [
+            "Opening a DxDiag report from a bug report zip now shows a Quick Info summary, starting with the reporter's crash history.",
+            "The summary lists EVE client crashes and blue screens by name, and flags hardware errors and DxDiag's own Direct3D crashes.",
+            "It also shows each graphics card's driver date and age, marks integrated and dedicated cards, and adds a short OS, CPU and RAM line.",
+            "Fixed an empty outstanding calls or last crashes file causing the next file you opened to appear in the wrong table."
+        ] },
+        { v: '2.30.0', date: '2026-08-09', items: [
+            "New funnel button in the Triage Assistant filters results by status (Open, Closed, All) and by creation within the last N days, until reload.",
+            "The PDM system check now shows minimum and recommended tiers with a breakdown per component.",
+            "Modern many-core CPUs are rated by thread count so they no longer wrongly show as minimum, and dual-GPU laptops use the stronger card.",
+            "Log Parser no longer misreads a code block in a comment as a log, and files in bug report zips open more reliably.",
+            "Updated bundled libraries and internal cleanup, no other visible change."
+        ] },
+        { v: '2.27.1', date: '2026-07-27', items: [
+            "Fixed the Triage Assistant and known-defect matching breaking after Atlassian started blocking the browser database behind a consent check.",
+            "Your already-synced data is kept."
+        ] },
+        { v: '2.27.0', date: '2026-07-07', items: [
+            "New \"Group Repeats\" toggle in the Log Parser collapses consecutive identical lines or exception blocks into one row with an Nx count.",
+            "Grouping updates live as you toggle message types or search, so hidden rows never break up a run of repeats."
+        ] },
+        { v: '2.26.0', date: '2026-07-05', items: [
+            "PLAT issues are now synced and indexed, so they appear as similar defects on bug reports alongside EDR and EO.",
+            "Existing installs refetch their defect data once automatically to pick up PLAT issues."
+        ] },
+        { v: '2.25.0', date: '2026-07-05', items: [
+            "PLAT issues now show a \"Matching bug reports\" list of similar open bug reports in the Triage Assistant."
+        ] },
+        { v: '2.24.3', date: '2026-06-25', items: [
+            "Fixed the Canned responses dropdown opening as a white list in Chrome; it now matches the dark theme."
+        ] },
+        { v: '2.24.2', date: '2026-06-25', items: [
+            "The opening and closing lines for Canned responses can now span several lines."
+        ] },
+        { v: '2.24.1', date: '2026-06-25', items: [
+            "New Canned responses dropdown in the Zendesk Support panel: pick a reply and it is filled into the public reply box for you.",
+            "Comes with 32 built-in replies grouped by section, plus an optional opening and closing line wrapped around each one.",
+            "Edit, add or delete responses and sections in Settings under \"Customize responses\"; \"Restore defaults\" brings back the originals.",
+            "Responses you never edited automatically pick up wording fixes from script updates.",
+            "The Triage Assistant is no longer a beta and is on by default, and it is switched on once for existing installs."
+        ] },
+        { v: '2.18.0', date: '2026-06-21', items: [
+            "Each entry in \"Known defects in attached log\" has a hide button that ignores that defect for 1 day, 1 week, 30 days or 90 days.",
+            "Hidden defects are left out of all Triage Assistant results; Settings shows how many are hidden and offers \"Unhide all\".",
+            "Removed the redundant EO/EDR project badge from result rows."
+        ] },
+        { v: '2.17.4', date: '2026-06-19', items: [
+            "New filter box in the Triage Assistant searches the whole local database for issues containing all typed words and shows the best matches.",
+            "Click the Keyword/Hybrid badge to switch ranking mode for the current session; it goes back to automatic on reload.",
+            "Reopened bug reports show up as open again, because open or closed is now judged by status.",
+            "The same exception now matches more reliably when only IDs or numbers inside lists differ between reports.",
+            "Long unbroken text no longer spills into the next column."
+        ] },
+        { v: '2.15.0', date: '2026-06-17', items: [
+            "New \"Results shown\" setting in the Triage Assistant section of Settings controls how many related issues are listed (1 to 30, default 8)."
+        ] },
+        { v: '2.14.5', date: '2026-06-17', items: [
+            "Exceptions that differ only by an ID in the message now match, so reports of the same bug cluster together."
+        ] },
+        { v: '2.14.4', date: '2026-06-17', items: [
+            "On a defect, each matching bug report has an Attach button that marks it as a duplicate of this defect and moves it to Attached.",
+            "Attach is only offered for reports that are unassigned or already yours, and it assigns the report to you.",
+            "An attached report fades out of the list and the next candidate slides in, without a page reload.",
+            "The two sync buttons are combined into one \"Sync now\"."
+        ] },
+        { v: '2.13.9', date: '2026-06-15', items: [
+            "Triage Assistant cards now fit two per row in Jira's sidebar on 1920-pixel-wide screens."
+        ] },
+        { v: '2.13.8', date: '2026-06-15', items: [
+            "Bug reports already Attached to a defect no longer appear as open matches under \"Matching bug reports\"."
+        ] },
+        { v: '2.13.7', date: '2026-06-12', items: [
+            "The issue's Created and Updated dates now appear in the header bar at the top, so you no longer need to scroll down for them.",
+            "Jira's own copy at the bottom is hidden so the dates are not shown twice."
+        ] },
+        { v: '2.13.6', date: '2026-06-11', items: [
+            "Looser \"crash-site\" matching finds the same exception reached through a different code path and marks it \"~ similar\".",
+            "Defects now show a \"Possibly related\" section under \"Same exception\", and log panels fall back to these hints when there is no exact match."
+        ] },
+        { v: '2.13.5', date: '2026-06-11', items: [
+            "Extra Buttons labels are now visually centered."
+        ] },
+        { v: '2.13.4', date: '2026-06-11', items: [
+            "Defects whose description contains pasted raw log lines now match the same exception in a parsed log.",
+            "Newly synced defects appear in the \"Defects in log\" panel without reopening the log.",
+            "Fixed a gap under the collapsed Triage Assistant card and a leftover blue focus ring on its header."
+        ] },
+        { v: '2.13.3', date: '2026-06-09', items: [
+            "Fixed the Log Parser header being cut off in Jira's new log viewer."
+        ] },
+        { v: '2.13.2', date: '2026-06-09', items: [
+            "The Exception clusters overview now correctly says it is sorted newest first."
+        ] },
+        { v: '2.13.1', date: '2026-06-09', items: [
+            "Exception cluster members are listed newest first, and the overview orders clusters by their newest defect.",
+            "Hover previews now appear above the Settings and clusters window instead of greyed out behind it.",
+            "Moving the mouse back to the main defect in \"Defects in log\" shows its preview again."
+        ] },
+        { v: '2.13.0', date: '2026-06-09', items: [
+            "Defects that share the same exception now form clusters, shown as \"Same exception (N)\" on a defect with Open/Fixed badges and a regression flag.",
+            "New \"Exception clusters\" overview in Settings, and a \"+N related\" expander in the \"Defects in log\" panel.",
+            "Matching no longer relies on the per-user Stackhash, which never matched across different reporters."
+        ] },
+        { v: '2.12.3', date: '2026-06-09', items: [
+            "Created dates now read like \"09 Jun 2026\" so they cannot be misread in other countries' date formats."
+        ] },
+        { v: '2.12.2', date: '2026-06-08', items: [
+            "The \"Mark dup\" button is now called \"Attach\" and updates the status in place without reloading the page.",
+            "Created dates sit in the bottom-right corner of each card so they line up.",
+            "The note on long-fixed matches no longer repeats \"Closed\" and just shows the time gap."
+        ] },
+        { v: '2.12.1', date: '2026-06-08', items: [
+            "EO issues now show \"Matching bug reports\" too, not just EDR defects."
+        ] },
+        { v: '2.12.0', date: '2026-06-08', items: [
+            "Removed Linked Issue Dropdowns, which had stopped working after Jira changed its layout."
+        ] },
+        { v: '2.11.0', date: '2026-06-08', items: [
+            "Similar Defects is now the Triage Assistant and sits in Jira's right-hand column between Details and Development; the floating box is still an option.",
+            "One \"Settings\" entry in the Tampermonkey menu opens a window with all feature switches and Triage Assistant actions.",
+            "Hover previews no longer autoplay attached videos.",
+            "The script's Dark Mode switch was removed; use Jira's own theme setting instead.",
+            "Fixed an occasional gap at the top of the panel, and the list no longer rebuilds several times during a sync."
+        ] },
+        { v: '2.10.1', date: '2026-06-08', items: [
+            "The defect database now builds itself automatically on first run, no manual sync needed.",
+            "Background auto-sync now reliably runs about every 30 minutes instead of sometimes skipping a turn."
+        ] },
+        { v: '2.10.0', date: '2026-06-08', items: [
+            "Defect (EDR) pages now show \"Matching bug reports\": open bug reports that look like this defect, ranked the same way as similar defects.",
+            "Open bug reports sync automatically, and a new \"Sync bug reports now\" menu entry lets you catch up by hand.",
+            "Opening a new or just-converted defect quietly syncs it so it gets indexed."
+        ] },
+        { v: '2.9.3', date: '2026-06-07', items: [
+            "When you drag the Similar Defects or Defects in log panel near the bottom of the screen, its list now opens upward while you drag."
+        ] },
+        { v: '2.9.1', date: '2026-06-07', items: [
+            "Translate now uses a free Google service and no longer needs an API key; the key prompt and its menu entry are gone.",
+            "Translated text keeps its line breaks and Jira's normal font.",
+            "Reloading shortly after a sync no longer starts another one; auto-sync waits about 30 minutes between runs."
+        ] },
+        { v: '2.9.0', date: '2026-06-07', items: [
+            "Similar Defects now scans the report's attached log and lists \"Known defects in attached log\" without you opening it.",
+            "In the Log Parser, exceptions matching a known defect are highlighted with its key, with a \"Defects in log\" panel and a live filter box.",
+            "Hover a suggestion to preview its summary, status and formatted description.",
+            "New \"Mark dup\" button links the report as a duplicate of a defect and moves it to Attached in one click.",
+            "Defects fixed long before the report was filed are greyed out and moved down the list."
+        ] },
+        { v: '2.8.4', date: '2026-06-07', items: [
+            "The Similar Defects panel now hides while an attachment or the Log Parser is open and comes back when you close it."
+        ] },
+        { v: '2.8.3', date: '2026-06-07', items: [
+            "Drag the Similar Defects panel by its header to move it; its position and minimized state are remembered.",
+            "The minimize button shows + or - to match the current state."
+        ] },
+        { v: '2.8.1', date: '2026-06-07', items: [
+            "If the GPU fails while indexing, the script retries and then pauses instead of switching to CPU; you choose GPU or CPU in the menu.",
+            "Indexing uses less graphics memory to avoid GPU crashes.",
+            "If the model fails while you view a report, that lookup shows keyword results instead."
+        ] },
+        { v: '2.8.0', date: '2026-06-07', items: [
+            "Similar Defects now also ranks by meaning, using an AI model that runs locally in your browser (GPU by default, CPU option in the menu).",
+            "Bug reporter boilerplate such as session and hardware info is ignored, so matches focus on the actual problem.",
+            "The defect database syncs quietly in the background every 30 minutes, and several open Jira tabs do not all sync at once.",
+            "Similar Defects is an opt-in beta: it is off for new installs until you enable it in the Tampermonkey menu."
+        ] },
+        { v: '2.7.0', date: '2026-06-07', items: [
+            "New Similar Defects panel on bug reports lists the existing EDR and EO defects that best match the report, with clickable links.",
+            "Defects are kept in a local copy in your browser; use \"Sync defects now\" or \"Rebuild defect database\" in the Tampermonkey menu.",
+            "The feature can be turned on or off from the Tampermonkey menu."
+        ] },
+        { v: '2.6.10', date: '2026-06-06', items: [
+            "Extra Buttons no longer disappear a couple of seconds after opening a bug report from a direct link.",
+            "They also come back when you move from one issue to another."
+        ] },
+        { v: '2.6.9', date: '2026-06-06', items: [
+            "The Log Parser now also works when a log file attached directly to a report opens in Jira's new log viewer."
+        ] },
+        { v: '2.6.8', date: '2026-05-20', items: [
+            "The script now works on the new Jira site address."
+        ] },
+        { v: '2.6.7', date: '2025-07-21', items: [
+            "Convert to Defect now converts the bug report you are looking at instead of looking up the wrong issue."
+        ] },
+        { v: '2.6.6', date: '2025-07-20', items: [
+            "Convert to Defect works again after Jira's conversion automation was replaced."
+        ] },
+        { v: '2.6.5', date: '2025-07-09', items: [
+            "Extra Buttons restyled for Jira's new layout, with their labels kept on one line.",
+            "The Dark Mode switch now sits next to Jira's Create button in the top bar."
+        ] },
+        { v: '2.6.4', date: '2025-07-03', items: [
+            "Fixed the Log Parser table layout so each log line stays on a single row."
+        ] },
+        { v: '2.6.3', date: '2024-11-29', items: [
+            "Convert to Defect updated for Jira's new way of starting automations.",
+            "Turning off Extra Buttons now also removes the Convert to Defect and Close buttons."
+        ] },
+        { v: '2.6.2', date: '2024-10-31', items: [
+            "Translate, Assign to GM, Convert to Defect and Close show up again after Jira renamed parts of its page.",
+            "The buttons are no longer added twice."
+        ] },
+        { v: '2.6.1', date: '2024-07-16', items: [
+            "The Log Parser recognizes process health logs again after two of their columns were renamed in the EVE client."
+        ] },
+        { v: '2.6', date: '2024-03-21', items: [
+            "Log Parser tables now always use a dark background with light text, so they stay readable when Jira is in light mode."
+        ] },
+        { v: '2.5', date: '2024-03-21', items: [
+            "Translate picks up the issue title again after a Jira change.",
+            "Log Parser tables for bug report zip files use darker colors that are easier on the eyes."
+        ] },
+        { v: '2.4', date: '2023-07-02', items: [
+            "Line numbers on attached files no longer go missing when the Log Parser is turned off.",
+            "Internal cleanup of how settings are stored, no other visible change."
+        ] },
+        { v: '2.3', date: '2023-07-01', items: [
+            "The Tampermonkey menu now shows whether each feature is on or off, with Enable and Disable entries.",
+            "Fixed the script not working on the first page load after installing.",
+            "The script now also loads when a Jira address is typed without the trailing slash."
+        ] },
+        { v: '2.2', date: '2023-06-11', items: [
+            "Fixed an issue that could stop the script from loading on some Jira pages."
+        ] },
+        { v: '2.1', date: '2023-06-10', items: [
+            "Fixed the automatic PC spec check for PDM files, which failed for many Windows PCs."
+        ] },
+        { v: '2.0', date: '2023-06-08', items: [
+            "Process health logs show CPU and memory values as whole numbers and highlight a session count of 2 or more in red."
+        ] },
+        { v: '1.9', date: '2023-06-07', items: [
+            "Log Parser now also formats process health and method call logs, with slow calls, low FPS and time dilation color-coded.",
+            "Method call logs show the average and peak GetTime (ping) duration; click the peak to jump to it.",
+            "Outstanding calls, last crashes and PDM files inside bug report zips are formatted too when you open them.",
+            "PDM files show whether the PC meets EVE's minimum or recommended requirements and how old the graphics driver is.",
+            "Click the FPS column header in process health logs to switch between FPS and seconds per frame."
+        ] },
+        { v: '1.8', date: '2023-05-15', items: [
+            "Clicking \"Only Exceptions\" in the Log Parser no longer hides the table header."
+        ] },
+        { v: '1.7', date: '2023-05-15', items: [
+            "The script now also runs on Jira's issues pages."
+        ] },
+        { v: '1.6', date: '2023-05-14', items: [
+            "New Dark Mode switch next to Jira's search box, also available from the Tampermonkey menu.",
+            "The script now only runs on Jira pages instead of every Atlassian page."
+        ] },
+        { v: '1.5', date: '2023-05-13', items: [
+            "Added author details to the script information shown in Tampermonkey."
+        ] },
+        { v: '1.4', date: '2023-05-13', items: [
+            "New Linked Issue Dropdowns: each group of linked issues collapses into a clickable heading that shows how many issues it holds.",
+            "New Tampermonkey menu entries turn Linked Issue Dropdowns and Extra Buttons on or off.",
+            "Turning Custom Scrollbar, Extra Buttons or Linked Issue Dropdowns on or off takes effect right away, without a reload.",
+            "Convert to Defect reloads the page as soon as Jira confirms the update instead of waiting a fixed 5 seconds."
+        ] },
+        { v: '1.2', date: '2023-05-10', items: [
+            "Version bump so existing installs pick up the corrected update address."
+        ] },
+        { v: '1.1', date: '2023-05-10', items: [
+            "First release: Translate, Assign to GM, Convert to Defect and Close buttons on bug reports (Extra Buttons).",
+            "Translate turns the title, description and reproduction steps into English (needs a Google Translate API key).",
+            "Assign to GM sets the Team to EO - Game Masters and unassigns the report so the GMs can see it.",
+            "Log Parser turns attached EVE client logs into a color-coded table with toggles for notices, warnings, errors and exceptions.",
+            "Adds the Custom Scrollbar, hides Jira's \"Give feedback\" button, and adds Tampermonkey menu entries for the API key and feature toggles."
+        ] }
+    ],
+
+    latest: function () { return JiTA.changelog.ENTRIES[0]; },
+
+    // What this browser has not been shown yet, newest first. One that has never seen the changelog gets just the
+    // newest entry: there is no telling which version it updated from, and "130 updates" would help nobody.
+    unseen: function () {
+        var C = JiTA.changelog, seen = String(gmGet(C.SEEN_KEY, '') || '');
+        if (!seen) { return C.ENTRIES.slice(0, 1); }
+        return C.ENTRIES.filter(function (e) { return JiTA.worker._verCmp(e.v, seen) > 0; });
+    },
+
+    markSeen: function () {
+        var C = JiTA.changelog;
+        gmSet(C.SEEN_KEY, C.latest().v);
+        C.remove();
+    },
+
+    label: function (fresh) {
+        if (fresh.length === 1) { return '📝 What\'s new in v' + fresh[0].v; }
+        return '📝 What\'s new: ' + fresh.length + ' updates';
+    },
+
+    shouldShow: function () { return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseen().length > 0; },
+
+    // "2026-09-05" -> "05 Sep 2026", the same shape as every other date JiTA shows. Read straight from the string:
+    // a Date would shift it a day in some timezones.
+    _date: function (ymd) {
+        var p = String(ymd || '').split('-');
+        if (p.length !== 3) { return String(ymd || ''); }
+        return p[2] + ' ' + JiTA.changelog.MONTHS[parseInt(p[1], 10) - 1] + ' ' + p[0];
+    },
+
+    // ---- the pill: styled like the Lead-duties chip, stacked with the others by jitaStackPills ----
+    mount: function () {
+        var C = JiTA.changelog;
+        if (!C.shouldShow()) { C.remove(); return; }
+        var el = document.getElementById(C.PILL_ID);
+        if (!el) {
+            el = document.createElement('div');
+            el.id = C.PILL_ID;
+            el.style.cssText = 'position:fixed;z-index:' + JITA_PILL_Z + ';left:16px;bottom:16px;cursor:pointer;display:flex;align-items:center;gap:8px;' +
+                'background:#1a1c1f;color:#e8e8ea;border:1px solid #34373d;border-radius:16px;padding:6px 8px 6px 12px;' +
+                'font:12px/1 "Segoe UI",Roboto,Arial,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.4);user-select:none;';
+            el.title = 'What changed in the latest update - click to read';
+            el.addEventListener('click', function () { JiTA.changelog.openView(); });
+            var label = document.createElement('span');
+            label.setAttribute('data-cl', 'label');
+            el.appendChild(label);
+            var x = document.createElement('span');
+            x.textContent = '×';
+            x.title = 'Dismiss until the next update - the changes stay in Settings';
+            x.style.cssText = 'color:#9aa6b2;font-weight:700;padding:0 4px;';
+            x.addEventListener('click', function (e) { e.stopPropagation(); JiTA.changelog.markSeen(); });
+            el.appendChild(x);
+            (document.body || document.documentElement).appendChild(el);
+        }
+        var lbl = el.querySelector('[data-cl="label"]');
+        if (lbl) { lbl.textContent = C.label(C.unseen()); }
+        try { jitaStackPills(); } catch (e) { /* ignore */ }
+    },
+
+    remove: function () {
+        var el = document.getElementById(JiTA.changelog.PILL_ID);
+        if (el && el.parentNode) { el.parentNode.removeChild(el); }
+        try { jitaStackPills(); } catch (e) { /* ignore */ }
+    },
+
+    // The changes were shown in another tab: take the pill away here as well. Wired once, at boot.
+    _watching: false,
+    watch: function () {
+        var C = JiTA.changelog;
+        if (C._watching || typeof GM_addValueChangeListener !== 'function') { return; }
+        C._watching = true;
+        try { GM_addValueChangeListener(C.SEEN_KEY, function (n, o, v, remote) { if (remote) { C.mount(); } }); } catch (e) { /* ignore */ }
+    },
+
+    // ---- the list: every version, newest first, the unseen ones marked New ----
+    openView: function () {
+        var C = JiTA.changelog;
+        C._injectCss();
+        var fresh = {};
+        C.unseen().forEach(function (e) { fresh[e.v] = true; });
+        var ov = JiTA.menu._openOverlay({ title: 'What\'s new in JiTA' });
+        ov.$menu.addClass('jita-changelog-view');
+        var $s = $('<div class="jcl-scroll"></div>').appendTo(ov.$menu);
+        var older = false;
+        C.ENTRIES.forEach(function (e) {
+            if (!older && JiTA.worker._verCmp(e.v, C.RENAME_V) < 0) {
+                older = true;
+                $('<div class="jcl-era"></div>').text('Before ' + C.RENAME_V + ' the script was called Enhanced Jira Features').appendTo($s);
+            }
+            var $e = $('<div class="jcl-entry"></div>').toggleClass('new', !!fresh[e.v]).appendTo($s);
+            var $h = $('<div class="jcl-head"></div>').appendTo($e);
+            $('<span class="jcl-v"></span>').text('v' + e.v).appendTo($h);
+            $('<span class="jcl-date"></span>').text(C._date(e.date)).appendTo($h);
+            if (fresh[e.v]) { $('<span class="jcl-new">New</span>').appendTo($h); }
+            var $ul = $('<ul class="jcl-items"></ul>').appendTo($e);
+            e.items.forEach(function (t) { $('<li></li>').text(t).appendTo($ul); });
+        });
+        C.markSeen();   // opening the list is what "viewed" means; the New marks above stay for this viewing
+    },
+
+    _cssInjected: false,
+    _injectCss: function () {
+        if (JiTA.changelog._cssInjected) { return; }
+        JiTA.changelog._cssInjected = true;
+        try {
+            GM_addStyle(
+                '#jita-menu.jita-changelog-view { width: 720px; max-width: 94vw; display: flex; flex-direction: column; overflow: hidden; }' +
+                '.jita-changelog-view .jcl-scroll { flex: 1 1 auto; min-height: 0; max-height: 72vh; overflow-y: auto; padding: 4px 18px 14px; }' +
+                '.jita-changelog-view .jcl-entry { padding: 10px 0; border-bottom: 1px solid #2c333a; }' +
+                '.jita-changelog-view .jcl-entry.new { border-left: 3px solid #4c9aff; padding-left: 10px; margin-left: -13px; }' +
+                '.jita-changelog-view .jcl-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }' +
+                '.jita-changelog-view .jcl-v { color: #e6e6e6; font-weight: 700; font-size: 13px; }' +
+                '.jita-changelog-view .jcl-date { color: #7a8694; font-size: 11px; }' +
+                '.jita-changelog-view .jcl-new { background: #4c9aff; color: #fff; border-radius: 8px; padding: 0 7px; font-size: 10px; font-weight: 700; }' +
+                '.jita-changelog-view .jcl-items { margin: 0; padding-left: 18px; color: #cfd6dd; font-size: 12px; line-height: 1.55; }' +
+                '.jita-changelog-view .jcl-items li { margin: 2px 0; }' +
+                '.jita-changelog-view .jcl-era { color: #7a8694; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 18px 0 2px; }'
+            );
+        } catch (e) { /* ignore */ }
+    },
+
+    _noop: null
+};
+
+
 /* ---- init: watch the DOM and (re)inject the panel across Atlassian's React re-renders / SPA nav ---- */
 // Mount the Lead-duties chip + menu command for a Lead. Shared by the Jira boot below and the Confluence
 // boot: the cached verdict (leadDutyMe) arms it synchronously on every load after the first, and resolveMe()
@@ -19521,6 +20236,7 @@ if (JITA_IS_WIKI) {
     (function () {
         if (!window.indexedDB) { return; }
         setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { /* swallow */ } }, 1200);
+        setTimeout(function () { try { JiTA.changelog.watch(); JiTA.changelog.mount(); } catch (e) { /* swallow */ } }, 2500);
     })();
 }
 
@@ -19623,6 +20339,8 @@ if (JITA_IS_WIKI) {
     }
     // ISD Lead duties: Leads only, and there is no feature flag - roster membership IS the gate.
     jitaArmLeadDuties();
+    // "What's new" after an update, once the page has settled.
+    setTimeout(function () { try { JiTA.changelog.watch(); JiTA.changelog.mount(); } catch (e) { /* swallow */ } }, 2500);
 })();
 
 

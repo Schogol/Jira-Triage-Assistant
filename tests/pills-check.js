@@ -33,7 +33,7 @@ global.window = {
 const a = src.indexOf('var JITA_PILL_Z = ');
 const b = src.indexOf('// Throttle: a single issue-view re-render', a);
 if (a < 0 || b < 0) { console.log('FAIL  pill block not found'); process.exit(1); }
-(0, eval)(src.slice(a, b) + '\nglobal.JITA_PILL_Z = JITA_PILL_Z; global.jitaPillsYield = jitaPillsYield; global.jitaPillsYieldSoon = jitaPillsYieldSoon;');
+(0, eval)(src.slice(a, b) + '\nglobal.JITA_PILL_Z = JITA_PILL_Z; global.jitaPillsYield = jitaPillsYield; global.jitaPillsYieldSoon = jitaPillsYieldSoon; global.jitaStackPills = jitaStackPills; global.JITA_PILL_IDS = JITA_PILL_IDS;');
 
 function reset() { byId = {}; layers = []; qsaCalls = 0; rafs = []; }
 function badge() { const p = el({ id: 'jita-credits-badge', rect: box(16, 860, 180, 26) }); byId['jita-credits-badge'] = p; return p; }
@@ -43,7 +43,7 @@ ok(JITA_PILL_Z > 200, 'above Atlassian page chrome (navigation layer 200, the si
 ok(JITA_PILL_Z < 300, 'below every Atlassian layer that opens over the page (dialog 300, popups 400, modal 510, flag 600)');
 ok(!/z-index:9000;left:16px/.test(src) && !/z-index:2147483647/.test(src), 'no corner pill keeps its old z-index');
 const uses = (src.match(/el\.style\.cssText = 'position:fixed;z-index:' \+ JITA_PILL_Z \+ ';/g) || []).length;
-ok(uses === 3, 'all three pills (credits badge, lead-duties chip, credits progress) take JITA_PILL_Z  (found ' + uses + ')');
+ok(uses === 4, 'all four pills (credits badge, lead-duties chip, what\'s new, credits progress) take JITA_PILL_Z  (found ' + uses + ')');
 
 section('2. stepping aside');
 reset(); jitaPillsYield();
@@ -103,6 +103,27 @@ ok(rafs.length === 1, 'a burst of mutations schedules one check');
 rafs.shift()();
 jitaPillsYieldSoon();
 ok(rafs.length === 1, 'the next frame can schedule again');
+
+section('3. stacking');
+// The bottom-left pills stack from the corner up, each only while it is on the page (v3.38.0).
+function pill(id, h) { const q = el({ id: id, offsetHeight: h }); byId[id] = q; return q; }
+const at = (...ps) => ps.map((q) => q.style.bottom).join(', ');
+reset();
+let sc = pill('jita-credits-badge', 26), sl = pill('jita-leadduty-chip', 26), sn = pill('jita-changelog-pill', 26);
+jitaStackPills();
+ok(at(sc, sl, sn) === '16px, 56px, 96px', 'all three stack from the corner up: credits, lead duties, what\'s new  (' + at(sc, sl, sn) + ')');
+reset(); sl = pill('jita-leadduty-chip', 26); sn = pill('jita-changelog-pill', 26);
+jitaStackPills();
+ok(at(sl, sn) === '16px, 56px', 'with credits off nothing hovers over an empty slot  (' + at(sl, sn) + ')');
+reset(); sc = pill('jita-credits-badge', 26); sn = pill('jita-changelog-pill', 26);
+jitaStackPills();
+ok(at(sc, sn) === '16px, 56px', 'without the Lead-duties chip the what\'s new pill sits right above credits  (' + at(sc, sn) + ')');
+reset(); sc = pill('jita-credits-badge', 40); sl = pill('jita-leadduty-chip', 26);
+jitaStackPills();
+ok(sl.style.bottom === '70px', 'a taller pill pushes the next one up by its own height  (' + sl.style.bottom + ')');
+reset(); jitaStackPills();
+ok(Object.keys(byId).length === 0, 'no pills on the page: nothing to stack, and no error');
+ok(JITA_PILL_IDS.indexOf('jita-changelog-pill') >= 0, 'the what\'s new pill steps aside under an open menu like the others');
 
 console.log('\n' + (fail ? 'RED' : 'GREEN') + '  pills-check  ' + pass + ' passed, ' + fail + ' failed');
 process.exit(fail ? 1 : 0);
