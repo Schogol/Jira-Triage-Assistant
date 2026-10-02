@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.0
+// @version     3.38.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -850,12 +850,19 @@ function jitaOpenGmModal(key) {
     $('<button class="jita-btn">Cancel</button>').on('click', ov.close).appendTo($actions);
     var $go = $('<button class="jita-btn" style="background:#4c9aff; color:#fff; font-weight:700; border-color:#4c9aff;">Convert</button>').appendTo($actions);
 
+    // Cancel, Esc, the backdrop and any other overlay opening all close this one, and that has to stop the
+    // conversion rather than just hide it: the ticket check alone can take 25 seconds, and the chain used to post
+    // the note and run the automation after the Lead had backed out.
+    var CLOSED = new Error('closed');
+    function alive() { return !!(ov.$overlay[0] && ov.$overlay[0].isConnected); }
+
     $go.on('click', function () {
         if (!selected) { $status.css('color', '#ff8f8f').text('Please pick a category first.'); return; }
-        var note = ($note.val() || '').trim();
+        var note = ($note.val() || '').trim(), invoked = false;
         $go.prop('disabled', true).css('opacity', '.6').text('Checking…');
         $status.css('color', '#9aa6b2').text('Checking for a linked Zendesk ticket…');
         jitaZdTicketState().then(function (state) {
+            if (!alive()) { throw CLOSED; }
             if (state === 'noticket') { showNoTicketOption(); return; }
             if (state === 'unavailable') { throw new Error('Could not load the Zendesk Support panel to check for a ticket. Open the Zendesk Support tab and retry.'); }
             // Ticket present -> post the note (if any), then run the conversion automation.
@@ -865,7 +872,9 @@ function jitaOpenGmModal(key) {
                 if (!res || !res.ok) { throw new Error((res && res.error) || 'Could not post the note.'); }
             }) : Promise.resolve();
             return pre.then(function () {
+                if (!alive()) { throw CLOSED; }   // closed while the note was posted: stop before the conversion
                 $status.text('Running automation…');
+                invoked = true;
                 return jitaInvokeGmAutomation(key, selected);
             }).then(function () {
                 $status.css('color', '#7fdca4').text('Automation started - this report will close in a few seconds…');
@@ -873,10 +882,16 @@ function jitaOpenGmModal(key) {
                 var t = setInterval(function () {
                     waited += 500;
                     if ($('strong:contains(Issue Updated)')[0]) { clearInterval(t); window.location.reload(false); }
-                    else if (waited >= 20000) { clearInterval(t); ov.close(); }
+                    else if (waited >= 20000) { clearInterval(t); if (alive()) { ov.close(); } }   // not an overlay opened since
                 }, 500);
             });
         }).catch(function (e) {
+            if (!alive()) {
+                // Closed before the automation was asked for: nothing was converted, as the Lead wanted. Closed while
+                // it ran: the modal is gone, so a failure is said where it can still be seen.
+                if (invoked) { JiTA.ui.toast('Convert to Support Ticket failed: ' + (e && e.message || e)); }
+                return;
+            }
             $go.prop('disabled', false).css('opacity', '').text('Convert');
             $status.css('color', '#ff8f8f').text('Failed: ' + (e && e.message || e));
         });
@@ -4627,10 +4642,21 @@ JiTA.responses = {
         return false;
     },
 
-    // Post `note` as an INTERNAL comment by driving the Zendesk composer: select the internal-note tab, fill the
-    // editor (reusing apply), click the Add button (data-testid="add-comment-button"), then confirm the composer
-    // cleared - its success signal. Resolves { ok, error }. Runs in whichever frame holds the composer (the Forge
-    // iframe normally). Errs toward FAILURE (so the caller aborts the conversion) rather than risk a lost note.
+    // True once "Add internal note" is the SELECTED composer tab, not merely present. Whatever is typed goes into the
+    // active tab's editor, so this decides whether a note reaches the GMs or the player.
+    _internalNoteActive: function () {
+        var tabs = document.querySelectorAll(SELECTORS.ROLE_TAB);
+        for (var i = 0; i < tabs.length; i++) {
+            if ((tabs[i].textContent || '').trim().toLowerCase() === 'add internal note') { return tabs[i].getAttribute('aria-selected') === 'true'; }
+        }
+        return false;
+    },
+
+    // Post `note` as an INTERNAL comment by driving the Zendesk composer: select the internal-note tab and see it
+    // selected, fill the editor (reusing apply), click the Add button (data-testid="add-comment-button"), then
+    // confirm the composer cleared - its success signal. Resolves { ok, error }. Runs in whichever frame holds the
+    // composer (the Forge iframe normally). Errs toward FAILURE (so the caller aborts the conversion) rather than
+    // risk a lost note, or one that reaches the player as a public reply.
     postInternalNote: function (note) {
         var ADD = SELECTORS.ADD_COMMENT_BTN;
         // Small poller: call onOk once test() is truthy, or onTimeout after `ms`.
@@ -4656,20 +4682,37 @@ JiTA.responses = {
                 });
             }
             function afterTicket() {
-                var switched = JiTA.responses._selectInternalNote();
-                setTimeout(function () {
-                    if (!JiTA.responses.apply(note)) { resolve({ ok: false, error: 'Could not find the comment editor.' }); return; }
-                    // 3. Wait for the Add button to enable (our fill has to register), then click.
-                    poll(function () { var b = document.querySelector(ADD); return b && !b.disabled; }, 6000, doClick, function () {
-                        resolve({ ok: false, error: 'The Add button did not enable (empty note?).' });
-                    });
-                }, switched ? 150 : 30);
+                // 3. The note is for the GMs only, and it goes into whichever composer tab is active. Left on "Add
+                //    public reply" (a canned response was just inserted, say), filling it and clicking Add would send
+                //    the note to the player. So the internal-note tab has to be found AND seen selected, or nothing is
+                //    posted - and the caller then stops before the conversion.
+                if (!JiTA.responses._selectInternalNote()) {
+                    resolve({ ok: false, error: 'Could not find the "Add internal note" tab, so the note was not posted (it could have gone out as a public reply).' });
+                    return;
+                }
+                poll(JiTA.responses._internalNoteActive, 3000, function () {
+                    setTimeout(fill, 150);   // a beat for React to mount the internal-note editor in place of the reply one
+                }, function () {
+                    resolve({ ok: false, error: 'The composer did not switch to "Add internal note", so the note was not posted.' });
+                });
+            }
+            function fill() {
+                if (!JiTA.responses.apply(note)) { resolve({ ok: false, error: 'Could not find the comment editor.' }); return; }
+                // 4. Wait for the Add button to enable (our fill has to register), then click.
+                poll(function () { var b = document.querySelector(ADD); return b && !b.disabled; }, 6000, doClick, function () {
+                    resolve({ ok: false, error: 'The Add button did not enable (empty note?).' });
+                });
             }
             function doClick() {
                 var b = document.querySelector(ADD);
                 if (!b) { resolve({ ok: false, error: 'The Add button vanished.' }); return; }
+                // A last look before anything leaves the page: the tab can be switched while the fill registers.
+                if (!JiTA.responses._internalNoteActive()) {
+                    resolve({ ok: false, error: 'The composer left "Add internal note" before the note was sent, so it was not posted.' });
+                    return;
+                }
                 b.click();
-                // 4. Success signal: after a posted comment the composer RESETS - the SCOPED editor (the one we
+                // 5. Success signal: after a posted comment the composer RESETS - the SCOPED editor (the one we
                 //    filled) empties AND/OR the Add button disables again, whichever comes first.
                 var waited = 0;
                 var iv = setInterval(function () {
@@ -19525,6 +19568,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.2', date: '2026-10-03', items: [
+            'Convert to Support Ticket: the note for the GMs is now posted only once the Zendesk composer is confirmed on its internal note tab, so it can no longer reach the player as a public reply.',
+            'Cancel, Esc or closing the Convert to Support Ticket window now stops the conversion, even while it is still checking for a linked Zendesk ticket.'
+        ] },
         { v: '3.38.0', date: '2026-09-30', items: [
             "After an update, a \"What's new\" pill appears in the bottom-left corner. Click it to read what changed, or use its x to dismiss it until the next update.",
             "The full history of changes, back to the first version in May 2023, is always available in Settings under About.",
