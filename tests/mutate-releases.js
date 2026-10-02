@@ -36,9 +36,11 @@ function run(text) {
 
 let allRed = true;
 try {
+    // The control: an unchanged copy must pass, or a red below would prove nothing. Printed as CONTROL rather than
+    // RED / GREEN, so run-breakages counts only the breakages; a failed control still fails the suite.
     const control = run(src);
     if (control.length) { allRed = false; }
-    console.log((control.length ? 'RED   ' : 'GREEN ') + 'releases  the script as it is (must stay green)' + (control[0] ? '  e.g.' + control[0].replace(/^  FAIL /, '') : ''));
+    console.log('CONTROL ' + (control.length ? 'FAILED  the script as it is fails ci-static: ' + control[0].replace(/^  FAIL /, '') : 'ok  the script as it is passes ci-static'));
     cases.forEach(([name, f]) => {
         const fails = run(f(src));
         if (!fails.length) { allRed = false; }
