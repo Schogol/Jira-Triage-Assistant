@@ -64,5 +64,44 @@ ok('a triage match row keeps the card beside it', !overlaps(t, TRIAGE), JSON.str
 const tall = place(LD, 700);
 ok('a tall card picks the side with more room', tall.top >= 6 && tall.top + 700 <= VH - 6, JSON.stringify(tall));
 
-console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'hover-card placement checks passed.'));
-process.exit(fail ? 1 : 0);
+// ---- the late description: a row that has left the page is not measured ----
+// A Lead-duties row action swaps its row for a freshly drawn one (v3.38.1). When the pointer stays over it, the
+// new row's hover opens the card again for the same key while the old row's request for Jira's rendered
+// description may still be out. That answer passes the key check, and placing the card against the old,
+// detached row - which measures as 0,0 - flung it into the top-left corner.
+const ss = src.indexOf('    _showTip: function (r, anchor, meta) {');
+const END = String.fromCharCode(10) + '    },';
+const se = src.indexOf(END, ss) + END.length;
+if (ss < 0 || se < 6) { throw new Error('could not slice _showTip'); }
+function fake() {
+    const n = { length: 1, 0: {} };
+    ['on', 'empty', 'addClass', 'removeClass', 'html', 'css', 'text', 'appendTo', 'find'].forEach((m) => { n[m] = () => n; });
+    return n;
+}
+async function late(detach) {
+    const tip = fake(), placed = [];
+    let land = null;
+    global.document = { body: {} };
+    global.$ = (x) => (x === '#jita-sd-tip' ? tip : fake());
+    global.JiTA = { ui: {} };
+    eval('global.JiTA.ui = {' + src.slice(ss, se) + '};');
+    Object.assign(global.JiTA.ui, {
+        injectCss() {}, _watchMedia() {}, _killMedia() {}, _renderedCache: {},
+        _getRendered: () => new Promise((res) => { land = res; }),
+        _positionTip: (t, a) => { placed.push(a); }
+    });
+    const row = { isConnected: true };
+    global.JiTA.ui._showTip({ key: 'EBR-9', summary: 'one', description: 'the stored text' }, row, 'Closed');
+    if (detach) { row.isConnected = false; }
+    land('<p>rendered</p>');
+    await new Promise((r) => setTimeout(r, 0));
+    return placed;
+}
+(async () => {
+    const still = await late(false);
+    ok('a description landing for a row still on the page places the card again', still.length === 2, String(still.length));
+    const gone = await late(true);
+    ok('...but not against a row that has left the page', gone.length === 1, String(gone.length));
+    console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'hover-card placement checks passed.'));
+    process.exit(fail ? 1 : 0);
+})().catch((e) => { console.log('CRASH ' + (e && e.stack || e)); process.exit(2); });
