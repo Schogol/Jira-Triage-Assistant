@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.2
+// @version     3.38.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -3990,15 +3990,18 @@ JiTA.util = {
         return 'unknown';
     },
 
-    // Convert a Jira ISO `updated` timestamp into the JQL literal "yyyy/MM/dd HH:mm".
-    // We subtract a 2 minute buffer so a slight timezone/rounding mismatch never SKIPS an updated issue
-    // (re-fetching a few extra issues is harmless - bulkPut is idempotent).
-    toJqlTime: function (iso) {
-        var d = new Date(iso);
-        if (isNaN(d.getTime())) { return null; }
-        d = new Date(d.getTime() - 2 * 60 * 1000);
-        function p(n) { return (n < 10 ? '0' : '') + n; }
-        return d.getFullYear() + '/' + p(d.getMonth() + 1) + '/' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    // The JQL cutoff for "updated since `iso`" (a Jira ISO timestamp: the sync high-water mark), as a RELATIVE time.
+    // "-Nm" is N minutes before Jira's own now, whatever anyone's timezone. An absolute "yyyy/MM/dd HH:mm" is read
+    // in the Jira PROFILE's timezone, and it used to be written in the BROWSER's: a browser two hours ahead of its
+    // profile (CEST against a UTC profile) asked for "since two hours after the mark" and skipped those updates for
+    // good, on every sync. Five minutes extra cover the rounding and a computer clock a little behind Jira's, and
+    // fetching a few issues twice is harmless (bulkPut is idempotent). Null when `iso` is not a date; `now` is for
+    // tests.
+    jqlSince: function (iso, now) {
+        var t = new Date(iso).getTime();
+        if (isNaN(t)) { return null; }
+        var mins = Math.ceil(((now == null ? Date.now() : now) - t) / 60000) + 5;
+        return '-' + Math.max(mins, 5) + 'm';
     },
 
     delay: function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); },
@@ -5197,7 +5200,7 @@ JiTA.sync = {
     incrementalSync: function () {
         return JiTA.db.getMeta('lastSyncHighWater').then(function (hw) {
             if (!hw) { return JiTA.sync.fullSync(); }
-            var since = JiTA.util.toJqlTime(hw);
+            var since = JiTA.util.jqlSince(hw);
             if (!since) { return JiTA.sync.fullSync(); }
             var jql = JiTA.SCOPE + ' AND updated >= "' + since + '" ORDER BY updated ASC';
             return JiTA.sync._run(jql, { startHighWater: hw });
@@ -5357,7 +5360,7 @@ JiTA.sync = {
     incrementalSyncEbr: function () {
         return JiTA.db.getMeta('lastSyncHighWaterEbr').then(function (hw) {
             if (!hw) { return JiTA.sync.fullSyncEbr(); }
-            var since = JiTA.util.toJqlTime(hw);
+            var since = JiTA.util.jqlSince(hw);
             if (!since) { return JiTA.sync.fullSyncEbr(); }
             // No open-filter here on purpose: we want updated-but-now-closed reports back so pruneResolved
             // can delete them from the open-report set.
@@ -19725,6 +19728,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.3', date: '2026-10-03', items: [
+            'The defect and bug report syncs no longer skip updates when your computer is set to a later timezone than your Jira profile.',
+            'If similar defects or open reports have looked out of date, run Rebuild defect DB and Rebuild BR DB once from the settings.'
+        ] },
         { v: '3.38.2', date: '2026-10-03', items: [
             'Convert to Support Ticket: the note for the GMs is now posted only once the Zendesk composer is confirmed on its internal note tab, so it can no longer reach the player as a public reply.',
             'Cancel, Esc or closing the Convert to Support Ticket window now stops the conversion, even while it is still checking for a linked Zendesk ticket.'
