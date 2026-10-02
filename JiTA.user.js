@@ -6910,6 +6910,9 @@ JiTA.ui = {
             if (!$d.length) { return; }
             if (htmlStr) { paintHtml($d, htmlStr); }
             else if (!flat) { $d.addClass('jita-sd-tip-dim').text('(no description)'); }
+            // A row redrawn under the pointer (Lead duties swaps a row in place) leaves this anchor detached, and a
+            // detached element measures as 0,0: the replacement's own hover is placing the card, so leave it be.
+            if (anchor && anchor.isConnected === false) { return; }
             JiTA.ui._positionTip($live, anchor);
         });
     },
@@ -16453,8 +16456,12 @@ JiTA.leadduty.ui = {
             }).appendTo($foot);
         U._wireKeys();
         U._apps = null;   // applicant answers are never kept across an open (see the _apps comment)
-        U._render();
-        U._load(false);
+        // The QC month is re-read on every open rather than kept from the last one: a row action now updates it in
+        // place instead of reloading it, so without this a sample computed while Confluence was unreachable, or a
+        // flag another Lead has resolved since, would stay on screen until a Refresh.
+        U._qc = null;
+        U._qcWarm = null;
+        U._render();   // which loads the selected tab - loading it again here ran every tab's load twice
         // Resolve the QC month alongside the wiki queue rather than waiting for the tab to be clicked, so
         // both halves of the month are ready together and switching tabs just paints.
         U._warmQc().catch(function () { /* the tab surfaces the error properly when it is opened */ });
@@ -16519,9 +16526,10 @@ JiTA.leadduty.ui = {
                 // done so the row doesn't look unactioned until flushPending() gets through.
                 U._wikiLocalDone = rec.done;
                 return L.local.put(L.wiki.localKey(ym), rec);
-            }).then(function () { U._renderWiki(); try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
+            // A load that lands after the Lead moved to another tab keeps its state but leaves that tab's body alone.
+            }).then(function () { if (U._tab === 'wiki') { U._renderWiki(); } try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
         }).catch(function (e) {
-            if (!U.isOpen()) { return; }
+            if (!U.isOpen() || U._tab !== 'wiki') { return; }
             U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
             U._status('');
         });
@@ -16585,7 +16593,7 @@ JiTA.leadduty.ui = {
     _wikiRow: function (id, ctx) {
         var L = JiTA.leadduty, U = L.ui, ym = ctx.ym;
         var page = ctx.byId[id], done = U._wikiDone(ctx, id);
-        var settle = function (marked) { return function (r, note) { U._wikiSettle(id, marked, r, note); }; };
+        var settle = function (r, note, marked) { U._wikiSettle(id, marked, r, note); };
         var $row = $('<div class="ld-row' + (done ? ' done' : '') + '"></div>').attr('data-key', id);
         $('<span class="ld-tick"></span>').text(done ? (done.skipped ? '–' : '✓') : '').appendTo($row);
         if (page) {
@@ -16604,15 +16612,15 @@ JiTA.leadduty.ui = {
                 .attr('title', done.skipped ? 'Take the skip back - the page goes back on your list'
                     : 'Take the review back - the page goes back on your list and its review history is restored')
                 .on('click', function () {
-                    U._undoWiki(this, id, ym, (page && page.title) || ('page ' + id), !!done.local, settle(false));
+                    U._undoWiki(this, id, ym, (page && page.title) || ('page ' + id), !!done.local, settle);
                 }).appendTo($act);
         }
         if (!done) {
             $('<button class="jita-btn ld-mini">Mark reviewed</button>').on('click', function () {
-                U._act(this, L.wiki.markReviewed(id, ym), L.wiki.localKey(ym), id, settle(true));
+                U._act(this, L.wiki.markReviewed(id, ym), L.wiki.localKey(ym), id, settle);
             }).appendTo($act);
             $('<button class="jita-btn ld-mini" title="Record it as handled without stamping it as read (deleted page, no access)">Skip</button>').on('click', function () {
-                U._act(this, L.wiki.skip(id, ym), L.wiki.localKey(ym), id, settle(true));
+                U._act(this, L.wiki.skip(id, ym), L.wiki.localKey(ym), id, settle, false);   // replays as a review: never queued
             }).appendTo($act);
         }
         return $row;
@@ -16632,30 +16640,47 @@ JiTA.leadduty.ui = {
         U._status(bits.join(' · '));
     },
 
-    // A row action has landed: fold it into the tab's state and redraw that row alone. The marked flag says
-    // which way the local mirror went (a mark adds the page, an Undo takes it out), and this tab's copy follows it.
+    // A row action has landed: fold it into the tab's state and redraw that row alone. _act / _takeBack have
+    // already updated the local mirror in the meta store; marked says which way (true: the page went in, false: an
+    // Undo took it out, null: it was left alone), and the copy this tab read at load is moved the same way instead
+    // of being read again.
     _wikiSettle: function (id, marked, r, note) {
-        var U = JiTA.leadduty.ui, res = U._wiki, v = U._adopt(r);
+        var U = JiTA.leadduty.ui, res = U._wiki, v = U._adopt(res, r);
         var local = U._wikiLocalDone || (U._wikiLocalDone = {});
-        if (marked) { local[id] = new Date().toISOString(); } else { delete local[id]; }
+        if (marked === true) { local[id] = new Date().toISOString(); } else if (marked === false) { delete local[id]; }
         if (res && v) { res.ledgerValue = v; }
         if (!res || !U.isOpen() || U._tab !== 'wiki') { return; }
-        U._swapRow(id, U._wikiRow(id, U._wikiCtx()));
+        // No row to swap means the list is being rebuilt (a Refresh emptied it while this write was in flight). That
+        // render draws the row from the state just folded in, so there is nothing to paint here.
+        if (!U._swapRow(id, U._wikiRow(id, U._wikiCtx()))) { return; }
         U._wikiStatus(note);
     },
 
     // A row action's result, as the ledger it leaves behind: the value a write stored, or - when the ledger
     // refused the change - the value it held instead. A dry run hands back a value nobody wrote, and a failed
     // write none at all: both give null, and the row is drawn from the local mirror the action updated.
-    _adopt: function (r) { return (r && r.value && !r.dry) ? r.value : null; },
+    //
+    // So does a value OLDER than the one the tab already holds. Two writes in flight can land in either order,
+    // and the later answer is not always the later ledger: the second write may have read the first one's result,
+    // saved on top of it and come back while the first PUT's response was still on its way. res (U._qc or U._wiki,
+    // or null) remembers the property version it last took.
+    _adopt: function (res, r) {
+        if (!r || !r.value || r.dry) { return null; }
+        var ver = (r.prop && r.prop.version) || 0;
+        if (res && ver && res.ledgerVersion && ver < res.ledgerVersion) { return null; }
+        if (res && ver) { res.ledgerVersion = ver; }
+        return r.value;
+    },
 
-    // Put a freshly drawn row in place of the one with the same key, leaving every other row where it is. The
-    // hover card goes first: its row is about to leave the page, and a removed row never fires the mouseleave
-    // that would close it.
+    // Put a freshly drawn row in place of the one with the same key, leaving every other row where it is.
+    // Returns false when there is no such row.
     _swapRow: function (key, $fresh) {
-        var $old = JiTA.leadduty.ui._body().children('.ld-row').filter(function () { return this.getAttribute('data-key') === key; }).first();
+        var U = JiTA.leadduty.ui;
+        var $old = U._body().children('.ld-row').filter(function () { return this.getAttribute('data-key') === key; }).first();
         if (!$old.length) { return false; }
-        try { JiTA.ui._hideTip(true); } catch (e) { /* ignore */ }
+        // Only this row's hover card: the row is about to leave the page and would never fire the mouseleave that
+        // closes it. A card open over another row stays up - that row is not touched.
+        try { if (JiTA.ui._tipKey === key) { JiTA.ui._hideTip(true); } } catch (e) { /* ignore */ }
         $old.replaceWith($fresh);
         return true;
     },
@@ -16695,9 +16720,9 @@ JiTA.leadduty.ui = {
                 if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!rec.done[k]) { rec.done[k] = prev.done[k]; } }); }
                 U._qcLocalDone = rec.done;   // see the note in _loadWiki: shows marks the ledger hasn't taken yet
                 return L.local.put(L.qc.localKey(ym), rec);
-            }).then(function () { U._renderQc(); try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
+            }).then(function () { if (U._tab === 'qc') { U._renderQc(); } try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
         }).catch(function (e) {
-            if (!U.isOpen()) { return; }
+            if (!U.isOpen() || U._tab !== 'qc') { return; }
             U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
             U._status('');
         });
@@ -16746,7 +16771,7 @@ JiTA.leadduty.ui = {
     _qcRow: function (it, ctx) {
         var L = JiTA.leadduty, U = L.ui, ym = ctx.ym;
         var done = U._qcDone(ctx, it.key);
-        var settle = function (marked) { return function (r, note) { U._qcSettle(it.key, marked, r, note); }; };
+        var settle = function (r, note, marked) { U._qcSettle(it.key, marked, r, note); };
         // ld-qc puts the key / type / status / handler in fixed-width columns, so ten rows read as a
         // table instead of four ragged edges that shift with every summary length.
         var $row = $('<div class="ld-row ld-qc' + (done ? ' done' : '') + (done && done.verdict === 'flag' ? ' flagged' : '') + '"></div>')
@@ -16797,12 +16822,12 @@ JiTA.leadduty.ui = {
             $('<button class="jita-btn ld-mini">Undo</button>')
                 .attr('title', done.verdict === 'flag' ? 'Take the flag back - it also withdraws the follow-up and its reason'
                     : 'Take this back - the item goes back on your list')
-                .on('click', function () { U._undo(this, it, ym, done.verdict === 'flag', !!done.local, settle(false)); })
+                .on('click', function () { U._undo(this, it, ym, done.verdict === 'flag', !!done.local, settle); })
                 .appendTo($act);
         }
         if (!done) {
             $('<button class="jita-btn ld-mini">Checked</button>').on('click', function () {
-                U._act(this, L.qc.markChecked(it.key, 'ok', ym, null, it), L.qc.localKey(ym), it.key, settle(true));
+                U._act(this, L.qc.markChecked(it.key, 'ok', ym, null, it), L.qc.localKey(ym), it.key, settle);
             }).appendTo($act);
             $('<button class="jita-btn ld-mini" title="Raise a follow-up: the other Leads see it under Follow-ups and on the ledger page until someone resolves it">Flag</button>').on('click', function () {
                 // A flag without a reason is nearly useless to whoever picks it up, so ask for one. An
@@ -16811,9 +16836,13 @@ JiTA.leadduty.ui = {
                 // reads (see qc.followUpText), so "shown to the other Leads" alone invites a Lead to write
                 // peer shorthand that then lands in front of the Bug Hunter it is about.
                 var note = prompt('What is wrong with ' + it.key +
-                    '? (the other Leads see this, and it is quoted to whoever handled it)', '');
+                    '? (the other Leads see this, and it is quoted to whoever handled it)', U._drafts[it.key] || '');
                 if (note === null) { return; }
-                U._act(this, L.qc.markChecked(it.key, 'flag', ym, note, it), L.qc.localKey(ym), it.key, settle(true));
+                U._drafts[it.key] = note;   // kept until the flag is saved, so a failed save does not cost the reason
+                U._act(this, L.qc.markChecked(it.key, 'flag', ym, note, it), L.qc.localKey(ym), it.key, function (r, msg, marked) {
+                    if (r) { delete U._drafts[it.key]; }
+                    settle(r, msg, marked);
+                }, false);   // replays as a plain Checked: never queued
             }).appendTo($act);
         }
         return $row;
@@ -16840,21 +16869,27 @@ JiTA.leadduty.ui = {
         U._tabCount(res.ledgerValue);
     },
 
-    // A row action has landed: fold it into the tab's state and redraw that row alone. The marked flag says
-    // which way the local mirror went (a mark adds the item, an Undo takes it out), and this tab's copy follows
-    // it. The state is kept current even when the tab is no longer on screen, because reopening it paints from it.
+    // A row action has landed: fold it into the tab's state and redraw that row alone. _act / _takeBack have
+    // already updated the local mirror in the meta store; marked says which way (true: the item went in, false: an
+    // Undo took it out, null: it was left alone), and the copy this tab read at load is moved the same way instead
+    // of being read again. The state is kept current even when the tab is no longer on screen.
     _qcSettle: function (key, marked, r, note) {
-        var L = JiTA.leadduty, U = L.ui, res = U._qc, v = U._adopt(r), it = null;
+        var L = JiTA.leadduty, U = L.ui, res = U._qc, v = U._adopt(res, r), it = null;
         var local = U._qcLocalDone || (U._qcLocalDone = {});
-        if (marked) { local[key] = new Date().toISOString(); } else { delete local[key]; }
-        if (res && v) {
-            var me = (L.me() && L.me().handle) || null, d = v.done && v.done[res.ym] && v.done[res.ym][key];
-            res.ledgerValue = v;
+        if (marked === true) { local[key] = new Date().toISOString(); } else if (marked === false) { delete local[key]; }
+        if (res) {
+            if (v) { res.ledgerValue = v; }
+            // This row's verdict, from the newest ledger the tab holds - which is not always this write's own
+            // answer (see _adopt), but always includes it when it was written.
+            var me = (L.me() && L.me().handle) || null, lv = res.ledgerValue || {};
+            var d = lv.done && lv.done[res.ym] && lv.done[res.ym][key];
             if (d && d.by === me) { res.done[key] = d; } else { delete res.done[key]; }
         }
+        if (U.isOpen() && v) { U._tabCount(v); }   // the Follow-ups count shows on every tab
         if (!res || !U.isOpen() || U._tab !== 'qc') { return; }
         res.items.forEach(function (x) { if (x.key === key) { it = x; } });
-        if (it) { U._swapRow(key, U._qcRow(it, U._qcCtx())); }
+        // No row to swap means the list is being rebuilt (a Refresh emptied it while this write was in flight).
+        if (!it || !U._swapRow(key, U._qcRow(it, U._qcCtx()))) { return; }
         U._qcStatus(note);
     },
 
@@ -16868,9 +16903,10 @@ JiTA.leadduty.ui = {
         void force;   // nothing is cached here - the ledger read IS the load
         L.ledger.read(L.QC_LEDGER_KEY).then(function (cur) {
             if (!U.isOpen()) { return; }
+            if (U._tab !== 'flags') { U._tabCount(cur.value); return; }   // the Lead moved on: keep the count, leave the body
             U._renderFlags(cur.value);
         }, function (e) {
-            if (!U.isOpen()) { return; }
+            if (!U.isOpen() || U._tab !== 'flags') { return; }
             U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
             U._status('');
         });
@@ -16930,10 +16966,12 @@ JiTA.leadduty.ui = {
                         if (note === null) { return; }
                         var $btn = $(this).prop('disabled', true);
                         L.qc.resolveFlag(o.key, note).then(function (r) {
-                            var v = U._adopt(r);
-                            if (!v) { U._loadFlags(false); return; }   // a dry run wrote nothing to show: read the ledger as it is
-                            if (U._qc) { U._qc.ledgerValue = v; }       // the QC tab's Undo reads whether a flag is resolved
-                            if (!U.isOpen() || U._tab !== 'flags') { return; }
+                            var v = U._adopt(U._qc, r);
+                            if (v && U._qc) { U._qc.ledgerValue = v; }   // the QC tab's Undo reads whether a flag is resolved
+                            if (!U.isOpen()) { return; }
+                            if (v) { U._tabCount(v); }                    // the count shows on every tab
+                            if (U._tab !== 'flags') { return; }
+                            if (!v) { U._loadFlags(false); return; }      // a dry run wrote nothing to show: read the ledger as it is
                             // The resolved row has to move to "Recently resolved", so this tab is redrawn rather
                             // than patched - but from the value just written, with no loading state in between,
                             // and at the same scroll position.
@@ -17354,26 +17392,40 @@ JiTA.leadduty.ui = {
         setTimeout(function () { $btn.text(was).prop('disabled', false); }, 1400);
     },
 
-    // Run a ledger write from a row button: disable it, and on failure keep the mark locally so
-    // flushPending() can replay it when Confluence comes back. `after(r, note)` then redraws the row: `r` is the
-    // write's result (null when it failed) and `note` what the status line should say about it.
-    _act: function (btn, promise, localKey, id, after) {
+    // Run a ledger write from a row button. Every button in the row's action cell is disabled while it runs:
+    // Checked and Flag (or Mark reviewed and Skip) are two answers to the same row, and a second one clicked
+    // before the first lands would write twice. after(r, note, marked) then redraws the row: r is the write's
+    // result (null when it failed), note what the status line should say about it, and marked which way the
+    // local mirror went (true: the mark is in it, null: it was left alone).
+    //
+    // A failed write is kept in the mirror for flushPending() to replay when Confluence comes back - but only a
+    // write that replays faithfully. flushPending() knows one replay per tab (a plain Checked, a Mark reviewed), so
+    // a Flag would come back without its reason and follow-up, and a Skip as a review that never happened: for
+    // those queue is false, nothing is kept, and the buttons come back so the Lead can try again. A dry run leaves
+    // the mirror alone too, or it would be replayed for real once dry run is switched off.
+    _act: function (btn, promise, localKey, id, after, queue) {
         var L = JiTA.leadduty;
-        var $btn = $(btn);
-        $btn.prop('disabled', true);
+        var $btns = $(btn).closest('.ld-act').find('button');
+        if (!$btns.length) { $btns = $(btn); }
+        $btns.prop('disabled', true);
         // The chip counts from the mirror this just updated, so it reflects the mark at once - the last mark of
         // the month turns it to "all done" while the overlay is still open, not a minute later.
-        function done(r, note) { after(r, note); try { L.reminder.mount(); } catch (e2) { /* ignore */ } }
+        function done(r, note, marked) { after(r, note, marked); try { L.reminder.mount(); } catch (e2) { /* ignore */ } }
         promise.then(function (r) {
-            return L.local.mark(localKey, id, !(r && r.dry)).then(function () {
-                done(r, (r && r.dry) ? 'DRY RUN - not written to Confluence' : '');
-            });
+            if (r && r.dry) { done(r, '', true); return null; }   // the status line says DRY RUN itself
+            return L.local.mark(localKey, id, true).then(function () { done(r, '', true); });
         }, function (e) {
+            var why = String(e && e.message || e);
+            if (queue === false) { done(null, 'Not saved - ' + why + ' Try again once Confluence answers.', null); return null; }
             return L.local.mark(localKey, id, false).then(function () {
-                done(null, 'Saved locally only - ' + String(e && e.message || e) + ' It will be retried automatically.');
+                done(null, 'Saved locally only - ' + why + ' It will be retried automatically.', true);
             });
-        }).catch(function () { $btn.prop('disabled', false); });
+        }).catch(function () { $btns.prop('disabled', false); });
     },
+
+    // Issue key -> the reason typed for a Flag that has not been saved yet. The prompt offers it again, so a Flag
+    // whose save failed costs the Lead a click, not the text.
+    _drafts: {},
 
     // Take a QC verdict back. A flag asks first, because undoing it also withdraws a follow-up the other Leads
     // can see; a plain Checked does not, since checking it again is one click.
@@ -17389,21 +17441,25 @@ JiTA.leadduty.ui = {
         U._takeBack(btn, L.wiki.unreview(id, ym), L.wiki.localKey(ym), id, local, '"' + title + '" is back on your list', after);
     },
 
-    // The shared tail of both Undo buttons. The local mirror is cleared whatever Confluence says - a mark that
-    // never reached the ledger lives only there - and the row is redrawn with a note saying what happened. A
-    // write that failed, or one the ledger refused because it changed underneath, is said as such rather than
-    // papered over: the row then shows the mark still standing.
+    // The shared tail of both Undo buttons. The local mirror is cleared only when the mark is really gone: the
+    // ledger took the Undo, or the mark never reached the ledger at all (local) - one made while Confluence was
+    // unreachable lives only in the mirror, so clearing it IS the Undo, whatever Confluence says now. An Undo the
+    // ledger refused (it changed underneath) or could not be reached for leaves the mark standing in the ledger,
+    // so the mirror keeps it too and the chip goes on counting it as done; the row is redrawn with a note that
+    // says so rather than papering over it.
     _takeBack: function (btn, write, localKey, id, local, okMsg, after) {
         var L = JiTA.leadduty;
         $(btn).prop('disabled', true);
         write.then(function (r) { return r || {}; }, function (e) { return { error: e }; }).then(function (r) {
-            return L.local.unmark(localKey, id).then(function () {
-                var note;
-                if (r.error) { note = 'Could not undo on Confluence - ' + String(r.error && r.error.message || r.error); }
-                else if (r.dry) { note = 'DRY RUN - not written to Confluence'; }
-                else if (r.written || local) { note = okMsg; }
-                else { note = 'Could not undo - the ledger changed since this was marked, so it is shown as it stands now'; }
-                after(r.error ? null : r, note);
+            var gone = !!(local || (r.written && !r.dry));
+            var note;
+            if (local) { note = okMsg; }
+            else if (r.error) { note = 'Could not undo on Confluence - ' + String(r.error && r.error.message || r.error); }
+            else if (r.dry) { note = ''; }   // the status line says DRY RUN itself
+            else if (r.written) { note = okMsg; }
+            else { note = 'Could not undo - the ledger changed since this was marked, so it is shown as it stands now'; }
+            return (gone ? L.local.unmark(localKey, id) : Promise.resolve()).then(function () {
+                after(r.error ? null : r, note, gone ? false : null);
                 try { L.reminder.mount(); } catch (e2) { /* ignore */ }
             });
         });
@@ -19629,7 +19685,9 @@ JiTA.changelog = {
         { v: '3.38.1', date: '2026-10-01', items: [
             "Lead duties: Checked, Flag, Mark reviewed, Skip and Undo now update only the row you clicked, so the list no longer empties, reloads and jumps around.",
             "Resolving a follow-up no longer reloads the Follow-ups tab, and the list keeps its scroll position.",
-            "When a mark cannot reach Confluence, or in a dry run, the status line now says so instead of the message vanishing straight away."
+            "When a mark cannot reach Confluence, or in a dry run, the status line now says so instead of the message vanishing straight away.",
+            "An Undo that Confluence refuses or cannot reach now leaves the item marked, so the Lead duties pill no longer counts it as still to do.",
+            "A Flag or Skip that cannot be saved is no longer queued to be replayed as a plain Checked or review: its buttons come back so you can try again, and the Flag reason you typed is kept."
         ] },
         { v: '3.38.0', date: '2026-09-30', items: [
             "After an update, a \"What's new\" pill appears in the bottom-left corner. Click it to read what changed, or use its x to dismiss it until the next update.",
