@@ -850,12 +850,19 @@ function jitaOpenGmModal(key) {
     $('<button class="jita-btn">Cancel</button>').on('click', ov.close).appendTo($actions);
     var $go = $('<button class="jita-btn" style="background:#4c9aff; color:#fff; font-weight:700; border-color:#4c9aff;">Convert</button>').appendTo($actions);
 
+    // Cancel, Esc, the backdrop and any other overlay opening all close this one, and that has to stop the
+    // conversion rather than just hide it: the ticket check alone can take 25 seconds, and the chain used to post
+    // the note and run the automation after the Lead had backed out.
+    var CLOSED = new Error('closed');
+    function alive() { return !!(ov.$overlay[0] && ov.$overlay[0].isConnected); }
+
     $go.on('click', function () {
         if (!selected) { $status.css('color', '#ff8f8f').text('Please pick a category first.'); return; }
-        var note = ($note.val() || '').trim();
+        var note = ($note.val() || '').trim(), invoked = false;
         $go.prop('disabled', true).css('opacity', '.6').text('Checking…');
         $status.css('color', '#9aa6b2').text('Checking for a linked Zendesk ticket…');
         jitaZdTicketState().then(function (state) {
+            if (!alive()) { throw CLOSED; }
             if (state === 'noticket') { showNoTicketOption(); return; }
             if (state === 'unavailable') { throw new Error('Could not load the Zendesk Support panel to check for a ticket. Open the Zendesk Support tab and retry.'); }
             // Ticket present -> post the note (if any), then run the conversion automation.
@@ -865,7 +872,9 @@ function jitaOpenGmModal(key) {
                 if (!res || !res.ok) { throw new Error((res && res.error) || 'Could not post the note.'); }
             }) : Promise.resolve();
             return pre.then(function () {
+                if (!alive()) { throw CLOSED; }   // closed while the note was posted: stop before the conversion
                 $status.text('Running automation…');
+                invoked = true;
                 return jitaInvokeGmAutomation(key, selected);
             }).then(function () {
                 $status.css('color', '#7fdca4').text('Automation started - this report will close in a few seconds…');
@@ -873,10 +882,16 @@ function jitaOpenGmModal(key) {
                 var t = setInterval(function () {
                     waited += 500;
                     if ($('strong:contains(Issue Updated)')[0]) { clearInterval(t); window.location.reload(false); }
-                    else if (waited >= 20000) { clearInterval(t); ov.close(); }
+                    else if (waited >= 20000) { clearInterval(t); if (alive()) { ov.close(); } }   // not an overlay opened since
                 }, 500);
             });
         }).catch(function (e) {
+            if (!alive()) {
+                // Closed before the automation was asked for: nothing was converted, as the Lead wanted. Closed while
+                // it ran: the modal is gone, so a failure is said where it can still be seen.
+                if (invoked) { JiTA.ui.toast('Convert to Support Ticket failed: ' + (e && e.message || e)); }
+                return;
+            }
             $go.prop('disabled', false).css('opacity', '').text('Convert');
             $status.css('color', '#ff8f8f').text('Failed: ' + (e && e.message || e));
         });
@@ -4630,10 +4645,21 @@ JiTA.responses = {
         return false;
     },
 
-    // Post `note` as an INTERNAL comment by driving the Zendesk composer: select the internal-note tab, fill the
-    // editor (reusing apply), click the Add button (data-testid="add-comment-button"), then confirm the composer
-    // cleared - its success signal. Resolves { ok, error }. Runs in whichever frame holds the composer (the Forge
-    // iframe normally). Errs toward FAILURE (so the caller aborts the conversion) rather than risk a lost note.
+    // True once "Add internal note" is the SELECTED composer tab, not merely present. Whatever is typed goes into the
+    // active tab's editor, so this decides whether a note reaches the GMs or the player.
+    _internalNoteActive: function () {
+        var tabs = document.querySelectorAll(SELECTORS.ROLE_TAB);
+        for (var i = 0; i < tabs.length; i++) {
+            if ((tabs[i].textContent || '').trim().toLowerCase() === 'add internal note') { return tabs[i].getAttribute('aria-selected') === 'true'; }
+        }
+        return false;
+    },
+
+    // Post `note` as an INTERNAL comment by driving the Zendesk composer: select the internal-note tab and see it
+    // selected, fill the editor (reusing apply), click the Add button (data-testid="add-comment-button"), then
+    // confirm the composer cleared - its success signal. Resolves { ok, error }. Runs in whichever frame holds the
+    // composer (the Forge iframe normally). Errs toward FAILURE (so the caller aborts the conversion) rather than
+    // risk a lost note, or one that reaches the player as a public reply.
     postInternalNote: function (note) {
         var ADD = SELECTORS.ADD_COMMENT_BTN;
         // Small poller: call onOk once test() is truthy, or onTimeout after `ms`.
@@ -4659,20 +4685,37 @@ JiTA.responses = {
                 });
             }
             function afterTicket() {
-                var switched = JiTA.responses._selectInternalNote();
-                setTimeout(function () {
-                    if (!JiTA.responses.apply(note)) { resolve({ ok: false, error: 'Could not find the comment editor.' }); return; }
-                    // 3. Wait for the Add button to enable (our fill has to register), then click.
-                    poll(function () { var b = document.querySelector(ADD); return b && !b.disabled; }, 6000, doClick, function () {
-                        resolve({ ok: false, error: 'The Add button did not enable (empty note?).' });
-                    });
-                }, switched ? 150 : 30);
+                // 3. The note is for the GMs only, and it goes into whichever composer tab is active. Left on "Add
+                //    public reply" (a canned response was just inserted, say), filling it and clicking Add would send
+                //    the note to the player. So the internal-note tab has to be found AND seen selected, or nothing is
+                //    posted - and the caller then stops before the conversion.
+                if (!JiTA.responses._selectInternalNote()) {
+                    resolve({ ok: false, error: 'Could not find the "Add internal note" tab, so the note was not posted (it could have gone out as a public reply).' });
+                    return;
+                }
+                poll(JiTA.responses._internalNoteActive, 3000, function () {
+                    setTimeout(fill, 150);   // a beat for React to mount the internal-note editor in place of the reply one
+                }, function () {
+                    resolve({ ok: false, error: 'The composer did not switch to "Add internal note", so the note was not posted.' });
+                });
+            }
+            function fill() {
+                if (!JiTA.responses.apply(note)) { resolve({ ok: false, error: 'Could not find the comment editor.' }); return; }
+                // 4. Wait for the Add button to enable (our fill has to register), then click.
+                poll(function () { var b = document.querySelector(ADD); return b && !b.disabled; }, 6000, doClick, function () {
+                    resolve({ ok: false, error: 'The Add button did not enable (empty note?).' });
+                });
             }
             function doClick() {
                 var b = document.querySelector(ADD);
                 if (!b) { resolve({ ok: false, error: 'The Add button vanished.' }); return; }
+                // A last look before anything leaves the page: the tab can be switched while the fill registers.
+                if (!JiTA.responses._internalNoteActive()) {
+                    resolve({ ok: false, error: 'The composer left "Add internal note" before the note was sent, so it was not posted.' });
+                    return;
+                }
                 b.click();
-                // 4. Success signal: after a posted comment the composer RESETS - the SCOPED editor (the one we
+                // 5. Success signal: after a posted comment the composer RESETS - the SCOPED editor (the one we
                 //    filled) empties AND/OR the Add button disables again, whichever comes first.
                 var waited = 0;
                 var iv = setInterval(function () {
@@ -6913,6 +6956,9 @@ JiTA.ui = {
             if (!$d.length) { return; }
             if (htmlStr) { paintHtml($d, htmlStr); }
             else if (!flat) { $d.addClass('jita-sd-tip-dim').text('(no description)'); }
+            // A row redrawn under the pointer (Lead duties swaps a row in place) leaves this anchor detached, and a
+            // detached element measures as 0,0: the replacement's own hover is placing the card, so leave it be.
+            if (anchor && anchor.isConnected === false) { return; }
             JiTA.ui._positionTip($live, anchor);
         });
     },
@@ -16456,8 +16502,12 @@ JiTA.leadduty.ui = {
             }).appendTo($foot);
         U._wireKeys();
         U._apps = null;   // applicant answers are never kept across an open (see the _apps comment)
-        U._render();
-        U._load(false);
+        // The QC month is re-read on every open rather than kept from the last one: a row action now updates it in
+        // place instead of reloading it, so without this a sample computed while Confluence was unreachable, or a
+        // flag another Lead has resolved since, would stay on screen until a Refresh.
+        U._qc = null;
+        U._qcWarm = null;
+        U._render();   // which loads the selected tab - loading it again here ran every tab's load twice
         // Resolve the QC month alongside the wiki queue rather than waiting for the tab to be clicked, so
         // both halves of the month are ready together and switching tabs just paints.
         U._warmQc().catch(function () { /* the tab surfaces the error properly when it is opened */ });
@@ -16522,9 +16572,10 @@ JiTA.leadduty.ui = {
                 // done so the row doesn't look unactioned until flushPending() gets through.
                 U._wikiLocalDone = rec.done;
                 return L.local.put(L.wiki.localKey(ym), rec);
-            }).then(function () { U._renderWiki(); try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
+            // A load that lands after the Lead moved to another tab keeps its state but leaves that tab's body alone.
+            }).then(function () { if (U._tab === 'wiki') { U._renderWiki(); } try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
         }).catch(function (e) {
-            if (!U.isOpen()) { return; }
+            if (!U.isOpen() || U._tab !== 'wiki') { return; }
             U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
             U._status('');
         });
@@ -16533,13 +16584,8 @@ JiTA.leadduty.ui = {
     _renderWiki: function () {
         var L = JiTA.leadduty, U = L.ui, res = U._wiki;
         if (!res || !U.isOpen()) { return; }
-        var ym = L._ym(), me = (L.me() && L.me().handle) || null;
+        var ctx = U._wikiCtx(), ym = ctx.ym, me = ctx.me, ids = ctx.ids;   // ids: frozen slice, minus anything now excluded
         var $b = U._body().empty();
-        var byId = L.pool.byId(res.pool);
-        var ledgerDone = (res.ledgerValue && res.ledgerValue.done && res.ledgerValue.done[ym]) || {};
-        var last = (res.ledgerValue && res.ledgerValue.lastReviewed) || {};
-        var by = (res.ledgerValue && res.ledgerValue.reviewedBy) || {};
-        var ids = L.wiki.assignedIds(res.record, res.pool);   // frozen slice, minus anything now excluded
         var dropped = ((res.record.assign && res.record.assign[me]) || []).length - ids.length;
 
         $('<div class="ld-sub"></div>').text('Proof-read these ' + ids.length + ' page' + (ids.length === 1 ? '' : 's') + ' this month (' + ym + ')').appendTo($b);
@@ -16565,50 +16611,124 @@ JiTA.leadduty.ui = {
                 ' (' + res.record.roster.join(', ') + ') but your script lists ' + L.ROSTER().length + '. First writer wins; the split above is the shared one.'));
         }
 
-        var localDone = U._wikiLocalDone || {};
-        var doneCount = 0;
-        ids.forEach(function (id) {
-            var page = byId[id];
-            var done = ledgerDone[id] || (localDone[id] ? { by: me, at: localDone[id], local: true } : null);
-            if (done) { doneCount++; }
-            var $row = $('<div class="ld-row' + (done ? ' done' : '') + '"></div>').appendTo($b);
-            $('<span class="ld-tick"></span>').text(done ? (done.skipped ? '–' : '✓') : '').appendTo($row);
-            if (page) {
-                $('<a class="ld-title" target="_blank" rel="noopener"></a>')
-                    .attr('href', JiTA.conf.pageUrl(id)).text(page.title).appendTo($row);
-            } else {
-                $('<span class="ld-title ld-gone">(page deleted or moved out of the tree)</span>').appendTo($row);
-            }
-            var age = L._monthsSince(last[id]);
-            var meta = !last[id] ? 'never reviewed'
-                : ('last reviewed ' + last[id] + (by[id] ? (' by ' + by[id]) : '') + (age != null ? (' · ' + age + ' month' + (age === 1 ? '' : 's') + ' ago') : ''));
-            $('<span class="ld-meta"></span>').text(meta).appendTo($row);
-            var $act = $('<span class="ld-act"></span>').appendTo($row);
-            if (done && L.wiki.undoable(done, res.ledgerValue, id)) {
-                $('<button class="jita-btn ld-mini">Undo</button>')
-                    .attr('title', done.skipped ? 'Take the skip back - the page goes back on your list'
-                        : 'Take the review back - the page goes back on your list and its review history is restored')
-                    .on('click', function () {
-                        U._undoWiki(this, id, ym, (page && page.title) || ('page ' + id), !!done.local, function () { U._loadWiki(false); });
-                    }).appendTo($act);
-            }
-            if (!done) {
-                $('<button class="jita-btn ld-mini">Mark reviewed</button>').on('click', function () {
-                    U._act(this, L.wiki.markReviewed(id, ym), L.wiki.localKey(ym), id, function () { U._loadWiki(false); });
-                }).appendTo($act);
-                $('<button class="jita-btn ld-mini" title="Record it as handled without stamping it as read (deleted page, no access)">Skip</button>').on('click', function () {
-                    U._act(this, L.wiki.skip(id, ym), L.wiki.localKey(ym), id, function () { U._loadWiki(false); });
-                }).appendTo($act);
-            }
-        });
+        ids.forEach(function (id) { $b.append(U._wikiRow(id, ctx)); });
+        U._wikiStatus();
+    },
 
-        // Progress only. The pool size, the coverage counters and the four-eyes tallies are of no use to a
-        // Lead working their three pages - they are section-wide health, which belongs where someone goes
-        // looking for it: the Settings status line (_poolLine) and the Coverage table on the ledger page.
-        var bits = [doneCount + ' of ' + ids.length + ' done'];
+    // Everything a wiki row is drawn from, read once per render rather than once per row.
+    _wikiCtx: function () {
+        var L = JiTA.leadduty, U = L.ui, res = U._wiki, ym = L._ym(), v = res.ledgerValue || {};
+        return {
+            res: res, ym: ym, me: (L.me() && L.me().handle) || null,
+            ids: L.wiki.assignedIds(res.record, res.pool),
+            byId: L.pool.byId(res.pool),
+            ledgerDone: (v.done && v.done[ym]) || {},
+            last: v.lastReviewed || {}, by: v.reviewedBy || {},
+            local: U._wikiLocalDone || {}
+        };
+    },
+
+    // The mark a row is drawn with: the ledger's, else one the ledger has not taken yet (made while Confluence
+    // was unreachable, or a write that failed), which the local mirror keeps until flushPending() gets it through.
+    _wikiDone: function (ctx, id) {
+        return ctx.ledgerDone[id] || (ctx.local[id] ? { by: ctx.me, at: ctx.local[id], local: true } : null);
+    },
+
+    // One page row. Its buttons settle into _wikiSettle, which redraws this row alone: the list never empties
+    // and reloads, so nothing around the row moves.
+    _wikiRow: function (id, ctx) {
+        var L = JiTA.leadduty, U = L.ui, ym = ctx.ym;
+        var page = ctx.byId[id], done = U._wikiDone(ctx, id);
+        var settle = function (r, note, marked) { U._wikiSettle(id, marked, r, note); };
+        var $row = $('<div class="ld-row' + (done ? ' done' : '') + '"></div>').attr('data-key', id);
+        $('<span class="ld-tick"></span>').text(done ? (done.skipped ? '–' : '✓') : '').appendTo($row);
+        if (page) {
+            $('<a class="ld-title" target="_blank" rel="noopener"></a>')
+                .attr('href', JiTA.conf.pageUrl(id)).text(page.title).appendTo($row);
+        } else {
+            $('<span class="ld-title ld-gone">(page deleted or moved out of the tree)</span>').appendTo($row);
+        }
+        var last = ctx.last[id], by = ctx.by[id], age = L._monthsSince(last);
+        var meta = !last ? 'never reviewed'
+            : ('last reviewed ' + last + (by ? (' by ' + by) : '') + (age != null ? (' · ' + age + ' month' + (age === 1 ? '' : 's') + ' ago') : ''));
+        $('<span class="ld-meta"></span>').text(meta).appendTo($row);
+        var $act = $('<span class="ld-act"></span>').appendTo($row);
+        if (done && L.wiki.undoable(done, ctx.res.ledgerValue, id)) {
+            $('<button class="jita-btn ld-mini">Undo</button>')
+                .attr('title', done.skipped ? 'Take the skip back - the page goes back on your list'
+                    : 'Take the review back - the page goes back on your list and its review history is restored')
+                .on('click', function () {
+                    U._undoWiki(this, id, ym, (page && page.title) || ('page ' + id), !!done.local, settle);
+                }).appendTo($act);
+        }
+        if (!done) {
+            $('<button class="jita-btn ld-mini">Mark reviewed</button>').on('click', function () {
+                U._act(this, L.wiki.markReviewed(id, ym), L.wiki.localKey(ym), id, settle);
+            }).appendTo($act);
+            $('<button class="jita-btn ld-mini" title="Record it as handled without stamping it as read (deleted page, no access)">Skip</button>').on('click', function () {
+                U._act(this, L.wiki.skip(id, ym), L.wiki.localKey(ym), id, settle, false);   // replays as a review: never queued
+            }).appendTo($act);
+        }
+        return $row;
+    },
+
+    // The progress line under the wiki list. A note on what the last action did goes first.
+    //
+    // Progress only. The pool size, the coverage counters and the four-eyes tallies are of no use to a
+    // Lead working their three pages - they are section-wide health, which belongs where someone goes
+    // looking for it: the Settings status line (_poolLine) and the Coverage table on the ledger page.
+    _wikiStatus: function (note) {
+        var L = JiTA.leadduty, U = L.ui, ctx = U._wikiCtx(), n = 0;
+        ctx.ids.forEach(function (id) { if (U._wikiDone(ctx, id)) { n++; } });
+        var bits = [n + ' of ' + ctx.ids.length + ' done'];
         if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
-        if (U._wikiNote) { bits.unshift(U._wikiNote); U._wikiNote = null; }   // what an Undo just did, first
+        if (note) { bits.unshift(note); }
         U._status(bits.join(' · '));
+    },
+
+    // A row action has landed: fold it into the tab's state and redraw that row alone. _act / _takeBack have
+    // already updated the local mirror in the meta store; marked says which way (true: the page went in, false: an
+    // Undo took it out, null: it was left alone), and the copy this tab read at load is moved the same way instead
+    // of being read again.
+    _wikiSettle: function (id, marked, r, note) {
+        var U = JiTA.leadduty.ui, res = U._wiki, v = U._adopt(res, r);
+        var local = U._wikiLocalDone || (U._wikiLocalDone = {});
+        if (marked === true) { local[id] = new Date().toISOString(); } else if (marked === false) { delete local[id]; }
+        if (res && v) { res.ledgerValue = v; }
+        if (!res || !U.isOpen() || U._tab !== 'wiki') { return; }
+        // No row to swap means the list is being rebuilt (a Refresh emptied it while this write was in flight). That
+        // render draws the row from the state just folded in, so there is nothing to paint here.
+        if (!U._swapRow(id, U._wikiRow(id, U._wikiCtx()))) { return; }
+        U._wikiStatus(note);
+    },
+
+    // A row action's result, as the ledger it leaves behind: the value a write stored, or - when the ledger
+    // refused the change - the value it held instead. A dry run hands back a value nobody wrote, and a failed
+    // write none at all: both give null, and the row is drawn from the local mirror the action updated.
+    //
+    // So does a value OLDER than the one the tab already holds. Two writes in flight can land in either order,
+    // and the later answer is not always the later ledger: the second write may have read the first one's result,
+    // saved on top of it and come back while the first PUT's response was still on its way. res (U._qc or U._wiki,
+    // or null) remembers the property version it last took.
+    _adopt: function (res, r) {
+        if (!r || !r.value || r.dry) { return null; }
+        var ver = (r.prop && r.prop.version) || 0;
+        if (res && ver && res.ledgerVersion && ver < res.ledgerVersion) { return null; }
+        if (res && ver) { res.ledgerVersion = ver; }
+        return r.value;
+    },
+
+    // Put a freshly drawn row in place of the one with the same key, leaving every other row where it is.
+    // Returns false when there is no such row.
+    _swapRow: function (key, $fresh) {
+        var U = JiTA.leadduty.ui;
+        var $old = U._body().children('.ld-row').filter(function () { return this.getAttribute('data-key') === key; }).first();
+        if (!$old.length) { return false; }
+        // Only this row's hover card: the row is about to leave the page and would never fire the mouseleave that
+        // closes it. A card open over another row stays up - that row is not touched.
+        try { if (JiTA.ui._tipKey === key) { JiTA.ui._hideTip(true); } } catch (e) { /* ignore */ }
+        $old.replaceWith($fresh);
+        return true;
     },
 
     // Resolve the QC month WITHOUT touching the UI, so the overlay can start it the moment it opens rather
@@ -16646,9 +16766,9 @@ JiTA.leadduty.ui = {
                 if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!rec.done[k]) { rec.done[k] = prev.done[k]; } }); }
                 U._qcLocalDone = rec.done;   // see the note in _loadWiki: shows marks the ledger hasn't taken yet
                 return L.local.put(L.qc.localKey(ym), rec);
-            }).then(function () { U._renderQc(); try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
+            }).then(function () { if (U._tab === 'qc') { U._renderQc(); } try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
         }).catch(function (e) {
-            if (!U.isOpen()) { return; }
+            if (!U.isOpen() || U._tab !== 'qc') { return; }
             U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
             U._status('');
         });
@@ -16658,7 +16778,6 @@ JiTA.leadduty.ui = {
         var L = JiTA.leadduty, U = L.ui, res = U._qc;
         if (!res || !U.isOpen()) { return; }
         var ym = res.ym, $b = U._body().empty();
-        var me = (L.me() && L.me().handle) || null;
 
         $('<div class="ld-sub"></div>').text('Check how these were handled in ' + ym).appendTo($b);
         if (!res.items.length) {
@@ -16672,88 +16791,116 @@ JiTA.leadduty.ui = {
             $b.append($('<div class="ld-warn">Computed locally - Confluence was unreachable, so this sample has not been shared with the other Leads yet.</div>'));
         }
 
-        var qcLocalDone = U._qcLocalDone || {};
-        var flags = (res.ledgerValue && res.ledgerValue.flags) || {};
-        var doneCount = 0;
-        res.items.forEach(function (it) {
-            var done = res.done[it.key] || (qcLocalDone[it.key] ? { by: me, at: qcLocalDone[it.key], local: true } : null);
-            if (done) { doneCount++; }
-            // ld-qc puts the key / type / status / handler in fixed-width columns, so ten rows read as a
-            // table instead of four ragged edges that shift with every summary length.
-            var $row = $('<div class="ld-row ld-qc' + (done ? ' done' : '') + (done && done.verdict === 'flag' ? ' flagged' : '') + '"></div>').appendTo($b);
-            $('<span class="ld-tick"></span>').text(done ? (done.verdict === 'flag' ? '!' : '✓') : '').appendTo($row);
-            // No type chip: the key already says which it is - EBR is a report, EDR / EO / PLAT a defect.
-            $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
-                .attr('href', JiTA.HOST + '/browse/' + it.key).text(it.key).appendTo($row);
-            $('<span class="ld-sum"></span>').attr('title', it.summary || '').text(it.summary || '').appendTo($row);
-            // The status cell is always present, even when the status is unknown, or the column collapses on
-            // that row and the handler beside it jumps left.
-            var $stcol = $('<span class="ld-stcol"></span>').appendTo($row);
-            if (it.status) { $('<span class="ld-st"></span>').text(it.status).appendTo($stcol); }
-            // Whose decision is being graded: for a report, whoever moved it to Attached / Closed; for a
-            // defect, whoever created it. Both come with the frozen month now, and a recorded verdict carries
-            // the name too, so the changelog read is only ever a fallback for a month frozen by an older
-            // build - and even then it fills in behind the row rather than delaying it.
-            var $who = $('<span class="ld-who"></span>').text('…').appendTo($row);
-            function paintWho(name) { $who.text(name || '').attr('title', name || ''); }   // title: the column truncates a long name
-            if (done && done.actor) { it.actor = done.actor; paintWho(done.actor); }
-            else if (it.actor) { paintWho(it.actor); }
-            else {
-                L.qc.actor(it).then(function (name) {
-                    if (!U.isOpen()) { return; }
-                    it.actor = name;
-                    paintWho(name);
-                });
-            }
-            // Hover preview on every row. A DEFECT is free - EO/PLAT/EDR are all synced locally, whatever
-            // their status - but a sampled REPORT never is: the local DB holds only OPEN bug reports, and the
-            // sample is by definition reports that were Attached or Closed, so the lookup always misses. That
-            // is why reports used to have no card at all. _showTip does not actually need the DB though: it
-            // fetches the RENDERED description from Jira itself (cached per key) and paints it in, so the DB
-            // record is only a head start. Hand it what we have and let it fill in the rest.
-            $row.on('mouseenter', function () {
-                var self = this;
-                function tip(r) {
-                    JiTA.ui._showTip({
-                        key: it.key, summary: (r && r.summary) || it.summary,
-                        description: (r && r.description) || '', created: (r && r.created) || it.created
-                    }, self, it.status);
-                }
-                JiTA.db.getDefect(it.key).then(tip, function () { tip(null); });
-            });
-            $row.on('mouseleave', function () { try { JiTA.ui._hideTip(); } catch (e) { /* ignore */ } });
-            var $act = $('<span class="ld-act"></span>').appendTo($row);
-            // Drop the hydrated cache before reloading: the ledger now carries (or has lost) a `done` entry
-            // this snapshot predates, and re-hydrating is cheap (the month is frozen, so it re-reads the
-            // ledger plus one targeted key lookup - it never re-crawls the pool).
-            var reload = function () { U._qc = null; U._loadQc(false); };
-            if (done && L.qc.undoable(done, flags[it.key], ym)) {
-                $('<button class="jita-btn ld-mini">Undo</button>')
-                    .attr('title', done.verdict === 'flag' ? 'Take the flag back - it also withdraws the follow-up and its reason'
-                        : 'Take this back - the item goes back on your list')
-                    .on('click', function () { U._undo(this, it, ym, done.verdict === 'flag', !!done.local, reload); })
-                    .appendTo($act);
-            }
-            if (!done) {
-                $('<button class="jita-btn ld-mini">Checked</button>').on('click', function () {
-                    U._act(this, L.qc.markChecked(it.key, 'ok', ym, null, it), L.qc.localKey(ym), it.key, reload);
-                }).appendTo($act);
-                $('<button class="jita-btn ld-mini" title="Raise a follow-up: the other Leads see it under Follow-ups and on the ledger page until someone resolves it">Flag</button>').on('click', function () {
-                    // A flag without a reason is nearly useless to whoever picks it up, so ask for one. An
-                    // empty note still flags (Cancel aborts) - a bare flag beats losing the judgement.
-                    // Name BOTH audiences: the note is quoted verbatim into the follow-up message the handler
-                    // reads (see qc.followUpText), so "shown to the other Leads" alone invites a Lead to write
-                    // peer shorthand that then lands in front of the Bug Hunter it is about.
-                    var note = prompt('What is wrong with ' + it.key +
-                        '? (the other Leads see this, and it is quoted to whoever handled it)', '');
-                    if (note === null) { return; }
-                    U._act(this, L.qc.markChecked(it.key, 'flag', ym, note, it), L.qc.localKey(ym), it.key, reload);
-                }).appendTo($act);
-            }
-        });
+        var ctx = U._qcCtx();
+        res.items.forEach(function (it) { $b.append(U._qcRow(it, ctx)); });
+        U._qcStatus();
+    },
 
-        var nDef = 0;
-        res.items.forEach(function (it) { if (it.kind !== 'report') { nDef++; } });
+    // Everything a QC row is drawn from, read once per render rather than once per row.
+    _qcCtx: function () {
+        var L = JiTA.leadduty, U = L.ui, res = U._qc;
+        return {
+            res: res, ym: res.ym, me: (L.me() && L.me().handle) || null,
+            local: U._qcLocalDone || {}, flags: (res.ledgerValue && res.ledgerValue.flags) || {}
+        };
+    },
+
+    // The verdict a row is drawn with: the ledger's, else a mark the ledger has not taken yet (made while
+    // Confluence was unreachable, or a write that failed), which the local mirror keeps until flushPending()
+    // gets it through.
+    _qcDone: function (ctx, key) {
+        return ctx.res.done[key] || (ctx.local[key] ? { by: ctx.me, at: ctx.local[key], local: true } : null);
+    },
+
+    // One sampled item. Its buttons settle into _qcSettle, which redraws this row alone: the list never empties
+    // and reloads, so nothing around the row moves.
+    _qcRow: function (it, ctx) {
+        var L = JiTA.leadduty, U = L.ui, ym = ctx.ym;
+        var done = U._qcDone(ctx, it.key);
+        var settle = function (r, note, marked) { U._qcSettle(it.key, marked, r, note); };
+        // ld-qc puts the key / type / status / handler in fixed-width columns, so ten rows read as a
+        // table instead of four ragged edges that shift with every summary length.
+        var $row = $('<div class="ld-row ld-qc' + (done ? ' done' : '') + (done && done.verdict === 'flag' ? ' flagged' : '') + '"></div>')
+            .attr('data-key', it.key);
+        $('<span class="ld-tick"></span>').text(done ? (done.verdict === 'flag' ? '!' : '✓') : '').appendTo($row);
+        // No type chip: the key already says which it is - EBR is a report, EDR / EO / PLAT a defect.
+        $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
+            .attr('href', JiTA.HOST + '/browse/' + it.key).text(it.key).appendTo($row);
+        $('<span class="ld-sum"></span>').attr('title', it.summary || '').text(it.summary || '').appendTo($row);
+        // The status cell is always present, even when the status is unknown, or the column collapses on
+        // that row and the handler beside it jumps left.
+        var $stcol = $('<span class="ld-stcol"></span>').appendTo($row);
+        if (it.status) { $('<span class="ld-st"></span>').text(it.status).appendTo($stcol); }
+        // Whose decision is being graded: for a report, whoever moved it to Attached / Closed; for a
+        // defect, whoever created it. Both come with the frozen month now, and a recorded verdict carries
+        // the name too, so the changelog read is only ever a fallback for a month frozen by an older
+        // build - and even then it fills in behind the row rather than delaying it.
+        var $who = $('<span class="ld-who"></span>').text('…').appendTo($row);
+        function paintWho(name) { $who.text(name || '').attr('title', name || ''); }   // title: the column truncates a long name
+        if (done && done.actor) { it.actor = done.actor; paintWho(done.actor); }
+        else if (it.actor) { paintWho(it.actor); }
+        else {
+            L.qc.actor(it).then(function (name) {
+                if (!U.isOpen()) { return; }
+                it.actor = name;
+                paintWho(name);
+            });
+        }
+        // Hover preview on every row. A DEFECT is free - EO/PLAT/EDR are all synced locally, whatever
+        // their status - but a sampled REPORT never is: the local DB holds only OPEN bug reports, and the
+        // sample is by definition reports that were Attached or Closed, so the lookup always misses. That
+        // is why reports used to have no card at all. _showTip does not actually need the DB though: it
+        // fetches the RENDERED description from Jira itself (cached per key) and paints it in, so the DB
+        // record is only a head start. Hand it what we have and let it fill in the rest.
+        $row.on('mouseenter', function () {
+            var self = this;
+            function tip(r) {
+                JiTA.ui._showTip({
+                    key: it.key, summary: (r && r.summary) || it.summary,
+                    description: (r && r.description) || '', created: (r && r.created) || it.created
+                }, self, it.status);
+            }
+            JiTA.db.getDefect(it.key).then(tip, function () { tip(null); });
+        });
+        $row.on('mouseleave', function () { try { JiTA.ui._hideTip(); } catch (e) { /* ignore */ } });
+        var $act = $('<span class="ld-act"></span>').appendTo($row);
+        if (done && L.qc.undoable(done, ctx.flags[it.key], ym)) {
+            $('<button class="jita-btn ld-mini">Undo</button>')
+                .attr('title', done.verdict === 'flag' ? 'Take the flag back - it also withdraws the follow-up and its reason'
+                    : 'Take this back - the item goes back on your list')
+                .on('click', function () { U._undo(this, it, ym, done.verdict === 'flag', !!done.local, settle); })
+                .appendTo($act);
+        }
+        if (!done) {
+            $('<button class="jita-btn ld-mini">Checked</button>').on('click', function () {
+                U._act(this, L.qc.markChecked(it.key, 'ok', ym, null, it), L.qc.localKey(ym), it.key, settle);
+            }).appendTo($act);
+            $('<button class="jita-btn ld-mini" title="Raise a follow-up: the other Leads see it under Follow-ups and on the ledger page until someone resolves it">Flag</button>').on('click', function () {
+                // A flag without a reason is nearly useless to whoever picks it up, so ask for one. An
+                // empty note still flags (Cancel aborts) - a bare flag beats losing the judgement.
+                // Name BOTH audiences: the note is quoted verbatim into the follow-up message the handler
+                // reads (see qc.followUpText), so "shown to the other Leads" alone invites a Lead to write
+                // peer shorthand that then lands in front of the Bug Hunter it is about.
+                var note = prompt('What is wrong with ' + it.key +
+                    '? (the other Leads see this, and it is quoted to whoever handled it)', U._drafts[it.key] || '');
+                if (note === null) { return; }
+                U._drafts[it.key] = note;   // kept until the flag is saved, so a failed save does not cost the reason
+                U._act(this, L.qc.markChecked(it.key, 'flag', ym, note, it), L.qc.localKey(ym), it.key, function (r, msg, marked) {
+                    if (r) { delete U._drafts[it.key]; }
+                    settle(r, msg, marked);
+                }, false);   // replays as a plain Checked: never queued
+            }).appendTo($act);
+        }
+        return $row;
+    },
+
+    // The progress line under the QC list. A note on what the last action did goes first.
+    _qcStatus: function (note) {
+        var L = JiTA.leadduty, U = L.ui, ctx = U._qcCtx(), res = ctx.res, doneCount = 0, nDef = 0;
+        res.items.forEach(function (it) {
+            if (U._qcDone(ctx, it.key)) { doneCount++; }
+            if (it.kind !== 'report') { nDef++; }
+        });
         var bits = [doneCount + ' of ' + res.items.length + ' checked',
             nDef + ' defect' + (nDef === 1 ? '' : 's') + ', ' + (res.items.length - nDef) + ' report' + (res.items.length - nDef === 1 ? '' : 's'),
             'pool ' + res.record.poolSize + ' items'];
@@ -16763,9 +16910,33 @@ JiTA.leadduty.ui = {
                 ' defect(s) created that month, so the floor of ' + res.record.minDefects + ' could not be met');
         }
         if (L._dry()) { bits.push('DRY RUN - nothing is written'); }
-        if (U._qcNote) { bits.unshift(U._qcNote); U._qcNote = null; }   // what an Undo just did, first
+        if (note) { bits.unshift(note); }
         U._status(bits.join(' · '));
         U._tabCount(res.ledgerValue);
+    },
+
+    // A row action has landed: fold it into the tab's state and redraw that row alone. _act / _takeBack have
+    // already updated the local mirror in the meta store; marked says which way (true: the item went in, false: an
+    // Undo took it out, null: it was left alone), and the copy this tab read at load is moved the same way instead
+    // of being read again. The state is kept current even when the tab is no longer on screen.
+    _qcSettle: function (key, marked, r, note) {
+        var L = JiTA.leadduty, U = L.ui, res = U._qc, v = U._adopt(res, r), it = null;
+        var local = U._qcLocalDone || (U._qcLocalDone = {});
+        if (marked === true) { local[key] = new Date().toISOString(); } else if (marked === false) { delete local[key]; }
+        if (res) {
+            if (v) { res.ledgerValue = v; }
+            // This row's verdict, from the newest ledger the tab holds - which is not always this write's own
+            // answer (see _adopt), but always includes it when it was written.
+            var me = (L.me() && L.me().handle) || null, lv = res.ledgerValue || {};
+            var d = lv.done && lv.done[res.ym] && lv.done[res.ym][key];
+            if (d && d.by === me) { res.done[key] = d; } else { delete res.done[key]; }
+        }
+        if (U.isOpen() && v) { U._tabCount(v); }   // the Follow-ups count shows on every tab
+        if (!res || !U.isOpen() || U._tab !== 'qc') { return; }
+        res.items.forEach(function (x) { if (x.key === key) { it = x; } });
+        // No row to swap means the list is being rebuilt (a Refresh emptied it while this write was in flight).
+        if (!it || !U._swapRow(key, U._qcRow(it, U._qcCtx()))) { return; }
+        U._qcStatus(note);
     },
 
     // ---- Follow-ups: every open flag, from every Lead and every retained month --------------------------
@@ -16778,9 +16949,10 @@ JiTA.leadduty.ui = {
         void force;   // nothing is cached here - the ledger read IS the load
         L.ledger.read(L.QC_LEDGER_KEY).then(function (cur) {
             if (!U.isOpen()) { return; }
+            if (U._tab !== 'flags') { U._tabCount(cur.value); return; }   // the Lead moved on: keep the count, leave the body
             U._renderFlags(cur.value);
         }, function (e) {
-            if (!U.isOpen()) { return; }
+            if (!U.isOpen() || U._tab !== 'flags') { return; }
             U._body().empty().append($('<div class="ld-empty"></div>').text(String(e && e.message || e)));
             U._status('');
         });
@@ -16839,7 +17011,20 @@ JiTA.leadduty.ui = {
                         var note = prompt('What was done about ' + o.key + '? (optional)', '');
                         if (note === null) { return; }
                         var $btn = $(this).prop('disabled', true);
-                        L.qc.resolveFlag(o.key, note).then(function () { U._loadFlags(false); },
+                        L.qc.resolveFlag(o.key, note).then(function (r) {
+                            var v = U._adopt(U._qc, r);
+                            if (v && U._qc) { U._qc.ledgerValue = v; }   // the QC tab's Undo reads whether a flag is resolved
+                            if (!U.isOpen()) { return; }
+                            if (v) { U._tabCount(v); }                    // the count shows on every tab
+                            if (U._tab !== 'flags') { return; }
+                            if (!v) { U._loadFlags(false); return; }      // a dry run wrote nothing to show: read the ledger as it is
+                            // The resolved row has to move to "Recently resolved", so this tab is redrawn rather
+                            // than patched - but from the value just written, with no loading state in between,
+                            // and at the same scroll position.
+                            var top = U._body().scrollTop();
+                            U._renderFlags(v);
+                            U._body().scrollTop(top);
+                        },
                             function (e) { $btn.prop('disabled', false); U._status('Could not resolve: ' + String(e && e.message || e)); });
                     }).appendTo($act);
             });
@@ -17253,59 +17438,74 @@ JiTA.leadduty.ui = {
         setTimeout(function () { $btn.text(was).prop('disabled', false); }, 1400);
     },
 
-    // Run a ledger write from a row button: disable it, and on failure keep the mark locally so
-    // flushPending() can replay it when Confluence comes back.
-    _act: function (btn, promise, localKey, id, after) {
-        var L = JiTA.leadduty, U = L.ui;
-        var $btn = $(btn);
-        $btn.prop('disabled', true);
+    // Run a ledger write from a row button. Every button in the row's action cell is disabled while it runs:
+    // Checked and Flag (or Mark reviewed and Skip) are two answers to the same row, and a second one clicked
+    // before the first lands would write twice. after(r, note, marked) then redraws the row: r is the write's
+    // result (null when it failed), note what the status line should say about it, and marked which way the
+    // local mirror went (true: the mark is in it, null: it was left alone).
+    //
+    // A failed write is kept in the mirror for flushPending() to replay when Confluence comes back - but only a
+    // write that replays faithfully. flushPending() knows one replay per tab (a plain Checked, a Mark reviewed), so
+    // a Flag would come back without its reason and follow-up, and a Skip as a review that never happened: for
+    // those queue is false, nothing is kept, and the buttons come back so the Lead can try again. A dry run leaves
+    // the mirror alone too, or it would be replayed for real once dry run is switched off.
+    _act: function (btn, promise, localKey, id, after, queue) {
+        var L = JiTA.leadduty;
+        var $btns = $(btn).closest('.ld-act').find('button');
+        if (!$btns.length) { $btns = $(btn); }
+        $btns.prop('disabled', true);
         // The chip counts from the mirror this just updated, so it reflects the mark at once - the last mark of
         // the month turns it to "all done" while the overlay is still open, not a minute later.
-        function done() { after(); try { L.reminder.mount(); } catch (e2) { /* ignore */ } }
+        function done(r, note, marked) { after(r, note, marked); try { L.reminder.mount(); } catch (e2) { /* ignore */ } }
         promise.then(function (r) {
-            return L.local.mark(localKey, id, !(r && r.dry)).then(function () {
-                if (r && r.dry) { U._status('DRY RUN - not written to Confluence'); }
-                done();
-            });
+            if (r && r.dry) { done(r, '', true); return null; }   // the status line says DRY RUN itself
+            return L.local.mark(localKey, id, true).then(function () { done(r, '', true); });
         }, function (e) {
+            var why = String(e && e.message || e);
+            if (queue === false) { done(null, 'Not saved - ' + why + ' Try again once Confluence answers.', null); return null; }
             return L.local.mark(localKey, id, false).then(function () {
-                U._status('Saved locally only - ' + String(e && e.message || e) + ' It will be retried automatically.');
-                done();
+                done(null, 'Saved locally only - ' + why + ' It will be retried automatically.', true);
             });
-        }).catch(function () { $btn.prop('disabled', false); });
+        }).catch(function () { $btns.prop('disabled', false); });
     },
+
+    // Issue key -> the reason typed for a Flag that has not been saved yet. The prompt offers it again, so a Flag
+    // whose save failed costs the Lead a click, not the text.
+    _drafts: {},
 
     // Take a QC verdict back. A flag asks first, because undoing it also withdraws a follow-up the other Leads
     // can see; a plain Checked does not, since checking it again is one click.
     _undo: function (btn, it, ym, wasFlag, local, after) {
         var L = JiTA.leadduty, U = L.ui;
         if (wasFlag && !confirm('Take back the flag on ' + it.key + '? This also withdraws its follow-up, reason included.')) { return; }
-        U._takeBack(btn, L.qc.uncheck(it.key, ym), L.qc.localKey(ym), it.key, local, it.key + ' is back on your list', '_qcNote', after);
+        U._takeBack(btn, L.qc.uncheck(it.key, ym), L.qc.localKey(ym), it.key, local, it.key + ' is back on your list', after);
     },
 
     // Take a page review or skip back. No confirmation: marking it again is one click.
     _undoWiki: function (btn, id, ym, title, local, after) {
         var L = JiTA.leadduty, U = L.ui;
-        U._takeBack(btn, L.wiki.unreview(id, ym), L.wiki.localKey(ym), id, local, '"' + title + '" is back on your list', '_wikiNote', after);
+        U._takeBack(btn, L.wiki.unreview(id, ym), L.wiki.localKey(ym), id, local, '"' + title + '" is back on your list', after);
     },
 
-    // The shared tail of both Undo buttons. The local mirror is cleared whatever Confluence says - a mark that
-    // never reached the ledger lives only there - and the outcome is handed to the redraw (see the end of
-    // _renderWiki / _renderQc) rather than written here, because the reload repaints the status line a moment
-    // later and would wipe it. A write that failed, or one the ledger refused because it changed underneath,
-    // is said as such rather than papered over: the reload then shows the mark still standing.
-    _qcNote: null,
-    _wikiNote: null,
-    _takeBack: function (btn, write, localKey, id, local, okMsg, noteKey, after) {
-        var L = JiTA.leadduty, U = L.ui;
+    // The shared tail of both Undo buttons. The local mirror is cleared only when the mark is really gone: the
+    // ledger took the Undo, or the mark never reached the ledger at all (local) - one made while Confluence was
+    // unreachable lives only in the mirror, so clearing it IS the Undo, whatever Confluence says now. An Undo the
+    // ledger refused (it changed underneath) or could not be reached for leaves the mark standing in the ledger,
+    // so the mirror keeps it too and the chip goes on counting it as done; the row is redrawn with a note that
+    // says so rather than papering over it.
+    _takeBack: function (btn, write, localKey, id, local, okMsg, after) {
+        var L = JiTA.leadduty;
         $(btn).prop('disabled', true);
         write.then(function (r) { return r || {}; }, function (e) { return { error: e }; }).then(function (r) {
-            return L.local.unmark(localKey, id).then(function () {
-                if (r.error) { U[noteKey] = 'Could not undo on Confluence - ' + String(r.error && r.error.message || r.error); }
-                else if (r.dry) { U[noteKey] = 'DRY RUN - not written to Confluence'; }
-                else if (r.written || local) { U[noteKey] = okMsg; }
-                else { U[noteKey] = 'Could not undo - the ledger changed since this was marked, so it is shown as it stands now'; }
-                after();
+            var gone = !!(local || (r.written && !r.dry));
+            var note;
+            if (local) { note = okMsg; }
+            else if (r.error) { note = 'Could not undo on Confluence - ' + String(r.error && r.error.message || r.error); }
+            else if (r.dry) { note = ''; }   // the status line says DRY RUN itself
+            else if (r.written) { note = okMsg; }
+            else { note = 'Could not undo - the ledger changed since this was marked, so it is shown as it stands now'; }
+            return (gone ? L.local.unmark(localKey, id) : Promise.resolve()).then(function () {
+                after(r.error ? null : r, note, gone ? false : null);
                 try { L.reminder.mount(); } catch (e2) { /* ignore */ }
             });
         });
@@ -19531,6 +19731,17 @@ JiTA.changelog = {
         { v: '3.38.3', date: '2026-10-03', items: [
             'The defect and bug report syncs no longer skip updates when your computer is set to a later timezone than your Jira profile.',
             'If similar defects or open reports have looked out of date, run Rebuild defect DB and Rebuild BR DB once from the settings.'
+        ] },
+        { v: '3.38.2', date: '2026-10-03', items: [
+            'Convert to Support Ticket: the note for the GMs is now posted only once the Zendesk composer is confirmed on its internal note tab, so it can no longer reach the player as a public reply.',
+            'Cancel, Esc or closing the Convert to Support Ticket window now stops the conversion, even while it is still checking for a linked Zendesk ticket.'
+        ] },
+        { v: '3.38.1', date: '2026-10-01', items: [
+            "Lead duties: Checked, Flag, Mark reviewed, Skip and Undo now update only the row you clicked, so the list no longer empties, reloads and jumps around.",
+            "Resolving a follow-up no longer reloads the Follow-ups tab, and the list keeps its scroll position.",
+            "When a mark cannot reach Confluence, or in a dry run, the status line now says so instead of the message vanishing straight away.",
+            "An Undo that Confluence refuses or cannot reach now leaves the item marked, so the Lead duties pill no longer counts it as still to do.",
+            "A Flag or Skip that cannot be saved is no longer queued to be replayed as a plain Checked or review: its buttons come back so you can try again, and the Flag reason you typed is kept."
         ] },
         { v: '3.38.0', date: '2026-09-30', items: [
             "After an update, a \"What's new\" pill appears in the bottom-left corner. Click it to read what changed, or use its x to dismiss it until the next update.",
