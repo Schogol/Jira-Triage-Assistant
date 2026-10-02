@@ -6274,6 +6274,12 @@ JiTA.link = {
     // link separately; if there's no such transition at all we just create the link. Resolves with
     // { attached: bool, linked: bool }.
     attachDuplicate: function (ebrKey, otherKey, statusName, preferredResolution, assigneeAccountId) {
+        // Only ever a bug report onto a defect: every caller means exactly that. A list painted for another issue,
+        // or a ranking cached under another view, once handed a REPORT here as the target, and Jira links an EBR to
+        // an EBR as readily as to a defect. So the shape is checked here, before anything is sent.
+        if (!/^EBR-\d+$/.test(String(ebrKey || '')) || !/^(EDR|EO|PLAT)-\d+$/.test(String(otherKey || ''))) {
+            return Promise.reject(new Error('Refused: only a bug report can be attached, and only to a defect (' + ebrKey + ' to ' + otherKey + ').'));
+        }
         return JiTA.link.dupInfo().then(function (info) {
             return new Promise(function (resolve, reject) {
                 $.ajax({ url: JiTA.HOST + '/rest/api/3/issue/' + ebrKey + '/transitions?expand=transitions.fields', dataType: 'json' })
@@ -7561,6 +7567,7 @@ JiTA.ui = {
     },
 
     _markDupButton: function (defectKey) {
+        var forKey = JiTA.ui.currentKey;   // the bug report this row is drawn for: the panel only paints the issue on screen
         var $dup = $('<span class="jita-sd-link"></span>')
             .text('Attach')
             .attr('title', 'Link this bug report as a duplicate of ' + defectKey);
@@ -7569,8 +7576,11 @@ JiTA.ui = {
             ev.stopPropagation();
             var $btn = $(this);
             if ($btn.hasClass('jita-sd-linked') || $btn.hasClass('jita-sd-linking')) { return; }
-            var ebr = JiTA.ui.currentKey;
+            var ebr = forKey;
             if (!ebr) { return; }
+            // A row can outlive its issue for a moment (the next issue's list has not painted yet): attach only the
+            // report it was drawn for, and only while that is still the one on screen.
+            if (JiTA.ui.currentKey !== ebr) { JiTA.ui.toast('This list was drawn for ' + ebr + ', not the issue on screen - wait for it to refresh.'); return; }
             if (!confirm('Link ' + ebr + ' as a duplicate of ' + defectKey + ' and set it to Attached?')) { return; }
             $btn.addClass('jita-sd-linking').text('…');
             // Single call: the Attached transition sets the status, resolution AND the duplicate link at once.
@@ -7642,6 +7652,7 @@ JiTA.ui = {
                 ev.stopPropagation();
                 var $b = $(this);
                 if ($b.hasClass('jita-sd-linked') || $b.hasClass('jita-sd-linking')) { return; }
+                if (JiTA.ui.currentKey !== defectKey) { JiTA.ui.toast('This list was drawn for ' + defectKey + ', not the issue on screen - wait for it to refresh.'); return; }
                 if (!confirm('Attach ' + reportKey + ' to ' + defectKey + ' as a duplicate and set it to Attached?')) { return; }
                 $b.addClass('jita-sd-linking').text('…');
                 // Pass the current user so the report is assigned to the triager on attach (the gate guarantees
@@ -8136,8 +8147,15 @@ JiTA.ui = {
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section; clear it on the EBR view
         JiTA.ui.renderLogLink(key, background);   // scan the attached log for known defects (no need to open it); background = don't blank it first
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar defects…'); }
+        // Everything below is asynchronous, and reading the text can mean an on-demand translation: by the time an
+        // answer lands the user may be on another issue, or have switched the funnel to another view. A late answer
+        // must not paint this issue's matches under that one - each row's Attach would then link the issue on screen
+        // to defects matched for this one. Every sibling view checks the same.
+        var stale = function () { return JiTA.ui.currentKey !== key || JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode; };
         JiTA.ui.getIssueText(key).then(function (text) {
+            if (stale()) { return; }
             return JiTA.db.countDefectsOnly().then(function (n) {
+                if (stale()) { return; }
                 if (!n) {
                     JiTA.ui.setStatusAction('No local data yet.', 'Sync defects now', function () { JiTA.sync.syncAllNow(); });
                     return;
@@ -8145,6 +8163,7 @@ JiTA.ui = {
                 if (!text) { JiTA.ui.setStatus('Could not read this issue’s text.'); return; }
                 return JiTA.ui._getCreated(key).then(function (brCreated) {
                 return JiTA.rank.suggestBest(text, key, brCreated, JiTA.ui.modeOverride, terms).then(function (out) {
+                    if (stale()) { return; }
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
                     if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar defects found (' + n + ' indexed).'); return; }   // clear a stale list if a refresh now finds nothing
@@ -8158,6 +8177,7 @@ JiTA.ui = {
                             return r;
                         }, function () { return r; });
                     })).then(function () {
+                        if (stale()) { return; }
                         var $list = $('#jita-sd-list');
                         $list.empty();   // clear atomically right before filling: a concurrent re-render (e.g. after an auto-sync) also emptied at its top, but both appended later - emptying here keeps each render self-contained and avoids doubled rows
                         for (var i = 0; i < results.length; i++) { $list.append(JiTA.ui._item(results[i])); }
@@ -8167,7 +8187,7 @@ JiTA.ui = {
                 });
                 });
             });
-        }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
+        }).catch(function (e) { if (stale()) { return; } JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
     },
 
     // EDR (defect) view: rank the OPEN bug reports that best match this defect's description (keyword BM25),
@@ -8181,14 +8201,20 @@ JiTA.ui = {
         if (!background) { $('#jita-sd-list').empty(); }   // background refresh keeps the list until new results are ready
         JiTA.ui.renderExceptionCluster(key, background);   // list other defects that reported the same exception; background = don't blank it first
         if (!background) { JiTA.ui.setStatus('Finding matching bug reports…'); }
+        // As in render(): a late answer for an issue the user has left paints nothing. Here it matters twice over,
+        // because each row's Attach takes the issue on screen as its defect when the row is drawn.
+        var stale = function () { return JiTA.ui.currentKey !== key; };
         JiTA.ui.getIssueText(key).then(function (text) {
+            if (stale()) { return; }
             return JiTA.db.countEbr().then(function (n) {
+                if (stale()) { return; }
                 if (!n) {
                     JiTA.ui.setStatusAction('No bug reports synced yet.', 'Sync bug reports now', function () { JiTA.sync.syncAllNow(); });
                     return;
                 }
                 if (!text) { JiTA.ui.setStatus('Could not read this defect’s text.'); return; }
                 return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms).then(function (out) {
+                    if (stale()) { return; }
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
                     if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No matching bug reports found (' + n + ' open).'); return; }   // clear a stale list if a refresh now finds nothing
@@ -8200,6 +8226,7 @@ JiTA.ui = {
                             return r;
                         }, function () { return r; });
                     })).then(function () {
+                        if (stale()) { return; }
                         var $list = $('#jita-sd-list');
                         $list.empty();   // clear atomically right before filling (see render() - avoids doubled rows from a concurrent re-render)
                         for (var i = 0; i < results.length; i++) { $list.append(JiTA.ui._reportItem(results[i])); }
@@ -8208,7 +8235,7 @@ JiTA.ui = {
                     });
                 });
             });
-        }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
+        }).catch(function (e) { if (stale()) { return; } JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
     },
 
     // EBR view, "reporter's other reports" mode (funnel toggle): list EVERY other bug report from the same
@@ -11497,6 +11524,9 @@ JiTA.triage = {
         if (!res) { T._setMsg('Still ranking - try again in a moment.', true); return; }
         res.then(function (r) {
             if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== item.key) { return; }
+            // The list's own view decides, not the funnel's flags: a ranking cached under a report view is a list of
+            // REPORTS, whatever the funnel says now.
+            if (r.view === 'reporter' || r.view === 'simreports') { T._setMsg('These rows are bug reports - a report can only be attached to a defect. Use the funnel to go back to the defect matches.', true); return; }
             var m = r.results[n - 1];
             if (!m) { T._setMsg('No match #' + n + '.', true); return; }
             T._arm({ type: 'attach', n: n, matchKey: m.key, label: (T._mode === 'defect' ? 'Attach ' + m.key + ' to this defect ' + item.key : 'Attach ' + item.key + ' to ' + m.key) + ' (#' + n + ', ' + (m.count ? m.count + ' reports in ' + JiTA.trend.WINDOW_DAYS + ' days' : (m.pct || 0) + '%') + ')', again: pressedKey.toUpperCase() });
@@ -11935,7 +11965,13 @@ JiTA.triage = {
         // None of the funnel's views survives the move to the defect queue: the issue on screen becomes a defect,
         // which has no reporter of its own, nothing to match report-to-report against, and nothing a trending
         // defect could be attached to.
-        if (to === 'defect') { JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false; }
+        // And every ranking cached under one of them is a list of the wrong things once it is off: back on this
+        // queue, a report's cached "reports by this reporter" would be shown as its defect matches, and a digit would
+        // attach the report to another report. Drop them, so those lists are ranked again.
+        if (to === 'defect') {
+            if (JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode) { T._cache = {}; }
+            JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false;
+        }
         T._syncModeUi(); T._renderLegend();
         var s = T._stash[T._mode];
         if (s && s.done && !s.error && s.queue.length) {
@@ -19736,6 +19772,10 @@ JiTA.changelog = {
     ENTRIES: [
         { v: '3.38.5', date: '2026-10-03', items: [
             "After an update the What's new pill now comes up reliably: if the page takes it away while still loading, it comes back by itself."
+        ] },
+        { v: '3.38.4', date: '2026-10-03', items: [
+            'Attach can no longer link a bug report to another bug report. Triage mode could, after a trip to the defect queue and back.',
+            'The similar defects panel no longer shows the previous issue\'s matches when you move on before they finish loading, so Attach always acts on the issue on screen.'
         ] },
         { v: '3.38.3', date: '2026-10-03', items: [
             'The defect and bug report syncs no longer skip updates when your computer is set to a later timezone than your Jira profile.',
