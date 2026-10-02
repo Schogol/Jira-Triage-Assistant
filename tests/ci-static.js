@@ -1,8 +1,10 @@
 // ci-static.js - the checks that need no harness: every script parses, git stores every text file with LF
-// endings, nothing contains an em dash, and a pull request that changes JiTA.user.js raises its @version.
+// endings, nothing contains an em dash, a pull request that changes JiTA.user.js raises its @version, and the
+// changelog keeps every release: each version main has carried has an entry, and no entry already out is
+// dropped or re-dated.
 //
-//   node tests/ci-static.js                      everything except the version check
-//   node tests/ci-static.js --base origin/main   plus the version check against that ref
+//   node tests/ci-static.js                      everything except the checks against a base
+//   node tests/ci-static.js --base origin/main   plus the version check and the changelog against that ref
 //
 // Run it from anywhere inside the repo. It reads the committed state through git, so stage new files first.
 const fs = require('fs'), path = require('path');
@@ -72,6 +74,52 @@ if (BASE) {
         ok('JiTA.user.js changed, so @version goes up (' + (base ? base.join('.') : 'none') + ' -> ' + (head ? head.join('.') : 'none') + ')',
             !!head && (!base || cmp(head, base) > 0),
             'bump the last digit for a fix, the middle one for a feature, the first for a major rework');
+    }
+}
+
+// ---- the changelog keeps every release ----
+// changelog-check pins the newest entry to @version, so no version ships without one. These guard the rest of the
+// list. Every version main has ever carried must still be listed: @updateURL points at main, so each one reached
+// someone. And an entry that is already out must not be dropped or re-dated by a later change (its wording may
+// be corrected); that also covers the versions before the 2.35.0 rename, which predate this file's history.
+const CL_END = '\n    _noop: null\n};';
+function changelog(text) {
+    const s = String(text || '').replace(/\r\n/g, '\n'), cs = s.indexOf('\nJiTA.changelog = {'), ce = s.indexOf(CL_END, cs);
+    if (cs < 0 || ce < 0) { return null; }
+    const J = {};
+    try { new Function('JiTA', s.slice(cs, ce + CL_END.length))(J); } catch (e) { return null; }
+    return (J.changelog && Array.isArray(J.changelog.ENTRIES)) ? J.changelog.ENTRIES : null;
+}
+// JITA_SRC names another copy whose changelog to check instead, as the harnesses take it (mutate-releases.js).
+const entries = changelog(fs.readFileSync(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'), 'utf8'));
+ok('JiTA.user.js carries its changelog', !!entries);
+if (entries) {
+    const listed = {};
+    entries.forEach((e) => { listed[e.v] = e; });
+    // Released = every @version on main's first-parent history, up to where this branch forked from it (the
+    // merge-base): a branch that forked before main's latest release is not asked for that entry yet, and the pull
+    // request's own check runs on its merge with main, where the merge-base is main itself. A pull request's own
+    // intermediate bumps never shipped, so they need no entry.
+    const REL = BASE ? git(['merge-base', 'HEAD', BASE]).trim() : 'HEAD', released = [];
+    git(['log', '--first-parent', REL, '-p', '-G^// @version', '--format=', '--', 'JiTA.user.js']).split('\n').forEach((l) => {
+        const m = /^\+\/\/ @version\s+(\S+)\s*$/.exec(l);
+        if (m && released.indexOf(m[1]) < 0) { released.push(m[1]); }
+    });
+    const unlisted = released.filter((v) => !listed[v]);
+    ok('every version released on ' + (BASE || 'this branch') + ' has a changelog entry (' + released.length + ', back to ' + (released[released.length - 1] || 'none') + ')',
+        released.length > 0 && unlisted.length === 0,
+        'no entry for: ' + unlisted.join(', ') + ' - each of these was on main, so its users got it: put its entry back');
+    if (BASE) {
+        let baseEntries = null;
+        try { baseEntries = changelog(git(['show', REL + ':JiTA.user.js'])); } catch (e) { /* no script on the base */ }
+        if (baseEntries) {
+            const lost = baseEntries.filter((e) => !listed[e.v]).map((e) => e.v);
+            const redated = baseEntries.filter((e) => listed[e.v] && listed[e.v].date !== e.date)
+                .map((e) => e.v + ' ' + e.date + ' -> ' + listed[e.v].date);
+            ok('every changelog entry on ' + BASE + ' is still there, with its date (' + baseEntries.length + ' entries)',
+                lost.length === 0 && redated.length === 0,
+                [lost.length ? 'removed: ' + lost.join(', ') : '', redated.length ? 're-dated: ' + redated.join(', ') : ''].filter(Boolean).join('; '));
+        }
     }
 }
 

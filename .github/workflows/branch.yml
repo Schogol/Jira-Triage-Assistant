@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Static checks (syntax, LF endings, em dashes, version bump)
+      - name: Static checks (syntax, LF endings, em dashes, version bump, changelog history)
         run: node tests/ci-static.js --base origin/main
 
       - name: Test files
