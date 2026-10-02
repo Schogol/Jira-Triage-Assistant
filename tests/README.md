@@ -6,10 +6,17 @@ the `checks` job before it can be merged, and `main` only changes through pull r
 Run them locally from the repo root with Node 24:
 
 ```
-node tests/ci-static.js --base origin/main   # syntax, LF endings, no em dashes, @version went up
+node tests/ci-static.js --base origin/main   # syntax, LF endings, no em dashes, @version went up, changelog history
 node tests/run-checks.js                     # every *-check.js harness
 node tests/run-breakages.js                  # every mutate-*.js suite (pull requests only in CI)
 ```
+
+## The changelog
+
+Every release needs its own entry at the top of `JiTA.changelog.ENTRIES`: `changelog-check.js` fails unless the
+newest entry is the `@version` being released. `ci-static.js` guards the rest of the history: every version main
+has carried keeps its entry, and no entry that is already out is dropped or re-dated (fixing its wording is fine).
+`mutate-releases.js` breaks that history four ways and requires `ci-static.js` to notice each one.
 
 ## Test files (`*-check.js`)
 
