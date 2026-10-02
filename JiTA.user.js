@@ -19765,7 +19765,7 @@ JiTA.changelog = {
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
         { v: '3.38.4', date: '2026-10-03', items: [
-            'Attaching can no longer link a bug report to another bug report: Triage mode ranks again after a trip to the defect queue, and every attach that is not a report onto a defect is refused.',
+            'Attach can no longer link a bug report to another bug report. Triage mode could, after a trip to the defect queue and back.',
             'The similar defects panel no longer shows the previous issue\'s matches when you move on before they finish loading, so Attach always acts on the issue on screen.'
         ] },
         { v: '3.38.3', date: '2026-10-03', items: [
