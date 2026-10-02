@@ -54,7 +54,7 @@ const muts = [
     // ---- triage ----
     [TG, 'triage never sees the trending view', "        if (JiTA.ui.trendMode) { return 'trending'; }\n", ''],
     [TG, 'digits inert under trending', "if (tv === 'reporter' || tv === 'simreports') {", "if (tv) {"],
-    [TG, 'defect queue keeps trending', "if (to === 'defect') { JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false; }", "if (to === 'defect') { JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; }"],
+    [TG, 'defect queue keeps trending', "            JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false;\n        }", "            JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false;\n        }"],
     [TG, 'trending view ranked instead', "            if (view === 'trending') {\n                var tterms", "            if (false) {\n                var tterms"],
     [TG, 'filter box ignored under trending', "results: tr.rows.filter(function (r) { return JiTA.trend.matches(r, tterms); }) };", "results: tr.rows };"],
     // ---- the note names its unit ----
