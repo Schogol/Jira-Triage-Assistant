@@ -96,6 +96,23 @@ layers = [el({ pos: 'absolute', rect: box(260, 600, 300, 235) })];   // reaches 
 jitaPillsYield();
 ok(chip.style.visibility === 'hidden' && p.style.visibility !== 'hidden', 'each pill is judged on its own box');
 
+// A pill that steps aside names the layer it stepped aside for, through the debug log (v3.38.5): a layer that never
+// closes would keep a pill hidden for good, and this is how that gets traced.
+const logs = [];
+global.JiTA = { dlog: function () { logs.push(Array.prototype.slice.call(arguments)); } };
+reset(); p = badge();
+const flyout = el({ pos: 'absolute', rect: box(100, 500, 300, 400) });
+layers = [el({ pos: 'absolute', rect: box(600, 0, 50, 50) }), flyout];   // the first floats too, but elsewhere
+jitaPillsYield();
+ok(p.style.visibility === 'hidden' && logs.length === 1 && /jita-credits-badge steps aside for/.test(logs[0][0]) && logs[0][1] === flyout,
+    'stepping aside names the pill, and the layer that covers it rather than another one');
+jitaPillsYield();
+ok(logs.length === 1, '...once, not on every check while it stays covered');
+layers = [];
+jitaPillsYield();
+ok(p.style.visibility === '' && logs.length === 1, '...and coming back is not logged');
+delete global.JiTA;
+
 section('3. at most one check a frame');
 reset(); badge();
 jitaPillsYieldSoon(); jitaPillsYieldSoon(); jitaPillsYieldSoon();

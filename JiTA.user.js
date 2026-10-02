@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.3
+// @version     3.38.5
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -406,11 +406,11 @@ function jitaPillsYield() {
         if (p) { pills.push(p); }
     }
     if (!pills.length) { return; }
-    var layers = [], found = document.querySelectorAll('[role="dialog"], [role="menu"], [role="listbox"]');
+    var layers = [], owners = [], found = document.querySelectorAll('[role="dialog"], [role="menu"], [role="listbox"]');
     for (i = 0; i < found.length; i++) {
         if (found[i].closest('[id^="jita"], #gpanel, .jdv-pop, #jdv-bar, #jdv-col, #jdv-rail')) { continue; }   // our own UI
         var r = found[i].getBoundingClientRect();
-        if (r.width > 0 && r.height > 0 && jitaFloats(found[i])) { layers.push(r); }
+        if (r.width > 0 && r.height > 0 && jitaFloats(found[i])) { layers.push(r); owners.push(found[i]); }
     }
     for (i = 0; i < pills.length; i++) {
         var pr = pills[i].getBoundingClientRect(), hit = false;
@@ -419,6 +419,12 @@ function jitaPillsYield() {
             hit = l.left < pr.right && l.right > pr.left && l.top < pr.bottom && l.bottom > pr.top;
         }
         var want = hit ? 'hidden' : '';
+        // Name the layer when a pill steps aside, so a pill that never seems to show can be traced (Settings > Debug
+        // logging, then the browser console): a layer that never closes keeps it hidden for good. The loop stopped one
+        // past the layer that hit.
+        if (hit && pills[i].style.visibility !== want && typeof JiTA !== 'undefined' && JiTA.dlog) {
+            JiTA.dlog('[JiTA] ' + pills[i].id + ' steps aside for', owners[k - 1]);
+        }
         if (pills[i].style.visibility !== want) { pills[i].style.visibility = want; }
     }
 }
@@ -19728,6 +19734,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.5', date: '2026-10-03', items: [
+            "After an update the What's new pill now comes up reliably: if the page takes it away while still loading, it comes back by itself."
+        ] },
         { v: '3.38.3', date: '2026-10-03', items: [
             'The defect and bug report syncs no longer skip updates when your computer is set to a later timezone than your Jira profile.',
             'If similar defects or open reports have looked out of date, run Rebuild defect DB and Rebuild BR DB once from the settings.'
@@ -20355,6 +20364,30 @@ JiTA.changelog = {
         try { jitaStackPills(); } catch (e) { /* ignore */ }
     },
 
+    // Put the pill up if it should be up and is not. It touches the page only when the pill is missing, so it is safe
+    // to call on every settled DOM change: a pill that one early attempt missed, or that the page took away while it
+    // was still building, comes back on its own. Inert until start() has given the page its time to settle, so the
+    // pill never flashes up mid-load.
+    _armed: false,
+    ensure: function () {
+        var C = JiTA.changelog;
+        if (!C._armed || document.getElementById(C.PILL_ID)) { return; }
+        if (String(gmGet(C.SEEN_KEY, '') || '') === C.latest().v) { return; }   // the usual answer, without walking the list
+        if (C.shouldShow()) { C.mount(); }
+    },
+
+    // Boot: the first look once the page has settled, then two more over the next half minute. On Jira pages the DOM
+    // observer also calls ensure() on every settled change; Confluence has no such observer, so there these retries are
+    // what put a lost pill back.
+    START_MS: [2500, 10000, 30000],
+    start: function () {
+        var C = JiTA.changelog;
+        C.watch();
+        C.START_MS.forEach(function (ms) {
+            setTimeout(function () { try { C._armed = true; C.ensure(); } catch (e) { /* swallow */ } }, ms);
+        });
+    },
+
     // The changes were shown in another tab: take the pill away here as well. Wired once, at boot.
     _watching: false,
     watch: function () {
@@ -20454,13 +20487,16 @@ if (JITA_IS_WIKI) {
     (function () {
         if (!window.indexedDB) { return; }
         setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { /* swallow */ } }, 1200);
-        setTimeout(function () { try { JiTA.changelog.watch(); JiTA.changelog.mount(); } catch (e) { /* swallow */ } }, 2500);
+        try { JiTA.changelog.start(); } catch (e) { /* swallow */ }   // the "What's new" pill after an update
     })();
 }
 
 
 (function () {
     if (JITA_NO_JIRA_UI) { return; }      // Forge iframe runs only the responses dropdown; Confluence only Lead duties (above)
+    // "What's new" after an update. Scheduled first, so nothing that boots after it can keep it from showing; start()
+    // still waits for the page to settle, and the observer below puts the pill back if anything takes it away.
+    try { JiTA.changelog.start(); } catch (eCl) { /* swallow */ }
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
     try { JiTA.dv._bindGlobal(); } catch (eDv) { /* swallow */ }   // the detail view's click hook works off /browse/ too (see _takeAll)
     var scheduled = false;
@@ -20478,6 +20514,7 @@ if (JITA_IS_WIKI) {
             try { JiTA.logsig.updateVisibility(); } catch (e3) { /* swallow */ }   // drop the "Defects in log" panel once the log viewer closes
             try { JiTA.dv.ensure(); } catch (e4) { /* swallow */ }   // detail view: mount / follow the open issue / unmount off /browse/
             try { JiTA.ocr.ensure(); } catch (e5) { /* swallow */ }  // screenshot translation: button on an open image attachment
+            try { JiTA.changelog.ensure(); } catch (e6) { /* swallow */ }   // the "What's new" pill, if something took it away
         }, 300);
     });
     observer.observe(document.body, { childList: true, subtree: true });
@@ -20547,7 +20584,7 @@ if (JITA_IS_WIKI) {
         })();
     }
     // start the periodic background catch-up sync
-    JiTA.sched.start();
+    try { JiTA.sched.start(); } catch (e) { /* swallow */ }
     // Shared ranking worker: elect a leader + spawn the one worker all tabs share (additive; nothing routes to it yet).
     try { JiTA.worker.start(); } catch (e) { /* swallow */ }
     // ISD credit tracker: show the corner badge (from cache) and start the throttled background recompute.
@@ -20556,9 +20593,7 @@ if (JITA_IS_WIKI) {
         try { JiTA.credits.sched.start(); } catch (e) { /* swallow */ }
     }
     // ISD Lead duties: Leads only, and there is no feature flag - roster membership IS the gate.
-    jitaArmLeadDuties();
-    // "What's new" after an update, once the page has settled.
-    setTimeout(function () { try { JiTA.changelog.watch(); JiTA.changelog.mount(); } catch (e) { /* swallow */ } }, 2500);
+    try { jitaArmLeadDuties(); } catch (e) { /* swallow */ }
 })();
 
 

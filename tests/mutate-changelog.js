@@ -24,7 +24,14 @@ const muts = [
     [H, 'the x only hides the pill', 'x.addEventListener(\'click\', function (e) { e.stopPropagation(); JiTA.changelog.markSeen(); });', 'x.addEventListener(\'click\', function (e) { e.stopPropagation(); JiTA.changelog.remove(); });'],
     [H, 'the x also opens the list', 'x.addEventListener(\'click\', function (e) { e.stopPropagation(); JiTA.changelog.markSeen(); });', 'x.addEventListener(\'click\', function (e) { JiTA.changelog.markSeen(); });'],
     [H, 'clicking the pill does nothing', "            el.addEventListener('click', function () { JiTA.changelog.openView(); });\n", "            el.addEventListener('click', function () {});\n"],
-    [H, 'the corner is not restacked', "        if (lbl) { lbl.textContent = C.label(C.unseen()); }\n        try { jitaStackPills(); } catch (e) { /* ignore */ }", "        if (lbl) { lbl.textContent = C.label(C.unseen()); }"]
+    [H, 'the corner is not restacked', "        if (lbl) { lbl.textContent = C.label(C.unseen()); }\n        try { jitaStackPills(); } catch (e) { /* ignore */ }", "        if (lbl) { lbl.textContent = C.label(C.unseen()); }"],
+    // ---- the pill comes back (v3.38.5) ----
+    [H, 'ensure puts the pill up before the page settles', 'if (!C._armed || document.getElementById(C.PILL_ID)) { return; }', 'if (document.getElementById(C.PILL_ID)) { return; }'],
+    [H, 'ensure redraws a pill that is up', 'if (!C._armed || document.getElementById(C.PILL_ID)) { return; }', 'if (!C._armed) { return; }'],
+    [H, 'ensure never puts the pill back', '        if (C.shouldShow()) { C.mount(); }\n    },', '    },'],
+    [H, 'start looks only once', 'START_MS: [2500, 10000, 30000],', 'START_MS: [2500],'],
+    [H, 'start never listens to the other tabs', '        C.watch();\n        C.START_MS.forEach', '        C.START_MS.forEach'],
+    [H, 'start never arms ensure', 'setTimeout(function () { try { C._armed = true; C.ensure(); } catch (e) { /* swallow */ } }, ms);', 'setTimeout(function () { try { C.ensure(); } catch (e) { /* swallow */ } }, ms);']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

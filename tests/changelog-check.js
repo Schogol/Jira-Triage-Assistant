@@ -104,5 +104,35 @@ el.listeners.click[0]();
 ok('clicking the pill opens the list', opened === 1);
 ok('...which counts as seen, so the pill is gone', !byId[C.PILL_ID] && gm[C.SEEN_KEY] === E[0].v);
 
+// ---- the pill comes back (v3.38.5) ----
+// It used to get one attempt, 2.5 s after the page loaded: a pill the page took away, or one never put up because
+// the boot stopped early, stayed gone while the list still showed the update as new. ensure() puts it up whenever it
+// should be up and is not, and start() looks three times; the Jira pages' DOM observer calls ensure() as well.
+gm[C.SEEN_KEY] = E[2].v;   // two updates unseen
+C.remove();
+C._armed = false;
+C.ensure();
+ok('ensure() does nothing before start() has let the page settle', !byId[C.PILL_ID]);
+const timers = [], realSetTimeout = global.setTimeout;
+let listening = 0;
+global.GM_addValueChangeListener = () => { listening++; };
+C._watching = false;
+global.setTimeout = (fn, ms) => { timers.push({ fn: fn, ms: ms }); return timers.length; };
+try { C.start(); } finally { global.setTimeout = realSetTimeout; }
+ok('start() looks three times over the first half minute', timers.map((q) => q.ms).join(',') === '2500,10000,30000', timers.map((q) => q.ms).join(','));
+ok('...and listens for the update being seen in another tab', listening === 1, String(listening));
+timers[0].fn();
+el = byId[C.PILL_ID];
+ok('its first look puts the pill up, counting both updates', !!el && el.children[0].textContent === '📝 What\'s new: 2 updates', el && el.children[0].textContent);
+body.removeChild(el);
+C.ensure();
+ok('a pill the page took away is put back', !!byId[C.PILL_ID] && body.children.filter((c) => c.id === C.PILL_ID).length === 1);
+stacked = 0;
+C.ensure(); timers[1].fn(); timers[2].fn();
+ok('a pill that is up is left alone: no second one, nothing redrawn', body.children.filter((c) => c.id === C.PILL_ID).length === 1 && stacked === 0, String(stacked));
+C.markSeen();
+C.ensure();
+ok('once the update is seen, ensure() leaves it down', !byId[C.PILL_ID]);
+
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'changelog checks passed.'));
 process.exit(fail ? 1 : 0);
