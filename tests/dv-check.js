@@ -411,7 +411,7 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     ok(posts.length === 0 && /Pick a filter/.test(D._error), 'no filters: no request (Jira refuses unbounded queries), a hint instead');
 
     section('12. finding the open issue deeper in the list');
-    reset(); scriptPost();
+    reset(); scriptPost(); D._mounted = true;
     store[D.STATE_KEY] = { mode: 'jql', jql: 'project = EBR ORDER BY key' };
     D._activeKey = 'EBR-77';
     D._run(false);
@@ -424,7 +424,7 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     D._seek();
     eq(countPosts().length, 2, 'and it is not asked again for this query');
 
-    reset(); scriptPost();
+    reset(); scriptPost(); D._mounted = true;
     store[D.STATE_KEY] = { mode: 'jql', jql: 'project = EBR ORDER BY key' };
     D._activeKey = 'EBR-5';
     D._run(false);
@@ -440,7 +440,7 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     await settle();
     eq([jqlPosts().length, D._index['EBR-5']], [3, 4], 'found: paging stops there, even with more pages left');
 
-    reset(); scriptPost();
+    reset(); scriptPost(); D._mounted = true;
     D.FIND_MAX = 4;
     store[D.STATE_KEY] = { mode: 'jql', jql: 'project = EBR ORDER BY key' };
     D._activeKey = 'EBR-99';
@@ -453,7 +453,7 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     await settle();
     eq(jqlPosts().length, 2, 'the search stops at FIND_MAX loaded issues');
 
-    reset(); scriptPost();
+    reset(); scriptPost(); D._mounted = true;
     store[D.STATE_KEY] = { mode: 'jql', jql: 'project = EBR ORDER BY key' };
     D._activeKey = 'EBR-5';
     D._run(false);
@@ -463,6 +463,33 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     countPosts()[1].resolve({ count: 1 });
     await settle();
     eq(jqlPosts().length, 1, 'the user moved to another issue meanwhile: the search is dropped');
+
+    // A page that fails mid-search (Jira down, the session expired) used to be asked for again at once, and again,
+    // for as long as it kept failing (v3.38.7).
+    reset(); scriptPost(); D._mounted = true;
+    store[D.STATE_KEY] = { mode: 'jql', jql: 'project = EBR ORDER BY key' };
+    D._activeKey = 'EBR-9';
+    D._run(false);
+    jqlPosts()[0].resolve({ issues: issues(['EBR-1', 'EBR-2']), nextPageToken: 'T2' });
+    await settle();
+    countPosts()[1].resolve({ count: 1 });
+    await settle();
+    jqlPosts()[1].reject(new Error('HTTP 401'));
+    await settle();
+    eq(jqlPosts().length, 2, 'a page that fails mid-search is not asked for again in a loop');
+
+    reset(); scriptPost(); D._mounted = true;
+    store[D.STATE_KEY] = { mode: 'jql', jql: 'project = EBR ORDER BY key' };
+    D._activeKey = 'EBR-9';
+    D._run(false);
+    jqlPosts()[0].resolve({ issues: issues(['EBR-1', 'EBR-2']), nextPageToken: 'T2' });
+    await settle();
+    countPosts()[1].resolve({ count: 1 });
+    await settle();
+    D._mounted = false;   // the user left the issue view while page two was on its way
+    jqlPosts()[1].resolve({ issues: issues(['EBR-3', 'EBR-4']), nextPageToken: 'T3' });
+    await settle();
+    eq(jqlPosts().length, 2, 'once the list is gone, the search pages no further');
 
     // ---- 13. cache, mapping, errors --------------------------------------------------------------------------------
     section('13. cache, mapping and errors');
