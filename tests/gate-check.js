@@ -67,7 +67,7 @@ ok('the worker hands the gate a ranking call carries to both scorers',
 const calls = [];
 global.JiTA = {
     TOP_N: 8, ui: { filters: { status: 'all', createdDays: 0 } }, rank: { CAND: 50 },
-    worker: { _started: true, call: (type, payload) => { calls.push({ type, payload }); return Promise.resolve({ results: [] }); } }
+    worker: { _started: true, usable: () => true, call:(type, payload) => { calls.push({ type, payload }); return Promise.resolve({ results: [] }); } }
 };
 Object.assign(JiTA.ui, eval('({' + member('    _gateSpec: function () {') + '})'));
 Object.assign(JiTA.rank, eval('({' + member('    _workerKeyword: function (text, scope, excludeKey, filterTerms, limit) {') + '})'));
