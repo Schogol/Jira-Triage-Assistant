@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.27
+// @version     3.38.28
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6470,6 +6470,16 @@ JiTA.link = {
     _info: null,   // cached { name, ebrSide } - the link-type name + which side the EBR goes on
     _me: null,     // cached current-user accountId (for the defect-side attach assignee gate)
 
+    // An Error that carries Jira's own reason - a validator, a required field on the transition screen, a
+    // permission. "transition HTTP 400" alone told the user nothing about what to fix.
+    _why: function (what, xhr) {
+        var j = xhr && xhr.responseJSON, m = [];
+        if (j && j.errorMessages) { m = m.concat(j.errorMessages); }
+        if (j && j.errors) { for (var k in j.errors) { if (Object.prototype.hasOwnProperty.call(j.errors, k)) { m.push(j.errors[k]); } } }
+        var st = xhr ? xhr.status : '?';
+        return new Error(what + ' failed (HTTP ' + st + ')' + (m.length ? ': ' + m.join(' ') : (st === 403 ? ' - no permission?' : '')));
+    },
+
     // Resolve the current user's accountId (cached). Used by the defect-side "Attach" control to gate which
     // bug reports may be attached (only unassigned ones, or ones already assigned to me). Prefer the
     // ajs-atlassian-account-id meta tag Jira renders into the page; fall back to /myself. Resolves null if
@@ -6496,7 +6506,7 @@ JiTA.link = {
         if (JiTA.link._info) { return Promise.resolve(JiTA.link._info); }
         var cached = gmGet('sdDupLink_v2', null);
         if (cached && cached.name) { JiTA.link._info = cached; return Promise.resolve(cached); }
-        return new Promise(function (resolve) {
+        return new Promise(function (resolve, reject) {
             $.ajax({ url: JiTA.HOST + '/rest/api/3/issueLinkType', dataType: 'json' })
                 .done(function (d) {
                     var types = (d && d.issueLinkTypes) || [];
@@ -6506,12 +6516,15 @@ JiTA.link = {
                         if (/^duplicates$/i.test(t.outward || '')) { info = { name: t.name, ebrSide: 'outward' }; }
                         else if (/^duplicates$/i.test(t.inward || '')) { info = { name: t.name, ebrSide: 'inward' }; }
                     }
-                    if (!info) { info = { name: 'Duplicate', ebrSide: 'outward' }; }   // sensible default
+                    // Remembered for good only when it was found: a guess stored in GM was never looked up again, so
+                    // if an admin reworded the type, links could go the wrong way round from then on.
+                    if (info) { gmSet('sdDupLink_v2', info); }
+                    else { info = { name: 'Duplicate', ebrSide: 'outward' }; }   // sensible default, for this session
                     JiTA.link._info = info;
-                    gmSet('sdDupLink_v2', info);
                     resolve(info);
                 })
-                .fail(function () { resolve({ name: 'Duplicate', ebrSide: 'outward' }); });
+                // A failed read used to resolve the guess too, which then drove a real link POST.
+                .fail(function (xhr) { reject(JiTA.link._why('reading the issue link types', xhr)); });
         });
     },
 
@@ -6543,7 +6556,7 @@ JiTA.link = {
                       // A successful POST /issueLink is 201 with an EMPTY body; jQuery then fires `fail` with
                       // a "parsererror" even though the link was created. Treat any 2xx as success.
                       if (xhr.status >= 200 && xhr.status < 300) { resolve(); return; }
-                      reject(new Error('HTTP ' + xhr.status + (xhr.status === 403 ? ' (no link permission?)' : '')));
+                      reject(JiTA.link._why('the duplicate link', xhr));
                   });
             });
         });
@@ -6632,10 +6645,10 @@ JiTA.link = {
                           .fail(function (xhr) {
                               // A successful transition is 204 (empty body) -> jQuery "parsererror"; treat 2xx as success.
                               if (xhr.status >= 200 && xhr.status < 300) { done2xx(); return; }
-                              reject(new Error('transition HTTP ' + xhr.status));
+                              reject(JiTA.link._why('the ' + (statusName || 'status') + ' transition', xhr));
                           });
                     })
-                    .fail(function (xhr) { reject(new Error('transitions HTTP ' + xhr.status)); });
+                    .fail(function (xhr) { reject(JiTA.link._why('reading the transitions', xhr)); });
             });
         });
     }
@@ -6700,7 +6713,7 @@ JiTA.ui = {
 #jita-sd-filtermenu .jita-fm-view { display: block; width: 100%; margin: 0 0 10px; background: #2c333a; color: #cfd6dd; border: 1px solid #3a434d; border-radius: 5px; padding: 6px; cursor: pointer; font-size: 12px; text-align: center; }\
 #jita-sd-filtermenu .jita-fm-view:hover { color: #fff; border-color: #4c9aff; }\
 #jita-sd-filtermenu .jita-fm-view.on { background: #4c9aff; color: #fff; font-weight: 700; border-color: #4c9aff; }\
-.jita-sd-list li.jita-sd-stale { opacity: .6; }\
+#jita-sd-list li.jita-sd-stale { opacity: .6; }\
 .jita-sd-sum { margin-top: 2px; color: #e6e6e6; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-meta { margin-top: 2px; color: #7a8694; font-size: 10px; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-date { margin-top: 2px; color: #7a8694; font-size: 10px; text-align: right; }\
@@ -7906,7 +7919,7 @@ JiTA.ui = {
                     // shows up as an open match on defects before the next EBR sync prunes it.
                     JiTA.db.deleteDefects([ebr]).then(function () {
                         JiTA.sync._ebrRemoved([ebr]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
-                    });
+                    }, function (e) { console.log('[JiTA] could not drop ' + ebr + ' from the local DB:', e && e.message || e); });
                 }
                 JiTA.ui.toast(msg);
             }, function (e) {
@@ -7962,9 +7975,18 @@ JiTA.ui = {
                 if (JiTA.ui.currentKey !== defectKey) { JiTA.ui.toast('This list was drawn for ' + defectKey + ', not the issue on screen - wait for it to refresh.'); return; }
                 if (!confirm('Attach ' + reportKey + ' to ' + defectKey + ' as a duplicate and set it to Attached?')) { return; }
                 $b.addClass('jita-sd-linking').text('…');
-                // Pass the current user so the report is assigned to the triager on attach (the gate guarantees
-                // it was unassigned or already mine, so this never steals someone else's assignment).
-                JiTA.link.currentUser().then(function (me) {
+                // Pass the current user so the report is assigned to the triager on attach. The gate above read a cache
+                // that lives as long as the tab: someone may have taken the report since, and attaching would have
+                // reassigned it to this user. Ask Jira again now, and refuse if it is someone else's.
+                delete JiTA.ui._assigneeCache[reportKey];
+                Promise.all([JiTA.link.currentUser(), JiTA.ui._getAssignee(reportKey)]).then(function (r0) {
+                    var me = r0[0], now = r0[1];
+                    if (now && (!me || now.accountId !== me)) {
+                        $b.off('click').removeClass('jita-sd-linking').addClass('jita-sd-noattach').text('assigned')
+                            .attr('title', 'Assigned to ' + (now.name || 'someone else') + ' - only unassigned reports or ones assigned to you can be attached');
+                        JiTA.ui.toast(reportKey + ' was taken by ' + (now.name || 'someone else') + ' meanwhile - not attached.');
+                        return;
+                    }
                     return JiTA.link.attachDuplicate(reportKey, defectKey, 'Attached', 'Duplicate', me).then(function (res) {
                         JiTA.ui._hideTip();
                         $b.removeClass('jita-sd-linking').addClass('jita-sd-linked').text(res.attached ? '✓ attached' : '✓ linked');
@@ -7979,10 +8001,12 @@ JiTA.ui = {
                         // suggestion loads into the freed slot. If only the link was created (status still
                         // open), leave the row in place - the report is still an open match.
                         if (res.attached) {
-                            return JiTA.db.deleteDefects([reportKey]).then(function () {
+                            // Not returned into the chain below: a local IndexedDB failure here was reported as "Could not
+                            // attach", the button went back to Attach, and a retry posted a second issue link.
+                            JiTA.db.deleteDefects([reportKey]).then(function () {
                                 JiTA.sync._ebrRemoved([reportKey]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
-                                JiTA.ui._fadeOutAndReplace($b.closest('li'), defectKey);
-                            });
+                            }, function (e) { console.log('[JiTA] could not drop ' + reportKey + ' from the local DB:', e && e.message || e); })
+                                .then(function () { JiTA.ui._fadeOutAndReplace($b.closest('li'), defectKey); });
                         }
                     });
                 }).catch(function (e) {
@@ -8208,9 +8232,10 @@ JiTA.ui = {
                     // fall back to the original text on any failure.
                     if (JiTA.util.detectLang(t) !== 'foreign' || typeof jitaTranslateRR !== 'function') { return t; }
                     return jitaTranslateRR(t.slice(0, 3000)).then(function (out) {
-                        var en = (out && out.en) ? out.en : t;
-                        JiTA.ui._qtx = { key: key, text: en };
-                        return en;
+                        // Only a translation is kept: a failed one (Google rate-limiting) cached the foreign text, and the
+                        // report ranked against the English-only index on it for the rest of the session.
+                        if (out && out.en) { JiTA.ui._qtx = { key: key, text: out.en }; return out.en; }
+                        return t;
                     });
                 });
             }, live);
@@ -8245,32 +8270,25 @@ JiTA.ui = {
     // hits when Jira's attachment-content endpoint 30x-redirects to its media host. Falls back to $.ajax if
     // GM_xmlhttpRequest isn't granted. Always resolves to a string ('' on any failure) so a hung/blocked
     // fetch can never stall the scan.
+    // Triage mode's fetch, which has a timeout and checks the status: this copy had neither, so a hung request kept
+    // the scan pending for good and a 403 page was matched as if it were a log.
     _fetchText: function (url) {
-        return new Promise(function (resolve) {
-            if (typeof GM_xmlhttpRequest === 'function') {
-                try {
-                    GM_xmlhttpRequest({
-                        method: 'GET',
-                        url: url,
-                        onload: function (resp) { resolve((resp && resp.responseText) || ''); },
-                        onerror: function () { resolve(''); },
-                        ontimeout: function () { resolve(''); }
-                    });
-                    return;
-                } catch (e) { /* fall through to $.ajax */ }
-            }
-            $.ajax({ url: url, dataType: 'text' })
-                .done(function (t) { resolve(t || ''); })
-                .fail(function () { resolve(''); });
-        });
+        return JiTA.triage._fetchText(url).then(null, function () { return ''; });
     },
 
+    // key -> the scan's promise, in flight or done. Only finished scans used to be kept, so the second render of a
+    // fresh page (trend.warm's) downloaded and matched multi-MB logs a second time; and a failed read of the
+    // attachment list was kept as "no hits", hiding the section until the tab was reloaded.
     _logScanCache: {},
     scanIssueLog: function (key) {
-        if (Object.prototype.hasOwnProperty.call(JiTA.ui._logScanCache, key)) {
-            return Promise.resolve(JiTA.ui._logScanCache[key]);
-        }
-        return new Promise(function (resolve) {
+        var cache = JiTA.ui._logScanCache;
+        if (cache[key]) { return cache[key]; }
+        var p = cache[key] = JiTA.ui._scanIssueLog(key);
+        p.then(null, function () { if (cache[key] === p) { delete cache[key]; } });
+        return p.then(null, function () { return {}; });   // to the caller a failed scan is no hits, as before
+    },
+    _scanIssueLog: function (key) {
+        return new Promise(function (resolve, reject) {
             $.ajax({ url: JiTA.HOST + '/rest/api/3/issue/' + key + '?fields=attachment', dataType: 'json' })
                 .done(function (d) {
                     var atts = (d && d.fields && d.fields.attachment) || [];
@@ -8279,7 +8297,7 @@ JiTA.ui = {
                         var fn = atts[i].filename || '';
                         if (/\.txt$/i.test(fn) && /log/i.test(fn) && atts[i].content) { logs.push(atts[i]); }
                     }
-                    if (!logs.length) { JiTA.ui._logScanCache[key] = {}; resolve({}); return; }
+                    if (!logs.length) { resolve({}); return; }
                     console.log('[JiTA] log scan ' + key + ': ' + logs.length + ' log attachment(s)');
                     var merged = {}, pending = logs.length;
                     function mergeFound(found) {
@@ -8291,7 +8309,6 @@ JiTA.ui = {
                         });
                         if (--pending === 0) {
                             console.log('[JiTA] log scan ' + key + ': ' + Object.keys(merged).length + ' known defect(s) matched');
-                            JiTA.ui._logScanCache[key] = merged;
                             resolve(merged);
                         }
                     }
@@ -8302,7 +8319,7 @@ JiTA.ui = {
                         }, function () { mergeFound({}); });
                     });
                 })
-                .fail(function () { JiTA.ui._logScanCache[key] = {}; resolve({}); });
+                .fail(function (xhr) { reject(new Error('attachment list HTTP ' + (xhr && xhr.status))); });
         });
     },
 
@@ -8683,7 +8700,7 @@ JiTA.ui = {
     // This report's Original Reporter ID, read live from Jira (one field). '' when the field is empty/absent.
     // Retries transient failures (429 / 5xx / status 0) so a network blip doesn't masquerade as "no reporter ID".
     _getReporterId: function (key) {
-        return new Promise(function (resolve) {
+        return new Promise(function (resolve, reject) {
             (function attempt(retries) {
                 $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=customfield_11660', dataType: 'json' })
                     .done(function (d) { var v = d && d.fields && d.fields.customfield_11660; resolve(typeof v === 'string' ? v.trim() : ''); })
@@ -8693,7 +8710,8 @@ JiTA.ui = {
                             var wait = xhr.status === 429 ? (isNaN(ra) ? 5 : ra) * 1000 : (JiTA.MAX_RETRIES - retries + 1) * 1000;
                             setTimeout(function () { attempt(retries - 1); }, wait);
                         } else {
-                            resolve('');   // genuine failure / field absent -> treat as no reporter ID
+                            // Could not be read: say so. Read as "no reporter ID" it told the user the report had none.
+                            reject(new Error('could not read the Original Reporter ID (HTTP ' + xhr.status + ')'));
                         }
                     });
             })(JiTA.MAX_RETRIES);
@@ -20448,6 +20466,13 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.28', date: '2026-10-03', items: [
+            'Attaching a report from a defect asks Jira who has it right before attaching, so a report someone took meanwhile is no longer reassigned to you.',
+            'A link or attach that Jira refuses now shows Jira\'s reason (a required field, a validator, a permission) instead of just an HTTP code.',
+            'Defects fixed long before a report are greyed out in the panel again, and a report whose translation failed is translated again on the next look.',
+            'Known defects in attached logs: a report\'s logs are scanned once per visit, and a scan that failed is tried again instead of hidden until reload.',
+            'A report whose Original Reporter ID could not be read says so, instead of claiming it has none.'
+        ] },
         { v: '3.38.27', date: '2026-10-03', items: [
             'Triage mode: pressing a digit twice while the matches are still ranking no longer attaches to a match you never saw; it waits for the list.',
             'Triage mode: a report attached from the defect queue is gone from the bug-report queue too, and a queue that stopped loading early says so.',
