@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.15
+// @version     3.38.23
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -4983,6 +4983,9 @@ JiTA.db = {
                 for (var i = 0; i < items.length; i++) { apply(store, items[i]); }
                 tx.oncomplete = function () { resolve(items.length); };
                 tx.onerror = function (e) { reject(e.target.error); };
+                // A commit that fails (QuotaExceededError) fires only abort: without this the promise never settled and
+                // JiTA.sync.running stayed true, so every Sync now said "already running" until a reload.
+                tx.onabort = function () { reject(tx.error || new Error('IndexedDB transaction aborted')); };
             });
         });
     },
@@ -5918,7 +5921,7 @@ JiTA.embed = {
             if (JiTA.embed._preparing) { return JiTA.embed._preparing; }
             JiTA.embed._preparing = JiTA.worker.call('embedPass').then(function (r) {
                 JiTA.embed._preparing = null;
-                if (r && r.embedded > 0) { try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ } }   // new vectors -> re-rank the open view
+                // The call is only acknowledged here; the pass reports its end with embedPassDone, which re-renders.
             }, function (e) {
                 JiTA.embed._preparing = null;
                 console.log('[JiTA] worker embed pass skipped:', (e && e.message) || e);
@@ -9731,6 +9734,7 @@ JiTA.credits = {
 // runs as-is in the worker. Never called in the page (references self/indexedDB/import only when run as a worker).
 function jitaWorkerBody(cfg) {
     var pipe = null, backend = 'none', db = null, vecCache = null, kwCache = null, logsigCache = null, BATCH = 8, embedding = false;
+    var pipeP = null, dbP = null, embedAgain = false;   // the model / DB being opened, and a pass asked for while one ran
     var LG_MIN = 2, LG_CRASH = 2;   // logsig: min stack frames to trust a signature; innermost frames for the crash-site sig
     var K1 = 1.5, B = 0.75, STOP = {};
     ('the a an and or of to in for on with is are was were be been it this that these those as at by from we you they i he she his her its their our your not no but if then than so such can will would should could may might do does did has have had into over under out up down off about your yours').split(' ').forEach(function (w) { STOP[w] = true; });
@@ -9826,8 +9830,25 @@ function jitaWorkerBody(cfg) {
         return found;
     }
 
-    async function loadModel() {
-        if (pipe) { return pipe; }
+    // One load at a time: the delayed embed pass and the open panel's first query both asked before the first
+    // load finished, built a second pipeline (a second WebGPU session) and dropped one of them undisposed.
+    function loadModel() {
+        if (pipe) { return Promise.resolve(pipe); }
+        if (!pipeP) {
+            pipeP = loadModelOnce().then(function (p) { pipeP = null; return p; }, function (e) { pipeP = null; throw e; });
+        }
+        return pipeP;
+    }
+    // Drop the pipeline (it may be dead after a device loss), releasing its session rather than leaving it to the
+    // garbage collector; the next loadModel builds a fresh one.
+    function dropPipe() {
+        var p = pipe;
+        pipe = null; backend = 'none';
+        if (p && typeof p.dispose === 'function') {
+            try { var d = p.dispose(); if (d && typeof d.then === 'function') { d.then(null, function () { /* ignore */ }); } } catch (e) { /* ignore */ }
+        }
+    }
+    async function loadModelOnce() {
         var mod = await import(cfg.LIB);
         mod.env.allowLocalModels = false;
         mod.env.useBrowserCache = true;                                   // cache weights in CacheStorage after first download
@@ -9930,6 +9951,9 @@ function jitaWorkerBody(cfg) {
                         var cur = g.result;
                         if (!cur) { return; }                                             // deleted meanwhile -> skip
                         if ((cur.enText || null) !== (rec.enText || null)) { return; }     // translated since we embedded -> stale vector, skip
+                        // Re-synced with new text since we read it: the sync cleared the vector, and ours is of the old text.
+                        // Stored with the current model version, no later pass would have looked at it again.
+                        if ((cur.textHash || null) !== (rec.textHash || null)) { return; }
                         cur.embedding = vecs[j]; cur.embeddingModelVersion = cfg.MODEL_VERSION;
                         store.put(cur);
                     };
@@ -9942,46 +9966,19 @@ function jitaWorkerBody(cfg) {
     }
     // Embed every stored record lacking a current-version embedding (defects + open non-GM EBRs), in batches,
     // writing as we go. Single-flight; resumable. On a bad/NaN batch, reset the model and retry a few times.
+    // Asked again while it runs (an auto-sync stored new defects, translate finished a report), it goes round once
+    // more when done: that request used to be answered "busy" and dropped, leaving those records without vectors
+    // until some later sync happened to bring changes.
     async function embedPass() {
-        if (embedding) { return { embedded: 0, busy: true }; }
+        if (embedding) { embedAgain = true; return { embedded: 0, busy: true }; }
         embedding = true;
+        var total = 0;
         try {
-            await loadModel();
-            var recs = await allRecords();
-            var todo = [];
-            for (var i = 0; i < recs.length; i++) {
-                var r = recs[i];
-                if (r.project === 'EBR' && (isClosedStatus(r.status) || isGmTeam(r.team))) { continue; }   // not ranked -> don't embed
-                if (r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION) { continue; }
-                todo.push(r);
-            }
-            if (!todo.length) { return { embedded: 0 }; }
-            var idx = 0, retries = 0, lastPost = 0;
-            // Post re-embed progress to the tab(s) so a long pass (minutes on CPU) is visible. Throttled to
-            // ~every 50 records; the tab shows it in the panel status (see _applyEvent 'embedPassProgress').
-            function postProgress() { try { self.postMessage({ event: 'embedPassProgress', done: idx, total: todo.length }); } catch (e) { /* only meaningful in a worker */ } }
-            postProgress();   // 0 / total up front so the pass is visible immediately
-            while (idx < todo.length) {
-                var slice = todo.slice(idx, idx + BATCH);
-                var texts = slice.map(function (x) { return effectiveText(x); });   // English translation for foreign reports, else cleaned original
-                try {
-                    var vecs = await Promise.race([
-                        embedBatch(texts),
-                        new Promise(function (_r, rej) { setTimeout(function () { rej(new Error('embed batch timeout')); }, 45000); })   // watchdog: a hung GPU batch
-                    ]);
-                    var bad = false;
-                    for (var g = 0; g < vecs.length; g++) { if (!vecs[g] || !vecs[g].length || !isFinite(vecs[g][0])) { bad = true; break; } }
-                    if (bad) { throw new Error('NaN/empty embedding (likely GPU device loss)'); }
-                    await putEmbeddingsMerged(slice, vecs);   // MERGE (not clobber): preserves a concurrent translate-write's enText/lang
-                    idx += slice.length; retries = 0;
-                    if (idx - lastPost >= 50 || idx >= todo.length) { lastPost = idx; postProgress(); }
-                } catch (e) {
-                    pipe = null;                                  // drop the (possibly dead) pipeline and rebuild
-                    if (++retries > 3) { throw e; }
-                    await new Promise(function (r) { setTimeout(r, 1500); });
-                }
-            }
-            return { embedded: todo.length };
+            do {
+                embedAgain = false;
+                total += await embedOnce();
+            } while (embedAgain);
+            return { embedded: total };
         } finally {
             embedding = false;
             // Rebuild every index on the next query, however the pass ended: new vectors, or none at all - it runs after
@@ -9990,9 +9987,60 @@ function jitaWorkerBody(cfg) {
             dropIndexes();
         }
     }
+    // One round of embedPass; resolves the number of records embedded.
+    async function embedOnce() {
+        await loadModel();
+        var recs = await allRecords();
+        var todo = [];
+        for (var i = 0; i < recs.length; i++) {
+            var r = recs[i];
+            if (r.project === 'EBR' && (isClosedStatus(r.status) || isGmTeam(r.team))) { continue; }   // not ranked -> don't embed
+            if (r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION) { continue; }
+            todo.push(r);
+        }
+        if (!todo.length) { return 0; }
+        var idx = 0, retries = 0, lastPost = 0, skipped = 0, skipRun = 0;
+        // Post re-embed progress to the tab(s) so a long pass (minutes on CPU) is visible. Throttled to
+        // ~every 50 records; the tab shows it in the panel status (see _applyEvent 'embedPassProgress').
+        function postProgress() { try { self.postMessage({ event: 'embedPassProgress', done: idx, total: todo.length }); } catch (e) { /* only meaningful in a worker */ } }
+        postProgress();   // 0 / total up front so the pass is visible immediately
+        while (idx < todo.length) {
+            var slice = todo.slice(idx, idx + BATCH);
+            var texts = slice.map(function (x) { return effectiveText(x); });   // English translation for foreign reports, else cleaned original
+            var wd = null;
+            try {
+                var vecs = await Promise.race([
+                    embedBatch(texts),
+                    new Promise(function (_r, rej) { wd = setTimeout(function () { rej(new Error('embed batch timeout')); }, 45000); })   // watchdog: a hung GPU batch
+                ]);
+                clearTimeout(wd);
+                var bad = false;
+                for (var g = 0; g < vecs.length; g++) { if (!vecs[g] || !vecs[g].length || !isFinite(vecs[g][0])) { bad = true; break; } }
+                if (bad) { throw new Error('NaN/empty embedding (likely GPU device loss)'); }
+                await putEmbeddingsMerged(slice, vecs);   // MERGE (not clobber): preserves a concurrent translate-write's enText/lang
+                idx += slice.length; retries = 0; skipRun = 0;
+                if (idx - lastPost >= 50 || idx >= todo.length) { lastPost = idx; postProgress(); }
+            } catch (e) {
+                clearTimeout(wd);
+                dropPipe();                                   // drop the (possibly dead) pipeline and rebuild
+                try { console.warn('[JiTA worker] embed batch failed (try ' + (retries + 1) + '): ' + ((e && e.message) || e)); } catch (_e) { /* ignore */ }
+                if (++retries > 3) {
+                    // The work is listed in the same order every time, so a slice that always fails used to stop every
+                    // pass at the same place. Leave it for a later pass and go on - unless slice after slice fails,
+                    // which is the device, not the text.
+                    if (++skipRun > 2) { throw e; }
+                    idx += slice.length; skipped += slice.length; retries = 0;
+                    continue;
+                }
+                await new Promise(function (r) { setTimeout(r, 1500); });
+            }
+        }
+        return todo.length - skipped;
+    }
     function openDb() {
         if (db) { return Promise.resolve(db); }
-        return new Promise(function (resolve, reject) {
+        if (dbP) { return dbP; }   // concurrent first calls used to open (and leak) a connection each
+        dbP = new Promise(function (resolve, reject) {
             var req = indexedDB.open(cfg.DB_NAME, cfg.DB_VERSION);   // pristine in a worker (no consent-gate wrapper)
             // Mirror the tab's schema (JiTA.db.open) so whichever context wins the open race at a
             // NEW DB_VERSION creates the stores. Without this the worker could bump the version with
@@ -10025,6 +10073,9 @@ function jitaWorkerBody(cfg) {
             req.onerror = function () { reject(req.error); };
             req.onblocked = function () { /* older connection elsewhere; it closes on versionchange */ };
         });
+        var settle = function () { dbP = null; };
+        dbP.then(settle, settle);
+        return dbP;
     }
     function allRecords() {
         return openDb().then(function (d) {
@@ -10709,7 +10760,7 @@ function jitaWorkerBody(cfg) {
             else if (type === 'embedPass') {
                 // Long-running (minutes on a full rebuild): ACK immediately so the caller's RPC never times out,
                 // and post an 'embedPassDone' event when the background pass actually finishes.
-                if (embedding) { result = { started: false, busy: true }; }
+                if (embedding) { embedAgain = true; result = { started: false, busy: true, queued: true }; }   // runs again when this pass ends
                 else {
                     embedPass().then(function (rr) { self.postMessage({ event: 'embedPassDone', embedded: (rr && rr.embedded) || 0 }); },
                         function (er) { self.postMessage({ event: 'embedPassError', error: String((er && er.message) || er) }); });
@@ -18790,9 +18841,7 @@ JiTA.worker = {
             // doesn't compete with first paint. Single-flight in the worker, so a concurrent prepare() is harmless.
             setTimeout(function () {
                 if (JiTA.worker._worker !== w) { return; }   // a respawn replaced this worker meanwhile
-                JiTA.worker._workerCall('embedPass').then(function (r) {
-                    if (r && r.embedded > 0) { if (window.console) { console.log('[JiTA worker] embed pass: ' + r.embedded + ' embedded'); } try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ } }
-                }, function () { /* ignore */ });
+                JiTA.worker._workerCall('embedPass').then(null, function () { /* ignore: the pass reports its end itself (embedPassDone) */ });
             }, 8000);
         } catch (e) {
             if (window.console) { console.log('[JiTA worker] worker spawn failed:', e); }
@@ -19979,6 +20028,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.23', date: '2026-10-03', items: [
+            'Defects and reports that arrive while an embedding pass is running get their vectors right after it, instead of waiting for a later sync with changes.',
+            'An issue re-synced with new text while it was being embedded no longer keeps the vector of its old text.',
+            'One report that cannot be embedded no longer stops every embedding pass at the same place; it is skipped and tried again next time.',
+            'A sync whose database write fails at the last step (a full disk) now fails instead of leaving "A sync is already running" until reload.'
+        ] },
         { v: '3.38.15', date: '2026-10-03', items: [
             'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
             'Lead duties: the Leads\' browsers no longer keep rewriting the ledger page just because each scanned the page tree at a different time.',
