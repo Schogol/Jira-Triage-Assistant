@@ -78,6 +78,27 @@ const hist = (id) => JSON.stringify([value().lastReviewed[id], value().prevRevie
     await W.markReviewed('p2', ym);
     ok('an undone page can be reviewed again', value().reviewedBy.p2 === 'schogol' && value().done[ym].p2 && value().done[ym].p2.was.by === 'solnichka');
 
+    // ---- a mark made twice (a stale second tab, a replay of a write that did land) ----
+    // It used to be written again, rebuilding the snapshot from the Lead's own stamp, so Undo then left the page
+    // counted as read (v3.38.14).
+    seed();
+    await W.markReviewed('p2', ym);
+    let w2 = writes;
+    r = await W.markReviewed('p2', ym);
+    ok('marking a page again this month writes nothing', !r.written && writes === w2, String(writes - w2));
+    await W.unreview('p2', ym);
+    ok('...so Undo still restores the history from before the first mark', hist('p2') === before.p2, hist('p2') + ' vs ' + before.p2);
+    seed();
+    await W.markReviewed('p2', ym);
+    w2 = writes;
+    r = await W.skip('p2', ym);
+    ok('a Skip over my own review this month writes nothing either', !r.written && writes === w2 && !value().done[ym].p2.skipped);
+    seed();
+    await W.skip('p2', ym);
+    w2 = writes;
+    r = await W.markReviewed('p2', ym);
+    ok('...nor a review over my own Skip: Undo first', !r.written && writes === w2 && value().done[ym].p2.skipped === true);
+
     // ---- skips ----
     seed();
     await W.skip('p2', ym);

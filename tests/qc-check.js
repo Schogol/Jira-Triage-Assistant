@@ -108,6 +108,14 @@ function cell(tbl, key, col) {
     await Q.markChecked('EBR-2', 'ok', pym, null, item('EBR-2'));
     ok('an undone item can be judged again', value().done[pym]['EBR-2'] && value().done[pym]['EBR-2'].verdict === 'ok');
 
+    // A verdict already given stands until it is undone: a Checked replayed from a browser that was offline must not
+    // overwrite a Flag given meanwhile in another one, and withdraw its follow-up with it (v3.38.14).
+    await Q.markChecked('EBR-5', 'flag', pym, 'Wrong project', item('EBR-5'));
+    const w5 = writes;
+    r = await Q.markChecked('EBR-5', 'ok', pym, null, item('EBR-5'));
+    ok('a second verdict on an item already judged writes nothing', !r.written && writes === w5, String(writes - w5));
+    ok('...the flag stands, and so does its follow-up', value().done[pym]['EBR-5'].verdict === 'flag' && !!value().flags['EBR-5'] && !value().flags['EBR-5'].resolvedAt);
+
     // Another Lead's verdict is theirs.
     value().done[pym]['EBR-9'] = { by: 'solnichka', at: 'x', verdict: 'ok' };
     const w0 = writes; taps = 0;
