@@ -14,7 +14,18 @@ node tests/run-breakages.js                  # every mutate-*.js suite (pull req
 ## The changelog
 
 Every release needs its own entry at the top of `JiTA.changelog.ENTRIES`: `changelog-check.js` fails unless the
-newest entry is the `@version` being released. `ci-static.js` guards the rest of the history: every version main
+newest entry is the `@version` being released. An entry lists what it added under `features` and what it fixed
+under `fixes` (either may be left out); only an entry with `features` brings up the What's new pill:
+
+```js
+{ v: '3.40.0', date: '2026-10-10', features: [
+    'What a user can now do, in one sentence.'
+], fixes: [
+    'What no longer goes wrong.'
+] },
+```
+
+`ci-static.js` guards the rest of the history: every version main
 has carried keeps its entry, and no entry that is already out is dropped or re-dated (fixing its wording is fine).
 `mutate-releases.js` breaks that history four ways and requires `ci-static.js` to notice each one.
 
