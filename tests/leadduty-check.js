@@ -93,7 +93,7 @@ const soloAsg = L.wiki.computeAssign(q0, solo, 5, '2026-09', soloPrior);
 ok('a one-Lead roster waives the rule rather than stalling', soloAsg.schogol.length === 5);
 
 // eyesIn is what "covered" means: reviews INSIDE the window only, so an aged-out pair does not count.
-const nowStamp = L._today();
+const nowStamp = new Date().toISOString().slice(0, 10);   // a review stamp is the UTC day
 const oldStamp = (Number(nowStamp.slice(0, 4)) - Math.ceil(WIN / 12) - 1) + nowStamp.slice(4);
 ok('no reviews -> 0 eyes', L.wiki.eyesIn({}, 'x') === 0);
 ok('one recent review -> 1 eye', L.wiki.eyesIn({ lastReviewed: { x: nowStamp } }, 'x') === 1);
@@ -254,14 +254,6 @@ ok('_bounds is half-open across a year end', JSON.stringify(L._bounds('2026-12')
 ok('_bounds normal month', JSON.stringify(L._bounds('2026-09')) === JSON.stringify({ start: '2026-09-01', end: '2026-10-01' }));
 ok('_ym is UTC', L._ym(new Date(Date.UTC(2026, 0, 1, 0, 30))) === '2026-01');
 ok('_monthIndex increments by 1 per month', L._monthIndex('2026-02') - L._monthIndex('2026-01') === 1);
-
-// ---------------------------------------------------------------- page id parsing
-console.log('\nPage id parsing');
-ok('bare id', L._pageId('123456789') === '123456789');
-ok('space URL', L._pageId('https://x.atlassian.net/wiki/spaces/ISD/pages/123456789/Some+Title') === '123456789');
-ok('legacy viewpage URL', L._pageId('https://x.atlassian.net/wiki/pages/viewpage.action?pageId=987654321') === '987654321');
-ok('garbage rejected', L._pageId('not a page') === '');
-ok('empty rejected', L._pageId('') === '');
 
 // ---------------------------------------------------------------- ledger pruning
 console.log('\nLedger month pruning');

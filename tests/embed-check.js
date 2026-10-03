@@ -6,6 +6,8 @@
 //  - a slice that always fails is skipped after its retries instead of stopping every pass at the same place, but
 //    slice after slice failing still ends the pass
 //  - openDb opens one connection for concurrent first calls; a transaction aborted at commit rejects
+//  - (v3.39.4) a tab never loads the model itself: prepare() only asks the shared worker, and the ranking-mode badge
+//    says Hybrid needs the worker when this tab has none
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cut = (from, to) => {
@@ -131,9 +133,34 @@ const quiet = { log() {}, warn() {} };
     ok('a bulk write aborted at commit rejects instead of never settling', outcome === 'err:QuotaExceededError', String(outcome));
 
     // ================= the tab's side =================
-    const prep = cut('    prepare: function (force) {', '        // Fallback (no worker at all)');
+    const prep = cut('\nJiTA.embed = {', '\n};');
     ok('the tab no longer waits for an embedded count the acknowledgement never carries', prep.indexOf('r.embedded') === -1 && src.indexOf("JiTA.worker._workerCall('embedPass').then(function (r)") === -1);
     ok('the worker queues a pass asked for while busy', /if \(embedding\) \{ embedAgain = true; result = \{ started: false, busy: true, queued: true \}; \}/.test(src));
+
+    // ---- no main-thread engine (v3.39.4): semantic ranking runs only in the worker, so a tab never loads a model ----
+    ok('JiTA.embed loads no model of its own', !/import\(|pipeline\(|embedPass:|load: function/.test(prep), prep.slice(0, 80));
+    let usable = false, calls = [], callD = null;
+    const JE = { worker: { usable: () => usable, call: (t) => { calls.push(t); callD = deferred(); return callD.promise; } } };
+    const EM = JE.embed = new Function('JiTA', 'console', 'return ' + prep.replace(/^\nJiTA\.embed = /, '') + '\n};')(JE, quiet);
+    EM.prepare();   // not awaited: a call it should not make would leave it pending for good
+    ok('with no usable worker, prepare does nothing', calls.length === 0, calls.join());
+    usable = true;
+    const q1 = EM.prepare(), q2 = EM.prepare();
+    ok('with one, it asks the worker for a pass, once while one is on its way', calls.join() === 'embedPass' && q1 === q2, calls.join());
+    callD.resolve({ started: true });
+    await q1;
+    EM.prepare();
+    ok('...and again once that has been acknowledged', calls.length === 2, calls.join());
+    ok('the worker answers no \'embed\' request and keeps no bulkPut nobody calls', src.indexOf("type === 'embed')") === -1 && src.indexOf('    function bulkPut(records) {') === -1);
+    let toasts = [], rerenders = 0;
+    const U = { modeOverride: null, toast: (m) => { toasts.push(m); }, _rerenderCurrent: () => { rerenders++; } };
+    const cyc = new Function('JiTA', '$', 'return ({' + cut('    _cycleMode: function (rerender) {', '\n    },') + '\n    }}).\_cycleMode;')({ ui: U, worker: { usable: () => usable }, triage: null }, () => ({ text: () => 'Keyword' }));
+    usable = false;
+    cyc.call(U);
+    ok('the ranking-mode badge says Hybrid needs the worker when there is none', toasts.length === 1 && /shared worker/.test(toasts[0]) && U.modeOverride === null && !rerenders, toasts.join());
+    usable = true;
+    cyc.call(U);
+    ok('...and switches the mode when there is one', U.modeOverride === 'Hybrid' && rerenders === 1, String(U.modeOverride));
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'embedding checks passed.'));
     process.exit(fail ? 1 : 0);

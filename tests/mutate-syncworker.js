@@ -16,7 +16,7 @@ const muts = [
     [A, 'a tick while this tab syncs takes the lease', "        if (JiTA.sync.running) { return; }               // a sync of this tab's own is going\n", ''],
     [A, 'closing the tab keeps the lease', "        try { window.addEventListener('pagehide', function () { JiTA.sched._releaseLease(); }); } catch (e) { /* ignore */ }\n", ''],
     [A, 'any tab\'s lease is freed', 'if (l && l.tabId === JiTA.sched.tabId) { gmSet(JiTA.sched.LEASE_KEY, null); }', 'if (l) { gmSet(JiTA.sched.LEASE_KEY, null); }'],
-    [A, 'a completed auto-sync says nothing', '                return true;\n            });\n        }).catch(function (e) {', '            });\n        }).catch(function (e) {'],
+    [A, 'a completed auto-sync says nothing', '            return true;\n        }).catch(function (e) {', '        }).catch(function (e) {'],
     [A, 'a failed auto-sync says nothing', "            console.log('[JiTA] auto-sync error:', e && e.message || e);\n            return false;\n", "            console.log('[JiTA] auto-sync error:', e && e.message || e);\n"],
     [A, 'an auto-sync that did not run is not told apart', 'if (JiTA.sync.running) { return Promise.resolve(null); }', 'if (JiTA.sync.running) { return Promise.resolve(); }'],
     // ---- a removed report ----
@@ -24,7 +24,8 @@ const muts = [
     [A, 'every other tab drops the indexes again', '        if (fromRemote) { return; }\n        var note', '        if (fromRemote) { JiTA.sync._invalidateWorker(); return; }\n        var note'],
     [A, 'a heard removal is echoed', '        if (fromRemote) { return; }\n        var note', '        var note'],
     [A, 'an unreachable worker keeps the news', "return JiTA.worker.call('invalidate').then(function () {}, function () { /* ignore */ });", "return JiTA.worker.call('invalidate').then(function () {});"],
-    [A, 'no worker at all keeps the news', 'if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }', 'if (!(JiTA.worker && JiTA.worker.usable())) { return new Promise(function () {}); }'],
+    [A, 'no worker at all keeps the news', '_invalidateWorker: function () {\n        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }',
+        '_invalidateWorker: function () {\n        if (!(JiTA.worker && JiTA.worker.usable())) { return new Promise(function () {}); }'],
     // ---- the upgrade check ----
     [A, 'the upgrade check runs into a sync', '        JiTA.migrate._done = true;\n        if (JiTA.sync.running) { JiTA.migrate._later(); return; }\n', '        JiTA.migrate._done = true;\n'],
     [A, 'a sync started mid-read is not noticed', '                        if (JiTA.sync.running) { JiTA.migrate._later(); return; }   // one started while we read\n', ''],
