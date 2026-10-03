@@ -11,6 +11,14 @@ const muts = [
     [H, 'a failure leaves the button disabled', '        jitaConvertButtonState();   // whichever button is on the page now', '        void 0;   // whichever button is on the page now'],
     [H, 'the button ignores the conversion', "$('#convertToDefectButton').prop('disabled', !!(key && jitaConvertBusy[key]));", "$('#convertToDefectButton').prop('disabled', false);"],
     [H, 'a put-back button is never set', "addActionButton('convertToDefectButton', 'Convert to Defect');\n    jitaConvertButtonState();", "addActionButton('convertToDefectButton', 'Convert to Defect');"],
+    // ---- v3.38.16 ----
+    [H, 'a non-SUCCESS answer is taken as started', "if (!inv || inv.status !== 'SUCCESS') { fail({ status: 0, jitaError: 'The conversion automation did not start", "if (false) { fail({ status: 0, jitaError: 'The conversion automation did not start"],
+    [H, 'the reason a conversion failed is dropped', 'jitaAjaxError(xhr && xhr.jitaError)(xhr);', 'jitaAjaxError()(xhr);'],
+    [H, 'the defect poll follows the user to another issue', '        if (jitaCurrentKey() !== ebrKey) { return; }\n', ''],
+    [H, 'the defect poll never gives up', '        if (tries >= 30) { window.location.reload(false); return; }\n        tries++; setTimeout(poll, 1000);', '        tries++; setTimeout(poll, 1000);'],
+    [H, 'Close does not wait for the menu', '        setTimeout(pick, 100);\n    })();', '    })();'],
+    [H, 'Close gives up without a word', "        if (Date.now() - t0 >= 3000) { alert('The Closed option did not appear", "        if (Date.now() - t0 >= 3000) { void ('The Closed option did not appear"],
+    [H, 'the cloud id is not checked', "    if (!cloudId) { return $.Deferred().reject({ status: 0, jitaError: 'Could not read the Jira cloud id from the page - reload it and try again.' }).promise(); }\n", ''],
     [H, 'the button is not wired', "$(\"#convertToDefectButton\").off('click.jita').on('click.jita', jitaConvertClick);", "$(\"#convertToDefectButton\").off('click.jita');"]
 ];
 let allRed = true;

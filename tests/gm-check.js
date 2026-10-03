@@ -43,7 +43,7 @@ async function advance(ms) {   // run each timer due within ms, in time order, s
 // ---- a fake Zendesk composer: a tab strip, one editor per tab, one Add button ----
 const TAB = '[role="tab"]', ADD = 'button[data-testid="add-comment-button"]';
 global.SELECTORS = { ROLE_TAB: TAB, ADD_COMMENT_BTN: ADD };
-let tabs = [], active = null, editors = {}, posted = [], fills = [], clicks = [], takes = true, flipOnFill = false;
+let tabs = [], active = null, editors = {}, posted = [], fills = [], clicks = [], takes = true, flipOnFill = false, noReset = false;
 function select(label) { active = label; tabs.forEach((x) => { x.attrs['aria-selected'] = String(x.textContent === label); }); }
 function Tab(label) {
     const tb = { textContent: label, attrs: { 'aria-selected': 'false' } };
@@ -51,7 +51,7 @@ function Tab(label) {
     tb.click = () => { clicks.push(label); if (takes) { select(label); } };
     return tb;
 }
-const add = { disabled: true, click() { posted.push({ tab: active, text: editors[active] }); editors[active] = ''; add.disabled = true; } };
+const add = { disabled: true, click() { posted.push({ tab: active, text: editors[active] }); if (!noReset) { editors[active] = ''; add.disabled = true; } } };
 global.document = {
     querySelectorAll: (sel) => (sel === TAB ? tabs : []),
     querySelector: (sel) => (sel === ADD ? add : null)
@@ -63,6 +63,7 @@ function composer(opts) {
     select(opts.on);
     takes = opts.takes !== false;
     flipOnFill = !!opts.flip;
+    noReset = !!opts.noReset;
     posted = []; fills = []; clicks = [];
     add.disabled = true;
 }
@@ -96,10 +97,8 @@ function El(html) {
     n.empty = () => { n.kids = []; return n; };
     return n;
 }
-let issueUpdated = false;
 global.$ = (x) => {
     if (typeof x === 'string' && x.charAt(0) === '<') { return El(x); }
-    if (x === 'strong:contains(Issue Updated)') { return [issueUpdated ? {} : undefined]; }
     return El('');
 };
 // One overlay at a time, as JiTA.menu has it: opening one closes whatever was up, and close() closes whatever is up.
@@ -112,11 +111,13 @@ JiTA.menu._openOverlay = () => {
 };
 JiTA.menu.close = () => { closes++; if (open) { open[0].isConnected = false; open = null; } };
 const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.resolve = a; d.reject = b; }); return d; };
-let ticket, notePost, invoke, notes = [], invokes = [], toasts = [], reloads = 0;
+let ticket, notePost, invoke, closedD, notes = [], invokes = [], toasts = [], waits = [], reloads = 0, onKey = 'EBR-77';
 global.JITA_GM_CATEGORIES = ['Account', 'Billing'];
 global.jitaZdTicketState = () => ticket.promise;
 global.jitaInvokeGmAutomation = (key, cat) => { invokes.push(key + ' ' + cat); return invoke.promise; };
 global.jitaCloseAsWontDo = () => { throw new Error('not in these tests'); };
+global.jitaWaitClosed = (key, tries) => { waits.push(key + ' ' + tries); return closedD.promise; };
+global.jitaCurrentKey = () => onKey;
 JiTA.ui.toast = (m) => { toasts.push(m); };
 global.window = { location: { reload: () => { reloads++; } } };
 eval(src.slice(ms, me));
@@ -127,8 +128,8 @@ const buttonOf = (label) => findEl(menu, (n) => /^<button/.test(n.html) && (n._t
 const statusText = () => findEl(menu, (n) => n.html.indexOf('min-height:15px') >= 0)._text;
 // Open the modal, pick a category, type the note (if any) and press Convert.
 function convert(note) {
-    ticket = deferred(); notePost = deferred(); invoke = deferred();
-    notes = []; invokes = []; toasts = []; closes = 0; reloads = 0; issueUpdated = false;
+    ticket = deferred(); notePost = deferred(); invoke = deferred(); closedD = deferred();
+    notes = []; invokes = []; toasts = []; waits = []; closes = 0; reloads = 0; onKey = 'EBR-77';
     JiTA.responses.postInternalNote = (n) => { notes.push(n); return notePost.promise; };
     jitaOpenGmModal('EBR-77');
     tap(buttonOf('Billing'));
@@ -167,6 +168,10 @@ const cancel = () => tap(buttonOf('Cancel'));
     ok('the composer leaving the internal note before Add: nothing is sent', !!r && r.ok === false && posted.length === 0, JSON.stringify(posted));
     ok('...and the error says so', String(r && r.error).indexOf('left "Add internal note" before the note was sent') >= 0, r && r.error);
 
+    composer({ on: 'Add internal note', noReset: true });
+    r = await post(NOTE);
+    ok('Add clicked but never seen to go through is not a success, and says it was clicked', !!r && r.ok === false && r.clicked === true && posted.length === 1, JSON.stringify(r));
+
     // ================= the modal =================
     convert('for the GMs');
     ticket.resolve('ticket');
@@ -177,18 +182,36 @@ const cancel = () => tap(buttonOf('Cancel'));
     ok('...then runs the automation for the report and category', invokes.join('|') === 'EBR-77 Billing', invokes.join('|'));
     invoke.resolve({});
     await advance(0);
-    ok('...and says it started', statusText().indexOf('Automation started') === 0, statusText());
-    await advance(20000);
-    ok('...and closes itself after 20 s when the report has not reloaded', closes === 1 && !open, String(closes));
+    ok('...and then waits for the report to close, the proof the rule did its work', statusText().indexOf('Automation started - waiting for the report to close') === 0 &&
+        waits.join() === 'EBR-77 10', statusText() + ' / ' + waits.join());
+    closedD.resolve(true);
+    await advance(0);
+    ok('...and reloads the page once it has', reloads === 1, String(reloads));
 
     convert('for the GMs');
-    invoke.resolve({});
-    ticket.resolve('ticket');
-    notePost.resolve({ ok: true });
+    ticket.resolve('ticket'); notePost.resolve({ ok: true }); invoke.resolve({});
     await advance(0);
-    issueUpdated = true;
-    await advance(600);
-    ok('the report updating reloads the page', reloads === 1, String(reloads));
+    closedD.resolve(false);
+    await advance(0);
+    ok('a report still open after the wait is said to be open, and why that may be', /still open 20 seconds later/.test(statusText()) && !!open && closes === 0, statusText());
+    ok('...with Convert held, since a slow rule may yet finish', buttonOf('Convert').props.disabled === true && buttonOf('Convert')._text === 'Started', buttonOf('Convert')._text);
+    ok('...and the page is not reloaded', reloads === 0, String(reloads));
+
+    convert('');
+    ticket.resolve('ticket'); invoke.resolve({});
+    await advance(0);
+    onKey = 'EBR-99';   // the user moved on to another issue meanwhile
+    closedD.resolve(true);
+    await advance(0);
+    ok('a report that closes while the user is on another issue does not reload that issue', reloads === 0 && closes === 1, reloads + ' ' + closes);
+
+    convert('');
+    ticket.resolve('ticket'); invoke.resolve({});
+    await advance(0);
+    cancel();
+    closedD.resolve(false);
+    await advance(0);
+    ok('a report still open after the modal was closed is said in a toast', toasts.length === 1 && /still open/.test(toasts[0]), toasts.join('|'));
 
     convert('for the GMs');
     cancel();
@@ -232,8 +255,10 @@ const cancel = () => tap(buttonOf('Cancel'));
     await advance(0);
     JiTA.menu._openOverlay({ title: 'Lead duties' });   // the Lead moved on to something else
     const other = open;
-    await advance(20000);
-    ok('another overlay opened after the automation started is not closed by the 20 s fallback', other[0].isConnected === true && closes === 0, String(closes));
+    onKey = 'EBR-99';
+    closedD.resolve(true);
+    await advance(0);
+    ok('another overlay opened after the automation started is never closed by it', other[0].isConnected === true && closes === 0, String(closes));
 
     convert('');
     ticket.resolve('ticket');
@@ -250,6 +275,33 @@ const cancel = () => tap(buttonOf('Cancel'));
     await advance(0);
     ok('the automation failing while the modal is open says so there', statusText() === 'Failed: Automation did not report success.' && toasts.length === 0, statusText());
     ok('...and Convert can be pressed again', buttonOf('Convert').props.disabled === false && buttonOf('Convert')._text === 'Convert');
+
+    // A retry after a failed automation does not post the note a second time (v3.38.16).
+    convert('for the GMs');
+    ticket.resolve('ticket');
+    await advance(0);
+    notePost.resolve({ ok: true });
+    await advance(0);
+    invoke.reject(new Error('Automation did not report success.'));
+    await advance(0);
+    ok('a failed automation after the note went out says the note is already on the ticket', /already on the ticket/.test(statusText()), statusText());
+    ticket = deferred(); invoke = deferred();
+    tap(buttonOf('Convert'));
+    ticket.resolve('ticket');
+    await advance(0);
+    ok('...and Convert again runs the automation without posting the note twice', notes.length === 1 && invokes.length === 2, notes.length + ' notes, ' + invokes.length + ' runs');
+
+    convert('for the GMs');
+    ticket.resolve('ticket');
+    await advance(0);
+    notePost.resolve({ ok: false, clicked: true, error: 'Could not confirm the note posted (composer did not reset).' });
+    await advance(0);
+    ok('a note whose Add was clicked but not confirmed counts as posted', /already on the ticket/.test(statusText()), statusText());
+    ticket = deferred(); invoke = deferred();
+    tap(buttonOf('Convert'));
+    ticket.resolve('ticket');
+    await advance(0);
+    ok('...so Convert again does not post it again', notes.length === 1 && invokes.length === 1, notes.length + ' notes, ' + invokes.length + ' runs');
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'GM conversion checks passed.'));
     process.exit(fail ? 1 : 0);

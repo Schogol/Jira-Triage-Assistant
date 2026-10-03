@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.15
+// @version     3.38.16
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -697,6 +697,8 @@ var JITA_GM_CATEGORIES = ['Gameplay', 'Billing & Account', 'Technical', 'Other']
 // Returns the $.ajax promise; the caller inspects the response / handles errors.
 function jitaInvokeAutomationRule(numericId, ruleId, userInputs) {
     var cloudId = $('meta[name="ajs-cloud-id"]').attr('content');
+    // Without it the request goes to .../jira/undefined/... and fails with a 404 that explains nothing.
+    if (!cloudId) { return $.Deferred().reject({ status: 0, jitaError: 'Could not read the Jira cloud id from the page - reload it and try again.' }).promise(); }
     var body = { objects: ['ari:cloud:jira:' + cloudId + ':issue/' + numericId] };
     if (userInputs) { body.userInputs = userInputs; }
     return $.ajax({
@@ -719,9 +721,33 @@ function jitaInvokeGmAutomation(key, category) {
                         if (inv && inv.status === 'SUCCESS') { resolve(resp); }
                         else { reject(new Error('Automation did not report success.')); }
                     })
-                    .fail(function (xhr) { reject(new Error('Automation invocation failed (HTTP ' + xhr.status + ').')); });
+                    .fail(function (xhr) { reject(new Error((xhr && xhr.jitaError) || ('Automation invocation failed (HTTP ' + xhr.status + ').'))); });
             })
             .fail(function (xhr) { reject(new Error('Could not read the issue id (HTTP ' + xhr.status + ').')); });
+    });
+}
+
+// Poll a report's status until it reads closed (resolves true) or the tries run out (false). First check after 1.5s
+// (gives the automation a head start), then every 2s. Network blips just consume a try, so a flaky connection
+// degrades to "not confirmed" rather than hanging forever. A conversion's SUCCESS only means the rule started; the
+// report closing is the proof it did its work.
+function jitaWaitClosed(key, tries) {
+    return new Promise(function (resolve) {
+        (function step(n) {
+            setTimeout(function () {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status', dataType: 'json' })
+                    .done(function (d) {
+                        var st = (d && d.fields && d.fields.status && d.fields.status.name) || '';
+                        if (JiTA.util.isClosedStatus(st)) { resolve(true); return; }
+                        if (n <= 0) { resolve(false); return; }
+                        step(n - 1);
+                    })
+                    .fail(function () {
+                        if (n <= 0) { resolve(false); return; }
+                        step(n - 1);
+                    });
+            }, n === tries ? 1500 : 2000);
+        })(tries);
     });
 }
 
@@ -815,20 +841,24 @@ function jitaGoToNewDefect(ebrKey, beforeKeys) {
     var before = {};
     (beforeKeys || []).forEach(function (k) { before[k] = true; });
     var tries = 0;
-    (function poll() {
+    function again() {
+        if (tries >= 30) { window.location.reload(false); return; }
+        tries++; setTimeout(poll, 1000);
+    }
+    function poll() {
+        // The user has moved on to another issue (Jira is one page): neither take them away from it nor reload it
+        // under a comment they may be typing. The report shows the result when they come back to it.
+        if (jitaCurrentKey() !== ebrKey) { return; }
         $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
             .done(function (d) {
                 var fresh = jitaLinkedKeys(d.fields && d.fields.issuelinks).filter(function (k) { return !before[k]; });
                 var defect = fresh.filter(function (k) { return /^(EDR|EO|PLAT)-/.test(k); })[0] || fresh[0];
                 if (defect) { window.location.href = '/browse/' + defect; return; }
-                if (tries >= 30) { window.location.reload(false); return; }
-                tries++; setTimeout(poll, 1000);
+                again();
             })
-            .fail(function () {
-                if (tries >= 30) { window.location.reload(false); return; }
-                tries++; setTimeout(poll, 1000);
-            });
-    })();
+            .fail(again);
+    }
+    poll();
 }
 
 // The category + optional-note modal opened by the "Assign to GM" button.
@@ -861,6 +891,9 @@ function jitaOpenGmModal(key) {
     // the note and run the automation after the Lead had backed out.
     var CLOSED = new Error('closed');
     function alive() { return !!(ov.$overlay[0] && ov.$overlay[0].isConnected); }
+    // The note already on the ticket from an earlier attempt. Convert re-enables after a failed automation, and
+    // pressing it again posted the same note a second time.
+    var notePosted = null;
 
     $go.on('click', function () {
         if (!selected) { $status.css('color', '#ff8f8f').text('Please pick a category first.'); return; }
@@ -874,7 +907,8 @@ function jitaOpenGmModal(key) {
             // Ticket present -> post the note (if any), then run the conversion automation.
             $go.text('Converting…');
             $status.text(note ? 'Posting note to Zendesk…' : 'Running automation…');
-            var pre = note ? JiTA.responses.postInternalNote(note).then(function (res) {
+            var pre = (note && note !== notePosted) ? JiTA.responses.postInternalNote(note).then(function (res) {
+                if (res && (res.ok || res.clicked)) { notePosted = note; }   // clicked but not confirmed: it may well be there
                 if (!res || !res.ok) { throw new Error((res && res.error) || 'Could not post the note.'); }
             }) : Promise.resolve();
             return pre.then(function () {
@@ -883,13 +917,20 @@ function jitaOpenGmModal(key) {
                 invoked = true;
                 return jitaInvokeGmAutomation(key, selected);
             }).then(function () {
-                $status.css('color', '#7fdca4').text('Automation started - this report will close in a few seconds…');
-                var waited = 0;
-                var t = setInterval(function () {
-                    waited += 500;
-                    if ($('strong:contains(Issue Updated)')[0]) { clearInterval(t); window.location.reload(false); }
-                    else if (waited >= 20000) { clearInterval(t); if (alive()) { ov.close(); } }   // not an overlay opened since
-                }, 500);
+                // SUCCESS only means the rule STARTED: with no linked Zendesk ticket, or more than one, it stops on its own,
+                // comments and leaves the report open. A conversion closes the report, so wait for that over REST (not
+                // for Jira's English "Issue Updated" flag), and when it does not come, say so instead of vanishing.
+                $status.css('color', '#7fdca4').text('Automation started - waiting for the report to close…');
+                return jitaWaitClosed(key, 10).then(function (closed) {
+                    if (closed) {
+                        if (jitaCurrentKey() === key) { window.location.reload(false); } else if (alive()) { ov.close(); }
+                        return;
+                    }
+                    var msg = 'The report is still open 20 seconds later. The rule may have stopped: with no linked Zendesk ticket, or more than one, it leaves a comment and the report open. Check its comments before converting again.';
+                    if (!alive()) { JiTA.ui.toast(msg); return; }
+                    $go.text('Started');   // stays disabled: a slow rule may still finish, and a second run converts twice
+                    $status.css('color', '#ffd479').text(msg);
+                });
             });
         }).catch(function (e) {
             if (!alive()) {
@@ -899,7 +940,8 @@ function jitaOpenGmModal(key) {
                 return;
             }
             $go.prop('disabled', false).css('opacity', '').text('Convert');
-            $status.css('color', '#ff8f8f').text('Failed: ' + (e && e.message || e));
+            $status.css('color', '#ff8f8f').text('Failed: ' + (e && e.message || e) +
+                (notePosted ? ' The note is already on the ticket, so Convert will not post it again.' : ''));
         });
     });
 
@@ -946,7 +988,7 @@ function jitaConvertClick() {
     function fail(xhr) {
         delete jitaConvertBusy[ebrKey];
         jitaConvertButtonState();   // whichever button is on the page now, not the one that was clicked
-        jitaAjaxError()(xhr);
+        jitaAjaxError(xhr && xhr.jitaError)(xhr);
     }
     // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
     // newly-created defect (found as the freshly-linked issue that wasn't linked before).
@@ -954,9 +996,28 @@ function jitaConvertClick() {
         .done(function (d) {
             var before = jitaLinkedKeys(d.fields && d.fields.issuelinks);
             jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
-                .done(function () { jitaGoToNewDefect(ebrKey, before); })   // poll the EBR's links for the new defect, then navigate
+                .done(function (resp) {
+                    // As for the GM rule: anything but SUCCESS means nothing is converting. Say so, rather than poll for
+                    // a defect that will never come and then reload the page in silence.
+                    var inv = resp && resp.invocations && resp.invocations[0];
+                    if (!inv || inv.status !== 'SUCCESS') { fail({ status: 0, jitaError: 'The conversion automation did not start (' + ((inv && inv.status) || 'no answer') + ').' }); return; }
+                    jitaGoToNewDefect(ebrKey, before);   // poll the EBR's links for the new defect, then navigate
+                })
                 .fail(fail);
         }).fail(fail);
+}
+
+// The Close button: open the status menu and pick "Closed" once Jira has rendered it. It clicked after a fixed
+// 100 ms; on a slow page the option was not there yet, and the menu stayed open with nothing said.
+function jitaCloseClick() {
+    $(SELECTORS.STATUS_FIELD_WRAP).find('button').click();
+    var t0 = Date.now();
+    (function pick() {
+        var opt = $("div[data-testid='issue.fields.status.common.ui.status-lozenge.3']").children().find('span:contains(Closed)');
+        if (opt.length) { opt.click(); return; }
+        if (Date.now() - t0 >= 3000) { alert('The Closed option did not appear in the status menu - set the status by hand. Report issues to Schogol :).'); return; }
+        setTimeout(pick, 100);
+    })();
 }
 
 // Adds the different buttons to the "command-bar" and defines what they do
@@ -1069,10 +1130,7 @@ function addButtons() {
     // Create close button
     addActionButton('closeButton', 'Close');
     // When the Close button is clicked we change the status to Closed by simulating clicks on the relevant buttons. This is extremely janky right now because I cant figure out a better way to do this.
-    $("#closeButton").off('click.jita').on('click.jita', function () {
-        $(SELECTORS.STATUS_FIELD_WRAP).find("button").click();
-        setTimeout(function(){$("div[data-testid='issue.fields.status.common.ui.status-lozenge.3']").children().find("span:contains(Closed)").click();}, 100);
-    });
+    $("#closeButton").off('click.jita').on('click.jita', jitaCloseClick);
 };
 
 
@@ -4767,7 +4825,7 @@ JiTA.responses = {
                     var cleared = ed && (ed.textContent || '').trim() === '';
                     var disabled = !!(addBtn && addBtn.disabled);
                     if (cleared || disabled) { clearInterval(iv); resolve({ ok: true }); }
-                    else if (waited >= 8000) { clearInterval(iv); resolve({ ok: false, error: 'Could not confirm the note posted (composer did not reset).' }); }
+                    else if (waited >= 8000) { clearInterval(iv); resolve({ ok: false, clicked: true, error: 'Could not confirm the note posted (composer did not reset).' }); }
                 }, 200);
             }
         });
@@ -11720,25 +11778,7 @@ JiTA.triage = {
     // Poll a report's status until it reads closed (resolves true) or the tries run out (false). First check
     // after 1.5s (gives the automation a head start), then every 2s - ~10s worst case. Network blips just
     // consume a try, so a flaky connection degrades to "not confirmed" rather than hanging forever.
-    _waitClosed: function (key, tries) {
-        return new Promise(function (resolve) {
-            (function step(n) {
-                setTimeout(function () {
-                    $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status', dataType: 'json' })
-                        .done(function (d) {
-                            var st = (d && d.fields && d.fields.status && d.fields.status.name) || '';
-                            if (JiTA.util.isClosedStatus(st)) { resolve(true); return; }
-                            if (n <= 0) { resolve(false); return; }
-                            step(n - 1);
-                        })
-                        .fail(function () {
-                            if (n <= 0) { resolve(false); return; }
-                            step(n - 1);
-                        });
-                }, n === tries ? 1500 : 2000);
-            })(tries);
-        });
-    },
+    _waitClosed: function (key, tries) { return jitaWaitClosed(key, tries); },
 
     _exec: function (type, a) {
         var T = JiTA.triage, item = T._queue[T._idx];
@@ -19979,6 +20019,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.16', date: '2026-10-03', items: [
+            'Convert to Support Ticket: trying again after a failed conversion no longer posts the GM note a second time.',
+            'Convert to Support Ticket now waits for the report to close, and says so if it stays open, instead of the window disappearing after 20 seconds without a word.',
+            'Convert to Defect no longer takes you away from, or reloads, an issue you moved on to while it converted, and says so when the conversion does not start.',
+            'The Close button now waits for Jira\'s status menu instead of giving up after a tenth of a second.'
+        ] },
         { v: '3.38.15', date: '2026-10-03', items: [
             'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
             'Lead duties: the Leads\' browsers no longer keep rewriting the ledger page just because each scanned the page tree at a different time.',
