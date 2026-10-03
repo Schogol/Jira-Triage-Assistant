@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.24
+// @version     3.38.25
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -9543,7 +9543,7 @@ JiTA.sched = {
  * Ports scratchpad/monthly_report.py to run IN-BROWSER against the logged-in ISD's Jira SESSION (read-only,
  * no API token). Same credit formula and attribution rules, so the live number matches the authoritative
  * month-end Python run. The computed per-member table is cached in the meta store (key credits:<YYYY-MM>);
- * past months are computed once (they don't change) and the current month is refreshed on demand / by a
+ * a past month is computed once more after it ends (see sched.tick) and then left alone; the current month is refreshed on demand / by a
  * throttled background job (added in a later phase).
  *
  * PARITY: keep this in lockstep with monthly_report.py. Mirrored here: the credit formula, projects
@@ -9591,6 +9591,7 @@ JiTA.credits = {
 
     running: false,
     _quiet: false,        // background (scheduled) runs set this true so the floating pill stays hidden (the badge is the visible artifact)
+    _updating: false,     // the scheduler is recomputing the leaderboard: the badge says so
     _cssInjected: false,
     _flashTimer: null,
     _tagSeq: 0,           // per-tab counter -> unique progress tag for a worker crawl (scopes the pill to THIS tab)
@@ -9657,6 +9658,10 @@ JiTA.credits = {
         var d = new Date(), p2 = function (n) { return (n < 10 ? '0' : '') + n; };
         return { y: d.getFullYear(), m: d.getMonth() + 1, ym: d.getFullYear() + '-' + p2(d.getMonth() + 1) };
     },
+    _ymPrev: function () {
+        var n = JiTA.credits._ymNow(), y = n.m === 1 ? n.y - 1 : n.y, m = n.m === 1 ? 12 : n.m - 1;
+        return { y: y, m: m, ym: y + '-' + (m < 10 ? '0' : '') + m };
+    },
 
     // Compute a month + cache it. Guarded so two calls don't overlap. Resolves the result object.
     refresh: function (y, m, mentor) {
@@ -9667,7 +9672,7 @@ JiTA.credits = {
         return JiTA.credits.computeMonth(y, m, mentor).then(function (res) {
             return JiTA.credits.putCached(res).then(function () {
                 JiTA.credits.running = false;
-                JiTA.credits._flash('Credits ' + res.ym + ' ready (' + Math.round((Date.now() - t0) / 1000) + 's)');
+                if (!quiet) { JiTA.credits._flash('Credits ' + res.ym + ' ready (' + Math.round((Date.now() - t0) / 1000) + 's)'); }   // a scheduled run used to flash it every 15 minutes
                 return res;
             });
         }).catch(function (e) {
@@ -9676,6 +9681,7 @@ JiTA.credits = {
             // backoff cover those, so a worker outage does not flash an error pill every poll). Use the captured
             // per-run `quiet`, not the shared _quiet (which a concurrent manual refresh could have flipped).
             if (!quiet) { JiTA.credits._flash('Credits error: ' + (e && e.message || e), 8000); }
+            else { JiTA.credits._clearProgress(); }   // a pill a manual Refresh made it draw would otherwise stay up
             throw e;
         });
     },
@@ -9726,9 +9732,14 @@ JiTA.credits = {
         var real = res.table.slice(0, res.table.length - 1).slice().sort(function (a, b) { return b[8] - a[8]; });
         var myName = null;
         for (var name in res.nameToAcc) { if (res.nameToAcc.hasOwnProperty(name) && res.nameToAcc[name] === me) { myName = name; } }
-        var myRow = null, myRank = null;
-        for (var i = 0; i < real.length; i++) { if (real[i][0] === myName) { myRow = real[i]; myRank = i + 1; } }
-        return { real: real, myName: myName, myRow: myRow, myRank: myRank, total: real.length };
+        // Ties share a rank (1, 2, 2, 4), as the worker ranks the badge: the table numbered them by position.
+        var ranks = [], myRow = null, myRank = null, withCredits = 0;
+        for (var i = 0; i < real.length; i++) {
+            ranks[i] = (i > 0 && real[i][8] === real[i - 1][8]) ? ranks[i - 1] : i + 1;
+            if (real[i][8]) { withCredits++; }
+            if (real[i][0] === myName) { myRow = real[i]; myRank = ranks[i]; }
+        }
+        return { real: real, ranks: ranks, myName: myName, myRow: myRow, myRank: myRank, total: real.length, withCredits: withCredits };
     },
 
     // ---- overlay CSS (the wide, scrollable overlay chrome; base menu CSS comes from JiTA.menu._injectCss) --
@@ -9772,10 +9783,19 @@ JiTA.credits = {
         $msel.appendTo($foot);
         var $refresh = $('<button class="jita-btn">Refresh</button>').appendTo($foot);
         $refresh.on('click', function () {
-            var p = sel.split('-'), yy = parseInt(p[0], 10), mm = parseInt(p[1], 10);
+            var p = sel.split('-'), yy = parseInt(p[0], 10), mm = parseInt(p[1], 10), isCur = sel === C._ymNow().ym;
+            // Before anything else: flipping _quiet while a background run goes on made that run draw its progress pill,
+            // and the click then resolved as if it had refreshed.
+            if (C.running) { JiTA.ui.toast('A credit computation is already running…'); return; }
             $refresh.prop('disabled', true).text('Computing…');
             C._quiet = false;   // user-triggered: show the progress pill
             C.refresh(yy, mm).then(function () {
+                if (!isCur) { return; }
+                // The scheduler's own run of the same crawl is not needed a minute later, and the badge's rank should
+                // agree with the table just drawn.
+                gmSet(C.sched.LAST_FULL_KEY, Date.now()); gmSet(C.sched.FAIL_FULL_KEY, 0);
+                return C.refreshSelf(yy, mm).then(function () { gmSet(C.sched.LAST_SELF_KEY, Date.now()); }, function () { /* the badge keeps its last value */ });
+            }).then(function () {
                 C.badge.refresh();
                 $refresh.prop('disabled', false).text('Refresh');
                 render();
@@ -9821,7 +9841,7 @@ JiTA.credits = {
                 if (!row[8]) { return; }   // hide members who earned 0 credits this month (they sort last, so ranks stay intact)
                 var mine = row[0] === d.myName;
                 var $r = $('<tr></tr>').attr('style', mine ? 'background:#20303f;' : '');
-                $('<td style="padding:4px 8px;color:#7a8694;"></td>').text(idx + 1).appendTo($r);
+                $('<td style="padding:4px 8px;color:#7a8694;"></td>').text(d.ranks[idx]).appendTo($r);
                 var acc = res.nameToAcc[row[0]];
                 var $nt = $('<td style="padding:4px 8px;white-space:nowrap;font-weight:600;"></td>');
                 if (acc) { $('<a target="_blank" rel="noopener" style="color:#b794f6;text-decoration:none;"></a>').attr('href', JiTA.HOST + '/jira/people/' + acc).text(row[0]).appendTo($nt); }
@@ -9858,7 +9878,11 @@ JiTA.credits = {
                 $scroll.append($('<div class="jita-cred-sub">Leaderboard</div>'));
                 $scroll.append(table(fullRes, d));
                 $scroll.append($('<div class="jita-menu-status" style="margin-top:12px;color:#7a8694;"></div>')
-                    .text('Leaderboard computed ' + String(fullRes.computedAt || '').replace('T', ' ').slice(0, 16) + ' - ' + d.total + ' members. Your own total updates every ~2 min.'));
+                    .text('Leaderboard computed ' + String(fullRes.computedAt || '').replace('T', ' ').slice(0, 16) + ' UTC - ' + d.total + ' members, ' + d.withCredits + ' with credits.' +
+                        (isCurrentMonth ? ' It refreshes about every 15 minutes; the badge shows your own total every 2.' : '')));
+            }).catch(function (e) {   // a failed read used to leave "Loading…" up for good
+                $scroll.empty().append($('<div class="jita-menu-status" style="color:#ff8f8f;margin-top:12px;"></div>')
+                    .text('Could not read the leaderboard: ' + (e && e.message || e)));
             });
         }
 
@@ -9888,9 +9912,12 @@ JiTA.credits = {
             var el = document.getElementById('jita-credits-badge');
             if (!el) { return; }
             var ym = JiTA.credits._ymNow().ym;
+            // While the scheduler recomputes the leaderboard: its "updating…" used to be overwritten by this very refresh,
+            // which resolves a moment after it was written, so the badge looked idle through the whole crawl.
+            var busy = JiTA.credits._updating ? ' · updating…' : '';
             JiTA.credits.getSelf(ym).then(function (self) {
                 if (self && self.credits != null) {
-                    el.textContent = '📊 ' + self.credits + ' Credits' + (self.rank != null ? (' · #' + self.rank + '/' + self.total) : '');
+                    el.textContent = '📊 ' + self.credits + ' Credits' + (self.rank != null ? (' · #' + self.rank + '/' + self.total) : '') + busy;
                     return;
                 }
                 // fallback: derive from the full-leaderboard cache until the first self compute lands
@@ -9898,7 +9925,7 @@ JiTA.credits = {
                     if (!res) { el.textContent = '📊 credits: -'; return; }
                     JiTA.link.currentUser().then(function (me) {
                         var d = JiTA.credits._derive(res, me);
-                        el.textContent = d.myRow ? ('📊 ' + d.myRow[8] + ' Credits · #' + d.myRank + '/' + d.total) : '📊 credits: n/a';
+                        el.textContent = (d.myRow ? ('📊 ' + d.myRow[8] + ' Credits · #' + d.myRank + '/' + d.total) : '📊 credits: n/a') + busy;
                     });
                 }).catch(function () { /* ignore */ });
             }).catch(function () { /* ignore */ });
@@ -9926,6 +9953,8 @@ JiTA.credits = {
         LAST_SELF_KEY: 'creditsLastSelfTs',
         FAIL_MS: 3 * 60 * 1000,          // after a FAILED run, wait this long before retrying (stops a 30s retry loop during a worker outage; short enough to recover soon after the worker returns)
         FAIL_FULL_KEY: 'creditsFullFailTs',
+        PREV_DONE_KEY: 'creditsPrevFinal',    // the last past month recomputed once it was over
+        FAIL_PREV_KEY: 'creditsPrevFailTs',
         FAIL_SELF_KEY: 'creditsSelfFailTs',
         FULL_LEASE_KEY: 'creditsFullLease',
         SELF_LEASE_KEY: 'creditsSelfLease',
@@ -9949,18 +9978,36 @@ JiTA.credits = {
             // Full leaderboard (heavy) takes priority. Heartbeats + releases its lease, then refreshes self off the fresh result.
             if (S._elapsed(S.LAST_FULL_KEY, S.FULL_MS) && S._elapsed(S.FAIL_FULL_KEY, S.FAIL_MS) && S._lease(S.FULL_LEASE_KEY, S.FULL_TTL_MS)) {
                 JiTA.credits._quiet = true;
-                try { var b = document.getElementById('jita-credits-badge'); if (b) { b.textContent = '📊 updating…'; } } catch (e) { /* ignore */ }
+                JiTA.credits._updating = true;
+                try { JiTA.credits.badge.refresh(); } catch (e) { /* ignore */ }
                 var hb = setInterval(function () { gmSet(S.FULL_LEASE_KEY, { tabId: JiTA.sched.tabId, ts: Date.now() }); }, S.HEARTBEAT_MS);
                 JiTA.credits.refresh(now.y, now.m).then(function () {
                     gmSet(S.LAST_FULL_KEY, Date.now()); gmSet(S.FAIL_FULL_KEY, 0);   // success: clear the failure backoff
                     clearInterval(hb); S._release(S.FULL_LEASE_KEY);
+                    JiTA.credits._updating = false;
                     return JiTA.credits.refreshSelf(now.y, now.m).then(function () { gmSet(S.LAST_SELF_KEY, Date.now()); gmSet(S.FAIL_SELF_KEY, 0); });
                 }).then(function () { try { JiTA.credits.badge.refresh(); } catch (e) { /* ignore */ } })
                     .catch(function () {
-                        gmSet(S.FAIL_FULL_KEY, Date.now());   // back off so a persistent worker outage doesn't retry every poll
+                        if (JiTA.credits._updating) { gmSet(S.FAIL_FULL_KEY, Date.now()); }   // the crawl failed: back off so a worker outage doesn't retry every poll
+                        JiTA.credits._updating = false;
                         clearInterval(hb); S._release(S.FULL_LEASE_KEY);
                         try { JiTA.credits.badge.refresh(); } catch (e) { /* ignore */ }   // drop the "updating…" badge back to the last cached value
                     });
+                return;   // one job per tick
+            }
+
+            // #29: once a month is over, its cached table is the last snapshot taken before its end, and it was shown as
+            // final. Compute it once more now that it is complete (a month never computed stays on demand).
+            var prev = JiTA.credits._ymPrev();
+            if (gmGet(S.PREV_DONE_KEY, '') !== prev.ym && S._elapsed(S.FAIL_PREV_KEY, S.FAIL_MS) && S._lease(S.FULL_LEASE_KEY, S.FULL_TTL_MS)) {
+                var hbp = setInterval(function () { gmSet(S.FULL_LEASE_KEY, { tabId: JiTA.sched.tabId, ts: Date.now() }); }, S.HEARTBEAT_MS);
+                var end = function () { clearInterval(hbp); S._release(S.FULL_LEASE_KEY); };
+                JiTA.credits.getCached(prev.ym).then(function (res) {
+                    if (!res || String(res.computedAt || '') >= now.ym + '-01') { return; }   // never computed, or already after its end
+                    JiTA.credits._quiet = true;
+                    return JiTA.credits.refresh(prev.y, prev.m);
+                }).then(function () { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); end(); },
+                    function () { gmSet(S.FAIL_PREV_KEY, Date.now()); end(); });
                 return;   // one job per tick
             }
 
@@ -9974,7 +10021,9 @@ JiTA.credits = {
 
         start: function () {
             var S = JiTA.credits.sched;
-            if (S._timer) { return; }
+            // _timer is only set after the startup delay: switching the feature off and on inside it started two polls.
+            if (S._timer || S._started) { return; }
+            S._started = true;
             // Release our leases when the tab goes away so a reload can pick the work up at once (TTL is the backstop).
             try { window.addEventListener('pagehide', function () { S._release(S.FULL_LEASE_KEY); S._release(S.SELF_LEASE_KEY); }); } catch (e) { /* ignore */ }
             setTimeout(function () {
@@ -10510,41 +10559,38 @@ function jitaWorkerBody(cfg) {
             })();
         });
     }
-    // Session-authenticated GET (retries mirror the tab's _get: 429 + 5xx, honoring Retry-After).
-    function crGet(path) {
-        return crGate(crRateKey(path)).then(function () { return new Promise(function (resolve, reject) {
+    // One session-authenticated request. Retries a 429 (honouring Retry-After), a 5xx and a dropped connection with
+    // the tab's _apiPost backoff, every attempt waiting its turn at the endpoint's rate gate. Search and count used to
+    // retry a 429 only, so one transient 502 among the hundreds of requests of a month's crawl threw the crawl away.
+    function crFetchJson(path, init, label) {
+        var key = crRateKey(path);
+        return new Promise(function (resolve, reject) {
             (function attempt(retries) {
-                fetch(cfg.HOST + path, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }).then(function (resp) {
+                var again = function (ms) { setTimeout(function () { attempt(retries - 1); }, ms); };
+                crGate(key).then(function () { return fetch(cfg.HOST + path, init); }).then(function (resp) {
                     if ((resp.status === 429 || resp.status >= 500) && retries > 0) {
                         var ra = parseInt(resp.headers.get('Retry-After'), 10);
-                        setTimeout(function () { attempt(retries - 1); }, (isNaN(ra) ? 3 : ra) * 1000); return;
+                        again(resp.status === 429 ? (isNaN(ra) ? 5 : ra) * 1000 : (cfg.MAX_RETRIES - retries + 1) * 1000);
+                        return;
                     }
-                    if (!resp.ok) { reject(new Error('GET ' + path + ' -> HTTP ' + resp.status)); return; }
-                    resp.json().then(resolve, function () { reject(new Error('GET ' + path + ' -> non-JSON (HTTP ' + resp.status + ', ' + (resp.headers.get('content-type') || '?') + '); likely an unauthenticated response')); });
-                }, reject);
+                    if (!resp.ok) { reject(new Error(label + ' -> HTTP ' + resp.status)); return; }
+                    resp.json().then(resolve, function () { reject(new Error(label + ' -> non-JSON (HTTP ' + resp.status + ', ' + (resp.headers.get('content-type') || '?') + '); likely an unauthenticated response')); });
+                }, function (e) {
+                    if (retries > 0) { again((cfg.MAX_RETRIES - retries + 1) * 1000); return; }
+                    reject(e);
+                });
             })(cfg.MAX_RETRIES);
-        }); });
+        });
     }
-    // One page of /search/jql (retries mirror the tab's _apiPost: 429 only). Resolves the parsed response body.
+    function crGet(path) {
+        return crFetchJson(path, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } }, 'GET ' + path);
+    }
+    var CR_POST_HEADERS = { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Atlassian-Token': 'no-check' };
+    // One page of /search/jql. Resolves the parsed response body.
     function crSearch(jql, fields, token) {
         var body = { jql: jql, fields: fields, maxResults: crc.PAGE_SIZE };
         if (token) { body.nextPageToken = token; }
-        return crGate('search/jql').then(function () { return new Promise(function (resolve, reject) {
-            (function attempt(retries) {
-                fetch(cfg.HOST + '/rest/api/3/search/jql', {
-                    method: 'POST', credentials: 'same-origin',
-                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Atlassian-Token': 'no-check' },
-                    body: JSON.stringify(body)
-                }).then(function (resp) {
-                    if (resp.status === 429 && retries > 0) {
-                        var ra = parseInt(resp.headers.get('Retry-After'), 10);
-                        setTimeout(function () { attempt(retries - 1); }, (isNaN(ra) ? 5 : ra) * 1000); return;
-                    }
-                    if (!resp.ok) { reject(new Error('search/jql -> HTTP ' + resp.status)); return; }
-                    resp.json().then(resolve, function () { reject(new Error('search/jql -> non-JSON (HTTP ' + resp.status + ', ' + (resp.headers.get('content-type') || '?') + '); likely an unauthenticated response')); });
-                }, reject);
-            })(cfg.MAX_RETRIES);
-        }); });
+        return crFetchJson('/rest/api/3/search/jql', { method: 'POST', credentials: 'same-origin', headers: CR_POST_HEADERS, body: JSON.stringify(body) }, 'search/jql');
     }
     function crAccList(accounts) { return accounts.map(function (a) { return '"' + a + '"'; }).join(', '); }
     function crSerial(items, fn) {
@@ -10572,7 +10618,7 @@ function jitaWorkerBody(cfg) {
         var out = [];
         function page(token) {
             return crSearch(jql, fields, token).then(function (d) {
-                out = out.concat(d.issues || []);
+                out.push.apply(out, d.issues || []);   // in place: concat copied the whole list on every page
                 var next = d.nextPageToken || null;
                 if (!next || d.isLast) { return out; }
                 return crSleep(cfg.PAGE_DELAY_MS).then(function () { return page(next); });
@@ -10586,29 +10632,15 @@ function jitaWorkerBody(cfg) {
     // Fast count via the approximate-count endpoint (ONE request, no issue pages). Exact for the small per-member
     // per-month sets we use it on. Used for trashed + reassigned.
     function crCount(jql) {
-        return crGate('search/approximate-count').then(function () { return new Promise(function (resolve, reject) {
-            (function attempt(retries) {
-                fetch(cfg.HOST + '/rest/api/3/search/approximate-count', {
-                    method: 'POST', credentials: 'same-origin',
-                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Atlassian-Token': 'no-check' },
-                    body: JSON.stringify({ jql: jql })
-                }).then(function (resp) {
-                    if (resp.status === 429 && retries > 0) {
-                        var ra = parseInt(resp.headers.get('Retry-After'), 10);
-                        setTimeout(function () { attempt(retries - 1); }, (isNaN(ra) ? 5 : ra) * 1000); return;
-                    }
-                    if (!resp.ok) { reject(new Error('approximate-count -> HTTP ' + resp.status)); return; }
-                    resp.json().then(function (d) { resolve((d && d.count) || 0); }, function () { reject(new Error('approximate-count -> non-JSON (HTTP ' + resp.status + ')')); });
-                }, reject);
-            })(cfg.MAX_RETRIES);
-        }); });
+        return crFetchJson('/rest/api/3/search/approximate-count', { method: 'POST', credentials: 'same-origin', headers: CR_POST_HEADERS, body: JSON.stringify({ jql: jql }) }, 'approximate-count')
+            .then(function (d) { return (d && d.count) || 0; });
     }
     function crAllHistories(key) {
         var out = [];
         function page(start) {
             return crGet('/rest/api/3/issue/' + key + '/changelog?startAt=' + start + '&maxResults=100').then(function (res) {
                 var vals = res.values || [];
-                out = out.concat(vals);
+                out.push.apply(out, vals);
                 if (start + vals.length >= (res.total || 0) || !vals.length) { out.sort(function (a, b) { return (a.created || '') < (b.created || '') ? -1 : 1; }); return out; }
                 return page(start + vals.length);
             });
@@ -10621,7 +10653,7 @@ function jitaWorkerBody(cfg) {
         function page(param, start) {
             return crGet('/rest/api/3/group/member?' + param + '&includeInactiveUsers=true&startAt=' + start + '&maxResults=50').then(function (res) {
                 var vals = res.values || [];
-                out = out.concat(vals);
+                out.push.apply(out, vals);
                 if (res.isLast || !vals.length) { return out; }
                 return page(param, start + vals.length);
             });
@@ -10649,26 +10681,49 @@ function jitaWorkerBody(cfg) {
         return uniq;
     }
     function crReporterAccount(value) {
-        return crSearch('reporter = "' + value + '"', ['reporter'], null).then(function (d) {
+        var q = String(value).replace(/[\\"]/g, '\\$&');   // a quote in the handle gave a 400, read as "no such account"
+        return crSearch('reporter = "' + q + '"', ['reporter'], null).then(function (d) {
             var issues = d.issues || [];
             if (!issues.length) { return ''; }
             return ((issues[0].fields || {}).reporter || {}).accountId || '';
         }, function () { return null; });
     }
+    // Each member's old-domain account: the first of their candidate handles that exists and no one before them in
+    // name order has. Two Johns both resolved john@<old domain>, and it went to whichever lookup finished last, so its
+    // credit history moved between their rows from one crawl to the next. Now the lookups run in parallel - each member
+    // stopping at its first handle that exists, each handle asked about once - and the accounts are then handed out in
+    // name order, so the answer depends on which accounts exist and never on timing.
     function crResolveOldReporters(members) {
-        var claimed = {}, oldIds = {}, oldNames = {}, done = 0;
-        return crParallel(members, crc.CONCURRENCY, function (m) {
-            var dn = m.displayName || m.accountId;
-            var cands = crHandles(m).map(function (h) { return h + '@' + crc.OLD_DOMAIN; });
-            return crSerial(cands, function (cand) {
-                if (claimed[cand]) { return null; }
-                return crReporterAccount(cand).then(function (aid) { return aid === null ? null : { cand: cand, aid: aid }; });
-            }).then(function (results) {
-                for (var k = 0; k < results.length; k++) {
-                    var hit = results[k];
-                    if (hit) { claimed[hit.cand] = true; if (hit.aid) { oldIds[hit.aid] = true; oldNames[hit.aid] = dn; } break; }
-                }
+        var oldIds = {}, oldNames = {}, done = 0, lookups = {};
+        function look(cand) { if (!lookups[cand]) { lookups[cand] = crReporterAccount(cand); } return lookups[cand]; }
+        // The first of cands[i..] that exists and is not taken: { i, cand, aid } (aid '' for an account with no
+        // reports, which still counts as theirs), or null.
+        function firstFree(cands, i, taken) {
+            if (i >= cands.length) { return Promise.resolve(null); }
+            if (taken[cands[i]]) { return firstFree(cands, i + 1, taken); }
+            return look(cands[i]).then(function (aid) { return aid === null ? firstFree(cands, i + 1, taken) : { i: i, cand: cands[i], aid: aid }; });
+        }
+        var byName = members.slice().sort(function (a, b) {
+            var x = a.displayName || a.accountId || '', y = b.displayName || b.accountId || '';
+            return x < y ? -1 : (x > y ? 1 : 0);
+        });
+        var candsOf = byName.map(function (m) { return crHandles(m).map(function (h) { return h + '@' + crc.OLD_DOMAIN; }); });
+        return crParallel(byName, crc.CONCURRENCY, function (m, k) {
+            return firstFree(candsOf[k], 0, {}).then(function (hit) {
                 done++; crTick(done - 1, members.length, 'resolving members: ' + done + '/' + members.length);
+                return hit;
+            });
+        }).then(function (hits) {
+            var taken = {};
+            return crSerial(byName, function (m, k) {
+                var hit = hits[k];
+                // Taken by someone earlier in name order: walk on through this member's other handles.
+                var p = (hit && !taken[hit.cand]) ? Promise.resolve(hit) : firstFree(candsOf[k], hit ? hit.i + 1 : candsOf[k].length, taken);
+                return p.then(function (h) {
+                    if (!h) { return; }
+                    taken[h.cand] = true;
+                    if (h.aid) { oldIds[h.aid] = true; oldNames[h.aid] = m.displayName || m.accountId; }
+                });
             });
         }).then(function () { return { oldIds: oldIds, oldNames: oldNames }; });
     }
@@ -20323,6 +20378,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.25', date: '2026-10-03', items: [
+            'ISD credits: one failed request no longer throws away the whole leaderboard crawl; it is retried like the rest of JiTA does.',
+            'ISD credits: an old-domain account shared by two names goes to the same person every crawl, and tied members share a rank in the table as on the badge.',
+            'ISD credits: last month is computed once more after it ends, instead of keeping its last mid-month snapshot as if it were final.',
+            'ISD credits: the badge says "updating" while the leaderboard is recomputed, Refresh never leaves a stuck progress pill, and a failed read says so.'
+        ] },
         { v: '3.38.24', date: '2026-10-03', items: [
             'Triage mode upgrades a report ranked while the model was still loading from Keyword to Hybrid once it is ready, as the panel already did.',
             'With the ranking worker unreachable, the panel no longer empties and refills every few seconds.',
