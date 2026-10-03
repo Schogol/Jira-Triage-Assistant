@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.15
+// @version     3.38.26
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5958,6 +5958,7 @@ JiTA.translate = {
     BATCH_DELAY: 1000,          // ms between a lane's successful calls (2 concurrent lanes, one pinned per endpoint); 1s was steadier than 500ms against the rate limit
     BACKOFF0: 5000, BACKOFF_MAX: 180000,
     HARD_SKIP: 2,               // consecutive hard (per-content) failures on one record before we skip it
+    MAX_CAPPED: 6,              // consecutive refusals waited out at BACKOFF_MAX before a lane gives its endpoint up
 
     prepare: function () {      // idempotent within a tab; a Web Lock makes it single-flight ACROSS tabs too, so the
         if (JiTA.translate._running) { return JiTA.translate._running; }   // foreign backlog is not translated N times (N tabs) against the same IP
@@ -6015,7 +6016,7 @@ JiTA.translate = {
                 // endpoint's rate stays bounded; combined throughput is ~2x. `next` is the shared work cursor;
                 // `done`/`translated` are shared counters (safe - single-threaded cooperative async). Per-lane backoff.
                 function lane(ep) {
-                    var backoff = JiTA.translate.BACKOFF0;
+                    var backoff = JiTA.translate.BACKOFF0, capped = 0;
                     function pull() {
                         if (next >= total) { return; }                          // no work left -> this lane resolves
                         return process(foreign[next++], 0);
@@ -6033,15 +6034,27 @@ JiTA.translate = {
                                     backoff = JiTA.translate.BACKOFF0; done++; report();
                                     return JiTA.util.delay(0).then(pull);
                                 }
+                                // An endpoint that refuses everything (blocked from this network) was retried every three minutes
+                                // for as long as the tab stayed open, holding the translate lock: give the lane up. Its report stays
+                                // untranslated (lang == null) for the next pass; the other lane takes the rest.
+                                if (backoff >= JiTA.translate.BACKOFF_MAX && ++capped >= JiTA.translate.MAX_CAPPED) {
+                                    console.log('[JiTA] translate: endpoint ' + ep + ' keeps refusing - leaving the rest to the next pass');
+                                    return;
+                                }
                                 var wait = backoff; backoff = Math.min(backoff * 2, JiTA.translate.BACKOFF_MAX);
                                 report(' (rate-limited, waiting…)');
                                 return JiTA.util.delay(wait).then(function () { return process(item, poison ? fails + 1 : fails); });
                             }
-                            backoff = JiTA.translate.BACKOFF0;
+                            backoff = JiTA.translate.BACKOFF0; capped = 0;
                             var apply;
                             if (confirmedEnglish) { apply = function (cc) { cc.lang = 'en'; cc.enText = null; }; }
                             else { translated++; var en = out.en, lang = src || 'xx'; apply = function (cc) { cc.lang = lang; cc.enText = en; cc.embedding = null; cc.embeddingModelVersion = null; }; }
-                            return JiTA.db.updateRecord(item.key, apply).then(function () {
+                            // A rejected write used to end this lane while the other went on: the pass let go of its lock and the
+                            // next prepare() started a second one beside it, translating some reports twice. Log it and go on;
+                            // the report keeps lang == null, so the next pass tries it again.
+                            return JiTA.db.updateRecord(item.key, apply).then(null, function (e) {
+                                console.log('[JiTA] translate: could not store ' + item.key + ':', e && e.message || e);
+                            }).then(function () {
                                 done++; report();
                                 return JiTA.util.delay(JiTA.translate.BATCH_DELAY).then(pull);   // per-lane rate-limit delay
                             });
@@ -6064,7 +6077,11 @@ JiTA.translate = {
 
             return Promise.resolve(classify())
                 .then(function () { return JiTA.db.mergeEach(enKeys, function (cc) { cc.lang = 'en'; cc.enText = null; }); })   // bulk-tag English (merge-safe)
-                .then(function () { return foreign.length ? translateForeign() : undefined; });
+                .then(function () { return foreign.length ? translateForeign() : undefined; })
+                .then(function () {
+                    // "Checking reports for translation… 3 / 3" took the panel's status line and kept it: give the view its own back.
+                    if (JiTA.ui && JiTA.ui.scheduleRender) { JiTA.ui.scheduleRender(); }
+                });
         });
     }
 };
@@ -19979,6 +19996,11 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.26', date: '2026-10-03', items: [
+            'Translating foreign reports: one report that cannot be stored no longer ends the pass and starts a second one beside it.',
+            'Translating foreign reports: a translation service that refuses everything is given up after a while instead of being retried for as long as the tab is open.',
+            'The "Checking reports for translation" line no longer stays in the panel once the pass is done.'
+        ] },
         { v: '3.38.15', date: '2026-10-03', items: [
             'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
             'Lead duties: the Leads\' browsers no longer keep rewriting the ledger page just because each scanned the page tree at a different time.',
