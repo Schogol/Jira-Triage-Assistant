@@ -2,6 +2,8 @@
 .history/
 
 # OS / editor cruft
+# Claude Code's local settings for this checkout
+.claude/
 .DS_Store
 Thumbs.db
 
