@@ -96,8 +96,8 @@ ok('...its control reads as expanded', els['jita-sd-collapse'].textContent === '
 ok('...remembered, and re-fitted', gm.sdPanelCollapsed === false && calls.indexOf('fit') !== -1, JSON.stringify(gm) + ' ' + calls.join(' '));
 
 // ---- the launcher ----
-const ls = src.indexOf("                if (e.key === '#') {");
-const le = src.indexOf("                // double-tap '>'", ls);
+const ls = src.indexOf("            if (e.key === '#') {");
+const le = src.indexOf("            // double-tap '>'", ls);
 if (ls < 0 || le < 0) { throw new Error('could not slice the launcher'); }
 let lastHash = 0;   // the launcher's own closure variable
 const launch = eval('(function (e, now) {' + src.slice(ls, le) + '})');

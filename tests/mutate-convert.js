@@ -13,7 +13,7 @@ const muts = [
     [H, 'a put-back button is never set', "addActionButton('convertToDefectButton', 'Convert to Defect');\n    jitaConvertButtonState();", "addActionButton('convertToDefectButton', 'Convert to Defect');"],
     // ---- v3.38.16 ----
     [H, 'a non-SUCCESS answer is taken as started', "if (!inv || inv.status !== 'SUCCESS') { fail({ status: 0, jitaError: 'The conversion automation did not start", "if (false) { fail({ status: 0, jitaError: 'The conversion automation did not start"],
-    [H, 'the reason a conversion failed is dropped', 'jitaAjaxError(xhr && xhr.jitaError)(xhr);', 'jitaAjaxError()(xhr);'],
+    [H, 'the reason a conversion failed is dropped', 'jitaAjaxError(xhr, xhr && xhr.jitaError);', 'jitaAjaxError(xhr);'],
     [H, 'the defect poll follows the user to another issue', '        if (jitaCurrentKey() !== ebrKey) { return; }\n', ''],
     [H, 'the defect poll never gives up', '        if (tries >= 30) { window.location.reload(false); return; }\n        tries++; setTimeout(poll, 1000);', '        tries++; setTimeout(poll, 1000);'],
     [H, 'Close does not wait for the menu', '        setTimeout(pick, 100);\n    })();', '    })();'],
