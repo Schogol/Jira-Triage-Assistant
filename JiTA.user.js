@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.14
+// @version     3.38.15
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -16366,12 +16366,19 @@ JiTA.leadduty = {
             var rerun = function () { if (R._again) { R._again = false; R.schedule(); } };
             var done = function (v) { R._busy = false; R._last = { at: Date.now(), result: v }; rerun(); return v; };
             var fail = function (e) { R._busy = false; R._last = { at: Date.now(), error: String(e && e.message || e) }; rerun(); throw e; };
+            var QC_UNREAD = { value: null };   // a QC read that failed, as against a QC ledger with nothing in it yet
             return Promise.all([
                 L.ledger.read(L.LEDGER_KEY),
-                L.ledger.read(L.QC_LEDGER_KEY).catch(function () { return { value: null }; }),
+                L.ledger.read(L.QC_LEDGER_KEY).catch(function () { return QC_UNREAD; }),
                 L.pool.ensureFresh(false).catch(function () { return null; })
             ]).then(function (r) {
                 var wiki = r[0].value, qc = r[1].value, pool = r[2];
+                // A read that FAILED stops the publish, where an empty one does not. Rendered without the QC ledger the
+                // page says the month was never sampled and drops every open follow-up; without the page tree nothing
+                // is excluded, so excluded pages come back as never reviewed. Either changes the hash, and the page
+                // was written that way. Keep the last good page, as for an incomplete tree below.
+                if (r[1] === QC_UNREAD) { return { skipped: 'the quality control ledger could not be read, so the page was left as it was' }; }
+                if (!pool) { return { skipped: 'the page tree could not be read, so the page was left as it was' }; }
                 if (!wiki && !qc) { return { skipped: 'nothing in the ledger yet' }; }
                 // Reading may degrade; PUBLISHING may not. A pool whose ancestry did not fully resolve reads
                 // as "excluded by nothing", so it silently ADDS pages to the rotation - and the page is the
@@ -16413,7 +16420,7 @@ JiTA.leadduty = {
                         pub.v + (pub.by ? (' on ' + pub.by + "'s tab") : '') +
                         ' - an older build does not overwrite a newer one. Reload this tab to pick up the update.' };
                 }
-                return R._write(R._stamp() + '\n' + body).then(function (res) {
+                return R._write(R._stamp(pool) + '\n' + body).then(function (res) {
                     // Remember what we published so the next tick can skip. Deliberately NOT tapped: this
                     // write is a consequence of publishing, not a reason to publish again.
                     return L.ledger.mutate(L.LEDGER_KEY, function (v) {
@@ -16465,14 +16472,18 @@ JiTA.leadduty = {
         // OUT of _content for exactly that reason: publish() hashes the content to decide whether to write,
         // and hashing this line made every hash unique, so "unchanged" could never be true and the page
         // collected a new version on every scheduler tick forever.
-        _stamp: function () {
+        // The page tree's scan time is here, outside the hash, for the reason "generated at" is: each Lead's browser
+        // rescans the tree on its own 24-hour clock, so as part of the content it made three browsers disagree on
+        // every tick and take turns rewriting a page in which nothing else had changed.
+        _stamp: function (pool) {
             var L = JiTA.leadduty, me = (L.me() && L.me().handle) || '';
+            var scanned = (pool && pool.fetchedAt) ? '; the page tree it is built from was last scanned on ' + L.report._when(new Date(pool.fetchedAt).toISOString()) + ' UTC' : '';
             // Naming the publisher costs nothing here (the stamp is outside the hash, so it updates on a real
             // write and never causes one) and answers the question that took an evening to answer by hand:
             // when three browsers write one page, WHICH one wrote what is on screen, and on what build.
             var who = 'v' + (JiTA.SCRIPT_VERSION || '?') + (me ? (' on ' + me + "'s tab") : '');
             return '<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant (' + who +
-                ') on ' + L.report._when(new Date().toISOString()) + ' UTC. Anything typed on this page by ' +
+                ') on ' + L.report._when(new Date().toISOString()) + ' UTC' + scanned + '. Anything typed on this page by ' +
                 'hand is replaced on the next update - record work through the Lead duties overlay in Jira ' +
                 'instead.</em></p>';
         },
@@ -16493,7 +16504,7 @@ JiTA.leadduty = {
 
         render: function (wiki, qc, pool) {
             var R = JiTA.leadduty.report;
-            return R._stamp() + '\n' + R._content(wiki, qc, pool);
+            return R._stamp(pool) + '\n' + R._content(wiki, qc, pool);
         },
 
         // The point of the whole exercise: a flag raised by one Lead is now visible to all of them.
@@ -16619,8 +16630,7 @@ JiTA.leadduty = {
                 [R._txt('Never reviewed'), R._txt(String(st.never))],
                 [R._txt('Overdue (older than ' + st.coverage + ' months)'), R._txt(String(st.overdue))],
                 [R._txt('Oldest review'), R._txt(st.oldestMonths == null ? 'n/a' : (st.oldestMonths + ' months ago'))],
-                [R._txt('Target'), R._txt('every page read by ' + st.eyes + ' different Leads every ' + st.coverage + ' months')],
-                [R._txt('Page tree last scanned'), R._when(pool.fetchedAt ? new Date(pool.fetchedAt).toISOString() : null)]
+                [R._txt('Target'), R._txt('every page read by ' + st.eyes + ' different Leads every ' + st.coverage + ' months')]
             ]);
         },
 
@@ -18533,6 +18543,7 @@ JiTA.leadduty.sched = {
     FAIL_MS: 30 * 60 * 1000,
     LAST_KEY: 'leadDutyLastTs',
     FAIL_KEY: 'leadDutyFailTs',
+    QC_FAIL_KEY: 'leadDutyQcFailTs',   // when the QC sample last failed to be drawn (see tick)
     LEASE_KEY: 'leadDutyLease',
     _timer: null,
     _running: false,
@@ -18562,6 +18573,11 @@ JiTA.leadduty.sched = {
         // made it say "2 page reviews" with no sign of the QC checks until someone opened the tab. A build
         // that adds a mirror (as the QC one was) therefore fills it in on the next poll, not next session.
         L._mirrorsReady().then(function (ready) {
+            // ...except when the mirror is missing because the QC sample cannot be drawn (Jira search failing at a
+            // month start): the refresh swallows that failure, so every poll found the mirror still missing and ran
+            // the whole refresh again - queue, wiki claim, QC crawl, roster, publish check - once a minute.
+            // Retry it on the failure back-off instead.
+            if (!ready && !S._elapsed(S.QC_FAIL_KEY, S.FAIL_MS)) { return; }
             if (ready && !S._elapsed(S.LAST_KEY, S.INTERVAL_MS)) { return; }
             if (S._running) { return; }                          // another poll got in while we read the mirrors
             if (!S._lease(S.LEASE_KEY, S.LEASE_TTL_MS)) { return; }
@@ -18597,6 +18613,7 @@ JiTA.leadduty.sched = {
             // whoever opened that tab first silently decided the split for everyone. Once the month is
             // frozen this costs one small key lookup per tick; the crawl happens once a month.
             return L.qc.claimMonth(L._prevYm()).then(function (q) {
+                gmSet(S.QC_FAIL_KEY, 0);
                 var qdone = {};
                 Object.keys(q.done || {}).forEach(function (k) { qdone[k] = q.done[k].at; });
                 return L.local.get(L.qc.localKey(q.ym)).then(function (prev) {
@@ -18610,6 +18627,7 @@ JiTA.leadduty.sched = {
             }, function (e) {
                 // A QC failure must not cost the wiki half its refresh: the wiki month is already frozen and
                 // mirrored by this point, so swallow it and let the next tick retry the sample.
+                gmSet(S.QC_FAIL_KEY, Date.now());
                 JiTA.dlog('[JiTA] leadduty: QC month not claimed this tick: ' + (e && e.message || e));
             });
         }).then(function () {
@@ -19961,6 +19979,11 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.15', date: '2026-10-03', items: [
+            'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
+            'Lead duties: the Leads\' browsers no longer keep rewriting the ledger page just because each scanned the page tree at a different time.',
+            'Lead duties: while the quality control sample cannot be drawn, the background refresh retries every half hour instead of every minute.'
+        ] },
         { v: '3.38.14', date: '2026-10-03', items: [
             'Lead duties: a review or check saved while Confluence was unreachable just before the month changed is no longer lost.',
             'Lead duties: something you took back in another browser no longer comes back as done, and marking an item twice no longer stops Undo from restoring it.'

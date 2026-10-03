@@ -115,6 +115,7 @@ function run(qcThrows, mirrorsReady) {
     ok('a QC failure still leaves the wiki month mirrored', !!b.puts['leadduty:wiki:2026-09']);
     ok('a QC failure still republishes the page', b.calls.indexOf('publish') !== -1, b.calls.join(' '));
     ok('a QC failure is not treated as a failed tick (no 30-min backoff)', !gm.leadDutyFailTs && !!gm.leadDutyLastTs);
+    ok('...but it is remembered, for the QC back-off', !!gm.leadDutyQcFailTs);
 
     // The six-hourly interval must not hold a MISSING mirror hostage: the chip cannot count that half of the
     // month until it exists, which is what left the QC checks off the chip until someone opened the tab.
@@ -136,6 +137,20 @@ function run(qcThrows, mirrorsReady) {
     gm.leadDutyFailTs = Date.now();
     const e2 = await run(false, false);
     ok('the failure backoff still suppresses a missing-mirror refresh', !e2.calls.length, e2.calls.join(' '));
+
+    // A mirror missing because the QC sample cannot be drawn used to rerun the whole refresh on every poll: the
+    // refresh swallows the QC failure, so the next poll found the mirror still missing (v3.38.15).
+    Object.keys(gm).forEach((k) => delete gm[k]);
+    gm.leadDutyLastTs = Date.now();
+    gm.leadDutyQcFailTs = Date.now();                 // the sample failed to be drawn a minute ago
+    const f = await run(false, false);
+    ok('a QC sample that just failed is not retried on every poll', !f.calls.length, f.calls.join(' '));
+    Object.keys(gm).forEach((k) => delete gm[k]);
+    gm.leadDutyLastTs = Date.now();
+    gm.leadDutyQcFailTs = Date.now() - 31 * 60 * 1000;
+    const g = await run(false, false);
+    ok('...but once the back-off is over it is', g.calls.indexOf('qc.claimMonth:2026-08') !== -1, g.calls.join(' '));
+    ok('...and a sample that is drawn clears the failure', !gm.leadDutyQcFailTs);
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'scheduler checks passed.'));
     process.exit(fail ? 1 : 0);
