@@ -11,8 +11,8 @@ const muts = [
     [H, 'a mark that is not a date becomes a cutoff', 'if (isNaN(t)) { return null; }', ''],
     [H, 'the cutoff is written in the computer\'s timezone again', "return '-' + Math.max(mins, 5) + 'm';",
         "var d = new Date(t - 2 * 60000), p = function (n) { return (n < 10 ? '0' : '') + n; };\n        return d.getFullYear() + '/' + p(d.getMonth() + 1) + '/' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());"],
-    [H, 'the defect sync ignores the time since the mark', 'if (!hw) { return JiTA.sync.fullSync(); }\n            var since = JiTA.util.jqlSince(hw);',
-        'if (!hw) { return JiTA.sync.fullSync(); }\n            var since = JiTA.util.jqlSince(hw, 0);'],
+    [H, 'the defect sync ignores the time since the mark', 'if (!hw) { return JiTA.sync.fullSync(); }\n                var since = JiTA.util.jqlSince(hw);',
+        'if (!hw) { return JiTA.sync.fullSync(); }\n                var since = JiTA.util.jqlSince(hw, 0);'],
     [H, 'a defect mark that is not a date runs a broken query', 'if (!since) { return JiTA.sync.fullSync(); }', ''],
     [H, 'a bug report mark that is not a date runs a broken query', 'if (!since) { return JiTA.sync.fullSyncEbr(); }', '']
 ];

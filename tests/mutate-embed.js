@@ -20,7 +20,12 @@ const muts = [
     [H, 'an aborted bulk write never settles', "                tx.onabort = function () { reject(tx.error || new Error('IndexedDB transaction aborted')); };\n", ''],
     [H, 'the worker drops a pass asked for while busy', 'if (embedding) { embedAgain = true; result = { started: false, busy: true, queued: true }; }', 'if (embedding) { result = { started: false, busy: true }; }'],
     [H, 'the tab waits for an embedded count again', "JiTA.worker._workerCall('embedPass').then(null, function () { /* ignore: the pass reports its end itself (embedPassDone) */ });",
-        "JiTA.worker._workerCall('embedPass').then(function (r) { if (r && r.embedded > 0) { JiTA.ui.scheduleRender(); } }, function () {});"]
+        "JiTA.worker._workerCall('embedPass').then(function (r) { if (r && r.embedded > 0) { JiTA.ui.scheduleRender(); } }, function () {});"],
+    // ---- no main-thread engine (v3.39.4) ----
+    [H, 'prepare calls a worker that cannot run', '        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }\n        if (JiTA.embed._preparing)', '        if (JiTA.embed._preparing)'],
+    [H, 'prepare asks again while a pass is on its way', '        if (JiTA.embed._preparing) { return JiTA.embed._preparing; }\n        JiTA.embed._preparing = JiTA.worker.call', '        JiTA.embed._preparing = JiTA.worker.call'],
+    [H, 'an acknowledged pass is never asked for again', "JiTA.embed._preparing = JiTA.worker.call('embedPass').then(function () {\n            JiTA.embed._preparing = null;", "JiTA.embed._preparing = JiTA.worker.call('embedPass').then(function () {"],
+    [H, 'the badge switches to Hybrid with no worker', "        if (!(JiTA.worker && JiTA.worker.usable())) { JiTA.ui.toast('Semantic ranking needs the shared worker", "        if (false) { JiTA.ui.toast('Semantic ranking needs the shared worker"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

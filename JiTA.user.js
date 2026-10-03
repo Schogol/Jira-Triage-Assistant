@@ -118,10 +118,11 @@ var JITA_IS_FORGE_FRAME = (function () {
     try { return /(^|\.)atlassian-dev\.net$/i.test(location.hostname); } catch (e) { return false; }
 })();
 
-// True on a CONFLUENCE page (same host as Jira, under /wiki). The script is matched there for ONE reason:
-// the Lead-duties chip and overlay belong where the documentation is actually read, so a page can be marked
-// proof-read on the page itself. Nothing else applies - there is no Jira DOM to decorate, no issue to parse,
-// and a wiki tab has no business electing the embedding-worker leader or driving the defect sync.
+// True on a CONFLUENCE page (same host as Jira, under /wiki). The script is matched there for the Lead-duties
+// chip and overlay, which belong where the documentation is actually read, so a page can be marked proof-read on
+// the page itself; the What's new pill and Settings come along. Nothing else applies - there is no Jira DOM to
+// decorate, no issue to parse, and a wiki tab has no business electing the embedding-worker leader or driving the
+// defect sync.
 var JITA_IS_WIKI = (function () {
     try { return /^\/wiki(\/|$)/i.test(location.pathname) && !/(^|\.)atlassian-dev\.net$/i.test(location.hostname); } catch (e) { return false; }
 })();
@@ -187,7 +188,9 @@ var SELECTORS = {
     FIELD_HEADING:     '[data-testid^="issue-field-heading-styled-field-heading"]',
     VC_DETAILS_GROUP:  '[data-vc="issue-view-context-group-details-group"]',
     ROLE_TAB:          '[role="tab"]',
-    RS_SINGLE_VALUE:   '[id$="-single-value"]'
+    RS_SINGLE_VALUE:   '[id$="-single-value"]',
+    ZD_TICKET_INPUT:   'input[id$="ticket-select"]',   // the Zendesk panel's ticket combobox
+    ZD_SUBDOMAIN_LABEL: 'label[for="subdomain-select"]'   // the panel's header; the canned-response dropdown sits beside it
 };
 
 
@@ -230,7 +233,7 @@ GM_addValueChangeListener("buttons", function(key, oldValue, newValue, remote) {
 
 
 // Iterate through all variables in savedVariables and load their locally saved values or set them to true if they are not set yet
-for (let i = 0; i < savedVariables.length; i++) {
+for (var i = 0; i < savedVariables.length; i++) {
     savedVariables[i][1] = GM_getValue (savedVariables[i][0], "");
     if (savedVariables[i][1] === "") {
         // Every feature now defaults ON for a fresh install (the Triage Assistant graduated from its opt-in
@@ -279,11 +282,12 @@ if (!JITA_IS_FORGE_FRAME) {
 
 
 // Switch the embedding backend between GPU (WebGPU - fast but has been unstable on some GPUs/drivers) and
-// CPU (WASM - slow but rock-solid). The choice is persisted in GM flags that JiTA.embed.load() reads:
-// `sdTryWebgpu` opts into WebGPU, and `sdForceCpu` is the sticky lock the embed pass sets after a GPU device
-// loss. Switching to GPU clears that lock so WebGPU is actually retried. We reload afterwards so the pipeline
-// rebuilds cleanly on the chosen backend - embedding is resumable, so a reload never loses progress, and any
-// already-stored vectors stay valid (same model/version; q8 vs fp32 is just minor quantization noise).
+// CPU (WASM - slow but rock-solid). The choice is persisted in GM flags the shared worker is built with
+// (JiTA.worker._src): `sdTryWebgpu` opts into WebGPU, and `sdForceCpu` is a CPU lock an older build set after a
+// GPU device loss. Switching to GPU clears that lock so WebGPU is actually retried. We reload afterwards so the
+// worker is rebuilt on the chosen backend (a change made in another tab rebuilds it too) - embedding is
+// resumable, so a reload never loses progress, and any already-stored vectors stay valid (same model/version;
+// q8 vs fp32 is just minor quantization noise).
 function toggleEmbedBackend() {
     var gpuOn = gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false);
     if (gpuOn) {
@@ -341,7 +345,7 @@ var issueItem = 'a[data-testid="issue.views.issue-base.foundation.breadcrumbs.cu
 waitForKeyElements (issueItem, checkIssueType);
 
 // The current issue's key (e.g. "EBR-67728"), read from the breadcrumb. Returns '' when not on an issue.
-function jitaCurrentKey() { return $.trim($(issueItem).text()); }
+function jitaCurrentKey() { return $.trim($(issueItem).first().text()); }
 
 
 // Check if the issue is a Bug report. If it is then we add the extra buttons
@@ -476,32 +480,17 @@ if (!JITA_NO_JIRA_UI) { jitaButtonObserver.observe(document.body, { childList: t
 var jitaDatesCache = {};   // issueKey -> { created, updated, at } ISO strings + when they were fetched
 var jitaDatesFail = {};    // issueKey -> when its last fetch failed
 var JITA_DATES_TTL_MS = 60 * 1000;   // refetch dates this old (an edit moves Updated), and retry a failed fetch after this
-function jitaFmtDateShort(iso) {
-    var d = new Date(iso);
-    if (isNaN(d.getTime())) { return ''; }
-    var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    function p(n) { return (n < 10 ? '0' : '') + n; }
-    return p(d.getDate()) + ' ' + MON[d.getMonth()] + ' ' + d.getFullYear();
-}
 
 // Find where to drop the dates element. The lock / watch / share / … icons live in the sticky header bar
 // #jira-issue-header-actions, which spans the full width of the issue's right-most context column but only
 // contains the (right-aligned) action-icon group - so the whole empty left part of that bar is the "red box".
 // We anchor to that bar and absolutely-position the dates at its LEFT edge (the bar is position:sticky, i.e. a
 // positioning context, so left:0 lands on the red-box border and top:50% keeps it level with the icons). The
-// breadcrumb is in a SEPARATE left structure, so it can't be used as a row anchor. Fallbacks probe the sticky-
-// header testid, then derive the bar from the watch button.
+// breadcrumb is in a SEPARATE left structure, so it can't be used as a row anchor. The fallback probes the
+// sticky-header testid.
 function jitaDatesTarget() {
     var bar = document.getElementById(SELECTORS.HEADER_ACTIONS_ID)
         || document.querySelector(SELECTORS.STICKY_HEADER);
-    if (!bar) {
-        var watch = document.querySelector('button[data-testid="issue.watchers.action-button.root"]')
-            || document.querySelector('button[data-testid*="watch" i]')
-            || document.querySelector('button[aria-label*="watch" i]');
-        bar = (watch && watch.closest)
-            ? (watch.closest('#' + SELECTORS.HEADER_ACTIONS_ID) || watch.closest(SELECTORS.STICKY_HEADER))
-            : null;
-    }
     if (!bar) { return null; }
     return { row: bar, before: null };   // before:null -> append; the element is absolutely positioned at left:0
 }
@@ -541,7 +530,7 @@ function jitaShowIssueDates() {
             var lbl = document.createElement('span');
             lbl.textContent = label;
             var val = document.createElement('span');
-            val.textContent = jitaFmtDateShort(iso);
+            val.textContent = JiTA.util.fmtDate(iso);
             val.style.marginLeft = 'auto';   // push the date to the right edge of the (stretched) row
             row.appendChild(lbl);
             row.appendChild(val);
@@ -589,11 +578,11 @@ function jitaNewDatesEl(key, tgt) {
 // Jira renders the issue's Created/Updated timestamps a second time at the very BOTTOM of the right context
 // column (the spot you'd otherwise have to scroll to). Now that we mirror them into the top header, hide that
 // native block so the date isn't shown twice. Jira gives those rows stable testids
-// ("created-date.ui.read.meta-date" / "updated-date.ui.read.meta-date"), so we target them directly. Idempotent.
+// ("created-date.ui.read.meta-date" / "updated-date.ui.read.meta-date"), so we target exactly those two: a suffix
+// match also hid any other date Jira lists there, such as Resolved, which is not mirrored anywhere. Idempotent.
 function jitaHideNativeDates() {
     var nodes = document.querySelectorAll(
-        '[data-testid="created-date.ui.read.meta-date"], [data-testid="updated-date.ui.read.meta-date"],' +
-        ' [data-testid$="-date.ui.read.meta-date"]');
+        '[data-testid="created-date.ui.read.meta-date"], [data-testid="updated-date.ui.read.meta-date"]');
     for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
         if (n.getAttribute('data-jita-hidden-dates')) { continue; }   // already hidden
@@ -601,13 +590,6 @@ function jitaHideNativeDates() {
         n.setAttribute('data-jita-hidden-dates', '1');
     }
 }
-
-// Initial nudge in case the header is already present before the first DOM mutation fires.
-waitForKeyElements(issueItem, function () {
-    try { jitaShowIssueDates(); } catch (e) { /* ignore */ }
-    try { jitaHideNativeDates(); } catch (e) { /* ignore */ }
-    try { if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.apply(); } } catch (e) { /* ignore */ }
-});
 
 
 // Free, keyless translation via Google (no API key, no cost - replaces the old paid Cloud Translation v2
@@ -714,13 +696,11 @@ function jitaTranslateRR(text, ep) {
 }
 
 
-// Standard $.ajax error handler for the action buttons: log the raw response, then alert `msg` (default: the
-// generic failure text) followed by the shared "check console / report to Schogol" tail. Returns the handler.
-function jitaAjaxError(msg) {
-    return function (data) {
-        console.log(JSON.stringify(data));
-        alert((msg || 'This failed for some reason.') + ' Check Console for errors and report issues to Schogol :).');
-    };
+// Standard error report for the action buttons: log the raw response, then alert `msg` (default: the generic
+// failure text) followed by the shared "check console / report to Schogol" tail.
+function jitaAjaxError(data, msg) {
+    console.log(JSON.stringify(data));
+    alert((msg || 'This failed for some reason.') + ' Check Console for errors and report issues to Schogol :).');
 }
 
 // ---- "Assign to GM" -> Convert-to-Support-Ticket flow ----
@@ -744,7 +724,7 @@ function jitaInvokeAutomationRule(numericId, ruleId, userInputs) {
     if (userInputs) { body.userInputs = userInputs; }
     return $.ajax({
         url: 'https://fenriscreations.atlassian.net/gateway/api/automation/internal-api/jira/' + cloudId + '/pro/rest/v1/rules/manual/invocation/' + ruleId,
-        type: 'POST', contentType: 'application/json', charset: 'utf-8',
+        type: 'POST', contentType: 'application/json',
         data: JSON.stringify(body)
     });
 }
@@ -859,7 +839,7 @@ function jitaCloseAsWontDo(key) {
     key = key || jitaCurrentKey();
     return $.ajax({
         url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + key + '/transitions',
-        type: 'POST', contentType: 'application/json', charset: 'utf-8',
+        type: 'POST', contentType: 'application/json',
         headers: { 'X-Atlassian-Token': 'no-check' },
         data: JSON.stringify({ transition: { id: JITA_CLOSE_TRANSITION }, fields: { resolution: { id: JITA_WONTDO_RESOLUTION } } })
     });
@@ -1024,7 +1004,7 @@ function jitaConvertClick() {
     function fail(xhr) {
         delete jitaConvertBusy[ebrKey];
         jitaConvertButtonState();   // whichever button is on the page now, not the one that was clicked
-        jitaAjaxError(xhr && xhr.jitaError)(xhr);
+        jitaAjaxError(xhr, xhr && xhr.jitaError);
     }
     // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
     // newly-created defect (found as the freshly-linked issue that wasn't linked before).
@@ -1061,8 +1041,8 @@ function addButtons() {
     // The native quick-add trigger: we copy its (react-churned) classes to style our buttons like it, and
     // insert ours right after it.
     var TRIGGER_SEL = SELECTORS.QUICK_ADD_TRIGGER;
-    let buttonClass = $(TRIGGER_SEL).attr('class');
-    let innerSpanClass = $(TRIGGER_SEL).find('span').eq(0).attr('class');
+    var buttonClass = $(TRIGGER_SEL).attr('class');
+    var innerSpanClass = $(TRIGGER_SEL).find('span').eq(0).attr('class');
 
     // Build one command-bar button (styled to match the trigger) and insert it after the trigger, unless it's
     // already present. A native <button> is keyboard-focusable in natural DOM order and takes its accessible
@@ -1249,7 +1229,7 @@ waitForKeyElements(cmSelector, SwapUI);
 })();
 
 
-// outstandingcalls.txt / lastcrashes.txt / PDMData.txt live inside the igbr.zip and - unlike the log /
+// outstandingcalls.txt / lastcrashes.txt / PDMData.txt / dxdiag.txt live inside the igbr.zip and - unlike the log /
 // processHealth / methodCalls files - have NO header row in their content to detect them by. So the only way to
 // tell them apart is WHICH file button was clicked: watch for each file's entry in the attachment list, and when
 // its button is clicked, poll for the freshly-loaded text (jitaRunParserWhenLoaded) and set the matching parser
@@ -1282,7 +1262,7 @@ IGBR_FILES.forEach(function (f) {
 //   3. #tableContent present - our (or another file's) parser markup is currently mounted, so the raw file text
 //      isn't showing; keep waiting for the viewer to swap it back in.
 //   4. HEADER_SIG - a header-based file (log / processHealth / methodCalls) loaded instead; those are handled
-//      by waitForKeyElements+SwapUI, so we must not grab them as our oc/lc/pdm file.
+//      by waitForKeyElements+SwapUI, so we must not grab them as our oc/lc/pdm/dx file.
 //   5. Cancel-on-navigate (the jitaParserGen bump below) - the poller watches a SHARED code-block, so if you open
 //      an EMPTY tracked file (its poller keeps waiting - no content ever arrives) and then click ANOTHER file
 //      before MAX, that file's content lands in the same span and would trip the stale poller, parsing it into
@@ -1290,7 +1270,7 @@ IGBR_FILES.forEach(function (f) {
 //      Guards #1/#2 don't catch this: an UNtracked file (fitting.txt / prefs.ini / ...) has no click handler to
 //      bump the generation, and its content arrives well before the #2 timeout. So we bump the generation on
 //      EVERY file-entry click, which kills any pending poller the moment you navigate away.
-// `setFlag` marks which parser branch SwapUI takes (oc / lc / pdm).
+// `setFlag` marks which parser branch SwapUI takes (oc / lc / pdm / dx).
 var jitaParserGen = 0;
 var jitaParserPending = 0;   // generation of an in-flight header-less (igbr.zip file-button) parse, or 0; drives the observer's pending-hide
 function jitaRevealLogs() {   // reveal every container the flash suppressor hid (shared by SwapUI + the poller)
@@ -1834,8 +1814,8 @@ function ParsePhLogs() {
  */
     var clickHandler = function() {
         return function() {
-            let FPS = 'FPS <i class="fa-regular fa-circle-question" title="Frames per second"></i>'
-            let spf = 'spf <i class="fa-regular fa-circle-question" title="Seconds per frame"></i>'
+            var FPS = 'FPS <i class="fa-regular fa-circle-question" title="Frames per second"></i>'
+            var spf = 'spf <i class="fa-regular fa-circle-question" title="Seconds per frame"></i>'
             $('#tableContent > thead > tr > th:nth-child(10)').html($(this).html() == FPS ? spf : FPS);
             $('#tableContent > tbody > tr > td:nth-child(10)').each(function() {
                 $(this).text(Math.round(1 / $(this).text() *10000) /10000);
@@ -1943,8 +1923,8 @@ function ParseLogs() {
 
 
  /**
- * If excTime is not empty but it doesnt match the time of the current row,
- * then add the 'borderbot' class to the row and set excTime to its default value
+ * If excTime is not empty but it doesnt match the time of the current row (the block above has ended),
+ * then add the 'bordertop' class to the row and set excTime to its default value
  */
             if (excTime != "" && table[i][0] != excTime) {
                 row.className += ' bordertop';
@@ -1963,8 +1943,8 @@ function ParseLogs() {
 
 
  /**
- * If sttTime is not empty but it doesnt match the time of the current row,
- * then add the 'borderbot' class to the row and set sttTime to its default value
+ * If sttTime is not empty but it doesnt match the time of the current row (the block above has ended),
+ * then add the 'bordertop' class to the row and set sttTime to its default value
  */
             if (sttTime != "" && table[i][0] != sttTime) {
                 row.className += ' bordertop';
@@ -2292,8 +2272,6 @@ var css = `
       left: 50%;
       top: 50%;
       z-index: 1;
-      width: 150px;
-      height: 150px;
       margin: -75px 0 0 -75px;
       border: 16px solid #f3f3f3;
       border-radius: 50%;
@@ -2312,24 +2290,6 @@ var css = `
     @keyframes spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
-    }
-
-    .animate-bottom {
-      position: relative;
-      -webkit-animation-name: animatebottom;
-      -webkit-animation-duration: 1s;
-      animation-name: animatebottom;
-      animation-duration: 1s
-    }
-
-    @-webkit-keyframes animatebottom {
-      from { bottom:-100px; opacity:0 }
-      to { bottom:0px; opacity:1 }
-    }
-
-    @keyframes animatebottom {
-      from{ bottom:-100px; opacity:0 }
-      to{ bottom:0; opacity:1 }
     }
 
     .fixedHead {
@@ -2358,25 +2318,9 @@ var css = `
 
 // Additional CSS only for the LogParser
 var cssLogParser = `
-    td:first-child, th:first-child {
-       padding: 4px 8px;
-    }
-
-    th {
-      vertical-align: top;
-      text-align: left;
-      font-weight: bold;
-      background-color: #282d33;
-      color: aliceblue;
-    }
-
     td {
       vertical-align: top;
       text-align: left;
-      font-family: Courier New;
-      font-size: 11px;
-      font-weight: normal;
-      border-right: 1.5px solid #aaaaaa;
     }
 
     .row {
@@ -2446,23 +2390,6 @@ var cssLogParser = `
     #button a:hover {
       background-color: rgba(204,204,204,.4);
       color: #FFF;
-    }
-
-    .timeCol {
-      width: 139.766px;
-      text-align: center;
-    }
-
-    .facilityCol {
-      width: 265px;
-    }
-
-    .typeCol {
-      width: 70px;
-    }
-
-    .messageCol {
-      width: auto;
     }
 
     .bordertop {
@@ -3206,17 +3133,16 @@ var dxdiagHtml = `
 
 
 /* =========================================================================================
- * Similar Defects feature (Phase 1: local DB + sync + BM25 keyword ranking + suggestions UI)
+ * Triage Assistant core (local DB + sync + ranking + suggestions UI)
  *
- * Builds a local IndexedDB cache of all issues in the EDR and EO projects, and on a bug report
- * (EBR) page shows a floating panel of the most relevant existing defects. Phase 1 ranks by BM25
- * keyword similarity (fully local, no model); a later phase swaps in local semantic embeddings,
- * which is why records already reserve `embedding` / `embeddingModelVersion` fields.
+ * Builds a local IndexedDB cache of every issue in the EDR, EO and PLAT projects plus the open bug
+ * reports, and on a bug report (EBR) shows the most relevant existing defects (on a defect, the open
+ * reports that match it). Ranking fuses BM25 keywords with local semantic embeddings, both held by
+ * the shared worker (JiTA.worker).
  *
  * Everything lives under the JiTA namespace to avoid polluting globals. Plain var/function +
  * Promises + jQuery, matching the rest of this file. Jira REST calls are same-origin and rely on
- * the browser session cookie (no auth header / no GM_xmlhttpRequest needed), exactly like the
- * existing Translate / Convert-to-Defect calls.
+ * the browser session cookie (no auth header needed), like the Convert to Defect and Close calls.
  * ========================================================================================= */
 var JiTA = {
     HOST: 'https://fenriscreations.atlassian.net',
@@ -3897,8 +3823,7 @@ JiTA.logsig = {
         panel.innerHTML = '';
         JiTA.logsig._panelIdx = {};
 
-        var collapsed = false;
-        collapsed = !!gmGet(JiTA.logsig.COLLAPSE_KEY, false);
+        var collapsed = !!gmGet(JiTA.logsig.COLLAPSE_KEY, false);
         panel.className = collapsed ? 'collapsed' : '';
 
         var head = document.createElement('div');
@@ -4048,8 +3973,7 @@ JiTA.logsig = {
 
     // Restore a saved {left, top}, clamped on-screen (same approach as the Similar Defects panel).
     _applyPos: function (panel) {
-        var pos = null;
-        pos = gmGet(JiTA.logsig.POS_KEY, null);
+        var pos = gmGet(JiTA.logsig.POS_KEY, null);
         if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') { return; }
         var w = panel.offsetWidth || 300, h = panel.offsetHeight || 60;
         var left = Math.min(Math.max(0, pos.left), Math.max(0, window.innerWidth - w));
@@ -4194,8 +4118,7 @@ JiTA.util = {
         return (rec && rec.enText) ? rec.enText : JiTA.util.cleanForCompare(rec.summary, rec.description);
     },
 
-    // High-frequency English function words; used by detectLang's stopword-ratio test.
-    // English-DISTINCTIVE function words. Deliberately EXCLUDES words that are also common in the main non-English
+    // English-DISTINCTIVE function words, used by detectLang's stopword-ratio test. Deliberately EXCLUDES words that are also common in the main non-English
     // languages in the corpus (Spanish/Portuguese/German/French) - a, no, me, as, do, so, in, on, an, i, if - so a
     // foreign Latin report scores near zero here instead of being mistaken for English.
     EN_STOP: { 'the':1,'be':1,'to':1,'of':1,'and':1,'that':1,'have':1,'it':1,'for':1,'not':1,'with':1,'you':1,'at':1,'this':1,'but':1,'by':1,'from':1,'they':1,'we':1,'or':1,'will':1,'all':1,'would':1,'there':1,'what':1,'which':1,'when':1,'can':1,'is':1,'are':1,'was':1,'were':1,'been':1,'has':1,'had':1,'did':1,'then':1,'them':1,'my':1,'your':1,'just':1,'how':1,'about':1,'over':1,'than':1,'only':1,'also':1,'these':1,'those':1,'our':1,'should':1,'could':1,'because':1,'while':1,'their':1,'who':1,'get':1,'like':1,'out':1,'up':1,'now':1,'into':1,'some':1 },
@@ -4314,8 +4237,7 @@ JiTA.util = {
         var ageDays = Math.round((created - fixed) / (1000 * 60 * 60 * 24));
         if (ageDays <= GRACE) { return { factor: 1, ageDays: ageDays }; }
         var f = 1 - (1 - FLOOR) * (ageDays - GRACE) / (FULL - GRACE);
-        if (f < FLOOR) { f = FLOOR; }
-        if (f > 1) { f = 1; }
+        if (f < FLOOR) { f = FLOOR; }   // past FULL days; ageDays > GRACE keeps f below 1
         return { factor: f, ageDays: ageDays };
     },
 
@@ -4359,8 +4281,7 @@ JiTA.hidden = {
 
     _load: function () {
         if (JiTA.hidden._map) { return JiTA.hidden._map; }
-        var m = {};
-        m = gmGet(JiTA.hidden.KEY, {}) || {};
+        var m = gmGet(JiTA.hidden.KEY, {}) || {};
         if (!m || typeof m !== 'object') { m = {}; }
         JiTA.hidden._map = m;
         return m;
@@ -4458,7 +4379,6 @@ JiTA.responses = {
     // added:[{title,body}] }. A response the user NEVER touched is not stored, so it stays a live DEFAULT and
     // picks up wording fixes from script updates. Only EDITED defaults (overrides), DELETED defaults, and
     // user-ADDED responses are persisted. A legacy full-array value is migrated to this shape on first read.
-    _isArr: function (v) { return Object.prototype.toString.call(v) === '[object Array]'; },
     _emptyOverlay: function () { return { overrides: {}, deleted: [], added: [] }; },
 
     // Diff a legacy full snapshot (array of {title,body}) against DEFAULTS into an overlay. A title that
@@ -4486,10 +4406,9 @@ JiTA.responses = {
     // Parse the stored overlay (migrating + persisting a legacy array on first read). Always returns a
     // well-formed { overrides, deleted, added }.
     _overlay: function () {
-        var raw = null;
-        raw = gmGet(JiTA.responses.GM_KEY, null);
+        var raw = gmGet(JiTA.responses.GM_KEY, null);
         if (!raw) { return JiTA.responses._emptyOverlay(); }
-        if (JiTA.responses._isArr(raw)) {                 // legacy full snapshot -> migrate once
+        if (Array.isArray(raw)) {                         // legacy full snapshot -> migrate once
             var ov = JiTA.responses._legacyToOverlay(raw);
             JiTA.responses._saveOverlay(ov);
             return ov;
@@ -4497,8 +4416,8 @@ JiTA.responses = {
         if (typeof raw === 'object') {
             return {
                 overrides: (raw.overrides && typeof raw.overrides === 'object') ? raw.overrides : {},
-                deleted: JiTA.responses._isArr(raw.deleted) ? raw.deleted : [],
-                added: JiTA.responses._isArr(raw.added) ? raw.added : []
+                deleted: Array.isArray(raw.deleted) ? raw.deleted : [],
+                added: Array.isArray(raw.added) ? raw.added : []
             };
         }
         return JiTA.responses._emptyOverlay();
@@ -4524,12 +4443,11 @@ JiTA.responses = {
             if (o) { usedOverride[d.title] = true; out.push({ title: o.title, body: o.body, _orig: d.title }); }
             else { out.push({ title: d.title, body: d.body, _orig: d.title }); }
         }
-        // Overrides whose default no longer exists (removed upstream) survive as custom responses.
+        // Overrides whose default no longer exists (removed upstream) survive as custom responses. (One for a
+        // default that is still there was used above, or that default is deleted.)
         for (var k in ov.overrides) {
             if (!Object.prototype.hasOwnProperty.call(ov.overrides, k) || usedOverride[k] || del[k]) { continue; }
-            var stillDefault = false;
-            for (i = 0; i < defs.length; i++) { if (defs[i].title === k) { stillDefault = true; break; } }
-            if (!stillDefault) { out.push({ title: ov.overrides[k].title, body: ov.overrides[k].body }); }
+            out.push({ title: ov.overrides[k].title, body: ov.overrides[k].body });
         }
         for (i = 0; i < ov.added.length; i++) { out.push({ title: ov.added[i].title, body: ov.added[i].body }); }
         return out;
@@ -4589,7 +4507,7 @@ JiTA.responses = {
     },
 
     // Standalone, roomier editor for the canned responses, opened by the settings menu's "Customize
-    // responses" button (the menu itself just shows that button + Restore defaults now, so it stays compact).
+    // responses" button (the menu itself shows only that button, so it stays compact).
     // Reuses the settings-menu overlay chrome (#jita-menu-overlay / #jita-menu) widened via .jita-menu-wide, and
     // the same .jita-resp-* row styling. Edits persist to GM (shared across frames, survive script updates).
     _editorCssInjected: false,
@@ -4778,23 +4696,29 @@ JiTA.responses = {
             }).appendTo($foot);
     },
 
+    // The Zendesk panel's ACTIVE compose editor: the editor nearest the composer's Add button, looked for no further
+    // out than the panel - the node that also holds the panel's header, where the ticket and subdomain selects and our
+    // dropdown sit. A global querySelector matched a DIFFERENT editor (the JQL search box, or an INACTIVE tab's
+    // editor that never clears), and so did the old fallback whenever our dropdown was not built yet; apply() empties
+    // whatever it is given. With no composer in the panel there is no editor: null.
+    _composerEditor: function () {
+        var SEL = 'div.ProseMirror[contenteditable="true"], [role="textbox"][contenteditable="true"]';
+        var add = document.querySelector(SELECTORS.ADD_COMMENT_BTN);
+        var head = document.getElementById('jita-resp-col') || document.querySelector(SELECTORS.ZD_SUBDOMAIN_LABEL);
+        if (!add || !head) { return null; }
+        for (var node = add.parentNode; node && node.querySelector; node = node.parentNode) {
+            var ed = node.querySelector(SEL);
+            if (ed) { return ed; }
+            if (node.contains(head)) { return null; }   // reached the panel without one: never look outside it
+        }
+        return null;
+    },
+
     // Replace the open comment editor's content with `body`. The Zendesk panel uses an Atlassian ProseMirror
     // editor (the single contenteditable=true instance; the comment-history editors are read-only). We focus
     // it, select all, then execCommand('insertText') so ProseMirror's own input handling rebuilds the document
-    // (more reliable than poking its internal model). Returns false if no editable editor is present.
-    // The Zendesk panel's ACTIVE compose editor: the nearest editable ProseMirror to OUR dropdown anchor. A
-    // global querySelector would match a DIFFERENT editor (the JQL search box, or an INACTIVE tab's editor that
-    // never clears), which is why the text landed in the wrong field AND why the post-success poll misfired.
-    _composerEditor: function () {
-        var SEL = 'div.ProseMirror[contenteditable="true"], [role="textbox"][contenteditable="true"]';
-        var anchor = document.getElementById('jita-resp-col');
-        for (var node = anchor && anchor.parentNode; node && node.querySelector; node = node.parentNode) {
-            var cand = node.querySelector(SEL);
-            if (cand) { return cand; }   // nearest enclosing editor == the Zendesk panel's compose box
-        }
-        return document.querySelector(SEL);   // fallback (shouldn't normally be needed)
-    },
-
+    // (more reliable than poking its internal model). Returns the editor it filled, so a caller can watch that one
+    // editor; false when there is none, or writing to it threw.
     apply: function (body) {
         var ed = JiTA.responses._composerEditor();
         if (!ed) { return false; }
@@ -4819,9 +4743,12 @@ JiTA.responses = {
                 var text = m ? ('• ' + line.slice(m[0].length)) : line;
                 if (text) { document.execCommand('insertText', false, text); }
             }
-            return true;
+            return ed;
         } catch (e) { return false; }
     },
+
+    // The dropdown's placeholder: its first option, and the text the cloned react-select shows.
+    _placeholder: function (list) { return list.length ? 'Insert a response…' : 'No responses configured'; },
 
     // Populate (or repopulate) the dropdown's <option>s from the repository. Guarded by a signature so a
     // re-inject during the user's interaction doesn't clobber an in-progress selection.
@@ -4829,39 +4756,42 @@ JiTA.responses = {
         var list = JiTA.responses.load();
         var sig = list.map(function (r) { return r.title; }).join('');
         if (sel.getAttribute('data-jita-sig') !== sig) {
-        sel.setAttribute('data-jita-sig', sig);
-        sel.innerHTML = '';
-        // Explicit dark colors on every option / optgroup so the native popup is readable in Chrome (which
-        // otherwise paints unstyled options on a white system background).
-        var OPT_CSS = 'background:#1d2125;color:#e6e6e6;';
-        var ph = document.createElement('option');
-        ph.value = '';
-        ph.textContent = list.length ? 'Insert a response…' : 'No responses configured';
-        ph.style.cssText = OPT_CSS;
-        sel.appendChild(ph);
-        // Group into <optgroup>s by section (derived from the title prefix), showing the short tail inside.
-        var groups = {};
-        for (var i = 0; i < list.length; i++) {
-            var sec = JiTA.responses._sectionOf(list[i].title);
-            var grp = groups[sec];
-            if (!grp) { grp = groups[sec] = document.createElement('optgroup'); grp.label = sec; grp.style.cssText = OPT_CSS; sel.appendChild(grp); }
-            var o = document.createElement('option');
-            o.value = String(i);
-            o.textContent = JiTA.responses._titleTail(list[i].title) || ('Response ' + (i + 1));
-            o.style.cssText = OPT_CSS;
-            grp.appendChild(o);
-        }
-        sel.value = '';
+            sel.setAttribute('data-jita-sig', sig);
+            sel.innerHTML = '';
+            // Explicit dark colors on every option / optgroup so the native popup is readable in Chrome (which
+            // otherwise paints unstyled options on a white system background).
+            var OPT_CSS = 'background:#1d2125;color:#e6e6e6;';
+            var ph = document.createElement('option');
+            ph.value = '';
+            ph.textContent = JiTA.responses._placeholder(list);
+            ph.style.cssText = OPT_CSS;
+            sel.appendChild(ph);
+            // Group into <optgroup>s by section (derived from the title prefix), showing the short tail inside.
+            var groups = {};
+            for (var i = 0; i < list.length; i++) {
+                var sec = JiTA.responses._sectionOf(list[i].title);
+                var grp = groups[sec];
+                if (!grp) { grp = groups[sec] = document.createElement('optgroup'); grp.label = sec; grp.style.cssText = OPT_CSS; sel.appendChild(grp); }
+                var o = document.createElement('option');
+                o.value = String(i);
+                o.textContent = JiTA.responses._titleTail(list[i].title) || ('Response ' + (i + 1));
+                o.style.cssText = OPT_CSS;
+                grp.appendChild(o);
+            }
+            sel.value = '';
         }
         JiTA.responses._setDisplay(list);
     },
 
     // Reset the (cloned react-select) display text back to the placeholder. The dropdown is an ACTION menu, so
     // after each pick it returns to the placeholder rather than showing the last choice. No-op on the fallback
-    // path (a plain <select> shows its own option text).
+    // path (a plain <select> shows its own option text). Written only when it differs: this runs on every pass of
+    // the panel's observer, and in a browser that does not skip an identical write (Firefox) each write fired the
+    // observer again, several times a second.
     _setDisplay: function (list) {
         var v = document.querySelector('[data-jita-respval]');
-        if (v) { v.textContent = (list || JiTA.responses.load()).length ? 'Insert a response…' : 'No responses configured'; }
+        var text = JiTA.responses._placeholder(list || JiTA.responses.load());
+        if (v && v.textContent !== text) { v.textContent = text; }
     },
 
     // Switch the Zendesk composer to its "Add public reply" tab (it defaults to "Add internal note"). The
@@ -4878,11 +4808,20 @@ JiTA.responses = {
         return false;
     },
 
+    // True once "Add public reply" is the SELECTED composer tab (mirrors _internalNoteActive).
+    _publicReplyActive: function () {
+        var tabs = document.querySelectorAll(SELECTORS.ROLE_TAB);
+        for (var i = 0; i < tabs.length; i++) {
+            if ((tabs[i].textContent || '').trim().toLowerCase() === 'add public reply') { return tabs[i].getAttribute('aria-selected') === 'true'; }
+        }
+        return false;
+    },
+
     // True when the Zendesk panel has a LINKED TICKET selected. react-select points the ticket combobox's
     // aria-describedby at a "…-single-value" node when a ticket is chosen, vs "…-placeholder" when empty (e.g. the
     // reporter had no email, so no ZD ticket was ever created - there's then nothing to comment on).
     _hasTicket: function () {
-        var inp = document.querySelector('input[id$="ticket-select"]');
+        var inp = document.querySelector(SELECTORS.ZD_TICKET_INPUT);
         if (!inp) { return false; }
         return /-single-value$/.test(inp.getAttribute('aria-describedby') || '');
     },
@@ -4910,13 +4849,27 @@ JiTA.responses = {
         return false;
     },
 
+    // A piece of `note` that apply() leaves in the editor verbatim: its first line with text in it (with the bullet
+    // glyph apply() gives a "- " line), whitespace squashed, at most 40 characters. The note counts as posted once
+    // that piece has left the editor it was typed into.
+    _probe: function (note) {
+        var lines = String(note == null ? '' : note).split('\n');
+        for (var i = 0; i < lines.length; i++) {
+            var m = /^[-•]\s+/.exec(lines[i]);
+            var text = JiTA.responses._squash(m ? ('• ' + lines[i].slice(m[0].length)) : lines[i]);
+            if (text) { return text.slice(0, 40); }
+        }
+        return '';
+    },
+    _squash: function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); },
+
     // Post `note` as an INTERNAL comment by driving the Zendesk composer: select the internal-note tab and see it
     // selected, fill the editor (reusing apply), click the Add button (data-testid="add-comment-button"), then
-    // confirm the composer cleared - its success signal. Resolves { ok, error }. Runs in whichever frame holds the
+    // confirm the note left the editor - its success signal. Resolves { ok, error }. Runs in whichever frame holds the
     // composer (the Forge iframe normally). Errs toward FAILURE (so the caller aborts the conversion) rather than
     // risk a lost note, or one that reaches the player as a public reply.
     postInternalNote: function (note) {
-        var ADD = SELECTORS.ADD_COMMENT_BTN;
+        var ADD = SELECTORS.ADD_COMMENT_BTN, filled = null;
         // Small poller: call onOk once test() is truthy, or onTimeout after `ms`.
         function poll(test, ms, onOk, onTimeout) {
             var t = 0;
@@ -4955,7 +4908,8 @@ JiTA.responses = {
                 });
             }
             function fill() {
-                if (!JiTA.responses.apply(note)) { resolve({ ok: false, error: 'Could not find the comment editor.' }); return; }
+                filled = JiTA.responses.apply(note);
+                if (!filled) { resolve({ ok: false, error: 'Could not find the comment editor.' }); return; }
                 // 4. Wait for the Add button to enable (our fill has to register), then click.
                 poll(function () { var b = document.querySelector(ADD); return b && !b.disabled; }, 6000, doClick, function () {
                     resolve({ ok: false, error: 'The Add button did not enable (empty note?).' });
@@ -4970,16 +4924,15 @@ JiTA.responses = {
                     return;
                 }
                 b.click();
-                // 5. Success signal: after a posted comment the composer RESETS - the SCOPED editor (the one we
-                //    filled) empties AND/OR the Add button disables again, whichever comes first.
-                var waited = 0;
+                // 5. Success signal: the composer RESETS after a posted comment, so the editor we filled no longer
+                //    holds the note - emptied (its placeholder may show), or replaced by a fresh editor, ours leaving
+                //    the page. The Add button disabling is no proof: it disables while the post is on its way and
+                //    comes back after a failure, which counted as posted and let the conversion go on without the note.
+                var probe = JiTA.responses._probe(note), waited = 0;
                 var iv = setInterval(function () {
                     waited += 200;
-                    var ed = JiTA.responses._composerEditor();
-                    var addBtn = document.querySelector(ADD);
-                    var cleared = ed && (ed.textContent || '').trim() === '';
-                    var disabled = !!(addBtn && addBtn.disabled);
-                    if (cleared || disabled) { clearInterval(iv); resolve({ ok: true }); }
+                    var posted = !filled.isConnected || JiTA.responses._squash(filled.textContent).indexOf(probe) === -1;
+                    if (posted) { clearInterval(iv); resolve({ ok: true }); }
                     else if (waited >= 8000) { clearInterval(iv); resolve({ ok: false, clicked: true, error: 'Could not confirm the note posted (composer did not reset).' }); }
                 }, 200);
             }
@@ -4988,20 +4941,31 @@ JiTA.responses = {
 
     // Shared change handler for the overlay/fallback <select>: switch the composer to the public-reply tab,
     // insert the picked response, then reset the dropdown to its placeholder. We select the tab FIRST because
-    // switching tabs swaps in the public-reply editor instance; a short delay lets React mount it before we
-    // write into it (the editor lookup in apply() then targets the now-active public-reply box).
+    // switching tabs swaps in the public-reply editor instance, then wait until the tab reads as selected and an
+    // editor is there, plus a beat for React to mount it (apply() then targets the now-active public-reply box).
+    // It used to write after a fixed 80 ms and drop the result, so a slow switch inserted nothing and said nothing.
+    PICK_WAIT_MS: 3000,
     _onPick: function () {
         var sel = document.getElementById('jita-resp-select');
         if (!sel) { return; }
         var i = parseInt(sel.value, 10);
         var list = JiTA.responses.load();
-        if (!isNaN(i) && list[i]) {
-            var body = JiTA.responses._compose(list[i].body);   // wrap with the configured opener / closing
-            var switched = JiTA.responses._selectPublicReply();
-            setTimeout(function () { JiTA.responses.apply(body); }, switched ? 80 : 0);
-        }
         sel.value = '';
         JiTA.responses._setDisplay(list);
+        if (isNaN(i) || !list[i]) { return; }
+        var body = JiTA.responses._compose(list[i].body);   // wrap with the configured opener / closing
+        function failed(why) { JiTA.ui.toast('Could not insert the response: ' + why + '. Click into the reply box and pick it again.'); }
+        if (!JiTA.responses._selectPublicReply()) { failed('the "Add public reply" tab was not found'); return; }
+        var waited = 0;
+        (function step() {
+            if (JiTA.responses._publicReplyActive() && JiTA.responses._composerEditor()) {
+                setTimeout(function () { if (!JiTA.responses.apply(body)) { failed('the reply box could not be written to'); } }, 80);
+                return;
+            }
+            if (waited >= JiTA.responses.PICK_WAIT_MS) { failed('the reply box did not open'); return; }
+            waited += 100;
+            setTimeout(step, 100);
+        })();
     },
 
     // True once a react-select column has finished rendering its chrome (the styled control box + the chevron
@@ -5021,7 +4985,7 @@ JiTA.responses = {
     // so the clone still lands to the right of the ticket selector. Idempotent: re-fills an existing dropdown,
     // or builds one next to the source column.
     inject: function () {
-        var srcLabel = document.querySelector('label[for="subdomain-select"]');
+        var srcLabel = document.querySelector(SELECTORS.ZD_SUBDOMAIN_LABEL);
         if (!srcLabel || !srcLabel.parentNode || !srcLabel.parentNode.parentNode) { return; }
         var srcCol = srcLabel.parentNode;                  // the subdomain-select column (label + react-select)
         var row = srcCol.parentNode;                       // flex row holding the subdomain + ticket columns
@@ -5061,7 +5025,7 @@ JiTA.responses = {
             }
             var inputs = col.querySelectorAll('input');
             for (i = 0; i < inputs.length; i++) { if (inputs[i].parentNode) { inputs[i].parentNode.removeChild(inputs[i]); } }
-            if (valEl) { valEl.setAttribute('data-jita-respval', '1'); valEl.textContent = 'Insert a response…'; }
+            if (valEl) { valEl.setAttribute('data-jita-respval', '1'); valEl.textContent = JiTA.responses._placeholder(JiTA.responses.load()); }
             box.style.position = 'relative';
             sel = document.createElement('select');
             sel.id = 'jita-resp-select';
@@ -5075,8 +5039,8 @@ JiTA.responses = {
             row.appendChild(col);
             return sel;
         } catch (e) {
-            // Fallback: a plain styled select that approximates the native look.
-            if (document.getElementById('jita-resp-col')) { return document.getElementById('jita-resp-select'); }
+            // Fallback: a plain styled select that approximates the native look. (inject() builds only when there is
+            // no #jita-resp-col yet, and the clone is appended last, so a throw above never leaves one behind.)
             var fcol = document.createElement('div');
             fcol.id = 'jita-resp-col';
             fcol.style.cssText = 'display:flex; flex-direction:column; margin-left:4px; min-width:220px; max-width:320px; box-sizing:border-box;';
@@ -5205,6 +5169,41 @@ JiTA.db = {
 
     bulkPut: function (recs) { return JiTA.db._bulkTx(recs, function (store, rec) { store.put(rec); }); },
 
+    // A sync page's records, merged in ONE readwrite transaction: each record's stored row is read, its derived work
+    // (embedding, translation) is kept while the source text is unchanged, and the record is written - or, with
+    // `prune`, deleted when its status is closed. Read and write in one transaction, so a translation or an embedding
+    // that another context writes in between cannot be overwritten with the row as it was read before it. A record
+    // that matches its stored row is not written at all. Resolves { changed }: the records that were new, differed
+    // in a synced field, or were pruned from the store.
+    syncPut: function (recs, prune) {
+        return JiTA.db.open().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                if (!recs || !recs.length) { resolve({ changed: 0 }); return; }
+                var tx = db.transaction('defects', 'readwrite'), store = tx.objectStore('defects'), changed = 0;
+                recs.forEach(function (rec) {
+                    var g = store.get(rec.key);
+                    g.onsuccess = function () {
+                        var old = g.result || null;
+                        if (prune && JiTA.util.isClosedStatus(rec.status)) {
+                            if (old) { store.delete(rec.key); changed++; }
+                            return;
+                        }
+                        if (old && old.textHash === rec.textHash) {   // SOURCE text unchanged -> keep derived work
+                            if (old.embedding) { rec.embedding = old.embedding; rec.embeddingModelVersion = old.embeddingModelVersion; }
+                            if (old.lang) { rec.lang = old.lang; rec.enText = old.enText; }   // keep the stored translation
+                        }
+                        if (old && JiTA.sync._sameSynced(old, rec)) { return; }
+                        changed++;
+                        store.put(rec);
+                    };
+                });
+                tx.oncomplete = function () { resolve({ changed: changed }); };
+                tx.onerror = function () { reject(tx.error); };
+                tx.onabort = function () { reject(tx.error); };
+            });
+        });
+    },
+
     // Atomic read-modify-write of ONE record: get + applyFn + put in a single transaction. Used by the translate
     // pass so it merges only its own fields (lang/enText) onto the CURRENT row instead of clobbering a concurrent
     // sync/embed write with a stale snapshot; skips (resolves false) if the record was deleted meanwhile.
@@ -5298,6 +5297,7 @@ JiTA.db = {
 /* ---- sync engine ---- */
 JiTA.sync = {
     running: false,
+    _quiet: false,   // set while autoSync runs: its incremental runs leave the panel's status line alone
 
     // POST to a Jira REST endpoint with the session cookie; retries on HTTP 429 honoring Retry-After.
     _apiPost: function (path, body) {
@@ -5358,18 +5358,47 @@ JiTA.sync = {
         };
     },
 
-    // Page through /search/jql for a given jql, storing each page. Resumable via meta.resumeToken.
-    // opts: { startToken, startHighWater, metaPrefix, pruneResolved, isEbr }
+    // Whether a stored row already holds what a freshly mapped record carries: every field of the record except the
+    // derived ones the embed and translate passes add. A row from an older build that lacks a field differs, so a
+    // re-fetch that backfills a new field still counts as a change.
+    _sameSynced: function (old, rec) {
+        var keys = Object.keys(rec);
+        for (var i = 0; i < keys.length; i++) {
+            var k = keys[i];
+            if (k === 'embedding' || k === 'embeddingModelVersion' || k === 'lang' || k === 'enText') { continue; }
+            if (JSON.stringify(old[k]) !== JSON.stringify(rec[k])) { return false; }
+        }
+        return true;
+    },
+
+    // The two full crawls. A page token saved for one of them is resumed only by the same query.
+    FULL_JQL: JiTA.SCOPE + ' ORDER BY updated ASC',
+    FULL_JQL_EBR: JiTA.EBR_SCOPE + ' ORDER BY updated ASC',
+
+    // Whether `rt` (a stored resume token) carries on the full crawl `jql`: saved by that query, by a build with the
+    // current record schema. A bare token from an older build, one saved by another query, or one saved before a
+    // schema change (its first pages would lack the new field) is not resumed.
+    _resumable: function (rt, jql) {
+        return !!(rt && typeof rt === 'object' && rt.token && rt.jql === jql && rt.v === JiTA.DATA_VERSION);
+    },
+
+    // Page through /search/jql for a given jql, storing each page. opts: { startToken, startHighWater, resume,
+    // metaPrefix, pruneResolved, isEbr }
+    //  - resume:       a full crawl: save the next page's token with each page, with the query and record schema it
+    //                  belongs to, so a reload carries on from there (_fullRun). Incremental runs are short and start over.
     //  - metaPrefix:   suffix for the resume/high-water meta keys so independent datasets (defects vs EBRs)
     //                  keep separate cursors (e.g. 'Ebr' -> resumeTokenEbr / lastSyncHighWaterEbr).
     //  - pruneResolved: DELETE records that come back resolved/closed instead of storing them (used by the
     //                  EBR incremental sync, whose JQL has no open-filter, so reports that have since closed
     //                  are dropped from the open-report set).
     //  - isEbr:        mark the EBR keyword index dirty (not the defect indexes / log-signature index).
+    // Resolves { stored, changed, highWater }. `changed` counts the records that were new, differed in a synced field,
+    // or were pruned: an incremental run re-fetches the last few minutes every time, so `stored` is never zero and only
+    // `changed` says whether anything needs re-indexing, embedding or redrawing.
     _run: function (jql, opts) {
         opts = opts || {};
         var token = opts.startToken || null;
-        var pages = 0, stored = 0;
+        var pages = 0, stored = 0, changed = 0;
         var maxUpdated = opts.startHighWater || '';
         var resumeKey = 'resumeToken' + (opts.metaPrefix || '');
         var hwKey = 'lastSyncHighWater' + (opts.metaPrefix || '');
@@ -5386,49 +5415,34 @@ JiTA.sync = {
                     if (rec.updated && rec.updated > maxUpdated) { maxUpdated = rec.updated; }
                     recs.push(rec);
                 }
-                // Preserve existing embeddings for issues whose TEXT did not change, so an incremental
-                // re-fetch (or a metadata-only update) does not throw away work the embed pass already did.
-                // (For an initial full sync the DB is empty, so these lookups all return null and are cheap.)
-                return Promise.all(recs.map(function (rec) {
-                    return JiTA.db.getDefect(rec.key).then(function (old) {
-                        if (old && old.textHash === rec.textHash) {   // SOURCE text unchanged -> keep derived work
-                            if (old.embedding) { rec.embedding = old.embedding; rec.embeddingModelVersion = old.embeddingModelVersion; }
-                            if (old.lang)      { rec.lang = old.lang; rec.enText = old.enText; }   // keep the stored translation
-                        }
-                        return rec;
-                    });
-                })).then(function (merged) {
-                    // pruneResolved (EBR incremental sync): split into keep (still open) vs drop (now closed ->
-                    // delete from store). Judge closed by STATUS only (isClosedStatus), NOT the resolution field,
-                    // so a REOPENED report that kept a stale resolution is kept instead of wrongly pruned.
-                    if (opts.pruneResolved) {
-                        var keep = [], drop = [];
-                        for (var k = 0; k < merged.length; k++) {
-                            if (JiTA.util.isClosedStatus(merged[k].status)) { drop.push(merged[k].key); }
-                            else { keep.push(merged[k]); }
-                        }
-                        return JiTA.db.deleteDefects(drop).then(function () { return JiTA.db.bulkPut(keep); });
-                    }
-                    return JiTA.db.bulkPut(merged);
-                }).then(function () {
+                // Merged and written in one transaction (syncPut), which keeps the derived work of an unchanged text.
+                // pruneResolved (the EBR incremental sync) deletes the reports that have closed since, judged by STATUS
+                // only (isClosedStatus), so a REOPENED report that kept a stale resolution is kept.
+                return JiTA.db.syncPut(recs, !!opts.pruneResolved).then(function (put) {
                     stored += recs.length;
                     pages++;
-                    if (opts.isEbr) {
-                        JiTA.rank._dirtyEbr = true;      // EBR keyword index depends on EBR records
-                        JiTA.rank._dirtyEbrVec = true;   // ...and the EBR vector index (new/removed reports)
-                    } else {
-                        JiTA.rank._dirty = true;
-                        JiTA.rank._dirtyVec = true;
-                        if (JiTA.logsig) { JiTA.logsig._dirty = true; }   // re-mine exception signatures on next log open
+                    if (put.changed) {
+                        changed += put.changed;
+                        if (opts.isEbr) {
+                            JiTA.rank._dirtyEbr = true;      // EBR keyword index depends on EBR records
+                        } else {
+                            JiTA.rank._dirty = true;
+                            if (JiTA.logsig) { JiTA.logsig._dirty = true; }   // re-mine exception signatures on next log open
+                        }
                     }
-                    var nextToken = data.nextPageToken || null;
-                    // Persist progress so a reload mid-sync resumes rather than restarting.
-                    return JiTA.db.setMeta(resumeKey, (data.isLast || !nextToken) ? null : nextToken)
+                    var nextToken = data.nextPageToken || null, last = !!(data.isLast || !nextToken);
+                    // A full crawl saves where it got to, so a reload mid-crawl carries on from there.
+                    var saved = opts.resume
+                        ? JiTA.db.setMeta(resumeKey, last ? null : { jql: jql, token: nextToken, v: JiTA.DATA_VERSION })
+                        : Promise.resolve();
+                    return saved
                         .then(function () { return JiTA.db.setMeta(hwKey, maxUpdated); })
                         .then(function () {
-                            JiTA.ui.setStatus('Syncing… ' + stored + ' issues fetched');
-                            if (data.isLast || !nextToken) { return { stored: stored, highWater: maxUpdated }; }
-                            if (nextToken === token) { throw new Error('nextPageToken did not advance – stopping (Jira API quirk).'); }
+                            // A background catch-up stays off the panel's status line, where its count used to stay until
+                            // the next redraw. A full crawl, or a sync someone asked for, shows how far it has got.
+                            if (opts.resume || !JiTA.sync._quiet) { JiTA.ui.setStatus('Syncing… ' + stored + ' issues fetched'); }
+                            if (last) { return { stored: stored, changed: changed, highWater: maxUpdated }; }
+                            if (nextToken === token) { throw new Error('nextPageToken did not advance - stopping (Jira API quirk).'); }
                             token = nextToken;
                             var near = (r.xhr.getResponseHeader('X-RateLimit-NearLimit') === 'true');
                             return JiTA.util.delay(near ? JiTA.NEAR_LIMIT_DELAY_MS : JiTA.PAGE_DELAY_MS).then(nextPage);
@@ -5438,39 +5452,82 @@ JiTA.sync = {
         }
         // What this run wrote, or pruned, stays invisible to the shared ranking worker until it rebuilds its indexes:
         // it keeps them in memory for as long as it lives, across reloads. So once the run ends - done, or failed part
-        // way - drop them if it stored anything. Once per run, not per page: a query in between rebuilds them, and a
+        // way - drop them if it changed anything. Once per run, not per page: a query in between rebuilds them, and a
         // full crawl is hundreds of pages. (embedPass drops them as well, but a sync that only changed statuses, or
         // pruned closed reports, gave it nothing to embed, and it used to return before dropping anything.)
-        function settled() { if (stored > 0) { JiTA.sync._invalidateWorker(); } }
-        return nextPage().then(function (res) { settled(); return res; }, function (e) { settled(); throw e; });
+        function settled() { if (changed > 0) { JiTA.sync._invalidateWorker(); } }
+        return nextPage().then(function (res) { settled(); return res; }, function (e) {
+            settled();
+            if (e && typeof e === 'object') { e.syncChanged = changed; }   // what the failed run wrote (see _fullRun)
+            throw e;
+        });
     },
 
-    fullSync: function () {
-        return JiTA.db.getMeta('resumeToken').then(function (rt) {
-            return JiTA.db.getMeta('lastSyncHighWater').then(function (hw) {
-                var jql = JiTA.SCOPE + ' ORDER BY updated ASC';
-                return JiTA.sync._run(jql, { startToken: rt || null, startHighWater: hw || '' }).then(function (res) {
-                    // A full crawl re-fetched every defect, so the whole dataset now carries the current field
-                    // set - stamp the schema version + build time (read by JiTA.migrate to auto-rebuild a
-                    // stale DB, and shown in the settings menu so you can see when the DB was built).
-                    return JiTA.db.setMeta('lastFullSyncAt', new Date().toISOString())
-                        .then(function () { return JiTA.db.setMeta('modelVersion', JiTA.MODEL_VERSION); })
-                        .then(function () { return JiTA.db.setMeta('dataVersionDefects', JiTA.DATA_VERSION); })
-                        .then(function () { return JiTA.db.setMeta('dbBuiltAtDefects', new Date().toISOString()); })
-                        .then(function () { return res; });
+    // A full crawl of one dataset (prefix '' = the defects, 'Ebr' = the open bug reports). A crawl a reload interrupted
+    // carries on from the page token it saved (_resumable). Jira refuses a token that has gone stale with a 400, and
+    // the crawl then starts over from the first page. It used to start over on every load: the resume token was only
+    // ever used by the next full crawl, and the upgrade check (JiTA.migrate) restarted an unfinished first build from
+    // scratch, because only a finished build carries the schema stamp.
+    _fullRun: function (prefix, jql) {
+        var resumeKey = 'resumeToken' + prefix;
+        return JiTA.db.getMeta(resumeKey).then(function (rt) {
+            return JiTA.db.getMeta('lastSyncHighWater' + prefix).then(function (hw) {
+                function run(token) {
+                    return JiTA.sync._run(jql, { startToken: token, startHighWater: hw || '', resume: true, metaPrefix: prefix, isEbr: prefix === 'Ebr' });
+                }
+                if (!JiTA.sync._resumable(rt, jql)) { return run(null); }
+                return run(rt.token).catch(function (e) {
+                    if (!e || e.status !== 400) { throw e; }   // anything else is a real failure
+                    var before = e.syncChanged || 0;
+                    console.log('[JiTA] Jira refused the saved sync position (HTTP 400) - crawling ' + (prefix ? 'the bug reports' : 'the defects') + ' from the start');
+                    return JiTA.db.setMeta(resumeKey, null)
+                        .then(function () { return run(null); })
+                        .then(function (res) { res.changed += before; return res; });
                 });
             });
         });
     },
 
-    incrementalSync: function () {
-        return JiTA.db.getMeta('lastSyncHighWater').then(function (hw) {
-            if (!hw) { return JiTA.sync.fullSync(); }
-            var since = JiTA.util.jqlSince(hw);
-            if (!since) { return JiTA.sync.fullSync(); }
-            var jql = JiTA.SCOPE + ' AND updated >= "' + since + '" ORDER BY updated ASC';
-            return JiTA.sync._run(jql, { startHighWater: hw });
+    fullSync: function () {
+        return JiTA.sync._fullRun('', JiTA.sync.FULL_JQL).then(function (res) {
+            // A full crawl re-fetched every defect, so the whole dataset now carries the current field
+            // set - stamp the schema version + build time (read by JiTA.migrate to auto-rebuild a
+            // stale DB, and shown in the settings menu so you can see when the DB was built).
+            return JiTA.db.setMeta('dataVersionDefects', JiTA.DATA_VERSION)
+                .then(function () { return JiTA.db.setMeta('dbBuiltAtDefects', new Date().toISOString()); })
+                .then(function () { return res; });
         });
+    },
+
+    incrementalSync: function () {
+        return JiTA.db.getMeta('resumeToken').then(function (rt) {
+            // A full build a reload interrupted is finished first, so it gets its schema stamp: caught up incrementally
+            // instead, it never would, and the upgrade check would crawl it again from the start.
+            if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL)) { return JiTA.sync.fullSync(); }
+            return JiTA.db.getMeta('lastSyncHighWater').then(function (hw) {
+                if (!hw) { return JiTA.sync.fullSync(); }
+                var since = JiTA.util.jqlSince(hw);
+                if (!since) { return JiTA.sync.fullSync(); }
+                var jql = JiTA.SCOPE + ' AND updated >= "' + since + '" ORDER BY updated ASC';
+                return JiTA.sync._run(jql, { startHighWater: hw });
+            });
+        });
+    },
+
+    // What every sync does once it is over. Start the 30-minute clock and, when the run changed anything, embed the
+    // new or changed text, translate new foreign reports, and redraw the view the changed dataset feeds. A sync
+    // someone asked for (`shown`) redraws the open view whatever it found, which also replaces the "Syncing…"
+    // progress the run wrote on the panel's status line. (_run has already dropped the shared worker's indexes.)
+    // Every sync, rebuild and refetch ends here: the copies this replaced had drifted, and rebuilding the bug report
+    // database no longer translated the foreign reports.
+    _afterSync: function (defects, ebr, shown) {
+        JiTA.sched.markSynced();   // any sync also resets the auto-sync 30-min clock
+        if (defects || ebr) { JiTA.embed.prepare(true); }   // embed the new / changed text in the background
+        if (ebr) { JiTA.translate.prepare(); }              // translate any new foreign reports to English
+        var k = JiTA.ui.currentKey;
+        if (!k) { return; }
+        // Defect data feeds the EBR (similar defects) view, bug report data the EDR/EO/PLAT (matching reports) view.
+        if (shown || (defects && /^EBR-/.test(k)) || (ebr && JiTA.ui._isReportsKey(k))) { JiTA.ui.scheduleRender(); }
     },
 
     // Menu entry point: full sync if the DB is empty, otherwise an incremental catch-up.
@@ -5484,16 +5541,12 @@ JiTA.sync = {
         }).then(function (res) {
             return JiTA.db.countDefectsOnly().then(function (total) {
                 JiTA.sync.running = false;
-                JiTA.ui.toast('Defect sync complete – ' + total + ' defects in local DB.');
-                JiTA.ui.setStatus(total + ' defects in database');
-                JiTA.sched.markSynced();   // a manual sync also resets the auto-sync 30-min clock
-                if (JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }   // defect data only affects the EBR (similar defects) view
-                JiTA.embed.prepare(true);   // embed new/changed defects in the background (no-op if model unavailable)
+                JiTA.ui.toast('Defect sync complete - ' + total + ' defects in local DB.');
+                JiTA.sync._afterSync(!!(res && res.changed), false, true);
                 return res;
             });
         }).catch(function (e) {
             JiTA.sync.running = false;
-            JiTA.db.setMeta('lastError', String(e && e.message || e));
             JiTA.ui.setStatus('Sync error: ' + (e && e.message || e));
             alert('Defect sync failed: ' + (e && e.message || e) + '\nReport issues to Schogol :).');
         });
@@ -5510,14 +5563,10 @@ JiTA.sync = {
             .then(function () { return JiTA.db.setMeta('lastSyncHighWater', ''); })
             .then(function () { JiTA.rank._dirty = true; return JiTA.sync.fullSync(); })
             .then(function () {
-                return JiTA.db.countByProject('EBR').then(function (ebr) {
-                  return JiTA.db.countDefects().then(function (total) {
+                return JiTA.db.countDefectsOnly().then(function (total) {
                     JiTA.sync.running = false;
-                    JiTA.ui.toast('Rebuild complete – ' + (total - ebr) + ' defects.');   // EBRs are preserved, exclude them from the count
-                    JiTA.sched.markSynced();   // a rebuild also resets the auto-sync 30-min clock
-                    if (JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }   // defect data only affects the EBR (similar defects) view
-                    JiTA.embed.prepare(true);   // re-embed everything in the background
-                  });
+                    JiTA.ui.toast('Rebuild complete - ' + total + ' defects.');
+                    JiTA.sync._afterSync(true, false, true);   // re-embed everything in the background
                 });
             })
             .catch(function (e) {
@@ -5530,7 +5579,7 @@ JiTA.sync = {
     // Wipe ONLY the stored open bug reports and rebuild that dataset from scratch (defects are preserved).
     // The mirror of rebuild() for the EBR side: clear EBR records + their cursors, then a full EBR build.
     // Useful when the open-report set has drifted (closures missed between incremental syncs) and you want
-    // a clean re-fetch, since "Sync bug reports now" only ever does an incremental catch-up once populated.
+    // a clean re-fetch, since "Sync now" only ever does an incremental catch-up once populated.
     rebuildEbr: function () {
         if (JiTA.sync.running) { JiTA.ui.toast('A sync is already running…'); return Promise.resolve(); }
         if (!confirm('Rebuild the local bug report database from scratch? This re-fetches every open EBR.')) { return Promise.resolve(); }
@@ -5539,14 +5588,12 @@ JiTA.sync = {
         return JiTA.db.clearEbr()
             .then(function () { return JiTA.db.setMeta('resumeTokenEbr', null); })
             .then(function () { return JiTA.db.setMeta('lastSyncHighWaterEbr', ''); })
-            .then(function () { JiTA.rank._dirtyEbr = true; JiTA.rank._dirtyEbrVec = true; return JiTA.sync.fullSyncEbr(); })
+            .then(function () { JiTA.rank._dirtyEbr = true; return JiTA.sync.fullSyncEbr(); })
             .then(function () {
                 return JiTA.db.countEbr().then(function (total) {
                     JiTA.sync.running = false;
-                    JiTA.ui.toast('Rebuild complete – ' + total + ' open bug reports.');
-                    JiTA.sched.markSynced();   // a rebuild also resets the auto-sync 30-min clock
-                    if (JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }   // bug-report data only affects the EDR/EO (matching reports) view
-                    JiTA.embed.prepare(true);   // re-embed the bug reports in the background
+                    JiTA.ui.toast('Rebuild complete - ' + total + ' open bug reports.');
+                    JiTA.sync._afterSync(false, true, true);   // re-embed and re-translate the bug reports in the background
                 });
             })
             .catch(function (e) {
@@ -5557,24 +5604,26 @@ JiTA.sync = {
     },
 
     // Re-crawl a whole dataset from scratch WITHOUT clearing it first (unlike rebuild). Resetting the cursors
-    // forces a full crawl; because the existing records stay put, _run's "preserve embedding when textHash is
-    // unchanged" path keeps every vector while bulkPut overwrites each record with the current field set - so
+    // forces a full crawl; because the existing records stay put, the "keep derived work when textHash is
+    // unchanged" merge (syncPut) keeps every vector while each record is rewritten with the current field set - so
     // a newly-added field (e.g. `created`) is backfilled with NO re-embedding. Used by JiTA.migrate to
-    // upgrade a DB built before a field existed. Single-flight via `running`; quiet (no confirm dialog).
+    // upgrade a DB built before a field existed. A full crawl already under way (one a reload interrupted) is
+    // carried on rather than reset. Single-flight via `running`; quiet (no confirm dialog).
     refetchDefects: function () {
         if (JiTA.sync.running) { return Promise.resolve(); }
         JiTA.sync.running = true;
         JiTA.ui.toast('Updating local defect database to the latest format…');
-        return JiTA.db.setMeta('resumeToken', null)
-            .then(function () { return JiTA.db.setMeta('lastSyncHighWater', ''); })
-            .then(function () { JiTA.rank._dirty = true; JiTA.rank._dirtyVec = true; return JiTA.sync.fullSync(); })
-            .then(function () {
+        return JiTA.db.getMeta('resumeToken')
+            .then(function (rt) {
+                if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL)) { return null; }
+                return JiTA.db.setMeta('resumeToken', null).then(function () { return JiTA.db.setMeta('lastSyncHighWater', ''); });
+            })
+            .then(function () { JiTA.rank._dirty = true; return JiTA.sync.fullSync(); })
+            .then(function (res) {
                 return JiTA.db.countDefectsOnly().then(function (total) {
                     JiTA.sync.running = false;
-                    JiTA.ui.toast('Defect database updated – ' + total + ' defects.');
-                    JiTA.sched.markSynced();
-                    if (JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                    JiTA.embed.prepare(true);
+                    JiTA.ui.toast('Defect database updated - ' + total + ' defects.');
+                    JiTA.sync._afterSync(!!(res && res.changed), false, true);
                 });
             })
             .catch(function (e) {
@@ -5587,16 +5636,17 @@ JiTA.sync = {
         if (JiTA.sync.running) { return Promise.resolve(); }
         JiTA.sync.running = true;
         JiTA.ui.toast('Updating local bug report database to the latest format…');
-        return JiTA.db.setMeta('resumeTokenEbr', null)
-            .then(function () { return JiTA.db.setMeta('lastSyncHighWaterEbr', ''); })
-            .then(function () { JiTA.rank._dirtyEbr = true; JiTA.rank._dirtyEbrVec = true; return JiTA.sync.fullSyncEbr(); })
-            .then(function () {
+        return JiTA.db.getMeta('resumeTokenEbr')
+            .then(function (rt) {
+                if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL_EBR)) { return null; }
+                return JiTA.db.setMeta('resumeTokenEbr', null).then(function () { return JiTA.db.setMeta('lastSyncHighWaterEbr', ''); });
+            })
+            .then(function () { JiTA.rank._dirtyEbr = true; return JiTA.sync.fullSyncEbr(); })
+            .then(function (res) {
                 return JiTA.db.countEbr().then(function (total) {
                     JiTA.sync.running = false;
-                    JiTA.ui.toast('Bug report database updated – ' + total + ' open reports.');
-                    JiTA.sched.markSynced();
-                    if (JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                    JiTA.embed.prepare(true);
+                    JiTA.ui.toast('Bug report database updated - ' + total + ' open reports.');
+                    JiTA.sync._afterSync(false, !!(res && res.changed), true);
                 });
             })
             .catch(function (e) {
@@ -5610,28 +5660,26 @@ JiTA.sync = {
     // and the EBR keyword index as the dirty target. The FULL build uses the open-only scope; the
     // INCREMENTAL pass drops the open-filter and prunes (deletes) reports that have since closed.
     fullSyncEbr: function () {
-        return JiTA.db.getMeta('resumeTokenEbr').then(function (rt) {
-            return JiTA.db.getMeta('lastSyncHighWaterEbr').then(function (hw) {
-                var jql = JiTA.EBR_SCOPE + ' ORDER BY updated ASC';
-                return JiTA.sync._run(jql, { startToken: rt || null, startHighWater: hw || '', metaPrefix: 'Ebr', isEbr: true }).then(function (res) {
-                    // Full open-EBR crawl -> stamp the EBR schema version + build time (see fullSync / JiTA.migrate).
-                    return JiTA.db.setMeta('dataVersionEbr', JiTA.DATA_VERSION)
-                        .then(function () { return JiTA.db.setMeta('dbBuiltAtEbr', new Date().toISOString()); })
-                        .then(function () { return res; });
-                });
-            });
+        return JiTA.sync._fullRun('Ebr', JiTA.sync.FULL_JQL_EBR).then(function (res) {
+            // Full open-EBR crawl -> stamp the EBR schema version + build time (see fullSync / JiTA.migrate).
+            return JiTA.db.setMeta('dataVersionEbr', JiTA.DATA_VERSION)
+                .then(function () { return JiTA.db.setMeta('dbBuiltAtEbr', new Date().toISOString()); })
+                .then(function () { return res; });
         });
     },
 
     incrementalSyncEbr: function () {
-        return JiTA.db.getMeta('lastSyncHighWaterEbr').then(function (hw) {
-            if (!hw) { return JiTA.sync.fullSyncEbr(); }
-            var since = JiTA.util.jqlSince(hw);
-            if (!since) { return JiTA.sync.fullSyncEbr(); }
-            // No open-filter here on purpose: we want updated-but-now-closed reports back so pruneResolved
-            // can delete them from the open-report set.
-            var jql = 'project = EBR AND updated >= "' + since + '" ORDER BY updated ASC';
-            return JiTA.sync._run(jql, { startHighWater: hw, metaPrefix: 'Ebr', pruneResolved: true, isEbr: true });
+        return JiTA.db.getMeta('resumeTokenEbr').then(function (rt) {
+            if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL_EBR)) { return JiTA.sync.fullSyncEbr(); }   // finish an interrupted build first
+            return JiTA.db.getMeta('lastSyncHighWaterEbr').then(function (hw) {
+                if (!hw) { return JiTA.sync.fullSyncEbr(); }
+                var since = JiTA.util.jqlSince(hw);
+                if (!since) { return JiTA.sync.fullSyncEbr(); }
+                // No open-filter here on purpose: we want updated-but-now-closed reports back so pruneResolved
+                // can delete them from the open-report set.
+                var jql = 'project = EBR AND updated >= "' + since + '" ORDER BY updated ASC';
+                return JiTA.sync._run(jql, { startHighWater: hw, metaPrefix: 'Ebr', pruneResolved: true, isEbr: true });
+            });
         });
     },
 
@@ -5643,20 +5691,14 @@ JiTA.sync = {
         JiTA.ui.setStatus('Starting bug report sync…');
         return JiTA.db.countEbr().then(function (n) {
             return n === 0 ? JiTA.sync.fullSyncEbr() : JiTA.sync.incrementalSyncEbr();
-        }).then(function () {
+        }).then(function (res) {
             return JiTA.db.countEbr().then(function (total) {
                 JiTA.sync.running = false;
-                JiTA.rank._dirtyEbr = true;
-                JiTA.rank._dirtyEbrVec = true;
-                JiTA.ui.toast('Bug report sync complete – ' + total + ' open reports in local DB.');
-                JiTA.sched.markSynced();   // a manual sync also resets the auto-sync 30-min clock
-                if (JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                JiTA.embed.prepare(true);   // embed the new/changed bug reports in the background (for hybrid)
-                JiTA.translate.prepare();   // translate any new foreign reports to English in the background
+                JiTA.ui.toast('Bug report sync complete - ' + total + ' open reports in local DB.');
+                JiTA.sync._afterSync(false, !!(res && res.changed), true);
             });
         }).catch(function (e) {
             JiTA.sync.running = false;
-            JiTA.db.setMeta('lastError', String(e && e.message || e));
             JiTA.ui.setStatus('Bug report sync error: ' + (e && e.message || e));
             alert('Bug report sync failed: ' + (e && e.message || e) + '\nReport issues to Schogol :).');
         });
@@ -5674,7 +5716,7 @@ JiTA.sync = {
     // enough: the shared ranking worker keeps the report in its in-memory kwCache/vecCache (its vector still
     // ranks in on the semantic channel), and a plain reload won't fix it - the worker survives the reload and
     // the 30-min sync throttle (recentlySynced) skips the catch-up that would re-prune + re-index. So we (a)
-    // mark THIS tab's EBR keyword/vector indexes dirty, (b) drop the shared worker's indexes via 'invalidate'
+    // mark THIS tab's EBR keyword index dirty, (b) drop the shared worker's indexes via 'invalidate'
     // (it rebuilds from the current DB, minus the removed report, on the next query), and (c) tell the other tabs
     // (the listener near startup re-renders them) once that has landed, so none of them ranks against the old
     // indexes. The other tabs only mark their own indexes: one removal used to drop the shared worker's indexes
@@ -5682,7 +5724,6 @@ JiTA.sync = {
     // (softRefreshStatus / _fadeOutAndReplace), so we deliberately don't re-render it here.
     _ebrRemoved: function (keys, fromRemote) {
         JiTA.rank._dirtyEbr = true;
-        JiTA.rank._dirtyEbrVec = true;
         if (fromRemote) { return; }
         var note = { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId };
         JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });
@@ -5697,37 +5738,34 @@ JiTA.sync = {
     },
 
     // Quiet background catch-up used by the auto-sync scheduler. BOTH datasets AUTO-INITIALIZE on the first
-    // run (full build when the DB is empty) and then run incremental catch-ups: DEFECTS (EDR/EO) and OPEN
-    // BUG REPORTS (EBRs). No start/finish toasts; re-embeds / refreshes the open panel only on actual changes.
+    // run (full build when the DB is empty) and then run incremental catch-ups: DEFECTS (EDR/EO/PLAT) and OPEN
+    // BUG REPORTS (EBRs). No toasts, and the incremental runs leave the panel's status line alone (_quiet); it
+    // re-embeds, translates and refreshes the open panel only when a run changed something.
     // Resolves true when it completed, false when it failed, and null when another sync was already running.
     autoSync: function () {
         if (JiTA.sync.running) { return Promise.resolve(null); }
         JiTA.sync.running = true;
-        var defectStored = 0, ebrChanged = false;
+        JiTA.sync._quiet = true;
+        var defectsChanged = false, ebrChanged = false;
         return JiTA.db.countDefectsOnly().then(function (n) {
             // Auto-initialize the defect DB on the first run (full build), then incremental catch-up.
             var run = (n === 0) ? JiTA.sync.fullSync() : JiTA.sync.incrementalSync();
-            return run.then(function (res) { defectStored = (res && res.stored) || 0; });
+            return run.then(function (res) { defectsChanged = !!(res && res.changed); });
         }).then(function () {
             return JiTA.db.countEbr().then(function (m) {
                 // First run with no reports yet -> initialize the open-report DB once; otherwise catch up.
                 var run = (m === 0) ? JiTA.sync.fullSyncEbr() : JiTA.sync.incrementalSyncEbr();
-                return run.then(function (res) { if (m === 0 || (res && res.stored)) { ebrChanged = true; } });
+                return run.then(function (res) { ebrChanged = !!(res && res.changed); });
             });
         }).then(function () {
             JiTA.sync.running = false;
-            console.log('[JiTA] auto-sync done (defects ' + defectStored + ' fetched; EBRs ' + (ebrChanged ? 'updated' : 'unchanged') + ')');
-            return JiTA.db.setMeta('lastAutoSyncAt', new Date().toISOString()).then(function () {
-                JiTA.sched.markSynced();   // start the 30-min clock so reloads don't re-fetch
-                if (defectStored > 0 || ebrChanged) { JiTA.embed.prepare(true); }   // embed any new/changed defects AND bug reports
-                if (ebrChanged) { JiTA.translate.prepare(); }                        // translate any new foreign reports
-                if (defectStored > 0 && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                if (ebrChanged && JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                return true;
-            });
+            JiTA.sync._quiet = false;
+            console.log('[JiTA] auto-sync done (defects ' + (defectsChanged ? 'changed' : 'unchanged') + '; EBRs ' + (ebrChanged ? 'changed' : 'unchanged') + ')');
+            JiTA.sync._afterSync(defectsChanged, ebrChanged, false);
+            return true;
         }).catch(function (e) {
             JiTA.sync.running = false;
-            JiTA.db.setMeta('lastError', String(e && e.message || e));
+            JiTA.sync._quiet = false;
             console.log('[JiTA] auto-sync error:', e && e.message || e);
             return false;
         });
@@ -5735,7 +5773,7 @@ JiTA.sync = {
 };
 
 
-/* ---- ranking: BM25 keyword similarity (Phase 1) ---- */
+/* ---- ranking: BM25 keyword similarity (the tab's fallback; the shared worker holds the main index) ---- */
 JiTA.rank = {
     _index: null,       // { N, avgdl, df:{}, docs:[{key,project,summary,status,tf:{},len}] }
     _dirty: true,       // set true whenever sync writes; triggers a rebuild on next query
@@ -5913,261 +5951,33 @@ JiTA.rank._bm25Score = function (idx, text, excludeKey, limit, filterTerms) {
 };
 
 
-/* ---- embedding engine: local transformers.js (main-thread fallback) ----
- * The shared worker hosts the primary embedding engine now (one model for all tabs). This local copy is
- * the fallback path for when the worker never comes up (no Web Locks / BroadcastChannel / module workers):
- * it lazily loads the same small sentence-embedding model in THIS tab (no server, no API key) and embeds
- * defect text into 384-dim normalized vectors. CSP on this instance is permissive (only frame-ancestors,
- * WASM OK), so we load the library with a plain dynamic import() of a pinned CDN ESM build and let it
- * fetch model weights directly. Any failure flips `unavailable` and the ranking layer falls back to BM25.
+/* ---- embedding: the shared worker's text model, as the tabs see it ----
+ * The embedding model (transformers.js, gte-small, 384-dim normalized vectors) runs only in the shared worker
+ * (jitaWorkerBody), one model for every tab. These are the settings the worker is built with, and prepare(), which
+ * asks it to embed whatever is outstanding. A tab without a usable worker ranks by keywords alone. There used to be a
+ * main-thread copy of the whole engine here, as a fallback, but semantic ranking only ever runs in the worker
+ * (rank._workerSemantic), so that copy loaded a model into the tab and wrote vectors nothing in it ever read.
  */
 JiTA.embed = {
     MODEL: 'Xenova/gte-small',   // English, retrieval-tuned, 384-dim (rolled back from the multilingual e5/paraphrase experiment, which was disliked). English-only; cross-language matching is to be handled by translating foreign reports to English at ingest instead. No query:/passage: prefixes.
     LIB_URL: 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.2/dist/transformers.min.js',
-    BATCH: 16,
-    MAX_CHARS: 1500,            // cap text per issue. Now that cleanForCompare strips the boilerplate, the
-                                // budget holds real content; raised back to 1500 (~380 tokens) since GPU
-                                // fp32/batch-32 handles it fast. (On the CPU fallback this is slower but the
-                                // single-item path + watchdog keep it safe.)
-    WARM_WAIT_MS: 4200,        // on first render, how long the panel waits for the model to finish loading
-                               // before falling back to instant keyword results (fast/no-op when cached)
-    ready: false,              // model pipeline is loaded and usable
-    unavailable: false,        // load failed irrecoverably -> stay on BM25
-    backend: null,             // 'webgpu/fp16' etc (for diagnostics)
-    _pipe: null,
-    _loading: null,
+    MAX_CHARS: 1500,            // cap text per issue (the worker cuts each text to this). Now that cleanForCompare strips
+                                // the boilerplate, the budget holds real content (~380 tokens).
+    WARM_WAIT_MS: 4200,        // on first render, how long the panel waits for the worker's hybrid ranking before
+                               // showing keyword results (fast once the worker's model is loaded)
     _preparing: null,
-    _prepared: false,
 
-    // Drop the current pipeline so the next embed call rebuilds it (used to recover from a lost GPU device).
-    _resetPipe: function () {
-        JiTA.embed._pipe = null;
-        JiTA.embed._loading = null;
-        JiTA.embed.ready = false;
-    },
-
-    // Load (once) the transformers.js pipeline. Resolves to the pipeline, or rejects and sets `unavailable`.
-    // Inference is kept OFF the main thread so the Jira tab never freezes: WebGPU runs on the GPU, and the
-    // WASM fallback runs in its own worker via env.backends.onnx.wasm.proxy. We pick WebGPU if it actually
-    // works (validated with a tiny warmup) and otherwise fall back to WASM.
-    load: function () {
-        if (JiTA.embed._pipe) { return Promise.resolve(JiTA.embed._pipe); }
-        if (JiTA.embed.unavailable) { return Promise.reject(new Error('embeddings unavailable')); }
-        if (JiTA.embed._loading) { return JiTA.embed._loading; }
-        JiTA.embed._loading = (function () {
-            return import(JiTA.embed.LIB_URL).then(function (mod) {
-                if (mod.env) {
-                    mod.env.allowLocalModels = false;     // always fetch from the hub/CDN
-                    mod.env.useBrowserCache = true;        // cache weights in CacheStorage after first download
-                    // Run the ONNX/WASM backend in a worker so embedding never blocks the page.
-                    try { mod.env.backends.onnx.wasm.proxy = true; } catch (e) { /* older builds: ignore */ }
-                }
-                // Pick a backend that actually works. We deliberately do NOT use fp16 on WebGPU for this
-                // model: gte-small's intermediate activations exceed the tiny fp16 range and overflow to
-                // Inf/NaN, so embeddings come back as NaN (cosine -> NaN, "%" shows NaN, semantic ranking
-                // becomes noise). fp32 on WebGPU is reliable; the WASM/CPU fallback uses q8 (small + fine on
-                // CPU). Each candidate is validated below, so any backend that yields bad numbers is rejected.
-                // After a GPU device loss we rebuild on WASM only; otherwise prefer WebGPU fp32 then WASM.
-                // WebGPU has proven unstable for this model: every dtype/batch size we tried eventually died
-                // with a device loss ("AbortError: Buffer unmapped") that can even HANG the worker - the
-                // batch promise never resolves or rejects, so the CPU fallback never triggers and the pass
-                // silently stalls. So the default is CPU/WASM only: slower but rock-solid and finite (no fp16
-                // NaN issues either). WebGPU is the DEFAULT backend (fast): `sdTryWebgpu` defaults to true and
-                // the menu toggle is the ONLY thing that switches backend - a GPU failure does NOT auto-fall
-                // back to CPU (it retries on GPU, then pauses). `sdForceCpu` is still honored if the menu sets
-                // it, but nothing else forces CPU on its own.
-                var forceCpu = gmGet('sdForceCpu', false);
-                var tryGpu = !forceCpu && gmGet('sdTryWebgpu', true);
-                var attempts = tryGpu
-                    ? [{ device: 'webgpu', dtype: 'fp32' }, { device: 'wasm', dtype: 'q8' }]
-                    : [{ device: 'wasm', dtype: 'q8' }];
-                function buildWith(opts) {
-                    // Validate with a realistic, longer input rather than a single word. fp16/overflow issues
-                    // surface only on real-length text, so a tiny warmup would falsely "pass" and we'd store
-                    // NaN vectors. Require a finite, properly-normalized vector (sum of squares ~= 1).
-                    return mod.pipeline('feature-extraction', JiTA.embed.MODEL, opts).then(function (pipe) {
-                        var probe = 'The quick brown fox jumps over the lazy dog. ' +
-                            'Client crashes on undock with an access violation in the rendering thread after the latest patch.';
-                        return pipe(probe, { pooling: 'mean', normalize: true }).then(function (out) {
-                            var d = out && out.data, ss = 0, ok = !!(d && d.length);
-                            for (var i = 0; ok && i < d.length; i++) {
-                                if (!isFinite(d[i])) { ok = false; } else { ss += d[i] * d[i]; }
-                            }
-                            if (!ok || !(ss > 0.5)) { throw new Error('backend produced invalid embeddings (NaN/Inf/zero)'); }
-                            return pipe;
-                        });
-                    });
-                }
-                function tryFrom(i) {
-                    if (i >= attempts.length) { return Promise.reject(new Error('no usable embedding backend')); }
-                    return buildWith(attempts[i]).then(function (pipe) {
-                        JiTA.embed.backend = attempts[i].device + '/' + attempts[i].dtype;
-                        // fp32 GPU memory ~ batch x sequence-length. With MAX_CHARS at 1500, a large batch can
-                        // exhaust VRAM and trigger a device loss (the "BindGroup '...' is invalid" cascade), so
-                        // WebGPU uses a conservative 8. CPU/WASM runs one at a time: batched (array) inference
-                        // hangs the worker there, while the single-string path (same shape as the warmup) is reliable.
-                        JiTA.embed.BATCH = (attempts[i].device === 'webgpu') ? 8 : 1;
-                        return pipe;
-                    }, function () {
-                        return tryFrom(i + 1);
-                    });
-                }
-                return tryFrom(0);
-            }).then(function (pipe) {
-                JiTA.embed._pipe = pipe;
-                JiTA.embed.ready = true;
-                console.log('[JiTA] embedding model ready (backend: ' + JiTA.embed.backend + ')');
-                return pipe;
-            });
-        })().catch(function (e) {
-            JiTA.embed.unavailable = true;
-            JiTA.embed._loading = null;
-            console.log('[JiTA] embedding model unavailable, using keyword ranking. Reason:', e && e.message || e);
-            throw e;
-        });
-        return JiTA.embed._loading;
-    },
-
-    // Embed a single text -> normalized Float32Array(384). Delegates to embedBatch, whose single-item path is
-    // the identical plain-string call (same input clamping + shape).
-    embedOne: function (text) {
-        return JiTA.embed.embedBatch([text]).then(function (vecs) { return vecs[0]; });
-    },
-
-    // Embed an array of texts -> array of normalized Float32Array(384).
-    embedBatch: function (texts) {
-        return JiTA.embed.load().then(function (pipe) {
-            var inputs = texts.map(function (t) { return (t || ' ').slice(0, JiTA.embed.MAX_CHARS) || ' '; });
-            // Single item: use the plain-string call - the exact shape the warmup proves works. On CPU/WASM
-            // here, passing an array (batched, padded) inference hangs the worker, but single strings are fine.
-            if (inputs.length === 1) {
-                return pipe(inputs[0], { pooling: 'mean', normalize: true }).then(function (out) {
-                    return [new Float32Array(out.data)];
-                });
-            }
-            return pipe(inputs, { pooling: 'mean', normalize: true }).then(function (out) {
-                var dim = out.dims[out.dims.length - 1];
-                var vecs = [];
-                for (var i = 0; i < inputs.length; i++) {
-                    vecs.push(new Float32Array(out.data.subarray(i * dim, (i + 1) * dim)));
-                }
-                return vecs;
-            });
-        });
-    },
-
-    // Embed every stored defect that lacks a current-version embedding, in batches, persisting as we go.
-    // Resumable: if interrupted, the next run just continues with whatever is still missing.
-    embedPass: function () {
-        return JiTA.embed.load().then(function () {
-            return JiTA.db.allDefects();
-        }).then(function (recs) {
-            var todo = [], curVer = 0;
-            for (var i = 0; i < recs.length; i++) {
-                // Embed BOTH defects and open bug reports (EBRs): hybrid ranking is used on both the EBR
-                // (similar defects) and EDR (matching reports) views. Skip closed EBRs and GM-team EBRs - neither
-                // is ranked in the "matching reports" view, so embedding them is wasted work.
-                if (recs[i].project === 'EBR' && (JiTA.util.isClosedStatus(recs[i].status) || JiTA.util.isGmTeam(recs[i].team))) { continue; }
-                if (recs[i].embedding && recs[i].embeddingModelVersion === JiTA.MODEL_VERSION) { curVer++; }
-                else { todo.push(recs[i]); }
-            }
-            console.log('[JiTA] embed pass: ' + todo.length + ' to embed, ' + curVer + ' already at ' +
-                JiTA.MODEL_VERSION + ' (of ' + recs.length + ' total, backend ' + JiTA.embed.backend + ')');
-            if (!todo.length) { JiTA.ui.setStatus('Embeddings up to date (' + curVer + ')'); return; }
-            JiTA.ui.toast('Embedding ' + todo.length + ' issues locally…');
-            var idx = 0, gpuRetries = 0;
-            function nextBatch() {
-                if (idx >= todo.length) { console.log('[JiTA] embed pass complete (' + todo.length + ' embedded)'); JiTA.rank._dirtyVec = true; JiTA.rank._dirtyEbrVec = true; return Promise.resolve(); }
-                var size = JiTA.embed.BATCH;
-                var slice = todo.slice(idx, idx + size);
-                var texts = slice.map(function (r) { return JiTA.util.effectiveText(r); });   // English translation for foreign reports, else cleaned original
-                // Watchdog: a WebGPU device loss can HANG the worker so embedBatch never resolves OR rejects,
-                // which would silently stall the whole pass. Race it against a timeout so a hung batch is
-                // treated as a failure and handled by the catch below (retry on the same backend, then pause).
-                var t0 = Date.now();
-                var batchVecs = JiTA.embed.embedBatch(texts);
-                var watchdog = new Promise(function (_resolve, reject) {
-                    setTimeout(function () { reject(new Error('embed batch timed out after 45s')); }, 45000);
-                });
-                return Promise.race([batchVecs, watchdog]).then(function (vecs) {
-                    var dt = Date.now() - t0;
-                    // Guard against a SILENT device loss: WebGPU can log "BindGroup is invalid" validation
-                    // errors yet still resolve the batch with NaN/empty vectors. Storing those would mark the
-                    // defect "done" with a garbage embedding (then dropped at query time -> silently never
-                    // matches). Detect it and throw, so the catch below recovers (-> CPU) and retries the slice.
-                    for (var g = 0; g < vecs.length; g++) {
-                        if (!vecs[g] || vecs[g].length === 0 || !isFinite(vecs[g][0])) {
-                            throw new Error('embedding returned NaN/empty (likely GPU device loss)');
-                        }
-                    }
-                    for (var j = 0; j < slice.length; j++) {
-                        slice[j].embedding = vecs[j];
-                        slice[j].embeddingModelVersion = JiTA.MODEL_VERSION;
-                    }
-                    return JiTA.db.bulkPut(slice).then(function () {
-                        idx += slice.length;   // advance by what we actually embedded
-                        JiTA.rank._dirtyVec = true;
-                        JiTA.rank._dirtyEbrVec = true;
-                        // Log throughput periodically so we can see the real CPU speed (first item always logs).
-                        if (idx <= slice.length || idx % 50 === 0) {
-                            console.log('[JiTA] embedded ' + idx + '/' + todo.length + ' (' + size + ' in ' + dt + 'ms, ' + JiTA.embed.backend + ')');
-                        }
-                        JiTA.ui.setStatus('Embedding… ' + Math.min(idx, todo.length) + '/' + todo.length + ' (' + JiTA.embed.backend + ')');
-                        return JiTA.util.delay(0).then(nextBatch);   // yield to keep the UI responsive
-                    });
-                }).catch(function (e) {
-                    // A batch failed (on WebGPU, usually a device loss). We deliberately do NOT auto-switch to
-                    // CPU - the backend is the user's choice via the Tampermonkey menu. idx is NOT advanced, so
-                    // no progress is lost: retry a few times on the SAME backend to ride out a transient blip,
-                    // and if it keeps failing, pause the pass (it resumes on the next reload / scheduled sync)
-                    // and tell the user they can switch backend from the menu.
-                    console.log('[JiTA] embed batch failed (' + JiTA.embed.backend + ', size ' + size + '):', e && e.message || e);
-                    JiTA.embed._resetPipe();
-                    gpuRetries++;
-                    if (gpuRetries <= 3) {
-                        return JiTA.util.delay(1500).then(nextBatch);
-                    }
-                    JiTA.ui.toast('Embedding keeps failing on ' + (JiTA.embed.backend || 'GPU') + ' - paused. Reload to retry, or switch backend from the Tampermonkey menu.');
-                    throw e;   // give up this pass (progress saved; ranking stays on BM25 meanwhile)
-                });
-            }
-            return nextBatch();
-        });
-    },
-
-    // Background entry point: load the model and embed anything outstanding, then refresh the panel.
-    // Idempotent per session unless `force` is passed (used right after a sync brings in new/changed text).
-    prepare: function (force) {
-        // With the shared worker, embedding runs THERE (one model for all tabs) - no main-thread model load.
-        // Any tab can trigger it; the request routes to the single leader worker, which is single-flight.
-        if (JiTA.worker && JiTA.worker.usable()) {
-            if (JiTA.embed._preparing) { return JiTA.embed._preparing; }
-            JiTA.embed._preparing = JiTA.worker.call('embedPass').then(function (r) {
-                JiTA.embed._preparing = null;
-                // The call is only acknowledged here; the pass reports its end with embedPassDone, which re-renders.
-            }, function (e) {
-                JiTA.embed._preparing = null;
-                console.log('[JiTA] worker embed pass skipped:', (e && e.message) || e);
-            });
-            return JiTA.embed._preparing;
-        }
-        // Fallback (no worker at all): the original main-thread embed pass.
-        if (JiTA.embed.unavailable) { return Promise.resolve(); }
+    // Background entry point, after a sync or a translation: ask the shared worker to embed anything outstanding.
+    // Any tab can trigger it; the request routes to the single leader worker, which is single-flight, and only
+    // acknowledges here - the pass reports its end with embedPassDone, which re-renders. No worker: nothing to do.
+    prepare: function () {
+        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }
         if (JiTA.embed._preparing) { return JiTA.embed._preparing; }
-        if (JiTA.embed._prepared && !force) { return Promise.resolve(); }
-        JiTA.embed._preparing = JiTA.db.countDefects().then(function (n) {
-            if (!n) { return; }   // nothing synced yet (no defects AND no bug reports) - don't download a model
-            return JiTA.embed.embedPass().then(function () {
-                JiTA.embed._prepared = true;
-                JiTA.rank._dirtyVec = true;
-                JiTA.rank._dirtyEbrVec = true;
-                JiTA.ui.scheduleRender();
-            });
-        }).then(function () {
+        JiTA.embed._preparing = JiTA.worker.call('embedPass').then(function () {
             JiTA.embed._preparing = null;
-        }).catch(function (e) {
+        }, function (e) {
             JiTA.embed._preparing = null;
-            console.log('[JiTA] embed prepare skipped:', e && e.message || e);
+            console.log('[JiTA] worker embed pass skipped:', (e && e.message) || e);
         });
         return JiTA.embed._preparing;
     }
@@ -6235,7 +6045,6 @@ JiTA.translate = {
                 var total = foreign.length, next = 0, done = 0, translated = 0;
                 function report(extra) {
                     if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating foreign reports… ' + done + ' / ' + total + (extra || '')); }
-                    if (done % 10 === 0 || done >= total) { JiTA.db.setMeta('translateProgress', { done: done, total: total, translated: translated }); }
                 }
                 // Two concurrent lanes, each PINNED to one endpoint (failover to the other per request), so both
                 // Google endpoints are in flight at once. Each lane waits BATCH_DELAY between its own calls, so each
@@ -6289,13 +6098,11 @@ JiTA.translate = {
                     return pull();
                 }
                 function finish() {
-                    return JiTA.db.setMeta('translateProgress', { done: total, total: total, translated: translated, at: Date.now() }).then(function () {
-                        if (translated > 0) {
-                            JiTA.rank._dirtyEbr = true; JiTA.rank._dirtyEbrVec = true;    // tab-side BM25/vec rebuild off English
-                            JiTA.embed.prepare(true);                                     // re-embed the cleared records, off English
-                            if (JiTA.ui && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                        }
-                    });
+                    if (translated > 0) {
+                        JiTA.rank._dirtyEbr = true;                                   // tab-side BM25 rebuild off English
+                        JiTA.embed.prepare();                                         // re-embed the cleared records, off English
+                        if (JiTA.ui && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
+                    }
                 }
                 report();   // 0 / total up front
                 return Promise.all([lane(0), lane(1)]).then(finish);   // both endpoints concurrently
@@ -6424,7 +6231,7 @@ JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid, onUpgrade) {
 JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, onUpgrade) {
     // Feature A: gently demote a Closed defect that was fixed long before this bug report was filed - it
     // is very unlikely to be the report's real duplicate. Scales whatever score fields the result carries
-    // (score / rrf / pct) by the age factor and tags it so the panel can grey it and explain why.
+    // (score / rrf / pct) by the age factor and notes the gap, so the row says why it ranks lower.
     function demote(r) {
         if (!brCreated || !r.resolutiondate || !JiTA.util.isResolved(r.status, r.resolution)) { return; }
         var sf = JiTA.util.staleFactor(brCreated, r.resolutiondate);
@@ -6432,7 +6239,6 @@ JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, 
         if (typeof r.score === 'number') { r.score *= sf.factor; }
         if (typeof r.rrf === 'number') { r.rrf *= sf.factor; }
         if (typeof r.pct === 'number') { r.pct = Math.round(r.pct * sf.factor); }
-        r.stale = true;
         // Note: the meta line already shows the status ("Closed"), so don't repeat it here - just the gap.
         r.staleNote = 'fixed ' + JiTA.util.humanizeAge(sf.ageDays) + ' before report';
     }
@@ -6721,7 +6527,7 @@ JiTA.ui = {
 #jita-sd-filtermenu .jita-fm-view { display: block; width: 100%; margin: 0 0 10px; background: #2c333a; color: #cfd6dd; border: 1px solid #3a434d; border-radius: 5px; padding: 6px; cursor: pointer; font-size: 12px; text-align: center; }\
 #jita-sd-filtermenu .jita-fm-view:hover { color: #fff; border-color: #4c9aff; }\
 #jita-sd-filtermenu .jita-fm-view.on { background: #4c9aff; color: #fff; font-weight: 700; border-color: #4c9aff; }\
-#jita-sd-list li.jita-sd-stale { opacity: .6; }\
+#jita-sd-list li.jita-sd-closed { opacity: .6; }\
 .jita-sd-sum { margin-top: 2px; color: #e6e6e6; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-meta { margin-top: 2px; color: #7a8694; font-size: 10px; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-date { margin-top: 2px; color: #7a8694; font-size: 10px; text-align: right; }\
@@ -6937,11 +6743,11 @@ JiTA.ui = {
             JiTA.ui._fitVertical();
         }
     },
-    // Toggle the session ranking-mode override (Hybrid <-> Keyword) and re-render. No-op (with a hint) when
-    // semantic embeddings are unavailable, since Hybrid isn't possible then. `rerender` lets the triage
-    // overlay's own badge re-rank its queue instead of the panel behind it.
+    // Toggle the session ranking-mode override (Hybrid <-> Keyword) and re-render. No-op (with a hint) when the
+    // shared worker cannot run in this tab, since semantic ranking runs only there and Hybrid isn't possible
+    // then. `rerender` lets the triage overlay's own badge re-rank its queue instead of the panel behind it.
     _cycleMode: function (rerender) {
-        if (JiTA.embed && JiTA.embed.unavailable) { JiTA.ui.toast('Semantic embeddings unavailable - keyword ranking only.'); return; }
+        if (!(JiTA.worker && JiTA.worker.usable())) { JiTA.ui.toast('Semantic ranking needs the shared worker, which is not running in this tab - keyword ranking only.'); return; }
         var cur = JiTA.ui.modeOverride;
         if (cur === 'Keyword') { JiTA.ui.modeOverride = 'Hybrid'; }
         else if (cur === 'Hybrid') { JiTA.ui.modeOverride = 'Keyword'; }
@@ -7405,8 +7211,7 @@ JiTA.ui = {
     // smaller than when the position was saved). Switching to left/top overrides the default right/bottom
     // anchoring from the CSS. A null/invalid saved value leaves the default bottom-right placement alone.
     _applyPos: function ($p) {
-        var pos = null;
-        pos = gmGet(JiTA.ui.POS_KEY, null);
+        var pos = gmGet(JiTA.ui.POS_KEY, null);
         if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') { return; }
         var el = $p[0];
         var w = el.offsetWidth || 340, h = el.offsetHeight || 60;
@@ -7579,8 +7384,7 @@ JiTA.ui = {
             '</div>'
         );
         // Restore the saved minimized state before showing the panel.
-        var collapsed = false;
-        collapsed = !!gmGet(JiTA.ui.COLLAPSE_KEY, false);
+        var collapsed = !!gmGet(JiTA.ui.COLLAPSE_KEY, false);
         if (collapsed) { $p.addClass('collapsed'); }
         $p.find('#jita-sd-collapse').text(collapsed ? '+' : '–');
         $p.find('#jita-sd-collapse').on('click', function () {
@@ -7640,8 +7444,7 @@ JiTA.ui = {
         var old = document.getElementById('jita-side-group');
         if (old && old.parentNode) { old.parentNode.removeChild(old); }
 
-        var collapsed = false;
-        collapsed = !!gmGet(JiTA.ui.SIDE_COLLAPSE_KEY, false);
+        var collapsed = !!gmGet(JiTA.ui.SIDE_COLLAPSE_KEY, false);
 
         var group = null, headerClickTarget = null;
 
@@ -8153,8 +7956,9 @@ JiTA.ui = {
     // Shared list-row builder for both views. `target` = the key link's anchor target ('_self' for the
     // EBR->defect list so you navigate in place; '_blank' for the defect->report list so the defect page stays
     // put). `action(key)` returns the trailing control ($ Mark-dup on the EBR view, Attach on the report view).
-    // The staleNote / stale-class bits fire only for stale-demoted defect matches (undefined on reports), and
-    // data-jita-key (read by the report view's incremental attach/slide-in) is harmless on the EBR view.
+    // The staleNote fires only for stale-demoted defect matches, the closed class only for a closed report in the
+    // reporter's list (both undefined elsewhere), and data-jita-key (read by the report view's incremental
+    // attach/slide-in) is harmless on the EBR view.
     // opts.score replaces the relevance % with a text of its own (the trending view's report count); r.note is
     // appended to the meta line. Every other row gets the 🔥 badge when its defect is trending.
     _row: function (r, target, action, opts) {
@@ -8164,7 +7968,7 @@ JiTA.ui = {
         if (r.staleNote) { meta += (meta ? ' · ' : '') + r.staleNote; }   // Feature A: explain the demotion
         if (r.note) { meta += (meta ? ' · ' : '') + r.note; }             // trending: how the count compares, reports after a fix
         var $li = $('<li></li>').attr('data-jita-key', r.key);
-        if (r.stale) { $li.addClass('jita-sd-stale'); }                    // Feature A: grey out stale-closed matches
+        if (r.closed) { $li.addClass('jita-sd-closed'); }                  // a closed report among this reporter's reports
         // Feature C: hover preview - a styled card (built in _showTip) showing the summary, full description
         // (incl. reproduction steps) and status, so the triager can judge a match without navigating.
         $li.on('mouseenter', function () { JiTA.ui._showTip(r, this, meta); });
@@ -8604,7 +8408,7 @@ JiTA.ui = {
                         resolution: (f.resolution && f.resolution.name) || null,
                         created: f.created || null,
                         description: JiTA.util.toPlainText(f.description),
-                        stale: JiTA.util.isClosedStatus(status)   // grey out closed reports so the open ones stand out
+                        closed: JiTA.util.isClosedStatus(status)   // grey out closed reports so the open ones stand out
                     });
                 }
                 if (!rows.length) { JiTA.ui.setStatus('No other reports from this reporter.'); return; }
@@ -8883,7 +8687,6 @@ JiTA.menu = {
 #jita-menu .jita-num { width: 56px; flex: 0 0 auto; background: #2c333a; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 5px 8px; font-size: 12px; text-align: center; }\
 #jita-menu .jita-num:focus { outline: none; border-color: #4c9aff; }\
 #jita-menu .jita-menu-status { color: #9aa6b2; font-size: 11px; padding: 8px 0 0; }\
-#jita-menu .jita-resp-list { display: flex; flex-direction: column; gap: 8px; padding: 6px 0; }\
 #jita-menu .jita-resp-item { display: flex; flex-direction: column; gap: 4px; border: 1px solid #2c333a; border-radius: 6px; padding: 8px; position: relative; }\
 #jita-menu .jita-resp-title { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 4px; padding: 5px 26px 5px 8px; font-size: 12px; font-weight: 600; }\
 #jita-menu .jita-resp-body { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 4px; padding: 5px 8px; font-size: 12px; resize: vertical; font-family: inherit; line-height: 1.4; }\
@@ -9002,8 +8805,8 @@ JiTA.menu = {
             if (!flagOn('similarDefects')) {
                 $('#jita-sd-panel').remove();
                 $('#jita-side-group').remove();
-                if (typeof JiTA !== 'undefined') { JiTA.ui.currentKey = null; }
-            } else if (typeof JiTA !== 'undefined') {
+                JiTA.ui.currentKey = null;
+            } else {
                 JiTA.ui.ensure();
             }
         }));
@@ -9041,7 +8844,7 @@ JiTA.menu = {
         // ---- Canned responses (Zendesk Support panel) ----
         // A repository of reusable replies, shown as a dropdown in the Zendesk Support activity panel (picking
         // one replaces the editor). The actual editing happens in a roomier standalone window
-        // (JiTA.responses.openEditor); here we just expose the entry point + a quick "Restore defaults".
+        // (JiTA.responses.openEditor, which also holds Restore defaults); here we just expose the entry point.
         // Edits persist in GM storage and reach the Forge-iframe dropdown live.
         var $resp = $('<div class="jita-menu-sect"></div>');
         $('<h3>Canned responses</h3>').appendTo($resp);
@@ -9068,7 +8871,7 @@ JiTA.menu = {
             $ta.append($actions);
 
             // Panel style (integrated sidebar vs floating box). JiTA.ui.toggleStyle() re-mounts in place.
-            var sidebarOn = (typeof JiTA !== 'undefined' && JiTA.ui.mode() === 'sidebar');
+            var sidebarOn = (JiTA.ui.mode() === 'sidebar');
             var $styleRow = $('<div class="jita-menu-row"></div>');
             $('<span class="lbl">Panel style</span>')
                 .append($('<span class="sub"></span>').text('Currently: ' + (sidebarOn ? 'Sidebar (integrated)' : 'Floating (draggable box)')))
@@ -9436,14 +9239,11 @@ JiTA.menu = {
 // device loss. This build makes WebGPU the default, so clear that stale lock ONCE (and arm `sdTryWebgpu`) to
 // give GPU a fresh attempt. Any future device loss re-sets the lock as normal, so the crash-loop guard still
 // works and the menu toggle can still force CPU.
-(function () {
-    if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') { return; }
-    if (!GM_getValue('sdGpuDefault_v1', false)) {
-        GM_setValue('sdForceCpu', false);
-        GM_setValue('sdTryWebgpu', true);
-        GM_setValue('sdGpuDefault_v1', true);
-    }
-})();
+if (!gmGet('sdGpuDefault_v1', false)) {
+    gmSet('sdForceCpu', false);
+    gmSet('sdTryWebgpu', true);
+    gmSet('sdGpuDefault_v1', true);
+}
 
 
 /* ---- data-schema migration: auto-rebuild a local DB that predates a stored-field change ---- */
@@ -9493,8 +9293,8 @@ JiTA.migrate = {
 };
 
 
-/* ---- background auto-sync scheduler (Phase 3) ---- */
-// Keeps the local DB fresh without the user clicking "Sync defects now": auto-initializes both datasets on
+/* ---- background auto-sync scheduler ---- */
+// Keeps the local DB fresh without the user clicking "Sync now": auto-initializes both datasets on
 // first run and then runs incremental catch-ups roughly every INTERVAL_MS. A best-effort cross-tab lease
 // (GM storage) keeps multiple open Jira tabs from all syncing at once; the in-tab `running` flag prevents
 // overlap within a tab. We POLL on a short timer (POLL_MS) and let the persisted recentlySynced() gate
@@ -9582,19 +9382,20 @@ JiTA.sched = {
 };
 
 
-/* ---- ISD monthly credit tracker: live current-month credit calc (+ leaderboard, later phases) ----
+/* ---- ISD monthly credit tracker: live current-month credits and the group leaderboard ----
  * Ports scratchpad/monthly_report.py to run IN-BROWSER against the logged-in ISD's Jira SESSION (read-only,
  * no API token). Same credit formula and attribution rules, so the live number matches the authoritative
  * month-end Python run. The computed per-member table is cached in the meta store (key credits:<YYYY-MM>);
- * a past month is computed once more after it ends (see sched.tick) and then left alone; the current month is refreshed on demand / by a
- * throttled background job (added in a later phase).
+ * a past month is computed once more after it ends (see sched.tick) and then left alone; the current month is
+ * refreshed on demand and by a throttled background job (sched). The crawl itself runs in the shared worker
+ * (crComputeMonth / crComputeSelf in jitaWorkerBody); this side dispatches it and keeps the cache.
  *
  * PARITY: keep this in lockstep with monthly_report.py. Mirrored here: the credit formula, projects
  * (EO/PLAT/EDR) + resolutions (Fixed/Done/Released), clone dedup via the "Cloners" link (union-find),
- * reopen-aware Attached/Trashed attribution, automation-account re-credit (a BR converted to a defect sets
- * -> Attached as the automation app account; credit the assignee who triggered it), Team -> GM reassignment
- * changelog crawl (date-gated), old-account (<handle>@ccpgames.com) bridging, and the hardcoded leads bonus.
- * Change one, change both.
+ * reopen-aware Attached attribution, automation-account re-credit (a BR converted to a defect sets
+ * -> Attached as the automation app account; credit the assignee who triggered it), Trashed vs Reassigned
+ * (a close carrying CCP's convert-to-support comment is a reassign), old-account (<handle>@ccpgames.com)
+ * bridging, and the hardcoded leads bonus. Change one, change both.
  */
 JiTA.credits = {
     // ---- config (mirror monthly_report.py) ----
@@ -9609,11 +9410,6 @@ JiTA.credits = {
     // CCP's convert-to-support automation closes the report AS the member and leaves this exact comment. A
     // Closed report carrying it is a REASSIGN (worth reassigned credit), not a TRASH - see the crawl's reassign split.
     CONVERT_COMMENT: 'BR converted to support ticket. Zendesk ticket has been unlinked. Closing bug report.',
-    TEAM_JQL: 'Team[Team]',
-    TEAM_CF: 'customfield_10001',
-    GM_TEAM_ID: '38',                                              // short id (button / JQL)
-    GM_TEAM_FULL_ID: 'ef4edd53-c099-4431-82af-9b4bd717cb88-38',   // full id (changelog `to`)
-    GM_TEAM_NAME: 'EO - GameMasters',                             // changelog `toString`
     AUTOMATION_ID: '557058:f58131cb-b67d-43c7-b30d-6b58d40bd077', // "Automation for Jira" app account
     AUTOMATION_EMAIL: 'workato@ccpgames.com',
     DEDUP_LINK_TYPES: { 'Cloners': true },
@@ -9950,6 +9746,14 @@ JiTA.credits = {
                 try { jitaStackPills(); } catch (e) { /* ignore */ }
             }
             JiTA.credits.badge.refresh();
+            // The balance from VMS: read it now if the cached one is due, and again when this tab is focused after a
+            // failed read (the ⚠ opens VMS in another tab, so the user comes back here logged in).
+            var B = JiTA.credits.balance;
+            B.refresh(false).then(function () { JiTA.credits.badge.refresh(); }, function () { /* the ⚠ says so */ });
+            if (!B._focusBound) {
+                B._focusBound = true;
+                try { window.addEventListener('focus', function () { B.onFocus(); }); } catch (e) { /* ignore */ }
+            }
         },
         refresh: function () {
             var el = document.getElementById('jita-credits-badge');
@@ -9958,25 +9762,165 @@ JiTA.credits = {
             // While the scheduler recomputes the leaderboard: its "updating…" used to be overwritten by this very refresh,
             // which resolves a moment after it was written, so the badge looked idle through the whole crawl.
             var busy = JiTA.credits._updating ? ' · updating…' : '';
-            JiTA.credits.getSelf(ym).then(function (self) {
-                if (self && self.credits != null) {
-                    el.textContent = '📊 ' + self.credits + ' Credits' + (self.rank != null ? (' · #' + self.rank + '/' + self.total) : '') + busy;
-                    return;
-                }
-                // fallback: derive from the full-leaderboard cache until the first self compute lands
-                JiTA.credits.getCached(ym).then(function (res) {
-                    if (!res) { el.textContent = '📊 credits: -'; return; }
-                    JiTA.link.currentUser().then(function (me) {
-                        var d = JiTA.credits._derive(res, me);
-                        el.textContent = (d.myRow ? ('📊 ' + d.myRow[8] + ' Credits · #' + d.myRank + '/' + d.total) : '📊 credits: n/a') + busy;
-                    });
-                }).catch(function () { /* ignore */ });
+            Promise.all([JiTA.credits.badge._month(ym), JiTA.credits.balance.readSafe()]).then(function (r) {
+                JiTA.credits.badge._paint(el, JiTA.credits.badge._parts(r[0], r[1], busy));
             }).catch(function () { /* ignore */ });
+        },
+
+        // This month's numbers for the viewer: their own total (recomputed every 2 minutes) when there is one, else their
+        // row of the cached leaderboard until the first one lands. Resolves { credits, rank, total }, { na: true } when
+        // they are not on the leaderboard, or null when nothing has been computed yet.
+        _month: function (ym) {
+            var C = JiTA.credits;
+            return C.getSelf(ym).then(function (self) {
+                if (self && self.credits != null) { return { credits: self.credits, rank: self.rank, total: self.total }; }
+                return C.getCached(ym).then(function (res) {
+                    if (!res) { return null; }
+                    return JiTA.link.currentUser().then(function (me) {
+                        var d = C._derive(res, me);
+                        return d.myRow ? { credits: d.myRow[8], rank: d.myRank, total: d.total } : { na: true };
+                    });
+                });
+            });
+        },
+
+        // What the pill says: the balance in VMS, then what this month has earned so far, then the rank. A failed read
+        // of VMS keeps showing the last balance it got, behind a ⚠; a balance never read is left out, never shown as 0.
+        // Resolves { text, warn, warnTitle, title }.
+        _parts: function (month, bal, busy) {
+            var B = JiTA.credits.balance;
+            var have = bal ? (bal.ok ? bal : bal.last) : null;
+            var m = (month && !month.na) ? month : null;
+            var bits = [], lines = [];
+            if (have) { bits.push(have.credits + ' credits'); }
+            if (m) {
+                bits.push(have ? ('+' + m.credits + ' this month') : (m.credits + ' credits this month'));
+                if (m.rank != null) { bits.push('#' + m.rank + '/' + m.total); }
+            } else if (!have) {
+                bits.push(month && month.na ? 'credits: n/a' : 'credits: -');
+            }
+            if (bal && bal.ok) {
+                lines.push('Credit balance in VMS: ' + bal.credits + (bal.updated ? ' (last changed ' + bal.updated + ')' : ''));
+            } else if (bal) {
+                lines.push((have ? ('Credit balance in VMS: ' + have.credits + ', as read on ' + B.when(have.at) + '. ') : '') + B.why(bal));
+            }
+            if (m) { lines.push('Earned so far this month: ' + m.credits + ' credits' + (m.rank != null ? (', rank ' + m.rank + ' of ' + m.total) : '')); }
+            lines.push('Click for the leaderboard');
+            var warn = !!(bal && !bal.ok);
+            return { text: bits.join(' · ') + busy, warn: warn, warnTitle: warn ? (B.why(bal) + ' Click to open your VMS profile.') : '', title: lines.join('\n') };
+        },
+
+        // The pill is three spans: the icon, the ⚠ (empty unless the balance could not be read) and the text. The ⚠
+        // opens VMS instead of the leaderboard.
+        _paint: function (el, p) {
+            var warn = el.querySelector('[data-cb="warn"]'), label = el.querySelector('[data-cb="label"]');
+            if (!label || !warn) {
+                el.textContent = '';
+                var icon = document.createElement('span');
+                icon.textContent = '📊 ';
+                el.appendChild(icon);
+                warn = document.createElement('span');
+                warn.setAttribute('data-cb', 'warn');
+                warn.style.cssText = 'color:#ffd479;cursor:pointer;';
+                warn.addEventListener('click', function (e) { e.stopPropagation(); JiTA.credits.balance.openVms(); });
+                el.appendChild(warn);
+                label = document.createElement('span');
+                label.setAttribute('data-cb', 'label');
+                el.appendChild(label);
+            }
+            warn.textContent = p.warn ? '⚠ ' : '';
+            warn.title = p.warnTitle;
+            label.textContent = p.text;
+            el.title = p.title;
         },
         remove: function () {
             var el = document.getElementById('jita-credits-badge');
             if (el && el.parentNode) { el.parentNode.removeChild(el); }
             try { jitaStackPills(); } catch (e) { /* ignore */ }
+        }
+    },
+
+    // ---- your credit balance, read from your own VMS profile ----------------------------------------------------
+    // The leaderboard counts what you earn this month; what you have to spend is on your profile page in VMS. It is read
+    // with your VMS session through the Lead duties' VMS helpers (GM_xmlhttpRequest; @connect volunteers.eveonline.com),
+    // cached an hour, and a failed read keeps the last good balance in `last`, so the pill can show it behind a ⚠
+    // instead of a guess. A page that could not be read is never a balance of 0.
+    // Record: { ok: true, credits, updated, at } or { ok: false, reason, at, last: { credits, updated, at } }.
+    balance: {
+        URL: 'https://volunteers.eveonline.com/settings/',
+        CACHE_KEY: 'creditsBalance',
+        TTL_MS: 60 * 60 * 1000,      // a good read is kept this long
+        FAIL_MS: 5 * 60 * 1000,      // a failed one is tried again after this long
+        FOCUS_MS: 2 * 60 * 1000,     // back in the tab after a failed read: read again if it is at least this old
+        OPENED_MS: 10 * 1000,        // ...or this old, once the ⚠ has sent the user to VMS
+        _busy: null,
+        _opened: false,              // the ⚠ opened VMS and no read has worked since
+        _focusBound: false,
+
+        read: function () { return JiTA.db.getMeta(JiTA.credits.balance.CACHE_KEY); },
+        readSafe: function () { return Promise.resolve().then(JiTA.credits.balance.read).catch(function () { return null; }); },
+
+        // Read the profile page unless the cached record is still good (or failed only a moment ago). One read at a time.
+        refresh: function (force) {
+            var B = JiTA.credits.balance;
+            if (B._busy) { return B._busy; }
+            var p = B.readSafe().then(function (cached) {
+                var age = cached ? Date.now() - (cached.at || 0) : Infinity;
+                if (!force && cached && age < (cached.ok ? B.TTL_MS : B.FAIL_MS)) { return cached; }
+                return JiTA.leadduty.apps._get(B.URL).then(function (r) {
+                    var res = B._parse(r);
+                    res.at = Date.now();
+                    var good = cached ? (cached.ok ? cached : cached.last) : null;
+                    if (!res.ok && good) { res.last = { credits: good.credits, updated: good.updated, at: good.at }; }
+                    if (res.ok) { B._opened = false; }
+                    return JiTA.db.setMeta(B.CACHE_KEY, res).then(function () { return res; }, function () { return res; });
+                });
+            });
+            B._busy = p.then(function (v) { B._busy = null; return v; }, function (e) { B._busy = null; throw e; });
+            return B._busy;
+        },
+
+        // The profile shows the balance as <dt>Credits</dt><dd>556</dd> and when it last changed as
+        // <dt>Updated</dt><dd>2026-10-02 15:33</dd>. Keyed on those labels, not on the layout around them. The credit
+        // transactions table below has a "Total Credits" column, which is not a <dt> and is never read.
+        _parse: function (r) {
+            var bad = JiTA.leadduty.apps._unusable(r);
+            if (bad) { return bad; }
+            var body = (r && r.body) || '';
+            var m = /<dt\b[^>]*>\s*Credits\s*<\/dt>\s*<dd\b[^>]*>([^<]*)<\/dd>/i.exec(body);
+            var n = m ? m[1].replace(/&nbsp;|&#160;/g, '').replace(/[,\s]/g, '') : '';
+            if (!/^-?\d+(\.\d+)?$/.test(n)) {
+                // No balance on the page. A login form or a link to the SSO means the session has run out.
+                return { ok: false, reason: /login\.eveonline\.com|\/account\/(login|signin)/i.test(body) ? 'login' : 'unreadable' };
+            }
+            var u = /<dt\b[^>]*>\s*Updated\s*<\/dt>\s*<dd\b[^>]*>([^<]*)<\/dd>/i.exec(body);
+            return { ok: true, credits: parseFloat(n), updated: u ? u[1].replace(/^\s+|\s+$/g, '') : '' };
+        },
+
+        why: function (bal) {
+            var r = bal && bal.reason;
+            if (r === 'login') { return 'Log in to VMS to update your credit balance.'; }
+            if (r === 'nogm') { return 'Your credit balance cannot be read from this browser.'; }
+            if (r === 'net') { return 'VMS could not be reached, so your credit balance was not updated.'; }
+            return 'Your VMS profile page could not be read, so your credit balance was not updated.';
+        },
+        when: function (at) { return at ? (new Date(at).toISOString().replace('T', ' ').slice(0, 16) + ' UTC') : 'an earlier visit'; },
+
+        openVms: function () {
+            JiTA.credits.balance._opened = true;
+            try { window.open(JiTA.credits.balance.URL, '_blank', 'noopener'); } catch (e) { /* ignore */ }
+        },
+
+        // This tab got the focus back. After a failed read, read again: soon after the ⚠ sent the user to VMS (they come
+        // back logged in), otherwise only once the failure is a couple of minutes old.
+        onFocus: function () {
+            var B = JiTA.credits.balance;
+            if (!flagOn('credits')) { return Promise.resolve(); }
+            return B.readSafe().then(function (c) {
+                if (!c || c.ok) { return; }
+                if (Date.now() - (c.at || 0) < (B._opened ? B.OPENED_MS : B.FOCUS_MS)) { return; }
+                return B.refresh(true).then(function () { JiTA.credits.badge.refresh(); });
+            }).catch(function () { /* ignore */ });
         }
     },
 
@@ -10015,6 +9959,8 @@ JiTA.credits = {
             var S = JiTA.credits.sched;
             if (!flagOn('credits')) { return; }                 // feature off
             try { JiTA.credits.badge.refresh(); } catch (e) { /* ignore */ }   // cheap: reflect the latest cache each poll
+            // The balance from VMS: a cache read on most polls, a fetch once the cached one is an hour old.
+            try { JiTA.credits.balance.refresh(false).then(function () { JiTA.credits.badge.refresh(); }, function () { /* the ⚠ says so */ }); } catch (e) { /* ignore */ }
             if (JiTA.credits.running) { return; }                  // a job is already running in THIS tab -> never overlap
             var now = JiTA.credits._ymNow();
 
@@ -10280,16 +10226,6 @@ function jitaWorkerBody(cfg) {
     function isClosedStatus(status) { return /closed|done|resolved|rejected|cancel|attached/i.test(status || ''); }
     function teamId(v) { if (v == null) { return ''; } if (typeof v === 'string' || typeof v === 'number') { return String(v); } if (typeof v === 'object') { return String(v.id || v.value || v.teamId || v.name || ''); } return ''; }
     function isGmTeam(v) { var id = teamId(v); if (!id) { return false; } var short = String(cfg.GM_TEAM_ID).split('-').pop(); return id === cfg.GM_TEAM_ID || id === short || id.split('-').pop() === short; }
-    function bulkPut(records) {
-        return openDb().then(function (d) {
-            return new Promise(function (resolve, reject) {
-                var tx = d.transaction('defects', 'readwrite'), store = tx.objectStore('defects');
-                for (var i = 0; i < records.length; i++) { store.put(records[i]); }
-                tx.oncomplete = function () { resolve(records.length); };
-                tx.onerror = function () { reject(tx.error); };
-            });
-        });
-    }
     // Write embeddings back by MERGING onto the current row (get-then-put in one tx) instead of putting the stale
     // snapshot, so a concurrent tab translate-write (enText/lang) is not clobbered. Skips a record that was deleted
     // meanwhile, or whose enText changed since we embedded (our vector is stale -> leave it for the next pass).
@@ -11102,7 +11038,6 @@ function jitaWorkerBody(cfg) {
         try {
             var result;
             if (type === 'ping') { result = { pong: true, backend: backend, version: cfg.SCRIPT_VERSION }; }
-            else if (type === 'embed') { var v = await embed((payload && payload.text) || ''); result = { backend: backend, dim: v.length, vec: Array.from(v) }; }
             else if (type === 'rankSemantic') { result = await rankSemantic(payload); }
             else if (type === 'dupDefects') { result = await dupDefects(payload); }
             else if (type === 'rankKeyword') { result = await rankKeyword(payload); }
@@ -11886,7 +11821,7 @@ JiTA.triage = {
             for (var i = 0; i < res.results.length; i++) {
                 (function (r, n) {
                     var $li = $('<li></li>').attr('data-jt-n', n);
-                    if (r.stale) { $li.addClass('jt-stale'); }   // a CLOSED report in the reporter list
+                    if (r.closed) { $li.addClass('jt-closed'); }   // a CLOSED report in the reporter list
                     var $n = $('<span class="jt-n"></span>').text(n).appendTo($li);
                     if (noAttach) { $n.addClass('jt-n-nokey').attr('title', 'No hotkey - these are bug reports, and a report cannot be attached to another report'); }
                     else if (n > T.MATCH_KEYS) { $n.addClass('jt-n-nokey').attr('title', 'No hotkey - only matches 1-' + T.MATCH_KEYS + ' are digit-addressable'); }
@@ -12459,7 +12394,7 @@ JiTA.triage = {
                         key: iss.key, summary: f.summary || '', status: status,
                         resolution: (f.resolution && f.resolution.name) || null,
                         created: f.created || null, description: JiTA.util.toPlainText(f.description),
-                        stale: JiTA.util.isClosedStatus(status)   // grey the closed ones so the open ones stand out
+                        closed: JiTA.util.isClosedStatus(status)   // grey the closed ones so the open ones stand out
                     });
                 }
                 return { rows: out, noId: false };
@@ -12740,7 +12675,7 @@ JiTA.triage = {
                 '.jita-triage-view .jt-list { list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; align-content: start; }' +
                 '.jita-triage-view .jt-list li { padding: 6px 8px; border: 1px solid #2c333a; border-radius: 6px; background: #22272b; }' +
                 '.jita-triage-view .jt-list li.armed { border-color: #ffb547; background: #2e2a1e; }' +
-                '.jita-triage-view .jt-list li.jt-stale { opacity: .55; }' +   // a CLOSED report in the reporter list
+                '.jita-triage-view .jt-list li.jt-closed { opacity: .55; }' +   // a CLOSED report in the reporter list
 
                 '.jita-triage-view .jt-n { display: inline-block; min-width: 16px; text-align: center; background: #3a434d; color: #cfd6dd; border-radius: 4px; font-size: 10px; font-weight: 700; margin-right: 8px; }' +
                 '.jita-triage-view .jt-n-nokey { opacity: .45; }' +
@@ -13034,7 +12969,7 @@ JiTA.dupfind = {
                 Object.keys(D._moved).forEach(function (gk) { if (!D._cleaned[gk]) { D._cleaned[gk] = true; ghostKeys.push(gk); } });
                 if (ghostKeys.length) {
                     JiTA.db.deleteDefects(ghostKeys).then(function () {
-                        JiTA.rank._dirty = true; JiTA.rank._dirtyVec = true;   // defect keyword + vector indexes
+                        JiTA.rank._dirty = true;   // the tab's defect keyword index (the worker's are dropped below)
                         if (JiTA.worker && JiTA.worker.usable()) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
                         if (window.console) { console.log('[JiTA] dupfind: deleted ' + ghostKeys.length + ' moved-key ghost record(s): ' + ghostKeys.join(', ')); }
                     }).catch(function () { /* best effort - the next full rebuild drops them anyway */ });
@@ -15278,10 +15213,7 @@ JiTA.leadduty = {
         var ny = p.m === 12 ? p.y + 1 : p.y, nm = p.m === 12 ? 1 : p.m + 1;
         return { start: p.y + '-' + JiTA.leadduty._p2(p.m) + '-01', end: ny + '-' + JiTA.leadduty._p2(nm) + '-01' };
     },
-    _today: function () {
-        var d = new Date();
-        return d.getUTCFullYear() + '-' + JiTA.leadduty._p2(d.getUTCMonth() + 1) + '-' + JiTA.leadduty._p2(d.getUTCDate());
-    },
+
     // Whole months between a YYYY-MM-DD review stamp and today; '' (never reviewed) yields null.
     _monthsSince: function (ymd) {
         if (!ymd) { return null; }
@@ -15291,14 +15223,6 @@ JiTA.leadduty = {
         return (now.y * 12 + now.m) - (y * 12 + m);
     },
 
-    // Accept a raw page id or any Confluence URL shape that carries one.
-    _pageId: function (raw) {
-        var s = String(raw == null ? '' : raw).replace(/^\s+|\s+$/g, '');
-        if (!s) { return ''; }
-        if (/^\d+$/.test(s)) { return s; }
-        var m = /[?&]pageId=(\d+)/.exec(s) || /\/pages\/(\d+)/.exec(s);
-        return m ? m[1] : '';
-    },
     rootPage: function () { return JiTA.leadduty.ROOT_PAGE; },
     // Deliberately a SEPARATE page from the root: the documentation root can stay locked while this one
     // carries the Lead-writable state.
@@ -18421,7 +18345,6 @@ JiTA.leadduty.apps = {
                 state: st ? A._text(st[1]) : (stage ? stage.one : ''),
                 stage: stage ? stage.key : '',
                 applied: dates[0] || '',
-                updated: dates[1] || dates[0] || '',
                 url: A.DETAIL_URL + idm[1]
             });
         }
@@ -18570,12 +18493,11 @@ JiTA.leadduty.apps = {
     APP_SERVICE: 'ApplicationService',
     NOTE_SERVICE: 'AdministratorService',
     ACTIONS: {
-        // `notifies` drives the wording of the confirm. Declining tells a real person no; resetting does
-        // not. That distinction is the single most important thing on this screen and must never be
-        // flattened into "are you sure?".
-        accept:  { btn: 'btn-approve', method: 'ApplicationAccept',  notifies: false, verb: 'move on' },
-        decline: { btn: 'btn-decline', method: 'ApplicationDecline', notifies: true,  verb: 'decline' },
-        reset:   { btn: 'btn-reset',   method: 'ApplicationDecline', notifies: false, verb: 'reset' }
+        // Declining tells a real person no; resetting does not. That distinction is the single most important
+        // thing on this screen and must never be flattened into "are you sure?": _armApp words each confirm by key.
+        accept:  { btn: 'btn-approve', method: 'ApplicationAccept' },
+        decline: { btn: 'btn-decline', method: 'ApplicationDecline' },
+        reset:   { btn: 'btn-reset',   method: 'ApplicationDecline' }
     },
 
     // What a specific application currently offers, read from its own page. Resolves
@@ -19097,8 +19019,8 @@ JiTA.leadduty.sched = {
  * elected LEADER via the Web Locks API and owns a single dedicated module worker; every tab talks to the
  * leader over a BroadcastChannel. The worker (built from a blob) imports transformers.js, opens the same-origin
  * IndexedDB (pristine in a worker - Atlassian's consent gate only wraps the main document), holds the model +
- * ranking indexes, and answers rank queries. Tabs become thin clients. Feature-flagged and additive: nothing
- * calls into it yet (this milestone just proves leader election + RPC + a shared worker across tabs).
+ * ranking indexes, and answers rank queries. Tabs become thin clients: ranking, the log signatures, the duplicate
+ * finder, embedding and the ISD credits crawl all run there (the credits crawl has no in-tab fallback).
  */
 JiTA.worker = {
     CHANNEL: 'jita-rank-v1',
@@ -19472,9 +19394,8 @@ JiTA.worker = {
         }
     },
 
-    // The dedicated worker's source (a module). Minimal for this milestone: lazy-load the model, answer 'ping'
-    // and 'embed'. Later milestones add the vector/keyword indexes + ranking here and return just ranked keys.
-    // The worker source: the real jitaWorkerBody function, serialized + immediately invoked with runtime config.
+    // The worker's source (a module): the real jitaWorkerBody function, serialized and immediately invoked with
+    // the runtime config. It sees nothing of the page, so everything it needs travels in `cfg`.
     _src: function () {
         var C = JiTA.credits;
         var cfg = {
@@ -19487,8 +19408,7 @@ JiTA.worker = {
                 PROJECTS: C.PROJECTS, RESOLUTIONS: C.RESOLUTIONS, GROUP: C.GROUP, OLD_DOMAIN: C.OLD_DOMAIN,
                 EBR: C.EBR, ATTACHED_STATUS: C.ATTACHED_STATUS, CLOSED_STATUS: C.CLOSED_STATUS,
                 OPEN_STATUS: C.OPEN_STATUS, CONVERT_COMMENT: C.CONVERT_COMMENT,
-                TEAM_JQL: C.TEAM_JQL, TEAM_CF: C.TEAM_CF, GM_TEAM_ID: C.GM_TEAM_ID, GM_TEAM_FULL_ID: C.GM_TEAM_FULL_ID,
-                GM_TEAM_NAME: C.GM_TEAM_NAME, AUTOMATION_ID: C.AUTOMATION_ID, AUTOMATION_EMAIL: C.AUTOMATION_EMAIL,
+                AUTOMATION_ID: C.AUTOMATION_ID, AUTOMATION_EMAIL: C.AUTOMATION_EMAIL,
                 DEDUP_LINK_TYPES: C.DEDUP_LINK_TYPES, PROJECT_RANK: C.PROJECT_RANK, LEADS: C.LEADS, LEAD_BONUS: C.LEAD_BONUS,
                 PAGE_SIZE: C.PAGE_SIZE, CRAWL_DELAY_MS: C.CRAWL_DELAY_MS, CONCURRENCY: C.CONCURRENCY,
                 RATE_LIMITS: C.RATE_LIMITS, RATE_SAFETY: C.RATE_SAFETY
@@ -19505,8 +19425,8 @@ JiTA.worker = {
  * issue-type and are re-applied across Jira's React re-renders via jitaButtonObserver, the same way
  * jitaHideNativeDates works. Matching is by visible text, so it covers standard + custom fields and Connect
  * app panels without depending on instance-specific field ids.
- * The field-row / section-card SELECTORS in _fieldRows()/_sections() are the parts most likely to need a
- * tweak if Atlassian changes the issue-view markup - they're grouped there for exactly that reason.
+ * The selectors live in SELECTORS (FIELD_HEADING, GROUP_TITLE); _fieldRows() / _sections() are the parts
+ * most likely to need a tweak if Atlassian changes the issue-view markup.
  */
 JiTA.declutter = {
     // Which persisted bucket applies to the open issue.
@@ -19530,10 +19450,8 @@ JiTA.declutter = {
     // Skip our own overlays/panels so we never detect (or hide) JiTA's own headings/fields.
     _mine: function (el) { return !!(el.closest && el.closest('[id^="jita"], #gpanel')); },
 
-    // ---- detection (the selectors most likely to need live tuning) ----
-    // Details field rows -> [{ label, el }]. Each sidebar field is wrapped in a testid starting
-    // "issue.views.field"; take the OUTERMOST such wrapper and read its heading as the label.
-    // Each Details field has a heading container "issue-field-heading-styled-field-heading.<key>" whose label
+    // ---- detection (the parts most likely to need live tuning) ----
+    // Details field rows -> [{ label, el }]. Each Details field has a heading container "issue-field-heading-styled-field-heading.<key>" whose label
     // text lives in a "*field-heading-title" element (with a multiline variant used by Labels / Team). We read
     // the clean label from there and hide the whole ROW (the ancestor that also holds the value).
     _fieldRows: function () {
@@ -19562,9 +19480,7 @@ JiTA.declutter = {
         }
         return el;
     },
-    // Collapsible sections -> [{ name, el }] (el = the card to hide). Section headers are <h2> in the issue
-    // view (Details, More fields, Development, Automation, Sentry, Zendesk Support, ...).
-    // Sections are collapsible groups titled "issue-view-layout-group.common.ui.collapsible-group-factory.title"
+    // Collapsible sections -> [{ name, el }] (el = the card to hide). Sections are collapsible groups titled "issue-view-layout-group.common.ui.collapsible-group-factory.title"
     // (Details, Development, More fields, Automation, Sentry, Zendesk Support, ...). Hide the whole enclosing
     // <section>, not just the title, and read the name without its sub-title (e.g. "More fields" alone).
     _sections: function () {
@@ -20483,6 +20399,33 @@ JiTA.changelog = {
             'Opening a bug report from a link or a reload no longer sometimes stops JiTA from loading at all, leaving no panel, buttons or pills. This came in with v3.38.16.',
             'If one part of JiTA fails while a page loads, the rest now loads anyway.'
         ] },
+        { v: '3.40.0', date: '2026-10-03', features: [
+            'The ISD credits pill now shows your credit balance from VMS, next to the credits you have earned so far this month.',
+            'When VMS cannot be read (you are not logged in there, for example), the pill shows a ⚠ and keeps the last balance it read. Click the ⚠ to open your VMS profile; the balance updates when you come back to the tab.'
+        ] },
+        { v: '3.39.5', date: '2026-10-03', fixes: [
+            'Closed defects fixed long before a report are no longer greyed out in the panel or in Triage mode. They still rank lower and still say how long before the report they were fixed.'
+        ] },
+        { v: '3.39.4', date: '2026-10-03', fixes: [
+            'A tab where the shared background worker cannot run no longer loads its own copy of the text model: it ranks by keywords, as it already did.',
+            'Internal cleanup, no other visible change.'
+        ] },
+        { v: '3.39.3', date: '2026-10-03', fixes: [
+            'Picking a canned response now waits for the public reply box to be ready, and says so when the text could not be put in, instead of doing nothing.',
+            'A canned response or the note for the GMs can no longer land in a Jira editor outside the Zendesk panel.',
+            'Convert to Support Ticket counts the note for the GMs as posted only once it has left the reply box, so a post that fails stops the conversion.',
+            'The canned-response dropdown no longer rewrites its label several times a second in Firefox.'
+        ] },
+        { v: '3.39.2', date: '2026-10-03', fixes: [
+            'A first download of the defect or bug report data that is interrupted by a reload now carries on where it stopped, instead of starting over on every reload.',
+            'The background sync every 30 minutes no longer re-embeds, re-translates and redraws when nothing in Jira changed.',
+            'A translation finished while a sync is writing the same report is no longer lost.',
+            'Rebuild BR DB now translates the foreign reports again, and the panel no longer keeps showing "Syncing" after a sync.'
+        ] },
+        { v: '3.39.1', date: '2026-10-03', fixes: [
+            'Only the Created and Updated dates at the bottom of an issue are hidden now, since they show at the top. Any other date Jira lists there stays visible.',
+            'Internal cleanup, no other visible change.'
+        ] },
         { v: '3.39.0', date: '2026-10-03', features: [
             'What\'s new has two tabs now, New features and Fixed issues, and the pill only comes up for an update that brings something new to use. Fixes are listed without one.'
         ] },
@@ -21367,8 +21310,8 @@ JiTA.changelog = {
 };
 
 
-/* ---- init: watch the DOM and (re)inject the panel across Atlassian's React re-renders / SPA nav ---- */
-// Mount the Lead-duties chip + menu command for a Lead. Shared by the Jira boot below and the Confluence
+/* ---- boot: the Lead-duties arming both boots share, then the Confluence boot and the Jira boot ---- */
+// Mount the Lead-duties chip for a Lead. Shared by the Jira boot below and the Confluence
 // boot: the cached verdict (leadDutyMe) arms it synchronously on every load after the first, and resolveMe()
 // re-checks it against Jira shortly after so a first-ever load (or a changed account) lights up a moment later.
 function jitaArmLeadDuties() {
@@ -21406,7 +21349,7 @@ function jitaArmLeadDuties() {
 }
 
 
-// ---- Confluence boot: Lead duties and nothing else -------------------------------------------------------
+// ---- Confluence boot: Lead duties and the What's new pill, nothing else ---------------------------------
 // No Jira DOM to observe, no issue to parse, no defect sync, and deliberately no worker leader election - a
 // wiki tab must never become the tab that owns the embedding model for everyone.
 if (JITA_IS_WIKI) {
@@ -21421,8 +21364,9 @@ if (JITA_IS_WIKI) {
 }
 
 
+// ---- Jira boot: watch the DOM and (re)inject the panel across Atlassian's React re-renders / SPA nav ----
 (function () {
-    if (JITA_NO_JIRA_UI) { return; }      // Forge iframe runs only the responses dropdown; Confluence only Lead duties (above)
+    if (JITA_NO_JIRA_UI) { return; }      // the Forge iframe runs only the responses dropdown, Confluence its own boot (above)
     // "What's new" after an update. Scheduled first, so nothing that boots after it can keep it from showing; start()
     // still waits for the page to settle, and the observer below puts the pill back if anything takes it away.
     try { JiTA.changelog.start(); } catch (eCl) { /* swallow */ }
@@ -21481,40 +21425,37 @@ if (JITA_IS_WIKI) {
     // the disabled-feature / already-open cases. Double-tap '>' opens the duplicate finder. Double-tap '#' switches the
     // Triage Assistant panel to the trending defects and back on a bug report, and opens the standalone trending list
     // anywhere else. (Inside Triage mode the overlay's own key layer handles '#', so it never reaches here.)
-    if (!JITA_IS_FORGE_FRAME) {
-        (function () {
-            var lastLt = 0, lastGt = 0, lastHash = 0;
-            document.addEventListener('keydown', function (e) {
-                if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || e.isComposing) { return; }   // a held key repeats in under 400 ms
-                if (e.key !== '<' && e.key !== '>' && e.key !== '#') { return; }
-                var t = e.target;
-                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
-                if (typeof JiTA === 'undefined') { return; }
-                var now = Date.now();
-                if (e.key === '<') {   // double-tap '<' -> Triage mode
-                    if (!JiTA.triage || JiTA.triage._open) { return; }
-                    if (now - lastLt < 400) { lastLt = 0; try { JiTA.triage.open(); } catch (e2) { /* ignore */ } }
-                    else { lastLt = now; }
-                    return;
-                }
-                if (e.key === '#') {   // double-tap '#' -> Trending defects
-                    if (!JiTA.trend || document.querySelector('#jita-menu.jita-trend-view')) { return; }
-                    if (now - lastHash >= 400) { lastHash = now; return; }
-                    lastHash = 0;
-                    // An open overlay covers the panel, so there is nothing on screen to switch: the list replaces it.
-                    try { if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) { JiTA.trend.openView(); } } catch (e4) { /* ignore */ }
-                    return;
-                }
-                // double-tap '>' -> Duplicate-defect finder (Shift+'<' on QWERTZ - the hidden siblings share a key)
-                if (!JiTA.dupfind || document.querySelector('#jita-menu.jita-dup-view')) { return; }
-                if (now - lastGt < 400) { lastGt = 0; try { JiTA.dupfind.openView(); } catch (e3) { /* ignore */ } }
-                else { lastGt = now; }
-            });
-        })();
-    }
+    (function () {
+        var lastLt = 0, lastGt = 0, lastHash = 0;
+        document.addEventListener('keydown', function (e) {
+            if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || e.isComposing) { return; }   // a held key repeats in under 400 ms
+            if (e.key !== '<' && e.key !== '>' && e.key !== '#') { return; }
+            var t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
+            var now = Date.now();
+            if (e.key === '<') {   // double-tap '<' -> Triage mode
+                if (!JiTA.triage || JiTA.triage._open) { return; }
+                if (now - lastLt < 400) { lastLt = 0; try { JiTA.triage.open(); } catch (e2) { /* ignore */ } }
+                else { lastLt = now; }
+                return;
+            }
+            if (e.key === '#') {   // double-tap '#' -> Trending defects
+                if (!JiTA.trend || document.querySelector('#jita-menu.jita-trend-view')) { return; }
+                if (now - lastHash >= 400) { lastHash = now; return; }
+                lastHash = 0;
+                // An open overlay covers the panel, so there is nothing on screen to switch: the list replaces it.
+                try { if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) { JiTA.trend.openView(); } } catch (e4) { /* ignore */ }
+                return;
+            }
+            // double-tap '>' -> Duplicate-defect finder (Shift+'<' on QWERTZ - the hidden siblings share a key)
+            if (!JiTA.dupfind || document.querySelector('#jita-menu.jita-dup-view')) { return; }
+            if (now - lastGt < 400) { lastGt = 0; try { JiTA.dupfind.openView(); } catch (e3) { /* ignore */ } }
+            else { lastGt = now; }
+        });
+    })();
     // start the periodic background catch-up sync
     try { JiTA.sched.start(); } catch (e) { /* swallow */ }
-    // Shared ranking worker: elect a leader + spawn the one worker all tabs share (additive; nothing routes to it yet).
+    // Shared ranking worker: elect a leader + spawn the one worker all tabs share (ranking, embedding, credits).
     try { JiTA.worker.start(); } catch (e) { /* swallow */ }
     // ISD credit tracker: show the corner badge (from cache) and start the throttled background recompute.
     if (flagOn('credits')) {
@@ -21529,8 +21470,8 @@ if (JITA_IS_WIKI) {
 /* ---- canned responses: inject the dropdown into the Zendesk Support panel ---- */
 // Runs in EVERY frame (the main Jira page AND the Forge iframe), because the Zendesk Support panel can be
 // rendered EITHER as UI Kit 2 native components in the main page OR inside the cross-origin Forge iframe -
-// we don't assume which, so the injector simply feature-detects the ticket selector wherever it lives. It's
-// cheap: inject() early-exits unless #ticket-select is present, so it's a no-op in frames without the panel.
+// we don't assume which, so the injector simply feature-detects the panel's header wherever it lives. It's
+// cheap: inject() early-exits unless the subdomain select's label is present, so it's a no-op in frames without the panel.
 (function () {
     if (JITA_IS_WIKI) { return; }   // Confluence has no Zendesk panel; don't observe a big wiki page for nothing
     var scheduled = false;
@@ -21548,7 +21489,7 @@ if (JITA_IS_WIKI) {
         try {
             GM_addValueChangeListener('ejfCannedResponses', function () {
                 var sel = document.getElementById('jita-resp-select');
-                if (sel) { sel.removeAttribute('data-jita-sig'); JiTA.responses._fill(sel); }
+                if (sel) { sel.removeAttribute('data-jita-sig'); try { JiTA.responses._fill(sel); } catch (e) { /* the next inject() refills it */ } }
             });
         } catch (e) { /* ignore */ }
     }

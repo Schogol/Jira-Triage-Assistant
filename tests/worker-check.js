@@ -54,7 +54,7 @@ global.JiTA = {
     dlog() {}, sched: { tabId: 'tabF' },
     rank: {}, logsig: {}, ui: { setStatus() {} },
     util: { isClosedStatus: (s) => /closed/i.test(s || ''), delay: () => Promise.resolve() },
-    db: { getDefect: () => Promise.resolve(null), bulkPut: () => Promise.resolve(), deleteDefects: () => Promise.resolve(), setMeta: () => Promise.resolve() },
+    db: { syncPut: (recs) => Promise.resolve({ changed: recs.length }), setMeta: () => Promise.resolve() },
     sync: {}
 };
 JiTA.sync._run = eval('({' + cut("    _run: function (jql, opts) {\n        opts = opts || {};\n        var token = opts.startToken || null;", '\n    },') + '\n    }})')._run;
