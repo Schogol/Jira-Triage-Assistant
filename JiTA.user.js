@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.15
+// @version     3.38.21
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8710,6 +8710,10 @@ JiTA.menu = {
         return $row;
     },
 
+    // True while $el is still on the page. render() rebuilds the overlay inside the same #jita-menu, so a completion
+    // that only checked for #jita-menu wrote into the old, detached copy of its status line after a redraw.
+    _live: function ($el) { return !!($el && $el[0] && document.body && document.body.contains($el[0])); },
+
     render: function () {
         var $p = $('#jita-menu');
         if (!$p.length) { return; }
@@ -8867,7 +8871,7 @@ JiTA.menu = {
                 return JiTA.db.countEbr().then(function (e) {
                     return JiTA.db.getMeta('dbBuiltAtDefects').then(function (bd) {
                         return JiTA.db.getMeta('dbBuiltAtEbr').then(function (be) {
-                            if (!document.getElementById('jita-menu')) { return; }
+                            if (!JiTA.menu._live($status)) { return; }
                             var line = d + ' defects · ' + e + ' open bug reports indexed locally';
                             var built = [];
                             if (bd) { built.push('defects ' + JiTA.util.fmtDate(bd)); }
@@ -8913,11 +8917,11 @@ JiTA.menu = {
                     return JiTA.conf.deleteProperty(page, pr.id).then(function () { out.push('cleanup ok'); },
                         function () { out.push('cleanup failed (a jita_leadduty_probe property was left behind)'); });
                 }).then(function () {
-                    if (!document.getElementById('jita-menu')) { return; }
+                    if (!JiTA.menu._live($ldStatus)) { return; }
                     $test.prop('disabled', false);
                     $ldStatus.text('Ledger page ' + page + ': ' + out.join(' · '));
                 }, function (e) {
-                    if (!document.getElementById('jita-menu')) { return; }
+                    if (!JiTA.menu._live($ldStatus)) { return; }
                     $test.prop('disabled', false);
                     $ldStatus.text('Ledger page ' + page + ': ' + (out.length ? (out.join(' · ') + ' · ') : '') + String(e && e.message || e));
                 });
@@ -8934,7 +8938,7 @@ JiTA.menu = {
                     JiTA.conf.getProperty(page, JiTA.leadduty.LEDGER_KEY),
                     JiTA.conf.getProperty(page, JiTA.leadduty.QC_LEDGER_KEY)
                 ]).then(function (r) {
-                    if (!document.getElementById('jita-menu')) { return; }
+                    if (!JiTA.menu._live($ldStatus)) { return; }
                     $show.prop('disabled', false);
                     var wiki = r[0], qc = r[1], bits = [];
                     if (window.console) {
@@ -8955,7 +8959,7 @@ JiTA.menu = {
                     bits.push('full JSON in the console (F12)');
                     $ldStatus.text(bits.join(' · '));
                 }, function (e) {
-                    if (!document.getElementById('jita-menu')) { return; }
+                    if (!JiTA.menu._live($ldStatus)) { return; }
                     $show.prop('disabled', false);
                     $ldStatus.text(String(e && e.message || e));
                 });
@@ -8991,12 +8995,12 @@ JiTA.menu = {
                         var line = JiTA.leadduty._poolLine(pool);
                         return JiTA.leadduty.report.publish(false).catch(function () { /* reported below */ })
                             .then(function () {
-                                if (!document.getElementById('jita-menu')) { return; }
+                                if (!JiTA.menu._live($ldStatus)) { return; }
                                 $rescan.prop('disabled', false);
                                 $ldStatus.text(line + ' · ' + JiTA.leadduty.report.lastLine());
                             });
                     }, function (e) {
-                        if (!document.getElementById('jita-menu')) { return; }
+                        if (!JiTA.menu._live($ldStatus)) { return; }
                         $rescan.prop('disabled', false);
                         $ldStatus.text(String(e && e.message || e));
                     });
@@ -9010,11 +9014,11 @@ JiTA.menu = {
                     $pub.prop('disabled', true);
                     $ldStatus.text('Publishing the ledger page…');
                     JiTA.leadduty.report.publish(true).then(function () {
-                        if (!document.getElementById('jita-menu')) { return; }
+                        if (!JiTA.menu._live($ldStatus)) { return; }
                         $pub.prop('disabled', false);
                         $ldStatus.text(JiTA.leadduty.report.lastLine() + ' · reload the Confluence page to see it');
                     }, function () {
-                        if (!document.getElementById('jita-menu')) { return; }
+                        if (!JiTA.menu._live($ldStatus)) { return; }
                         $pub.prop('disabled', false);
                         $ldStatus.text(JiTA.leadduty.report.lastLine());
                     });
@@ -9028,11 +9032,14 @@ JiTA.menu = {
                     $wipe.prop('disabled', true);
                     $ldStatus.text('Clearing the ledgers…');
                     var out = [];
+                    // A failed read OR delete is reported for its key and the wipe goes on: the handler used to cover
+                    // the read alone, so a refused DELETE left the button disabled on "Clearing the ledgers…" and
+                    // the mirror and the scheduler's clocks never reset.
                     function drop(key) {
                         return JiTA.conf.getProperty(page, key).then(function (prop) {
                             if (!prop) { out.push(key + ': already absent'); return; }
                             return JiTA.conf.deleteProperty(page, prop.id).then(function () { out.push(key + ': deleted'); });
-                        }, function (e) { out.push(key + ': ' + String(e && e.message || e)); });
+                        }).catch(function (e) { out.push(key + ': ' + String(e && e.message || e)); });
                     }
                     drop(JiTA.leadduty.LEDGER_KEY).then(function () {
                         return drop(JiTA.leadduty.QC_LEDGER_KEY);
@@ -9058,9 +9065,13 @@ JiTA.menu = {
                         JiTA.leadduty.ui._qc = null;
                         JiTA.leadduty.ui._qcWarm = null;
                         JiTA.leadduty.qc._actorCache = {};
-                        if (!document.getElementById('jita-menu')) { return; }
+                        if (!JiTA.menu._live($ldStatus)) { return; }
                         $wipe.prop('disabled', false);
                         $ldStatus.text(out.join(' · ') + ' · local mirror and pool cache cleared · rebuild starts within a minute');
+                    }).catch(function (e) {
+                        if (!JiTA.menu._live($ldStatus)) { return; }
+                        $wipe.prop('disabled', false);
+                        $ldStatus.text((out.length ? out.join(' · ') + ' · ' : '') + 'clearing stopped: ' + String(e && e.message || e));
                     });
                 });
             }
@@ -9069,7 +9080,7 @@ JiTA.menu = {
                 var me = JiTA.leadduty.me();
                 var who = 'You are ' + ((me && me.handle) || '?') + ' · roster: ' + JiTA.leadduty.ROSTER().join(', ');
                 JiTA.db.getMeta(JiTA.leadduty.pool.CACHE_KEY).then(function (raw) {
-                    if (!document.getElementById('jita-menu') || $ldStatus.text()) { return; }
+                    if (!JiTA.menu._live($ldStatus) || $ldStatus.text()) { return; }
                     var line = who;
                     if (raw && raw.pages) { line = JiTA.leadduty._poolLine(JiTA.leadduty.pool._applyExclusions(raw)) + ' · ' + who; }
                     // A failed publish is otherwise invisible: it happens 20s after a ledger write with no UI
@@ -9118,7 +9129,7 @@ JiTA.menu = {
         var $wbk = $('<div class="jita-menu-status">Worker backend: checking…</div>').appendTo($dbg);
         if (w._started) {
             JiTA.worker.call('ping', null, { timeoutMs: 8000 }).then(function (r) {
-                if (!document.getElementById('jita-menu')) { return; }
+                if (!JiTA.menu._live($wbk)) { return; }
                 var b = (r && r.backend) || 'unknown';
                 var label = (b === 'none' || b === 'unknown') ? (b + ' (model not loaded yet - open a bug report to trigger it)')
                           : /webgpu/i.test(b) ? (b + ' (GPU)')
@@ -19979,6 +19990,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.21', date: '2026-10-03', items: [
+            'Lead duties: Clear ledger no longer hangs on "Clearing the ledgers…" when Confluence refuses a delete; it says which one failed and finishes the rest.',
+            'Lead duties: the chip goes away as soon as JiTA finds the account is not a Lead, instead of staying until reload.',
+            'The What\'s new pill no longer comes back for changes already read when a tab still running an older version is closed or dismissed.',
+            'Settings: a result that arrives after the menu was redrawn is no longer written into the old copy of the menu.'
+        ] },
         { v: '3.38.15', date: '2026-10-03', items: [
             'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
             'Lead duties: the Leads\' browsers no longer keep rewriting the ledger page just because each scanned the page tree at a different time.',
@@ -20594,8 +20611,10 @@ JiTA.changelog = {
     },
 
     markSeen: function () {
-        var C = JiTA.changelog;
-        gmSet(C.SEEN_KEY, C.latest().v);
+        var C = JiTA.changelog, seen = String(gmGet(C.SEEN_KEY, '') || '');
+        // Only ever forward: a tab still on an older version marking its own latest as seen moved the mark back, and
+        // every updated tab then showed the pill again for changes already read.
+        if (!seen || JiTA.worker._verCmp(C.latest().v, seen) > 0) { gmSet(C.SEEN_KEY, C.latest().v); }
         C.remove();
     },
 
@@ -20740,6 +20759,13 @@ JiTA.changelog = {
 function jitaArmLeadDuties() {
     var mounted = false;
     function arm() {
+        // Armed from the cached verdict, and resolveMe() now says this account is not a Lead (any more): take the chip
+        // down, and the Settings section with it. It used to stay for the rest of the session.
+        if (mounted && !JiTA.leadduty.isLead()) {
+            try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }   // removes the chip for a non-Lead
+            try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { /* swallow */ }
+            return;
+        }
         if (mounted || !JiTA.leadduty.isLead()) { return; }
         mounted = true;
         try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }
