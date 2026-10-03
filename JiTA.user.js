@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.5
+// @version     3.38.12
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -3432,13 +3432,20 @@ JiTA.logsig = {
                 if (!found[defect].raw && label) { found[defect].raw = label; }
                 if (!loose) { found[defect].loose = false; }   // any exact hit upgrades the entry from "possibly related"
             }
+            // The badge is one element, classed so rematch() can take it off again, put in front of what the cell holds;
+            // rebuilding the cell through innerHTML re-parsed everything else in it as well.
             function markAnchor(tr, defect, loose) {
                 var cell = tr.lastElementChild;
-                tr.className += loose ? ' sig-hit-loose' : ' sig-hit';
+                tr.classList.add(loose ? 'sig-hit-loose' : 'sig-hit');
                 if (cell) {
                     cell.title = (loose ? 'Possibly related (same crash site) · ' : 'Known exception · ') + defect;
-                    var col = loose ? '#9aa6b2' : '#4c9aff';
-                    cell.innerHTML = '<a href="/browse/' + defect + '" target="_blank" style="color:' + col + ';font-weight:700;margin-right:6px;">[' + (loose ? '~' : '') + defect + ']</a>' + cell.innerHTML;
+                    var a = document.createElement('a');
+                    a.className = 'jita-sig-link';
+                    a.href = '/browse/' + defect;
+                    a.target = '_blank';
+                    a.style.cssText = 'color:' + (loose ? '#9aa6b2' : '#4c9aff') + ';font-weight:700;margin-right:6px;';
+                    a.textContent = '[' + (loose ? '~' : '') + defect + ']';
+                    cell.insertBefore(a, cell.firstChild);
                 }
             }
             var i = 0;
@@ -3491,7 +3498,17 @@ JiTA.logsig = {
     rematch: function () {
         if (!document.getElementById('tableContent')) { return; }   // no parsed log open
         var rows = document.querySelectorAll('#tableContent tbody tr');
-        for (var i = 0; i < rows.length; i++) { rows[i].removeAttribute('data-jita-sig'); }
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            r.removeAttribute('data-jita-sig');
+            // ...and what the last pass drew on the row, so it keeps a badge only if it matches now. Left in place,
+            // every sync put another [EDR-x] in front of the last one, and a match that no longer held stayed up.
+            r.classList.remove('sig-hit', 'sig-hit-loose');
+            var links = r.querySelectorAll('a.jita-sig-link');
+            for (var k = 0; k < links.length; k++) { links[k].parentNode.removeChild(links[k]); }
+            var cell = r.lastElementChild;
+            if (cell && /^(Known exception|Possibly related \(same crash site\)) · /.test(cell.title || '')) { cell.removeAttribute('title'); }
+        }
         JiTA.logsig.applyToTable();
     },
 
@@ -19770,6 +19787,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.12', date: '2026-10-03', items: [
+            'A parsed log left open no longer collects another defect badge on its exceptions with every sync, and a badge for a defect that no longer matches goes away.'
+        ] },
         { v: '3.38.5', date: '2026-10-03', items: [
             "After an update the What's new pill now comes up reliably: if the page takes it away while still loading, it comes back by itself."
         ] },
