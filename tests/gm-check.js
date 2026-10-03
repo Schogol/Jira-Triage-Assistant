@@ -44,6 +44,7 @@ async function advance(ms) {   // run each timer due within ms, in time order, s
 const TAB = '[role="tab"]', ADD = 'button[data-testid="add-comment-button"]';
 global.SELECTORS = { ROLE_TAB: TAB, ADD_COMMENT_BTN: ADD };
 let tabs = [], active = null, editors = {}, posted = [], fills = [], clicks = [], takes = true, flipOnFill = false, noReset = false;
+let failPost = false, placeholder = false, replace = false, gone = {};
 function select(label) { active = label; tabs.forEach((x) => { x.attrs['aria-selected'] = String(x.textContent === label); }); }
 function Tab(label) {
     const tb = { textContent: label, attrs: { 'aria-selected': 'false' } };
@@ -51,7 +52,12 @@ function Tab(label) {
     tb.click = () => { clicks.push(label); if (takes) { select(label); } };
     return tb;
 }
-const add = { disabled: true, click() { posted.push({ tab: active, text: editors[active] }); if (!noReset) { editors[active] = ''; add.disabled = true; } } };
+const add = { disabled: true, click() {
+    posted.push({ tab: active, text: editors[active] });
+    if (failPost) { add.disabled = true; setTimeout(() => { add.disabled = false; }, 400); return; }   // the post fails: the button comes back, the note stays
+    if (replace) { gone[active] = true; add.disabled = true; return; }                                 // a fresh editor takes the old one's place
+    if (!noReset) { editors[active] = placeholder ? 'Add an internal note for your team' : ''; add.disabled = true; }
+} };
 global.document = {
     querySelectorAll: (sel) => (sel === TAB ? tabs : []),
     querySelector: (sel) => (sel === ADD ? add : null)
@@ -64,6 +70,7 @@ function composer(opts) {
     takes = opts.takes !== false;
     flipOnFill = !!opts.flip;
     noReset = !!opts.noReset;
+    failPost = !!opts.failPost; placeholder = !!opts.placeholder; replace = !!opts.replace; gone = {};
     posted = []; fills = []; clicks = [];
     add.disabled = true;
 }
@@ -74,7 +81,12 @@ Object.assign(JiTA.responses, {
     _hasTicket: () => true,
     _composerEditor: () => ({ textContent: editors[active] }),
     // The real apply types into the ACTIVE editor; the fill registering is what enables Add.
-    apply: (text) => { fills.push(active); editors[active] = text; add.disabled = false; if (flipOnFill) { select('Add public reply'); } return true; }
+    apply: (text) => {
+        const tab = active;
+        fills.push(tab); editors[tab] = text; add.disabled = false;
+        if (flipOnFill) { select('Add public reply'); }
+        return { get isConnected() { return !gone[tab]; }, get textContent() { return editors[tab]; } };
+    }
 });
 async function post(note) {
     let res = null;
@@ -171,6 +183,15 @@ const cancel = () => tap(buttonOf('Cancel'));
     composer({ on: 'Add internal note', noReset: true });
     r = await post(NOTE);
     ok('Add clicked but never seen to go through is not a success, and says it was clicked', !!r && r.ok === false && r.clicked === true && posted.length === 1, JSON.stringify(r));
+    composer({ on: 'Add internal note', failPost: true });
+    r = await post(NOTE);
+    ok('a post that fails is not a success, though the Add button disabled for a moment', !!r && r.ok === false && r.clicked === true, JSON.stringify(r));
+    composer({ on: 'Add internal note', placeholder: true });
+    r = await post(NOTE);
+    ok('a reset editor showing its placeholder counts as posted', !!r && r.ok === true, JSON.stringify(r));
+    composer({ on: 'Add internal note', replace: true });
+    r = await post(NOTE);
+    ok('...as does the editor being replaced by a fresh one', !!r && r.ok === true, JSON.stringify(r));
 
     // ================= the modal =================
     convert('for the GMs');

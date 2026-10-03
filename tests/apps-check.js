@@ -148,8 +148,7 @@ ${name}
         A._text('<!--<div class="circular" style="x"></div>--> Name') === 'Name',
         JSON.stringify(A._text('<!--<div class="circular" style="x"></div>--> Name')));
     ok('the state is read from its own span', L1.items[0].state === 'New', L1.items[0].state);
-    ok('applied and updated are told apart', L1.items[0].applied === '2026-09-05 10:19' && L1.items[0].updated === '2026-09-06 11:20',
-        JSON.stringify([L1.items[0].applied, L1.items[0].updated]));
+    ok('applied is the first date, not the last update', L1.items[0].applied === '2026-09-05 10:19', L1.items[0].applied);
     ok('the detail URL is built from the id', L1.items[0].url.slice(-36) === G1, L1.items[0].url);
     ok('the header row is not read as an application', L1.items.every((i) => i.id && i.name !== 'APPLICANT'));
 

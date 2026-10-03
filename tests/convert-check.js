@@ -28,7 +28,7 @@ global.jitaCurrentKey = () => current;
 global.jitaLinkedKeys = (links) => (links || []).map((l) => l.key);
 global.jitaInvokeAutomationRule = (id, rule) => { const d = Deferred(); rules.push({ id, rule, d }); return d; };
 global.jitaGoToNewDefect = (key, before) => { goes.push(key + ' ' + before.join(',')); };
-global.jitaAjaxError = (msg) => () => { errors++; lastErr = msg; };
+global.jitaAjaxError = (xhr, msg) => { errors++; lastErr = msg; };
 global.JITA_CONVERT_DEFECT_RULE = 'rule-9';
 (0, eval)(src.slice(s, e) + '\nglobal.jitaConvertClick = jitaConvertClick; global.jitaConvertButtonState = jitaConvertButtonState; global.jitaConvertBusy = jitaConvertBusy;');
 

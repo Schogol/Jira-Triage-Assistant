@@ -16,7 +16,7 @@ const muts = [
     [A, 'a tick while this tab syncs takes the lease', "        if (JiTA.sync.running) { return; }               // a sync of this tab's own is going\n", ''],
     [A, 'closing the tab keeps the lease', "        try { window.addEventListener('pagehide', function () { JiTA.sched._releaseLease(); }); } catch (e) { /* ignore */ }\n", ''],
     [A, 'any tab\'s lease is freed', 'if (l && l.tabId === JiTA.sched.tabId) { gmSet(JiTA.sched.LEASE_KEY, null); }', 'if (l) { gmSet(JiTA.sched.LEASE_KEY, null); }'],
-    [A, 'a completed auto-sync says nothing', '                return true;\n            });\n        }).catch(function (e) {', '            });\n        }).catch(function (e) {'],
+    [A, 'a completed auto-sync says nothing', '            return true;\n        }).catch(function (e) {', '        }).catch(function (e) {'],
     [A, 'a failed auto-sync says nothing', "            console.log('[JiTA] auto-sync error:', e && e.message || e);\n            return false;\n", "            console.log('[JiTA] auto-sync error:', e && e.message || e);\n"],
     [A, 'an auto-sync that did not run is not told apart', 'if (JiTA.sync.running) { return Promise.resolve(null); }', 'if (JiTA.sync.running) { return Promise.resolve(); }'],
     // ---- a removed report ----

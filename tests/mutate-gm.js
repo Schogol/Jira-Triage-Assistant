@@ -8,7 +8,7 @@ const muts = [
     // ---- the internal note ----
     [H, 'a missing internal-note tab is typed into anyway', 'if (!JiTA.responses._selectInternalNote()) {', 'if (!JiTA.responses._selectInternalNote() && false) {'],
     [H, 'the tab switch is not waited for', 'poll(JiTA.responses._internalNoteActive, 3000, function () {', 'poll(function () { return true; }, 3000, function () {'],
-    [H, 'a present tab counts as selected', "{ return tabs[i].getAttribute('aria-selected') === 'true'; }", '{ return true; }'],
+    [H, 'a present tab counts as selected', "=== 'add internal note') { return tabs[i].getAttribute('aria-selected') === 'true'; }", "=== 'add internal note') { return true; }"],
     [H, 'no last look before Add', "if (!JiTA.responses._internalNoteActive()) {\n                    resolve({ ok: false, error: 'The composer left", "if (false) {\n                    resolve({ ok: false, error: 'The composer left"],
     // ---- closing the modal stops the conversion ----
     [H, 'the modal is always alive', 'function alive() { return !!(ov.$overlay[0] && ov.$overlay[0].isConnected); }', 'function alive() { return true; }'],
@@ -26,6 +26,9 @@ const muts = [
     [H, 'a retry posts the note again', '(note && note !== notePosted) ? JiTA.responses.postInternalNote(note)', 'note ? JiTA.responses.postInternalNote(note)'],
     [H, 'an unconfirmed click does not count as posted', 'if (res && (res.ok || res.clicked)) { notePosted = note; }', 'if (res && res.ok) { notePosted = note; }'],
     [H, 'the failure does not mention the posted note', "(notePosted ? ' The note is already on the ticket, so Convert will not post it again.' : '')", "''"],
+    [H, 'a disabled Add button counts as posted', 'var posted = !filled.isConnected ||', 'var posted = !!(document.querySelector(ADD) && document.querySelector(ADD).disabled) || !filled.isConnected ||'],
+    [H, 'a placeholder blocks the confirm', 'JiTA.responses._squash(filled.textContent).indexOf(probe) === -1', 'JiTA.responses._squash(filled.textContent) === \'\''],
+    [H, 'a replaced editor is not a post', 'var posted = !filled.isConnected ||', 'var posted ='],
     [H, 'an unconfirmed click is not reported as clicked', "resolve({ ok: false, clicked: true, error: 'Could not confirm", "resolve({ ok: false, error: 'Could not confirm"],
     [H, 'a failure after the close goes unsaid', "if (invoked) { JiTA.ui.toast('Convert to Support Ticket failed: '", "if (false) { JiTA.ui.toast('Convert to Support Ticket failed: '"],
     [H, 'a backed-out conversion is toasted as failed', "if (invoked) { JiTA.ui.toast('Convert to Support Ticket failed: '", "if (true) { JiTA.ui.toast('Convert to Support Ticket failed: '"],
