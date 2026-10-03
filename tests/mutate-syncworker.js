@@ -24,7 +24,8 @@ const muts = [
     [A, 'every other tab drops the indexes again', '        if (fromRemote) { return; }\n        var note', '        if (fromRemote) { JiTA.sync._invalidateWorker(); return; }\n        var note'],
     [A, 'a heard removal is echoed', '        if (fromRemote) { return; }\n        var note', '        var note'],
     [A, 'an unreachable worker keeps the news', "return JiTA.worker.call('invalidate').then(function () {}, function () { /* ignore */ });", "return JiTA.worker.call('invalidate').then(function () {});"],
-    [A, 'no worker at all keeps the news', 'if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }', 'if (!(JiTA.worker && JiTA.worker.usable())) { return new Promise(function () {}); }'],
+    [A, 'no worker at all keeps the news', '_invalidateWorker: function () {\n        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }',
+        '_invalidateWorker: function () {\n        if (!(JiTA.worker && JiTA.worker.usable())) { return new Promise(function () {}); }'],
     // ---- the upgrade check ----
     [A, 'the upgrade check runs into a sync', '        JiTA.migrate._done = true;\n        if (JiTA.sync.running) { JiTA.migrate._later(); return; }\n', '        JiTA.migrate._done = true;\n'],
     [A, 'a sync started mid-read is not noticed', '                        if (JiTA.sync.running) { JiTA.migrate._later(); return; }   // one started while we read\n', ''],
