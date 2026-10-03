@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.39.0
+// @version     3.39.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -183,7 +183,9 @@ var SELECTORS = {
     FIELD_HEADING:     '[data-testid^="issue-field-heading-styled-field-heading"]',
     VC_DETAILS_GROUP:  '[data-vc="issue-view-context-group-details-group"]',
     ROLE_TAB:          '[role="tab"]',
-    RS_SINGLE_VALUE:   '[id$="-single-value"]'
+    RS_SINGLE_VALUE:   '[id$="-single-value"]',
+    ZD_TICKET_INPUT:   'input[id$="ticket-select"]',   // the Zendesk panel's ticket combobox
+    ZD_SUBDOMAIN_LABEL: 'label[for="subdomain-select"]'   // the panel's header; the canned-response dropdown sits beside it
 };
 
 
@@ -4450,7 +4452,6 @@ JiTA.responses = {
     // added:[{title,body}] }. A response the user NEVER touched is not stored, so it stays a live DEFAULT and
     // picks up wording fixes from script updates. Only EDITED defaults (overrides), DELETED defaults, and
     // user-ADDED responses are persisted. A legacy full-array value is migrated to this shape on first read.
-    _isArr: function (v) { return Object.prototype.toString.call(v) === '[object Array]'; },
     _emptyOverlay: function () { return { overrides: {}, deleted: [], added: [] }; },
 
     // Diff a legacy full snapshot (array of {title,body}) against DEFAULTS into an overlay. A title that
@@ -4478,10 +4479,9 @@ JiTA.responses = {
     // Parse the stored overlay (migrating + persisting a legacy array on first read). Always returns a
     // well-formed { overrides, deleted, added }.
     _overlay: function () {
-        var raw = null;
-        raw = gmGet(JiTA.responses.GM_KEY, null);
+        var raw = gmGet(JiTA.responses.GM_KEY, null);
         if (!raw) { return JiTA.responses._emptyOverlay(); }
-        if (JiTA.responses._isArr(raw)) {                 // legacy full snapshot -> migrate once
+        if (Array.isArray(raw)) {                         // legacy full snapshot -> migrate once
             var ov = JiTA.responses._legacyToOverlay(raw);
             JiTA.responses._saveOverlay(ov);
             return ov;
@@ -4489,8 +4489,8 @@ JiTA.responses = {
         if (typeof raw === 'object') {
             return {
                 overrides: (raw.overrides && typeof raw.overrides === 'object') ? raw.overrides : {},
-                deleted: JiTA.responses._isArr(raw.deleted) ? raw.deleted : [],
-                added: JiTA.responses._isArr(raw.added) ? raw.added : []
+                deleted: Array.isArray(raw.deleted) ? raw.deleted : [],
+                added: Array.isArray(raw.added) ? raw.added : []
             };
         }
         return JiTA.responses._emptyOverlay();
@@ -4516,12 +4516,11 @@ JiTA.responses = {
             if (o) { usedOverride[d.title] = true; out.push({ title: o.title, body: o.body, _orig: d.title }); }
             else { out.push({ title: d.title, body: d.body, _orig: d.title }); }
         }
-        // Overrides whose default no longer exists (removed upstream) survive as custom responses.
+        // Overrides whose default no longer exists (removed upstream) survive as custom responses. (One for a
+        // default that is still there was used above, or that default is deleted.)
         for (var k in ov.overrides) {
             if (!Object.prototype.hasOwnProperty.call(ov.overrides, k) || usedOverride[k] || del[k]) { continue; }
-            var stillDefault = false;
-            for (i = 0; i < defs.length; i++) { if (defs[i].title === k) { stillDefault = true; break; } }
-            if (!stillDefault) { out.push({ title: ov.overrides[k].title, body: ov.overrides[k].body }); }
+            out.push({ title: ov.overrides[k].title, body: ov.overrides[k].body });
         }
         for (i = 0; i < ov.added.length; i++) { out.push({ title: ov.added[i].title, body: ov.added[i].body }); }
         return out;
@@ -4581,7 +4580,7 @@ JiTA.responses = {
     },
 
     // Standalone, roomier editor for the canned responses, opened by the settings menu's "Customize
-    // responses" button (the menu itself just shows that button + Restore defaults now, so it stays compact).
+    // responses" button (the menu itself shows only that button, so it stays compact).
     // Reuses the settings-menu overlay chrome (#jita-menu-overlay / #jita-menu) widened via .jita-menu-wide, and
     // the same .jita-resp-* row styling. Edits persist to GM (shared across frames, survive script updates).
     _editorCssInjected: false,
@@ -4770,23 +4769,29 @@ JiTA.responses = {
             }).appendTo($foot);
     },
 
+    // The Zendesk panel's ACTIVE compose editor: the editor nearest the composer's Add button, looked for no further
+    // out than the panel - the node that also holds the panel's header, where the ticket and subdomain selects and our
+    // dropdown sit. A global querySelector matched a DIFFERENT editor (the JQL search box, or an INACTIVE tab's
+    // editor that never clears), and so did the old fallback whenever our dropdown was not built yet; apply() empties
+    // whatever it is given. With no composer in the panel there is no editor: null.
+    _composerEditor: function () {
+        var SEL = 'div.ProseMirror[contenteditable="true"], [role="textbox"][contenteditable="true"]';
+        var add = document.querySelector(SELECTORS.ADD_COMMENT_BTN);
+        var head = document.getElementById('jita-resp-col') || document.querySelector(SELECTORS.ZD_SUBDOMAIN_LABEL);
+        if (!add || !head) { return null; }
+        for (var node = add.parentNode; node && node.querySelector; node = node.parentNode) {
+            var ed = node.querySelector(SEL);
+            if (ed) { return ed; }
+            if (node.contains(head)) { return null; }   // reached the panel without one: never look outside it
+        }
+        return null;
+    },
+
     // Replace the open comment editor's content with `body`. The Zendesk panel uses an Atlassian ProseMirror
     // editor (the single contenteditable=true instance; the comment-history editors are read-only). We focus
     // it, select all, then execCommand('insertText') so ProseMirror's own input handling rebuilds the document
-    // (more reliable than poking its internal model). Returns false if no editable editor is present.
-    // The Zendesk panel's ACTIVE compose editor: the nearest editable ProseMirror to OUR dropdown anchor. A
-    // global querySelector would match a DIFFERENT editor (the JQL search box, or an INACTIVE tab's editor that
-    // never clears), which is why the text landed in the wrong field AND why the post-success poll misfired.
-    _composerEditor: function () {
-        var SEL = 'div.ProseMirror[contenteditable="true"], [role="textbox"][contenteditable="true"]';
-        var anchor = document.getElementById('jita-resp-col');
-        for (var node = anchor && anchor.parentNode; node && node.querySelector; node = node.parentNode) {
-            var cand = node.querySelector(SEL);
-            if (cand) { return cand; }   // nearest enclosing editor == the Zendesk panel's compose box
-        }
-        return document.querySelector(SEL);   // fallback (shouldn't normally be needed)
-    },
-
+    // (more reliable than poking its internal model). Returns the editor it filled, so a caller can watch that one
+    // editor; false when there is none, or writing to it threw.
     apply: function (body) {
         var ed = JiTA.responses._composerEditor();
         if (!ed) { return false; }
@@ -4811,9 +4816,12 @@ JiTA.responses = {
                 var text = m ? ('• ' + line.slice(m[0].length)) : line;
                 if (text) { document.execCommand('insertText', false, text); }
             }
-            return true;
+            return ed;
         } catch (e) { return false; }
     },
+
+    // The dropdown's placeholder: its first option, and the text the cloned react-select shows.
+    _placeholder: function (list) { return list.length ? 'Insert a response…' : 'No responses configured'; },
 
     // Populate (or repopulate) the dropdown's <option>s from the repository. Guarded by a signature so a
     // re-inject during the user's interaction doesn't clobber an in-progress selection.
@@ -4821,39 +4829,42 @@ JiTA.responses = {
         var list = JiTA.responses.load();
         var sig = list.map(function (r) { return r.title; }).join('');
         if (sel.getAttribute('data-jita-sig') !== sig) {
-        sel.setAttribute('data-jita-sig', sig);
-        sel.innerHTML = '';
-        // Explicit dark colors on every option / optgroup so the native popup is readable in Chrome (which
-        // otherwise paints unstyled options on a white system background).
-        var OPT_CSS = 'background:#1d2125;color:#e6e6e6;';
-        var ph = document.createElement('option');
-        ph.value = '';
-        ph.textContent = list.length ? 'Insert a response…' : 'No responses configured';
-        ph.style.cssText = OPT_CSS;
-        sel.appendChild(ph);
-        // Group into <optgroup>s by section (derived from the title prefix), showing the short tail inside.
-        var groups = {};
-        for (var i = 0; i < list.length; i++) {
-            var sec = JiTA.responses._sectionOf(list[i].title);
-            var grp = groups[sec];
-            if (!grp) { grp = groups[sec] = document.createElement('optgroup'); grp.label = sec; grp.style.cssText = OPT_CSS; sel.appendChild(grp); }
-            var o = document.createElement('option');
-            o.value = String(i);
-            o.textContent = JiTA.responses._titleTail(list[i].title) || ('Response ' + (i + 1));
-            o.style.cssText = OPT_CSS;
-            grp.appendChild(o);
-        }
-        sel.value = '';
+            sel.setAttribute('data-jita-sig', sig);
+            sel.innerHTML = '';
+            // Explicit dark colors on every option / optgroup so the native popup is readable in Chrome (which
+            // otherwise paints unstyled options on a white system background).
+            var OPT_CSS = 'background:#1d2125;color:#e6e6e6;';
+            var ph = document.createElement('option');
+            ph.value = '';
+            ph.textContent = JiTA.responses._placeholder(list);
+            ph.style.cssText = OPT_CSS;
+            sel.appendChild(ph);
+            // Group into <optgroup>s by section (derived from the title prefix), showing the short tail inside.
+            var groups = {};
+            for (var i = 0; i < list.length; i++) {
+                var sec = JiTA.responses._sectionOf(list[i].title);
+                var grp = groups[sec];
+                if (!grp) { grp = groups[sec] = document.createElement('optgroup'); grp.label = sec; grp.style.cssText = OPT_CSS; sel.appendChild(grp); }
+                var o = document.createElement('option');
+                o.value = String(i);
+                o.textContent = JiTA.responses._titleTail(list[i].title) || ('Response ' + (i + 1));
+                o.style.cssText = OPT_CSS;
+                grp.appendChild(o);
+            }
+            sel.value = '';
         }
         JiTA.responses._setDisplay(list);
     },
 
     // Reset the (cloned react-select) display text back to the placeholder. The dropdown is an ACTION menu, so
     // after each pick it returns to the placeholder rather than showing the last choice. No-op on the fallback
-    // path (a plain <select> shows its own option text).
+    // path (a plain <select> shows its own option text). Written only when it differs: this runs on every pass of
+    // the panel's observer, and in a browser that does not skip an identical write (Firefox) each write fired the
+    // observer again, several times a second.
     _setDisplay: function (list) {
         var v = document.querySelector('[data-jita-respval]');
-        if (v) { v.textContent = (list || JiTA.responses.load()).length ? 'Insert a response…' : 'No responses configured'; }
+        var text = JiTA.responses._placeholder(list || JiTA.responses.load());
+        if (v && v.textContent !== text) { v.textContent = text; }
     },
 
     // Switch the Zendesk composer to its "Add public reply" tab (it defaults to "Add internal note"). The
@@ -4870,11 +4881,20 @@ JiTA.responses = {
         return false;
     },
 
+    // True once "Add public reply" is the SELECTED composer tab (mirrors _internalNoteActive).
+    _publicReplyActive: function () {
+        var tabs = document.querySelectorAll(SELECTORS.ROLE_TAB);
+        for (var i = 0; i < tabs.length; i++) {
+            if ((tabs[i].textContent || '').trim().toLowerCase() === 'add public reply') { return tabs[i].getAttribute('aria-selected') === 'true'; }
+        }
+        return false;
+    },
+
     // True when the Zendesk panel has a LINKED TICKET selected. react-select points the ticket combobox's
     // aria-describedby at a "…-single-value" node when a ticket is chosen, vs "…-placeholder" when empty (e.g. the
     // reporter had no email, so no ZD ticket was ever created - there's then nothing to comment on).
     _hasTicket: function () {
-        var inp = document.querySelector('input[id$="ticket-select"]');
+        var inp = document.querySelector(SELECTORS.ZD_TICKET_INPUT);
         if (!inp) { return false; }
         return /-single-value$/.test(inp.getAttribute('aria-describedby') || '');
     },
@@ -4902,13 +4922,27 @@ JiTA.responses = {
         return false;
     },
 
+    // A piece of `note` that apply() leaves in the editor verbatim: its first line with text in it (with the bullet
+    // glyph apply() gives a "- " line), whitespace squashed, at most 40 characters. The note counts as posted once
+    // that piece has left the editor it was typed into.
+    _probe: function (note) {
+        var lines = String(note == null ? '' : note).split('\n');
+        for (var i = 0; i < lines.length; i++) {
+            var m = /^[-•]\s+/.exec(lines[i]);
+            var text = JiTA.responses._squash(m ? ('• ' + lines[i].slice(m[0].length)) : lines[i]);
+            if (text) { return text.slice(0, 40); }
+        }
+        return '';
+    },
+    _squash: function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); },
+
     // Post `note` as an INTERNAL comment by driving the Zendesk composer: select the internal-note tab and see it
     // selected, fill the editor (reusing apply), click the Add button (data-testid="add-comment-button"), then
-    // confirm the composer cleared - its success signal. Resolves { ok, error }. Runs in whichever frame holds the
+    // confirm the note left the editor - its success signal. Resolves { ok, error }. Runs in whichever frame holds the
     // composer (the Forge iframe normally). Errs toward FAILURE (so the caller aborts the conversion) rather than
     // risk a lost note, or one that reaches the player as a public reply.
     postInternalNote: function (note) {
-        var ADD = SELECTORS.ADD_COMMENT_BTN;
+        var ADD = SELECTORS.ADD_COMMENT_BTN, filled = null;
         // Small poller: call onOk once test() is truthy, or onTimeout after `ms`.
         function poll(test, ms, onOk, onTimeout) {
             var t = 0;
@@ -4947,7 +4981,8 @@ JiTA.responses = {
                 });
             }
             function fill() {
-                if (!JiTA.responses.apply(note)) { resolve({ ok: false, error: 'Could not find the comment editor.' }); return; }
+                filled = JiTA.responses.apply(note);
+                if (!filled) { resolve({ ok: false, error: 'Could not find the comment editor.' }); return; }
                 // 4. Wait for the Add button to enable (our fill has to register), then click.
                 poll(function () { var b = document.querySelector(ADD); return b && !b.disabled; }, 6000, doClick, function () {
                     resolve({ ok: false, error: 'The Add button did not enable (empty note?).' });
@@ -4962,16 +4997,15 @@ JiTA.responses = {
                     return;
                 }
                 b.click();
-                // 5. Success signal: after a posted comment the composer RESETS - the SCOPED editor (the one we
-                //    filled) empties AND/OR the Add button disables again, whichever comes first.
-                var waited = 0;
+                // 5. Success signal: the composer RESETS after a posted comment, so the editor we filled no longer
+                //    holds the note - emptied (its placeholder may show), or replaced by a fresh editor, ours leaving
+                //    the page. The Add button disabling is no proof: it disables while the post is on its way and
+                //    comes back after a failure, which counted as posted and let the conversion go on without the note.
+                var probe = JiTA.responses._probe(note), waited = 0;
                 var iv = setInterval(function () {
                     waited += 200;
-                    var ed = JiTA.responses._composerEditor();
-                    var addBtn = document.querySelector(ADD);
-                    var cleared = ed && (ed.textContent || '').trim() === '';
-                    var disabled = !!(addBtn && addBtn.disabled);
-                    if (cleared || disabled) { clearInterval(iv); resolve({ ok: true }); }
+                    var posted = !filled.isConnected || JiTA.responses._squash(filled.textContent).indexOf(probe) === -1;
+                    if (posted) { clearInterval(iv); resolve({ ok: true }); }
                     else if (waited >= 8000) { clearInterval(iv); resolve({ ok: false, clicked: true, error: 'Could not confirm the note posted (composer did not reset).' }); }
                 }, 200);
             }
@@ -4980,20 +5014,31 @@ JiTA.responses = {
 
     // Shared change handler for the overlay/fallback <select>: switch the composer to the public-reply tab,
     // insert the picked response, then reset the dropdown to its placeholder. We select the tab FIRST because
-    // switching tabs swaps in the public-reply editor instance; a short delay lets React mount it before we
-    // write into it (the editor lookup in apply() then targets the now-active public-reply box).
+    // switching tabs swaps in the public-reply editor instance, then wait until the tab reads as selected and an
+    // editor is there, plus a beat for React to mount it (apply() then targets the now-active public-reply box).
+    // It used to write after a fixed 80 ms and drop the result, so a slow switch inserted nothing and said nothing.
+    PICK_WAIT_MS: 3000,
     _onPick: function () {
         var sel = document.getElementById('jita-resp-select');
         if (!sel) { return; }
         var i = parseInt(sel.value, 10);
         var list = JiTA.responses.load();
-        if (!isNaN(i) && list[i]) {
-            var body = JiTA.responses._compose(list[i].body);   // wrap with the configured opener / closing
-            var switched = JiTA.responses._selectPublicReply();
-            setTimeout(function () { JiTA.responses.apply(body); }, switched ? 80 : 0);
-        }
         sel.value = '';
         JiTA.responses._setDisplay(list);
+        if (isNaN(i) || !list[i]) { return; }
+        var body = JiTA.responses._compose(list[i].body);   // wrap with the configured opener / closing
+        function failed(why) { JiTA.ui.toast('Could not insert the response: ' + why + '. Click into the reply box and pick it again.'); }
+        if (!JiTA.responses._selectPublicReply()) { failed('the "Add public reply" tab was not found'); return; }
+        var waited = 0;
+        (function step() {
+            if (JiTA.responses._publicReplyActive() && JiTA.responses._composerEditor()) {
+                setTimeout(function () { if (!JiTA.responses.apply(body)) { failed('the reply box could not be written to'); } }, 80);
+                return;
+            }
+            if (waited >= JiTA.responses.PICK_WAIT_MS) { failed('the reply box did not open'); return; }
+            waited += 100;
+            setTimeout(step, 100);
+        })();
     },
 
     // True once a react-select column has finished rendering its chrome (the styled control box + the chevron
@@ -5013,7 +5058,7 @@ JiTA.responses = {
     // so the clone still lands to the right of the ticket selector. Idempotent: re-fills an existing dropdown,
     // or builds one next to the source column.
     inject: function () {
-        var srcLabel = document.querySelector('label[for="subdomain-select"]');
+        var srcLabel = document.querySelector(SELECTORS.ZD_SUBDOMAIN_LABEL);
         if (!srcLabel || !srcLabel.parentNode || !srcLabel.parentNode.parentNode) { return; }
         var srcCol = srcLabel.parentNode;                  // the subdomain-select column (label + react-select)
         var row = srcCol.parentNode;                       // flex row holding the subdomain + ticket columns
@@ -5053,7 +5098,7 @@ JiTA.responses = {
             }
             var inputs = col.querySelectorAll('input');
             for (i = 0; i < inputs.length; i++) { if (inputs[i].parentNode) { inputs[i].parentNode.removeChild(inputs[i]); } }
-            if (valEl) { valEl.setAttribute('data-jita-respval', '1'); valEl.textContent = 'Insert a response…'; }
+            if (valEl) { valEl.setAttribute('data-jita-respval', '1'); valEl.textContent = JiTA.responses._placeholder(JiTA.responses.load()); }
             box.style.position = 'relative';
             sel = document.createElement('select');
             sel.id = 'jita-resp-select';
@@ -5067,8 +5112,8 @@ JiTA.responses = {
             row.appendChild(col);
             return sel;
         } catch (e) {
-            // Fallback: a plain styled select that approximates the native look.
-            if (document.getElementById('jita-resp-col')) { return document.getElementById('jita-resp-select'); }
+            // Fallback: a plain styled select that approximates the native look. (inject() builds only when there is
+            // no #jita-resp-col yet, and the clone is appended last, so a throw above never leaves one behind.)
             var fcol = document.createElement('div');
             fcol.id = 'jita-resp-col';
             fcol.style.cssText = 'display:flex; flex-direction:column; margin-left:4px; min-width:220px; max-width:320px; box-sizing:border-box;';
@@ -20471,6 +20516,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.39.3', date: '2026-10-03', fixes: [
+            'Picking a canned response now waits for the public reply box to be ready, and says so when the text could not be put in, instead of doing nothing.',
+            'A canned response or the note for the GMs can no longer land in a Jira editor outside the Zendesk panel.',
+            'Convert to Support Ticket counts the note for the GMs as posted only once it has left the reply box, so a post that fails stops the conversion.',
+            'The canned-response dropdown no longer rewrites its label several times a second in Firefox.'
+        ] },
         { v: '3.39.0', date: '2026-10-03', features: [
             'What\'s new has two tabs now, New features and Fixed issues, and the pill only comes up for an update that brings something new to use. Fixes are listed without one.'
         ] },
@@ -21517,8 +21568,8 @@ if (JITA_IS_WIKI) {
 /* ---- canned responses: inject the dropdown into the Zendesk Support panel ---- */
 // Runs in EVERY frame (the main Jira page AND the Forge iframe), because the Zendesk Support panel can be
 // rendered EITHER as UI Kit 2 native components in the main page OR inside the cross-origin Forge iframe -
-// we don't assume which, so the injector simply feature-detects the ticket selector wherever it lives. It's
-// cheap: inject() early-exits unless #ticket-select is present, so it's a no-op in frames without the panel.
+// we don't assume which, so the injector simply feature-detects the panel's header wherever it lives. It's
+// cheap: inject() early-exits unless the subdomain select's label is present, so it's a no-op in frames without the panel.
 (function () {
     if (JITA_IS_WIKI) { return; }   // Confluence has no Zendesk panel; don't observe a big wiki page for nothing
     var scheduled = false;
@@ -21536,7 +21587,7 @@ if (JITA_IS_WIKI) {
         try {
             GM_addValueChangeListener('ejfCannedResponses', function () {
                 var sel = document.getElementById('jita-resp-select');
-                if (sel) { sel.removeAttribute('data-jita-sig'); JiTA.responses._fill(sel); }
+                if (sel) { sel.removeAttribute('data-jita-sig'); try { JiTA.responses._fill(sel); } catch (e) { /* the next inject() refills it */ } }
             });
         } catch (e) { /* ignore */ }
     }
