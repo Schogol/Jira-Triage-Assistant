@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.39.0
+// @version     3.39.4
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -275,11 +275,12 @@ if (!JITA_IS_FORGE_FRAME) {
 
 
 // Switch the embedding backend between GPU (WebGPU - fast but has been unstable on some GPUs/drivers) and
-// CPU (WASM - slow but rock-solid). The choice is persisted in GM flags that JiTA.embed.load() reads:
-// `sdTryWebgpu` opts into WebGPU, and `sdForceCpu` is the sticky lock the embed pass sets after a GPU device
-// loss. Switching to GPU clears that lock so WebGPU is actually retried. We reload afterwards so the pipeline
-// rebuilds cleanly on the chosen backend - embedding is resumable, so a reload never loses progress, and any
-// already-stored vectors stay valid (same model/version; q8 vs fp32 is just minor quantization noise).
+// CPU (WASM - slow but rock-solid). The choice is persisted in GM flags the shared worker is built with
+// (JiTA.worker._src): `sdTryWebgpu` opts into WebGPU, and `sdForceCpu` is a CPU lock an older build set after a
+// GPU device loss. Switching to GPU clears that lock so WebGPU is actually retried. We reload afterwards so the
+// worker is rebuilt on the chosen backend (a change made in another tab rebuilds it too) - embedding is
+// resumable, so a reload never loses progress, and any already-stored vectors stay valid (same model/version;
+// q8 vs fp32 is just minor quantization noise).
 function toggleEmbedBackend() {
     var gpuOn = gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false);
     if (gpuOn) {
@@ -5905,261 +5906,33 @@ JiTA.rank._bm25Score = function (idx, text, excludeKey, limit, filterTerms) {
 };
 
 
-/* ---- embedding engine: local transformers.js (main-thread fallback) ----
- * The shared worker hosts the primary embedding engine now (one model for all tabs). This local copy is
- * the fallback path for when the worker never comes up (no Web Locks / BroadcastChannel / module workers):
- * it lazily loads the same small sentence-embedding model in THIS tab (no server, no API key) and embeds
- * defect text into 384-dim normalized vectors. CSP on this instance is permissive (only frame-ancestors,
- * WASM OK), so we load the library with a plain dynamic import() of a pinned CDN ESM build and let it
- * fetch model weights directly. Any failure flips `unavailable` and the ranking layer falls back to BM25.
+/* ---- embedding: the shared worker's text model, as the tabs see it ----
+ * The embedding model (transformers.js, gte-small, 384-dim normalized vectors) runs only in the shared worker
+ * (jitaWorkerBody), one model for every tab. These are the settings the worker is built with, and prepare(), which
+ * asks it to embed whatever is outstanding. A tab without a usable worker ranks by keywords alone. There used to be a
+ * main-thread copy of the whole engine here, as a fallback, but semantic ranking only ever runs in the worker
+ * (rank._workerSemantic), so that copy loaded a model into the tab and wrote vectors nothing in it ever read.
  */
 JiTA.embed = {
     MODEL: 'Xenova/gte-small',   // English, retrieval-tuned, 384-dim (rolled back from the multilingual e5/paraphrase experiment, which was disliked). English-only; cross-language matching is to be handled by translating foreign reports to English at ingest instead. No query:/passage: prefixes.
     LIB_URL: 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.2/dist/transformers.min.js',
-    BATCH: 16,
-    MAX_CHARS: 1500,            // cap text per issue. Now that cleanForCompare strips the boilerplate, the
-                                // budget holds real content; raised back to 1500 (~380 tokens) since GPU
-                                // fp32/batch-32 handles it fast. (On the CPU fallback this is slower but the
-                                // single-item path + watchdog keep it safe.)
-    WARM_WAIT_MS: 4200,        // on first render, how long the panel waits for the model to finish loading
-                               // before falling back to instant keyword results (fast/no-op when cached)
-    ready: false,              // model pipeline is loaded and usable
-    unavailable: false,        // load failed irrecoverably -> stay on BM25
-    backend: null,             // 'webgpu/fp16' etc (for diagnostics)
-    _pipe: null,
-    _loading: null,
+    MAX_CHARS: 1500,            // cap text per issue (the worker cuts each text to this). Now that cleanForCompare strips
+                                // the boilerplate, the budget holds real content (~380 tokens).
+    WARM_WAIT_MS: 4200,        // on first render, how long the panel waits for the worker's hybrid ranking before
+                               // showing keyword results (fast once the worker's model is loaded)
     _preparing: null,
-    _prepared: false,
 
-    // Drop the current pipeline so the next embed call rebuilds it (used to recover from a lost GPU device).
-    _resetPipe: function () {
-        JiTA.embed._pipe = null;
-        JiTA.embed._loading = null;
-        JiTA.embed.ready = false;
-    },
-
-    // Load (once) the transformers.js pipeline. Resolves to the pipeline, or rejects and sets `unavailable`.
-    // Inference is kept OFF the main thread so the Jira tab never freezes: WebGPU runs on the GPU, and the
-    // WASM fallback runs in its own worker via env.backends.onnx.wasm.proxy. We pick WebGPU if it actually
-    // works (validated with a tiny warmup) and otherwise fall back to WASM.
-    load: function () {
-        if (JiTA.embed._pipe) { return Promise.resolve(JiTA.embed._pipe); }
-        if (JiTA.embed.unavailable) { return Promise.reject(new Error('embeddings unavailable')); }
-        if (JiTA.embed._loading) { return JiTA.embed._loading; }
-        JiTA.embed._loading = (function () {
-            return import(JiTA.embed.LIB_URL).then(function (mod) {
-                if (mod.env) {
-                    mod.env.allowLocalModels = false;     // always fetch from the hub/CDN
-                    mod.env.useBrowserCache = true;        // cache weights in CacheStorage after first download
-                    // Run the ONNX/WASM backend in a worker so embedding never blocks the page.
-                    try { mod.env.backends.onnx.wasm.proxy = true; } catch (e) { /* older builds: ignore */ }
-                }
-                // Pick a backend that actually works. We deliberately do NOT use fp16 on WebGPU for this
-                // model: gte-small's intermediate activations exceed the tiny fp16 range and overflow to
-                // Inf/NaN, so embeddings come back as NaN (cosine -> NaN, "%" shows NaN, semantic ranking
-                // becomes noise). fp32 on WebGPU is reliable; the WASM/CPU fallback uses q8 (small + fine on
-                // CPU). Each candidate is validated below, so any backend that yields bad numbers is rejected.
-                // After a GPU device loss we rebuild on WASM only; otherwise prefer WebGPU fp32 then WASM.
-                // WebGPU has proven unstable for this model: every dtype/batch size we tried eventually died
-                // with a device loss ("AbortError: Buffer unmapped") that can even HANG the worker - the
-                // batch promise never resolves or rejects, so the CPU fallback never triggers and the pass
-                // silently stalls. So the default is CPU/WASM only: slower but rock-solid and finite (no fp16
-                // NaN issues either). WebGPU is the DEFAULT backend (fast): `sdTryWebgpu` defaults to true and
-                // the menu toggle is the ONLY thing that switches backend - a GPU failure does NOT auto-fall
-                // back to CPU (it retries on GPU, then pauses). `sdForceCpu` is still honored if the menu sets
-                // it, but nothing else forces CPU on its own.
-                var forceCpu = gmGet('sdForceCpu', false);
-                var tryGpu = !forceCpu && gmGet('sdTryWebgpu', true);
-                var attempts = tryGpu
-                    ? [{ device: 'webgpu', dtype: 'fp32' }, { device: 'wasm', dtype: 'q8' }]
-                    : [{ device: 'wasm', dtype: 'q8' }];
-                function buildWith(opts) {
-                    // Validate with a realistic, longer input rather than a single word. fp16/overflow issues
-                    // surface only on real-length text, so a tiny warmup would falsely "pass" and we'd store
-                    // NaN vectors. Require a finite, properly-normalized vector (sum of squares ~= 1).
-                    return mod.pipeline('feature-extraction', JiTA.embed.MODEL, opts).then(function (pipe) {
-                        var probe = 'The quick brown fox jumps over the lazy dog. ' +
-                            'Client crashes on undock with an access violation in the rendering thread after the latest patch.';
-                        return pipe(probe, { pooling: 'mean', normalize: true }).then(function (out) {
-                            var d = out && out.data, ss = 0, ok = !!(d && d.length);
-                            for (var i = 0; ok && i < d.length; i++) {
-                                if (!isFinite(d[i])) { ok = false; } else { ss += d[i] * d[i]; }
-                            }
-                            if (!ok || !(ss > 0.5)) { throw new Error('backend produced invalid embeddings (NaN/Inf/zero)'); }
-                            return pipe;
-                        });
-                    });
-                }
-                function tryFrom(i) {
-                    if (i >= attempts.length) { return Promise.reject(new Error('no usable embedding backend')); }
-                    return buildWith(attempts[i]).then(function (pipe) {
-                        JiTA.embed.backend = attempts[i].device + '/' + attempts[i].dtype;
-                        // fp32 GPU memory ~ batch x sequence-length. With MAX_CHARS at 1500, a large batch can
-                        // exhaust VRAM and trigger a device loss (the "BindGroup '...' is invalid" cascade), so
-                        // WebGPU uses a conservative 8. CPU/WASM runs one at a time: batched (array) inference
-                        // hangs the worker there, while the single-string path (same shape as the warmup) is reliable.
-                        JiTA.embed.BATCH = (attempts[i].device === 'webgpu') ? 8 : 1;
-                        return pipe;
-                    }, function () {
-                        return tryFrom(i + 1);
-                    });
-                }
-                return tryFrom(0);
-            }).then(function (pipe) {
-                JiTA.embed._pipe = pipe;
-                JiTA.embed.ready = true;
-                console.log('[JiTA] embedding model ready (backend: ' + JiTA.embed.backend + ')');
-                return pipe;
-            });
-        })().catch(function (e) {
-            JiTA.embed.unavailable = true;
-            JiTA.embed._loading = null;
-            console.log('[JiTA] embedding model unavailable, using keyword ranking. Reason:', e && e.message || e);
-            throw e;
-        });
-        return JiTA.embed._loading;
-    },
-
-    // Embed a single text -> normalized Float32Array(384). Delegates to embedBatch, whose single-item path is
-    // the identical plain-string call (same input clamping + shape).
-    embedOne: function (text) {
-        return JiTA.embed.embedBatch([text]).then(function (vecs) { return vecs[0]; });
-    },
-
-    // Embed an array of texts -> array of normalized Float32Array(384).
-    embedBatch: function (texts) {
-        return JiTA.embed.load().then(function (pipe) {
-            var inputs = texts.map(function (t) { return (t || ' ').slice(0, JiTA.embed.MAX_CHARS) || ' '; });
-            // Single item: use the plain-string call - the exact shape the warmup proves works. On CPU/WASM
-            // here, passing an array (batched, padded) inference hangs the worker, but single strings are fine.
-            if (inputs.length === 1) {
-                return pipe(inputs[0], { pooling: 'mean', normalize: true }).then(function (out) {
-                    return [new Float32Array(out.data)];
-                });
-            }
-            return pipe(inputs, { pooling: 'mean', normalize: true }).then(function (out) {
-                var dim = out.dims[out.dims.length - 1];
-                var vecs = [];
-                for (var i = 0; i < inputs.length; i++) {
-                    vecs.push(new Float32Array(out.data.subarray(i * dim, (i + 1) * dim)));
-                }
-                return vecs;
-            });
-        });
-    },
-
-    // Embed every stored defect that lacks a current-version embedding, in batches, persisting as we go.
-    // Resumable: if interrupted, the next run just continues with whatever is still missing.
-    embedPass: function () {
-        return JiTA.embed.load().then(function () {
-            return JiTA.db.allDefects();
-        }).then(function (recs) {
-            var todo = [], curVer = 0;
-            for (var i = 0; i < recs.length; i++) {
-                // Embed BOTH defects and open bug reports (EBRs): hybrid ranking is used on both the EBR
-                // (similar defects) and EDR (matching reports) views. Skip closed EBRs and GM-team EBRs - neither
-                // is ranked in the "matching reports" view, so embedding them is wasted work.
-                if (recs[i].project === 'EBR' && (JiTA.util.isClosedStatus(recs[i].status) || JiTA.util.isGmTeam(recs[i].team))) { continue; }
-                if (recs[i].embedding && recs[i].embeddingModelVersion === JiTA.MODEL_VERSION) { curVer++; }
-                else { todo.push(recs[i]); }
-            }
-            console.log('[JiTA] embed pass: ' + todo.length + ' to embed, ' + curVer + ' already at ' +
-                JiTA.MODEL_VERSION + ' (of ' + recs.length + ' total, backend ' + JiTA.embed.backend + ')');
-            if (!todo.length) { JiTA.ui.setStatus('Embeddings up to date (' + curVer + ')'); return; }
-            JiTA.ui.toast('Embedding ' + todo.length + ' issues locally…');
-            var idx = 0, gpuRetries = 0;
-            function nextBatch() {
-                if (idx >= todo.length) { console.log('[JiTA] embed pass complete (' + todo.length + ' embedded)'); JiTA.rank._dirtyVec = true; JiTA.rank._dirtyEbrVec = true; return Promise.resolve(); }
-                var size = JiTA.embed.BATCH;
-                var slice = todo.slice(idx, idx + size);
-                var texts = slice.map(function (r) { return JiTA.util.effectiveText(r); });   // English translation for foreign reports, else cleaned original
-                // Watchdog: a WebGPU device loss can HANG the worker so embedBatch never resolves OR rejects,
-                // which would silently stall the whole pass. Race it against a timeout so a hung batch is
-                // treated as a failure and handled by the catch below (retry on the same backend, then pause).
-                var t0 = Date.now();
-                var batchVecs = JiTA.embed.embedBatch(texts);
-                var watchdog = new Promise(function (_resolve, reject) {
-                    setTimeout(function () { reject(new Error('embed batch timed out after 45s')); }, 45000);
-                });
-                return Promise.race([batchVecs, watchdog]).then(function (vecs) {
-                    var dt = Date.now() - t0;
-                    // Guard against a SILENT device loss: WebGPU can log "BindGroup is invalid" validation
-                    // errors yet still resolve the batch with NaN/empty vectors. Storing those would mark the
-                    // defect "done" with a garbage embedding (then dropped at query time -> silently never
-                    // matches). Detect it and throw, so the catch below recovers (-> CPU) and retries the slice.
-                    for (var g = 0; g < vecs.length; g++) {
-                        if (!vecs[g] || vecs[g].length === 0 || !isFinite(vecs[g][0])) {
-                            throw new Error('embedding returned NaN/empty (likely GPU device loss)');
-                        }
-                    }
-                    for (var j = 0; j < slice.length; j++) {
-                        slice[j].embedding = vecs[j];
-                        slice[j].embeddingModelVersion = JiTA.MODEL_VERSION;
-                    }
-                    return JiTA.db.bulkPut(slice).then(function () {
-                        idx += slice.length;   // advance by what we actually embedded
-                        JiTA.rank._dirtyVec = true;
-                        JiTA.rank._dirtyEbrVec = true;
-                        // Log throughput periodically so we can see the real CPU speed (first item always logs).
-                        if (idx <= slice.length || idx % 50 === 0) {
-                            console.log('[JiTA] embedded ' + idx + '/' + todo.length + ' (' + size + ' in ' + dt + 'ms, ' + JiTA.embed.backend + ')');
-                        }
-                        JiTA.ui.setStatus('Embedding… ' + Math.min(idx, todo.length) + '/' + todo.length + ' (' + JiTA.embed.backend + ')');
-                        return JiTA.util.delay(0).then(nextBatch);   // yield to keep the UI responsive
-                    });
-                }).catch(function (e) {
-                    // A batch failed (on WebGPU, usually a device loss). We deliberately do NOT auto-switch to
-                    // CPU - the backend is the user's choice via the Tampermonkey menu. idx is NOT advanced, so
-                    // no progress is lost: retry a few times on the SAME backend to ride out a transient blip,
-                    // and if it keeps failing, pause the pass (it resumes on the next reload / scheduled sync)
-                    // and tell the user they can switch backend from the menu.
-                    console.log('[JiTA] embed batch failed (' + JiTA.embed.backend + ', size ' + size + '):', e && e.message || e);
-                    JiTA.embed._resetPipe();
-                    gpuRetries++;
-                    if (gpuRetries <= 3) {
-                        return JiTA.util.delay(1500).then(nextBatch);
-                    }
-                    JiTA.ui.toast('Embedding keeps failing on ' + (JiTA.embed.backend || 'GPU') + ' - paused. Reload to retry, or switch backend from the Tampermonkey menu.');
-                    throw e;   // give up this pass (progress saved; ranking stays on BM25 meanwhile)
-                });
-            }
-            return nextBatch();
-        });
-    },
-
-    // Background entry point: load the model and embed anything outstanding, then refresh the panel.
-    // Idempotent per session unless `force` is passed (used right after a sync brings in new/changed text).
-    prepare: function (force) {
-        // With the shared worker, embedding runs THERE (one model for all tabs) - no main-thread model load.
-        // Any tab can trigger it; the request routes to the single leader worker, which is single-flight.
-        if (JiTA.worker && JiTA.worker.usable()) {
-            if (JiTA.embed._preparing) { return JiTA.embed._preparing; }
-            JiTA.embed._preparing = JiTA.worker.call('embedPass').then(function (r) {
-                JiTA.embed._preparing = null;
-                // The call is only acknowledged here; the pass reports its end with embedPassDone, which re-renders.
-            }, function (e) {
-                JiTA.embed._preparing = null;
-                console.log('[JiTA] worker embed pass skipped:', (e && e.message) || e);
-            });
-            return JiTA.embed._preparing;
-        }
-        // Fallback (no worker at all): the original main-thread embed pass.
-        if (JiTA.embed.unavailable) { return Promise.resolve(); }
+    // Background entry point, after a sync or a translation: ask the shared worker to embed anything outstanding.
+    // Any tab can trigger it; the request routes to the single leader worker, which is single-flight, and only
+    // acknowledges here - the pass reports its end with embedPassDone, which re-renders. No worker: nothing to do.
+    prepare: function () {
+        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }
         if (JiTA.embed._preparing) { return JiTA.embed._preparing; }
-        if (JiTA.embed._prepared && !force) { return Promise.resolve(); }
-        JiTA.embed._preparing = JiTA.db.countDefects().then(function (n) {
-            if (!n) { return; }   // nothing synced yet (no defects AND no bug reports) - don't download a model
-            return JiTA.embed.embedPass().then(function () {
-                JiTA.embed._prepared = true;
-                JiTA.rank._dirtyVec = true;
-                JiTA.rank._dirtyEbrVec = true;
-                JiTA.ui.scheduleRender();
-            });
-        }).then(function () {
+        JiTA.embed._preparing = JiTA.worker.call('embedPass').then(function () {
             JiTA.embed._preparing = null;
-        }).catch(function (e) {
+        }, function (e) {
             JiTA.embed._preparing = null;
-            console.log('[JiTA] embed prepare skipped:', e && e.message || e);
+            console.log('[JiTA] worker embed pass skipped:', (e && e.message) || e);
         });
         return JiTA.embed._preparing;
     }
@@ -6227,7 +6000,6 @@ JiTA.translate = {
                 var total = foreign.length, next = 0, done = 0, translated = 0;
                 function report(extra) {
                     if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating foreign reports… ' + done + ' / ' + total + (extra || '')); }
-                    if (done % 10 === 0 || done >= total) { JiTA.db.setMeta('translateProgress', { done: done, total: total, translated: translated }); }
                 }
                 // Two concurrent lanes, each PINNED to one endpoint (failover to the other per request), so both
                 // Google endpoints are in flight at once. Each lane waits BATCH_DELAY between its own calls, so each
@@ -6281,13 +6053,11 @@ JiTA.translate = {
                     return pull();
                 }
                 function finish() {
-                    return JiTA.db.setMeta('translateProgress', { done: total, total: total, translated: translated, at: Date.now() }).then(function () {
-                        if (translated > 0) {
-                            JiTA.rank._dirtyEbr = true; JiTA.rank._dirtyEbrVec = true;    // tab-side BM25/vec rebuild off English
-                            JiTA.embed.prepare(true);                                     // re-embed the cleared records, off English
-                            if (JiTA.ui && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                        }
-                    });
+                    if (translated > 0) {
+                        JiTA.rank._dirtyEbr = true;                                   // tab-side BM25 rebuild off English
+                        JiTA.embed.prepare();                                         // re-embed the cleared records, off English
+                        if (JiTA.ui && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
+                    }
                 }
                 report();   // 0 / total up front
                 return Promise.all([lane(0), lane(1)]).then(finish);   // both endpoints concurrently
@@ -6929,11 +6699,11 @@ JiTA.ui = {
             JiTA.ui._fitVertical();
         }
     },
-    // Toggle the session ranking-mode override (Hybrid <-> Keyword) and re-render. No-op (with a hint) when
-    // semantic embeddings are unavailable, since Hybrid isn't possible then. `rerender` lets the triage
-    // overlay's own badge re-rank its queue instead of the panel behind it.
+    // Toggle the session ranking-mode override (Hybrid <-> Keyword) and re-render. No-op (with a hint) when the
+    // shared worker cannot run in this tab, since semantic ranking runs only there and Hybrid isn't possible
+    // then. `rerender` lets the triage overlay's own badge re-rank its queue instead of the panel behind it.
     _cycleMode: function (rerender) {
-        if (JiTA.embed && JiTA.embed.unavailable) { JiTA.ui.toast('Semantic embeddings unavailable - keyword ranking only.'); return; }
+        if (!(JiTA.worker && JiTA.worker.usable())) { JiTA.ui.toast('Semantic ranking needs the shared worker, which is not running in this tab - keyword ranking only.'); return; }
         var cur = JiTA.ui.modeOverride;
         if (cur === 'Keyword') { JiTA.ui.modeOverride = 'Hybrid'; }
         else if (cur === 'Hybrid') { JiTA.ui.modeOverride = 'Keyword'; }
@@ -10272,16 +10042,6 @@ function jitaWorkerBody(cfg) {
     function isClosedStatus(status) { return /closed|done|resolved|rejected|cancel|attached/i.test(status || ''); }
     function teamId(v) { if (v == null) { return ''; } if (typeof v === 'string' || typeof v === 'number') { return String(v); } if (typeof v === 'object') { return String(v.id || v.value || v.teamId || v.name || ''); } return ''; }
     function isGmTeam(v) { var id = teamId(v); if (!id) { return false; } var short = String(cfg.GM_TEAM_ID).split('-').pop(); return id === cfg.GM_TEAM_ID || id === short || id.split('-').pop() === short; }
-    function bulkPut(records) {
-        return openDb().then(function (d) {
-            return new Promise(function (resolve, reject) {
-                var tx = d.transaction('defects', 'readwrite'), store = tx.objectStore('defects');
-                for (var i = 0; i < records.length; i++) { store.put(records[i]); }
-                tx.oncomplete = function () { resolve(records.length); };
-                tx.onerror = function () { reject(tx.error); };
-            });
-        });
-    }
     // Write embeddings back by MERGING onto the current row (get-then-put in one tx) instead of putting the stale
     // snapshot, so a concurrent tab translate-write (enText/lang) is not clobbered. Skips a record that was deleted
     // meanwhile, or whose enText changed since we embedded (our vector is stale -> leave it for the next pass).
@@ -11094,7 +10854,6 @@ function jitaWorkerBody(cfg) {
         try {
             var result;
             if (type === 'ping') { result = { pong: true, backend: backend, version: cfg.SCRIPT_VERSION }; }
-            else if (type === 'embed') { var v = await embed((payload && payload.text) || ''); result = { backend: backend, dim: v.length, vec: Array.from(v) }; }
             else if (type === 'rankSemantic') { result = await rankSemantic(payload); }
             else if (type === 'dupDefects') { result = await dupDefects(payload); }
             else if (type === 'rankKeyword') { result = await rankKeyword(payload); }
@@ -13026,7 +12785,7 @@ JiTA.dupfind = {
                 Object.keys(D._moved).forEach(function (gk) { if (!D._cleaned[gk]) { D._cleaned[gk] = true; ghostKeys.push(gk); } });
                 if (ghostKeys.length) {
                     JiTA.db.deleteDefects(ghostKeys).then(function () {
-                        JiTA.rank._dirty = true; JiTA.rank._dirtyVec = true;   // defect keyword + vector indexes
+                        JiTA.rank._dirty = true;   // the tab's defect keyword index (the worker's are dropped below)
                         if (JiTA.worker && JiTA.worker.usable()) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
                         if (window.console) { console.log('[JiTA] dupfind: deleted ' + ghostKeys.length + ' moved-key ghost record(s): ' + ghostKeys.join(', ')); }
                     }).catch(function () { /* best effort - the next full rebuild drops them anyway */ });
@@ -20471,6 +20230,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.39.4', date: '2026-10-03', fixes: [
+            'A tab where the shared background worker cannot run no longer loads its own copy of the text model: it ranks by keywords, as it already did.',
+            'Internal cleanup, no other visible change.'
+        ] },
         { v: '3.39.0', date: '2026-10-03', features: [
             'What\'s new has two tabs now, New features and Fixed issues, and the pill only comes up for an update that brings something new to use. Fixes are listed without one.'
         ] },
