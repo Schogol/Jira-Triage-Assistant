@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.39.1
+// @version     3.39.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5115,6 +5115,41 @@ JiTA.db = {
 
     bulkPut: function (recs) { return JiTA.db._bulkTx(recs, function (store, rec) { store.put(rec); }); },
 
+    // A sync page's records, merged in ONE readwrite transaction: each record's stored row is read, its derived work
+    // (embedding, translation) is kept while the source text is unchanged, and the record is written - or, with
+    // `prune`, deleted when its status is closed. Read and write in one transaction, so a translation or an embedding
+    // that another context writes in between cannot be overwritten with the row as it was read before it. A record
+    // that matches its stored row is not written at all. Resolves { changed }: the records that were new, differed
+    // in a synced field, or were pruned from the store.
+    syncPut: function (recs, prune) {
+        return JiTA.db.open().then(function (db) {
+            return new Promise(function (resolve, reject) {
+                if (!recs || !recs.length) { resolve({ changed: 0 }); return; }
+                var tx = db.transaction('defects', 'readwrite'), store = tx.objectStore('defects'), changed = 0;
+                recs.forEach(function (rec) {
+                    var g = store.get(rec.key);
+                    g.onsuccess = function () {
+                        var old = g.result || null;
+                        if (prune && JiTA.util.isClosedStatus(rec.status)) {
+                            if (old) { store.delete(rec.key); changed++; }
+                            return;
+                        }
+                        if (old && old.textHash === rec.textHash) {   // SOURCE text unchanged -> keep derived work
+                            if (old.embedding) { rec.embedding = old.embedding; rec.embeddingModelVersion = old.embeddingModelVersion; }
+                            if (old.lang) { rec.lang = old.lang; rec.enText = old.enText; }   // keep the stored translation
+                        }
+                        if (old && JiTA.sync._sameSynced(old, rec)) { return; }
+                        changed++;
+                        store.put(rec);
+                    };
+                });
+                tx.oncomplete = function () { resolve({ changed: changed }); };
+                tx.onerror = function () { reject(tx.error); };
+                tx.onabort = function () { reject(tx.error); };
+            });
+        });
+    },
+
     // Atomic read-modify-write of ONE record: get + applyFn + put in a single transaction. Used by the translate
     // pass so it merges only its own fields (lang/enText) onto the CURRENT row instead of clobbering a concurrent
     // sync/embed write with a stale snapshot; skips (resolves false) if the record was deleted meanwhile.
@@ -5208,6 +5243,7 @@ JiTA.db = {
 /* ---- sync engine ---- */
 JiTA.sync = {
     running: false,
+    _quiet: false,   // set while autoSync runs: its incremental runs leave the panel's status line alone
 
     // POST to a Jira REST endpoint with the session cookie; retries on HTTP 429 honoring Retry-After.
     _apiPost: function (path, body) {
@@ -5268,18 +5304,47 @@ JiTA.sync = {
         };
     },
 
-    // Page through /search/jql for a given jql, storing each page. Resumable via meta.resumeToken.
-    // opts: { startToken, startHighWater, metaPrefix, pruneResolved, isEbr }
+    // Whether a stored row already holds what a freshly mapped record carries: every field of the record except the
+    // derived ones the embed and translate passes add. A row from an older build that lacks a field differs, so a
+    // re-fetch that backfills a new field still counts as a change.
+    _sameSynced: function (old, rec) {
+        var keys = Object.keys(rec);
+        for (var i = 0; i < keys.length; i++) {
+            var k = keys[i];
+            if (k === 'embedding' || k === 'embeddingModelVersion' || k === 'lang' || k === 'enText') { continue; }
+            if (JSON.stringify(old[k]) !== JSON.stringify(rec[k])) { return false; }
+        }
+        return true;
+    },
+
+    // The two full crawls. A page token saved for one of them is resumed only by the same query.
+    FULL_JQL: JiTA.SCOPE + ' ORDER BY updated ASC',
+    FULL_JQL_EBR: JiTA.EBR_SCOPE + ' ORDER BY updated ASC',
+
+    // Whether `rt` (a stored resume token) carries on the full crawl `jql`: saved by that query, by a build with the
+    // current record schema. A bare token from an older build, one saved by another query, or one saved before a
+    // schema change (its first pages would lack the new field) is not resumed.
+    _resumable: function (rt, jql) {
+        return !!(rt && typeof rt === 'object' && rt.token && rt.jql === jql && rt.v === JiTA.DATA_VERSION);
+    },
+
+    // Page through /search/jql for a given jql, storing each page. opts: { startToken, startHighWater, resume,
+    // metaPrefix, pruneResolved, isEbr }
+    //  - resume:       a full crawl: save the next page's token with each page, with the query and record schema it
+    //                  belongs to, so a reload carries on from there (_fullRun). Incremental runs are short and start over.
     //  - metaPrefix:   suffix for the resume/high-water meta keys so independent datasets (defects vs EBRs)
     //                  keep separate cursors (e.g. 'Ebr' -> resumeTokenEbr / lastSyncHighWaterEbr).
     //  - pruneResolved: DELETE records that come back resolved/closed instead of storing them (used by the
     //                  EBR incremental sync, whose JQL has no open-filter, so reports that have since closed
     //                  are dropped from the open-report set).
     //  - isEbr:        mark the EBR keyword index dirty (not the defect indexes / log-signature index).
+    // Resolves { stored, changed, highWater }. `changed` counts the records that were new, differed in a synced field,
+    // or were pruned: an incremental run re-fetches the last few minutes every time, so `stored` is never zero and only
+    // `changed` says whether anything needs re-indexing, embedding or redrawing.
     _run: function (jql, opts) {
         opts = opts || {};
         var token = opts.startToken || null;
-        var pages = 0, stored = 0;
+        var pages = 0, stored = 0, changed = 0;
         var maxUpdated = opts.startHighWater || '';
         var resumeKey = 'resumeToken' + (opts.metaPrefix || '');
         var hwKey = 'lastSyncHighWater' + (opts.metaPrefix || '');
@@ -5296,49 +5361,34 @@ JiTA.sync = {
                     if (rec.updated && rec.updated > maxUpdated) { maxUpdated = rec.updated; }
                     recs.push(rec);
                 }
-                // Preserve existing embeddings for issues whose TEXT did not change, so an incremental
-                // re-fetch (or a metadata-only update) does not throw away work the embed pass already did.
-                // (For an initial full sync the DB is empty, so these lookups all return null and are cheap.)
-                return Promise.all(recs.map(function (rec) {
-                    return JiTA.db.getDefect(rec.key).then(function (old) {
-                        if (old && old.textHash === rec.textHash) {   // SOURCE text unchanged -> keep derived work
-                            if (old.embedding) { rec.embedding = old.embedding; rec.embeddingModelVersion = old.embeddingModelVersion; }
-                            if (old.lang)      { rec.lang = old.lang; rec.enText = old.enText; }   // keep the stored translation
-                        }
-                        return rec;
-                    });
-                })).then(function (merged) {
-                    // pruneResolved (EBR incremental sync): split into keep (still open) vs drop (now closed ->
-                    // delete from store). Judge closed by STATUS only (isClosedStatus), NOT the resolution field,
-                    // so a REOPENED report that kept a stale resolution is kept instead of wrongly pruned.
-                    if (opts.pruneResolved) {
-                        var keep = [], drop = [];
-                        for (var k = 0; k < merged.length; k++) {
-                            if (JiTA.util.isClosedStatus(merged[k].status)) { drop.push(merged[k].key); }
-                            else { keep.push(merged[k]); }
-                        }
-                        return JiTA.db.deleteDefects(drop).then(function () { return JiTA.db.bulkPut(keep); });
-                    }
-                    return JiTA.db.bulkPut(merged);
-                }).then(function () {
+                // Merged and written in one transaction (syncPut), which keeps the derived work of an unchanged text.
+                // pruneResolved (the EBR incremental sync) deletes the reports that have closed since, judged by STATUS
+                // only (isClosedStatus), so a REOPENED report that kept a stale resolution is kept.
+                return JiTA.db.syncPut(recs, !!opts.pruneResolved).then(function (put) {
                     stored += recs.length;
                     pages++;
-                    if (opts.isEbr) {
-                        JiTA.rank._dirtyEbr = true;      // EBR keyword index depends on EBR records
-                        JiTA.rank._dirtyEbrVec = true;   // ...and the EBR vector index (new/removed reports)
-                    } else {
-                        JiTA.rank._dirty = true;
-                        JiTA.rank._dirtyVec = true;
-                        if (JiTA.logsig) { JiTA.logsig._dirty = true; }   // re-mine exception signatures on next log open
+                    if (put.changed) {
+                        changed += put.changed;
+                        if (opts.isEbr) {
+                            JiTA.rank._dirtyEbr = true;      // EBR keyword index depends on EBR records
+                        } else {
+                            JiTA.rank._dirty = true;
+                            if (JiTA.logsig) { JiTA.logsig._dirty = true; }   // re-mine exception signatures on next log open
+                        }
                     }
-                    var nextToken = data.nextPageToken || null;
-                    // Persist progress so a reload mid-sync resumes rather than restarting.
-                    return JiTA.db.setMeta(resumeKey, (data.isLast || !nextToken) ? null : nextToken)
+                    var nextToken = data.nextPageToken || null, last = !!(data.isLast || !nextToken);
+                    // A full crawl saves where it got to, so a reload mid-crawl carries on from there.
+                    var saved = opts.resume
+                        ? JiTA.db.setMeta(resumeKey, last ? null : { jql: jql, token: nextToken, v: JiTA.DATA_VERSION })
+                        : Promise.resolve();
+                    return saved
                         .then(function () { return JiTA.db.setMeta(hwKey, maxUpdated); })
                         .then(function () {
-                            JiTA.ui.setStatus('Syncing… ' + stored + ' issues fetched');
-                            if (data.isLast || !nextToken) { return { stored: stored, highWater: maxUpdated }; }
-                            if (nextToken === token) { throw new Error('nextPageToken did not advance – stopping (Jira API quirk).'); }
+                            // A background catch-up stays off the panel's status line, where its count used to stay until
+                            // the next redraw. A full crawl, or a sync someone asked for, shows how far it has got.
+                            if (opts.resume || !JiTA.sync._quiet) { JiTA.ui.setStatus('Syncing… ' + stored + ' issues fetched'); }
+                            if (last) { return { stored: stored, changed: changed, highWater: maxUpdated }; }
+                            if (nextToken === token) { throw new Error('nextPageToken did not advance - stopping (Jira API quirk).'); }
                             token = nextToken;
                             var near = (r.xhr.getResponseHeader('X-RateLimit-NearLimit') === 'true');
                             return JiTA.util.delay(near ? JiTA.NEAR_LIMIT_DELAY_MS : JiTA.PAGE_DELAY_MS).then(nextPage);
@@ -5348,39 +5398,82 @@ JiTA.sync = {
         }
         // What this run wrote, or pruned, stays invisible to the shared ranking worker until it rebuilds its indexes:
         // it keeps them in memory for as long as it lives, across reloads. So once the run ends - done, or failed part
-        // way - drop them if it stored anything. Once per run, not per page: a query in between rebuilds them, and a
+        // way - drop them if it changed anything. Once per run, not per page: a query in between rebuilds them, and a
         // full crawl is hundreds of pages. (embedPass drops them as well, but a sync that only changed statuses, or
         // pruned closed reports, gave it nothing to embed, and it used to return before dropping anything.)
-        function settled() { if (stored > 0) { JiTA.sync._invalidateWorker(); } }
-        return nextPage().then(function (res) { settled(); return res; }, function (e) { settled(); throw e; });
+        function settled() { if (changed > 0) { JiTA.sync._invalidateWorker(); } }
+        return nextPage().then(function (res) { settled(); return res; }, function (e) {
+            settled();
+            if (e && typeof e === 'object') { e.syncChanged = changed; }   // what the failed run wrote (see _fullRun)
+            throw e;
+        });
     },
 
-    fullSync: function () {
-        return JiTA.db.getMeta('resumeToken').then(function (rt) {
-            return JiTA.db.getMeta('lastSyncHighWater').then(function (hw) {
-                var jql = JiTA.SCOPE + ' ORDER BY updated ASC';
-                return JiTA.sync._run(jql, { startToken: rt || null, startHighWater: hw || '' }).then(function (res) {
-                    // A full crawl re-fetched every defect, so the whole dataset now carries the current field
-                    // set - stamp the schema version + build time (read by JiTA.migrate to auto-rebuild a
-                    // stale DB, and shown in the settings menu so you can see when the DB was built).
-                    return JiTA.db.setMeta('lastFullSyncAt', new Date().toISOString())
-                        .then(function () { return JiTA.db.setMeta('modelVersion', JiTA.MODEL_VERSION); })
-                        .then(function () { return JiTA.db.setMeta('dataVersionDefects', JiTA.DATA_VERSION); })
-                        .then(function () { return JiTA.db.setMeta('dbBuiltAtDefects', new Date().toISOString()); })
-                        .then(function () { return res; });
+    // A full crawl of one dataset (prefix '' = the defects, 'Ebr' = the open bug reports). A crawl a reload interrupted
+    // carries on from the page token it saved (_resumable). Jira refuses a token that has gone stale with a 400, and
+    // the crawl then starts over from the first page. It used to start over on every load: the resume token was only
+    // ever used by the next full crawl, and the upgrade check (JiTA.migrate) restarted an unfinished first build from
+    // scratch, because only a finished build carries the schema stamp.
+    _fullRun: function (prefix, jql) {
+        var resumeKey = 'resumeToken' + prefix;
+        return JiTA.db.getMeta(resumeKey).then(function (rt) {
+            return JiTA.db.getMeta('lastSyncHighWater' + prefix).then(function (hw) {
+                function run(token) {
+                    return JiTA.sync._run(jql, { startToken: token, startHighWater: hw || '', resume: true, metaPrefix: prefix, isEbr: prefix === 'Ebr' });
+                }
+                if (!JiTA.sync._resumable(rt, jql)) { return run(null); }
+                return run(rt.token).catch(function (e) {
+                    if (!e || e.status !== 400) { throw e; }   // anything else is a real failure
+                    var before = e.syncChanged || 0;
+                    console.log('[JiTA] Jira refused the saved sync position (HTTP 400) - crawling ' + (prefix ? 'the bug reports' : 'the defects') + ' from the start');
+                    return JiTA.db.setMeta(resumeKey, null)
+                        .then(function () { return run(null); })
+                        .then(function (res) { res.changed += before; return res; });
                 });
             });
         });
     },
 
-    incrementalSync: function () {
-        return JiTA.db.getMeta('lastSyncHighWater').then(function (hw) {
-            if (!hw) { return JiTA.sync.fullSync(); }
-            var since = JiTA.util.jqlSince(hw);
-            if (!since) { return JiTA.sync.fullSync(); }
-            var jql = JiTA.SCOPE + ' AND updated >= "' + since + '" ORDER BY updated ASC';
-            return JiTA.sync._run(jql, { startHighWater: hw });
+    fullSync: function () {
+        return JiTA.sync._fullRun('', JiTA.sync.FULL_JQL).then(function (res) {
+            // A full crawl re-fetched every defect, so the whole dataset now carries the current field
+            // set - stamp the schema version + build time (read by JiTA.migrate to auto-rebuild a
+            // stale DB, and shown in the settings menu so you can see when the DB was built).
+            return JiTA.db.setMeta('dataVersionDefects', JiTA.DATA_VERSION)
+                .then(function () { return JiTA.db.setMeta('dbBuiltAtDefects', new Date().toISOString()); })
+                .then(function () { return res; });
         });
+    },
+
+    incrementalSync: function () {
+        return JiTA.db.getMeta('resumeToken').then(function (rt) {
+            // A full build a reload interrupted is finished first, so it gets its schema stamp: caught up incrementally
+            // instead, it never would, and the upgrade check would crawl it again from the start.
+            if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL)) { return JiTA.sync.fullSync(); }
+            return JiTA.db.getMeta('lastSyncHighWater').then(function (hw) {
+                if (!hw) { return JiTA.sync.fullSync(); }
+                var since = JiTA.util.jqlSince(hw);
+                if (!since) { return JiTA.sync.fullSync(); }
+                var jql = JiTA.SCOPE + ' AND updated >= "' + since + '" ORDER BY updated ASC';
+                return JiTA.sync._run(jql, { startHighWater: hw });
+            });
+        });
+    },
+
+    // What every sync does once it is over. Start the 30-minute clock and, when the run changed anything, embed the
+    // new or changed text, translate new foreign reports, and redraw the view the changed dataset feeds. A sync
+    // someone asked for (`shown`) redraws the open view whatever it found, which also replaces the "Syncing…"
+    // progress the run wrote on the panel's status line. (_run has already dropped the shared worker's indexes.)
+    // Every sync, rebuild and refetch ends here: the copies this replaced had drifted, and rebuilding the bug report
+    // database no longer translated the foreign reports.
+    _afterSync: function (defects, ebr, shown) {
+        JiTA.sched.markSynced();   // any sync also resets the auto-sync 30-min clock
+        if (defects || ebr) { JiTA.embed.prepare(true); }   // embed the new / changed text in the background
+        if (ebr) { JiTA.translate.prepare(); }              // translate any new foreign reports to English
+        var k = JiTA.ui.currentKey;
+        if (!k) { return; }
+        // Defect data feeds the EBR (similar defects) view, bug report data the EDR/EO/PLAT (matching reports) view.
+        if (shown || (defects && /^EBR-/.test(k)) || (ebr && JiTA.ui._isReportsKey(k))) { JiTA.ui.scheduleRender(); }
     },
 
     // Menu entry point: full sync if the DB is empty, otherwise an incremental catch-up.
@@ -5394,16 +5487,12 @@ JiTA.sync = {
         }).then(function (res) {
             return JiTA.db.countDefectsOnly().then(function (total) {
                 JiTA.sync.running = false;
-                JiTA.ui.toast('Defect sync complete – ' + total + ' defects in local DB.');
-                JiTA.ui.setStatus(total + ' defects in database');
-                JiTA.sched.markSynced();   // a manual sync also resets the auto-sync 30-min clock
-                if (JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }   // defect data only affects the EBR (similar defects) view
-                JiTA.embed.prepare(true);   // embed new/changed defects in the background (no-op if model unavailable)
+                JiTA.ui.toast('Defect sync complete - ' + total + ' defects in local DB.');
+                JiTA.sync._afterSync(!!(res && res.changed), false, true);
                 return res;
             });
         }).catch(function (e) {
             JiTA.sync.running = false;
-            JiTA.db.setMeta('lastError', String(e && e.message || e));
             JiTA.ui.setStatus('Sync error: ' + (e && e.message || e));
             alert('Defect sync failed: ' + (e && e.message || e) + '\nReport issues to Schogol :).');
         });
@@ -5420,14 +5509,10 @@ JiTA.sync = {
             .then(function () { return JiTA.db.setMeta('lastSyncHighWater', ''); })
             .then(function () { JiTA.rank._dirty = true; return JiTA.sync.fullSync(); })
             .then(function () {
-                return JiTA.db.countByProject('EBR').then(function (ebr) {
-                  return JiTA.db.countDefects().then(function (total) {
+                return JiTA.db.countDefectsOnly().then(function (total) {
                     JiTA.sync.running = false;
-                    JiTA.ui.toast('Rebuild complete – ' + (total - ebr) + ' defects.');   // EBRs are preserved, exclude them from the count
-                    JiTA.sched.markSynced();   // a rebuild also resets the auto-sync 30-min clock
-                    if (JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }   // defect data only affects the EBR (similar defects) view
-                    JiTA.embed.prepare(true);   // re-embed everything in the background
-                  });
+                    JiTA.ui.toast('Rebuild complete - ' + total + ' defects.');
+                    JiTA.sync._afterSync(true, false, true);   // re-embed everything in the background
                 });
             })
             .catch(function (e) {
@@ -5440,7 +5525,7 @@ JiTA.sync = {
     // Wipe ONLY the stored open bug reports and rebuild that dataset from scratch (defects are preserved).
     // The mirror of rebuild() for the EBR side: clear EBR records + their cursors, then a full EBR build.
     // Useful when the open-report set has drifted (closures missed between incremental syncs) and you want
-    // a clean re-fetch, since "Sync bug reports now" only ever does an incremental catch-up once populated.
+    // a clean re-fetch, since "Sync now" only ever does an incremental catch-up once populated.
     rebuildEbr: function () {
         if (JiTA.sync.running) { JiTA.ui.toast('A sync is already running…'); return Promise.resolve(); }
         if (!confirm('Rebuild the local bug report database from scratch? This re-fetches every open EBR.')) { return Promise.resolve(); }
@@ -5449,14 +5534,12 @@ JiTA.sync = {
         return JiTA.db.clearEbr()
             .then(function () { return JiTA.db.setMeta('resumeTokenEbr', null); })
             .then(function () { return JiTA.db.setMeta('lastSyncHighWaterEbr', ''); })
-            .then(function () { JiTA.rank._dirtyEbr = true; JiTA.rank._dirtyEbrVec = true; return JiTA.sync.fullSyncEbr(); })
+            .then(function () { JiTA.rank._dirtyEbr = true; return JiTA.sync.fullSyncEbr(); })
             .then(function () {
                 return JiTA.db.countEbr().then(function (total) {
                     JiTA.sync.running = false;
-                    JiTA.ui.toast('Rebuild complete – ' + total + ' open bug reports.');
-                    JiTA.sched.markSynced();   // a rebuild also resets the auto-sync 30-min clock
-                    if (JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }   // bug-report data only affects the EDR/EO (matching reports) view
-                    JiTA.embed.prepare(true);   // re-embed the bug reports in the background
+                    JiTA.ui.toast('Rebuild complete - ' + total + ' open bug reports.');
+                    JiTA.sync._afterSync(false, true, true);   // re-embed and re-translate the bug reports in the background
                 });
             })
             .catch(function (e) {
@@ -5467,24 +5550,26 @@ JiTA.sync = {
     },
 
     // Re-crawl a whole dataset from scratch WITHOUT clearing it first (unlike rebuild). Resetting the cursors
-    // forces a full crawl; because the existing records stay put, _run's "preserve embedding when textHash is
-    // unchanged" path keeps every vector while bulkPut overwrites each record with the current field set - so
+    // forces a full crawl; because the existing records stay put, the "keep derived work when textHash is
+    // unchanged" merge (syncPut) keeps every vector while each record is rewritten with the current field set - so
     // a newly-added field (e.g. `created`) is backfilled with NO re-embedding. Used by JiTA.migrate to
-    // upgrade a DB built before a field existed. Single-flight via `running`; quiet (no confirm dialog).
+    // upgrade a DB built before a field existed. A full crawl already under way (one a reload interrupted) is
+    // carried on rather than reset. Single-flight via `running`; quiet (no confirm dialog).
     refetchDefects: function () {
         if (JiTA.sync.running) { return Promise.resolve(); }
         JiTA.sync.running = true;
         JiTA.ui.toast('Updating local defect database to the latest format…');
-        return JiTA.db.setMeta('resumeToken', null)
-            .then(function () { return JiTA.db.setMeta('lastSyncHighWater', ''); })
-            .then(function () { JiTA.rank._dirty = true; JiTA.rank._dirtyVec = true; return JiTA.sync.fullSync(); })
-            .then(function () {
+        return JiTA.db.getMeta('resumeToken')
+            .then(function (rt) {
+                if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL)) { return null; }
+                return JiTA.db.setMeta('resumeToken', null).then(function () { return JiTA.db.setMeta('lastSyncHighWater', ''); });
+            })
+            .then(function () { JiTA.rank._dirty = true; return JiTA.sync.fullSync(); })
+            .then(function (res) {
                 return JiTA.db.countDefectsOnly().then(function (total) {
                     JiTA.sync.running = false;
-                    JiTA.ui.toast('Defect database updated – ' + total + ' defects.');
-                    JiTA.sched.markSynced();
-                    if (JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                    JiTA.embed.prepare(true);
+                    JiTA.ui.toast('Defect database updated - ' + total + ' defects.');
+                    JiTA.sync._afterSync(!!(res && res.changed), false, true);
                 });
             })
             .catch(function (e) {
@@ -5497,16 +5582,17 @@ JiTA.sync = {
         if (JiTA.sync.running) { return Promise.resolve(); }
         JiTA.sync.running = true;
         JiTA.ui.toast('Updating local bug report database to the latest format…');
-        return JiTA.db.setMeta('resumeTokenEbr', null)
-            .then(function () { return JiTA.db.setMeta('lastSyncHighWaterEbr', ''); })
-            .then(function () { JiTA.rank._dirtyEbr = true; JiTA.rank._dirtyEbrVec = true; return JiTA.sync.fullSyncEbr(); })
-            .then(function () {
+        return JiTA.db.getMeta('resumeTokenEbr')
+            .then(function (rt) {
+                if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL_EBR)) { return null; }
+                return JiTA.db.setMeta('resumeTokenEbr', null).then(function () { return JiTA.db.setMeta('lastSyncHighWaterEbr', ''); });
+            })
+            .then(function () { JiTA.rank._dirtyEbr = true; return JiTA.sync.fullSyncEbr(); })
+            .then(function (res) {
                 return JiTA.db.countEbr().then(function (total) {
                     JiTA.sync.running = false;
-                    JiTA.ui.toast('Bug report database updated – ' + total + ' open reports.');
-                    JiTA.sched.markSynced();
-                    if (JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                    JiTA.embed.prepare(true);
+                    JiTA.ui.toast('Bug report database updated - ' + total + ' open reports.');
+                    JiTA.sync._afterSync(false, !!(res && res.changed), true);
                 });
             })
             .catch(function (e) {
@@ -5520,28 +5606,26 @@ JiTA.sync = {
     // and the EBR keyword index as the dirty target. The FULL build uses the open-only scope; the
     // INCREMENTAL pass drops the open-filter and prunes (deletes) reports that have since closed.
     fullSyncEbr: function () {
-        return JiTA.db.getMeta('resumeTokenEbr').then(function (rt) {
-            return JiTA.db.getMeta('lastSyncHighWaterEbr').then(function (hw) {
-                var jql = JiTA.EBR_SCOPE + ' ORDER BY updated ASC';
-                return JiTA.sync._run(jql, { startToken: rt || null, startHighWater: hw || '', metaPrefix: 'Ebr', isEbr: true }).then(function (res) {
-                    // Full open-EBR crawl -> stamp the EBR schema version + build time (see fullSync / JiTA.migrate).
-                    return JiTA.db.setMeta('dataVersionEbr', JiTA.DATA_VERSION)
-                        .then(function () { return JiTA.db.setMeta('dbBuiltAtEbr', new Date().toISOString()); })
-                        .then(function () { return res; });
-                });
-            });
+        return JiTA.sync._fullRun('Ebr', JiTA.sync.FULL_JQL_EBR).then(function (res) {
+            // Full open-EBR crawl -> stamp the EBR schema version + build time (see fullSync / JiTA.migrate).
+            return JiTA.db.setMeta('dataVersionEbr', JiTA.DATA_VERSION)
+                .then(function () { return JiTA.db.setMeta('dbBuiltAtEbr', new Date().toISOString()); })
+                .then(function () { return res; });
         });
     },
 
     incrementalSyncEbr: function () {
-        return JiTA.db.getMeta('lastSyncHighWaterEbr').then(function (hw) {
-            if (!hw) { return JiTA.sync.fullSyncEbr(); }
-            var since = JiTA.util.jqlSince(hw);
-            if (!since) { return JiTA.sync.fullSyncEbr(); }
-            // No open-filter here on purpose: we want updated-but-now-closed reports back so pruneResolved
-            // can delete them from the open-report set.
-            var jql = 'project = EBR AND updated >= "' + since + '" ORDER BY updated ASC';
-            return JiTA.sync._run(jql, { startHighWater: hw, metaPrefix: 'Ebr', pruneResolved: true, isEbr: true });
+        return JiTA.db.getMeta('resumeTokenEbr').then(function (rt) {
+            if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL_EBR)) { return JiTA.sync.fullSyncEbr(); }   // finish an interrupted build first
+            return JiTA.db.getMeta('lastSyncHighWaterEbr').then(function (hw) {
+                if (!hw) { return JiTA.sync.fullSyncEbr(); }
+                var since = JiTA.util.jqlSince(hw);
+                if (!since) { return JiTA.sync.fullSyncEbr(); }
+                // No open-filter here on purpose: we want updated-but-now-closed reports back so pruneResolved
+                // can delete them from the open-report set.
+                var jql = 'project = EBR AND updated >= "' + since + '" ORDER BY updated ASC';
+                return JiTA.sync._run(jql, { startHighWater: hw, metaPrefix: 'Ebr', pruneResolved: true, isEbr: true });
+            });
         });
     },
 
@@ -5553,20 +5637,14 @@ JiTA.sync = {
         JiTA.ui.setStatus('Starting bug report sync…');
         return JiTA.db.countEbr().then(function (n) {
             return n === 0 ? JiTA.sync.fullSyncEbr() : JiTA.sync.incrementalSyncEbr();
-        }).then(function () {
+        }).then(function (res) {
             return JiTA.db.countEbr().then(function (total) {
                 JiTA.sync.running = false;
-                JiTA.rank._dirtyEbr = true;
-                JiTA.rank._dirtyEbrVec = true;
-                JiTA.ui.toast('Bug report sync complete – ' + total + ' open reports in local DB.');
-                JiTA.sched.markSynced();   // a manual sync also resets the auto-sync 30-min clock
-                if (JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                JiTA.embed.prepare(true);   // embed the new/changed bug reports in the background (for hybrid)
-                JiTA.translate.prepare();   // translate any new foreign reports to English in the background
+                JiTA.ui.toast('Bug report sync complete - ' + total + ' open reports in local DB.');
+                JiTA.sync._afterSync(false, !!(res && res.changed), true);
             });
         }).catch(function (e) {
             JiTA.sync.running = false;
-            JiTA.db.setMeta('lastError', String(e && e.message || e));
             JiTA.ui.setStatus('Bug report sync error: ' + (e && e.message || e));
             alert('Bug report sync failed: ' + (e && e.message || e) + '\nReport issues to Schogol :).');
         });
@@ -5584,7 +5662,7 @@ JiTA.sync = {
     // enough: the shared ranking worker keeps the report in its in-memory kwCache/vecCache (its vector still
     // ranks in on the semantic channel), and a plain reload won't fix it - the worker survives the reload and
     // the 30-min sync throttle (recentlySynced) skips the catch-up that would re-prune + re-index. So we (a)
-    // mark THIS tab's EBR keyword/vector indexes dirty, (b) drop the shared worker's indexes via 'invalidate'
+    // mark THIS tab's EBR keyword index dirty, (b) drop the shared worker's indexes via 'invalidate'
     // (it rebuilds from the current DB, minus the removed report, on the next query), and (c) tell the other tabs
     // (the listener near startup re-renders them) once that has landed, so none of them ranks against the old
     // indexes. The other tabs only mark their own indexes: one removal used to drop the shared worker's indexes
@@ -5592,7 +5670,6 @@ JiTA.sync = {
     // (softRefreshStatus / _fadeOutAndReplace), so we deliberately don't re-render it here.
     _ebrRemoved: function (keys, fromRemote) {
         JiTA.rank._dirtyEbr = true;
-        JiTA.rank._dirtyEbrVec = true;
         if (fromRemote) { return; }
         var note = { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId };
         JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });
@@ -5607,37 +5684,34 @@ JiTA.sync = {
     },
 
     // Quiet background catch-up used by the auto-sync scheduler. BOTH datasets AUTO-INITIALIZE on the first
-    // run (full build when the DB is empty) and then run incremental catch-ups: DEFECTS (EDR/EO) and OPEN
-    // BUG REPORTS (EBRs). No start/finish toasts; re-embeds / refreshes the open panel only on actual changes.
+    // run (full build when the DB is empty) and then run incremental catch-ups: DEFECTS (EDR/EO/PLAT) and OPEN
+    // BUG REPORTS (EBRs). No toasts, and the incremental runs leave the panel's status line alone (_quiet); it
+    // re-embeds, translates and refreshes the open panel only when a run changed something.
     // Resolves true when it completed, false when it failed, and null when another sync was already running.
     autoSync: function () {
         if (JiTA.sync.running) { return Promise.resolve(null); }
         JiTA.sync.running = true;
-        var defectStored = 0, ebrChanged = false;
+        JiTA.sync._quiet = true;
+        var defectsChanged = false, ebrChanged = false;
         return JiTA.db.countDefectsOnly().then(function (n) {
             // Auto-initialize the defect DB on the first run (full build), then incremental catch-up.
             var run = (n === 0) ? JiTA.sync.fullSync() : JiTA.sync.incrementalSync();
-            return run.then(function (res) { defectStored = (res && res.stored) || 0; });
+            return run.then(function (res) { defectsChanged = !!(res && res.changed); });
         }).then(function () {
             return JiTA.db.countEbr().then(function (m) {
                 // First run with no reports yet -> initialize the open-report DB once; otherwise catch up.
                 var run = (m === 0) ? JiTA.sync.fullSyncEbr() : JiTA.sync.incrementalSyncEbr();
-                return run.then(function (res) { if (m === 0 || (res && res.stored)) { ebrChanged = true; } });
+                return run.then(function (res) { ebrChanged = !!(res && res.changed); });
             });
         }).then(function () {
             JiTA.sync.running = false;
-            console.log('[JiTA] auto-sync done (defects ' + defectStored + ' fetched; EBRs ' + (ebrChanged ? 'updated' : 'unchanged') + ')');
-            return JiTA.db.setMeta('lastAutoSyncAt', new Date().toISOString()).then(function () {
-                JiTA.sched.markSynced();   // start the 30-min clock so reloads don't re-fetch
-                if (defectStored > 0 || ebrChanged) { JiTA.embed.prepare(true); }   // embed any new/changed defects AND bug reports
-                if (ebrChanged) { JiTA.translate.prepare(); }                        // translate any new foreign reports
-                if (defectStored > 0 && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                if (ebrChanged && JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
-                return true;
-            });
+            JiTA.sync._quiet = false;
+            console.log('[JiTA] auto-sync done (defects ' + (defectsChanged ? 'changed' : 'unchanged') + '; EBRs ' + (ebrChanged ? 'changed' : 'unchanged') + ')');
+            JiTA.sync._afterSync(defectsChanged, ebrChanged, false);
+            return true;
         }).catch(function (e) {
             JiTA.sync.running = false;
-            JiTA.db.setMeta('lastError', String(e && e.message || e));
+            JiTA.sync._quiet = false;
             console.log('[JiTA] auto-sync error:', e && e.message || e);
             return false;
         });
@@ -20359,6 +20433,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.39.2', date: '2026-10-03', fixes: [
+            'A first download of the defect or bug report data that is interrupted by a reload now carries on where it stopped, instead of starting over on every reload.',
+            'The background sync every 30 minutes no longer re-embeds, re-translates and redraws when nothing in Jira changed.',
+            'A translation finished while a sync is writing the same report is no longer lost.',
+            'Rebuild BR DB now translates the foreign reports again, and the panel no longer keeps showing "Syncing" after a sync.'
+        ] },
         { v: '3.39.1', date: '2026-10-03', fixes: [
             'Only the Created and Updated dates at the bottom of an issue are hidden now, since they show at the top. Any other date Jira lists there stays visible.',
             'Internal cleanup, no other visible change.'
