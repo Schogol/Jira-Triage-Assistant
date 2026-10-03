@@ -5,7 +5,7 @@
 //  - a refused link or transition carries Jira's own reason; a link type is remembered only when it was found, and a
 //    failed read of the types is an error, not a guess
 //  - a failed on-demand translation is not cached; one log scan per report, a failed one tried again; an attachment
-//    fetch that 403s is no text; an unreadable Original Reporter ID is an error, not "none"; the stale rule matches
+//    fetch that 403s is no text; an unreadable Original Reporter ID is an error, not "none"; the closed-report rule matches
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const member = (head, from) => {
@@ -169,8 +169,8 @@ const log0 = console.log;
     rid = await JiTA.ui._getReporterId('EBR-1');
     ok('...a report that really has none is still "none" (control)', rid === '', JSON.stringify(rid));
 
-    // ================= the stale rule =================
-    ok('the stale-match rule targets the list by its id', src.indexOf('#jita-sd-list li.jita-sd-stale { opacity: .6; }') >= 0 && !/\.jita-sd-list\b/.test(src));
+    // ================= the closed-report rule =================
+    ok('the closed-report rule targets the list by its id', src.indexOf('#jita-sd-list li.jita-sd-closed { opacity: .6; }') >= 0 && !/\.jita-sd-list\b/.test(src));
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'panel and attach checks passed.'));
     process.exit(fail ? 1 : 0);

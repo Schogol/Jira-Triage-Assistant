@@ -23,7 +23,7 @@ const muts = [
     [H, 'two renders scan the logs twice', '        if (cache[key]) { return cache[key]; }\n', ''],
     [H, 'a failed scan is kept', '        p.then(null, function () { if (cache[key] === p) { delete cache[key]; } });\n', ''],
     [H, 'an unreadable reporter ID is "none"', "                            reject(new Error('could not read the Original Reporter ID (HTTP ' + xhr.status + ')'));", "                            resolve('');"],
-    [H, 'the stale rule misses the list again', '#jita-sd-list li.jita-sd-stale { opacity: .6; }', '.jita-sd-list li.jita-sd-stale { opacity: .6; }']
+    [H, 'the closed-report rule misses the list again', '#jita-sd-list li.jita-sd-closed { opacity: .6; }', '.jita-sd-list li.jita-sd-closed { opacity: .6; }']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
