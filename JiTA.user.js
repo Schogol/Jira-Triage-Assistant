@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.5
+// @version     3.38.7
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -13495,10 +13495,14 @@ JiTA.dv = {
         D._post('/rest/api/3/search/approximate-count', { jql: '(' + where + ') AND key = ' + D._q(key) }).then(function (d) {
             if (gen !== D._gen || !(d && d.count)) { return; }
             (function more() {
-                if (gen !== D._gen || D._activeKey !== key) { return; }
+                if (gen !== D._gen || D._activeKey !== key || !D._mounted) { return; }   // a newer query, another issue, or the list is gone
                 if (D._index[key] != null) { D._syncActive(true); return; }
                 if (!D._more || D._issues.length >= D.FIND_MAX) { return; }
-                D._page(gen).then(more);
+                var pages = D._pages;
+                // On only once the page has landed. One that failed (Jira down, the session expired) leaves _more and the
+                // token as they were, so asking again at once sent the same request in a loop for as long as it kept
+                // failing. The next scroll or seek tries again.
+                D._page(gen).then(function () { if (D._pages > pages) { more(); } });
             })();
         }, function () { /* a key JQL does not know (moved, deleted) - simply not in the list */ });
     },
@@ -19770,6 +19774,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.7', date: '2026-10-03', items: [
+            'If Jira stops answering, or your session expires, while the issue list beside an issue is looking for the open issue, it no longer repeats the same request in an endless loop.'
+        ] },
         { v: '3.38.5', date: '2026-10-03', items: [
             "After an update the What's new pill now comes up reliably: if the page takes it away while still loading, it comes back by itself."
         ] },
