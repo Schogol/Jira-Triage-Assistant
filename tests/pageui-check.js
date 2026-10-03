@@ -167,6 +167,7 @@ global.jitaTranslateFree = () => { const r = results.shift(); return r instanceo
 global.alert = (m) => { alerts.push(m); };
 global.jitaConvertButtonState = () => {};
 global.jitaConvertClick = () => {};
+global.jitaCloseClick = () => {};   // the Close button's handler once v3.38.16 is in
 global.flagOn = () => false;
 (0, eval)(cut('\nfunction addButtons(', '\n};\n') + '\n};');
 addButtons();
