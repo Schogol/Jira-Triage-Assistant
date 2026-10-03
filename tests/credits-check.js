@@ -120,17 +120,26 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     await C.refresh(2026, 10).catch(() => {});
     ok('a failed scheduled run clears any progress pill instead of flashing', flashes.length === 0 && clears === 1, flashes.length + ' flashes, ' + clears + ' clears');
 
-    const badge = { textContent: '' };
-    global.document = { getElementById: (id) => (id === 'jita-credits-badge' ? badge : null) };
+    // The pill is spans now (icon, the VMS warning, the text): a small element that joins its children's text.
+    const mkEl = () => ({
+        kids: [], attrs: {}, style: {}, title: '', _t: '',
+        setAttribute(k, v) { this.attrs[k] = v; }, addEventListener() {},
+        appendChild(c) { this.kids.push(c); return c; },
+        querySelector(sel) { const k = /data-cb="(\w+)"/.exec(sel)[1]; return this.kids.filter((c) => c.attrs['data-cb'] === k)[0] || null; },
+        get textContent() { return this.kids.length ? this.kids.map((c) => c.textContent).join('') : this._t; },
+        set textContent(v) { this.kids = []; this._t = v; }
+    });
+    const badge = mkEl();
+    global.document = { getElementById: (id) => (id === 'jita-credits-badge' ? badge : null), createElement: mkEl };
     C.getSelf = () => Promise.resolve({ credits: 12, rank: 3, total: 40 });
     C._updating = true;
     C.badge.refresh();
     await flush();
-    ok('the badge keeps saying it is updating through its own refresh', badge.textContent === '📊 12 Credits · #3/40 · updating…', badge.textContent);
+    ok('the badge keeps saying it is updating through its own refresh', badge.textContent === '📊 12 credits this month · #3/40 · updating…', badge.textContent);
     C._updating = false;
     C.badge.refresh();
     await flush();
-    ok('...and stops once the run is over (control)', badge.textContent === '📊 12 Credits · #3/40', badge.textContent);
+    ok('...and stops once the run is over (control)', badge.textContent === '📊 12 credits this month · #3/40', badge.textContent);
 
     global.window = { addEventListener() {} };
     timeouts = [];
