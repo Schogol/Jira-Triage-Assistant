@@ -926,6 +926,39 @@ function jitaOpenGmModal(key) {
 }
 
 
+// Bug reports whose Convert to Defect is under way (EBR key -> true). Kept apart from the button: Jira's own
+// re-render replaces it with a fresh, enabled one about two seconds after a click, while the conversion goes on for
+// up to 30 seconds (jitaGoToNewDefect polls for the new defect), and a second click on that one created a second
+// defect. Success always leaves the page (to the defect, or a reload), which clears this; a failure clears its key.
+var jitaConvertBusy = {};
+
+// The Convert to Defect button reflects whether the report on screen is being converted.
+function jitaConvertButtonState() {
+    var key = jitaCurrentKey();
+    $('#convertToDefectButton').prop('disabled', !!(key && jitaConvertBusy[key]));
+}
+
+function jitaConvertClick() {
+    var ebrKey = jitaCurrentKey();
+    if (!ebrKey || jitaConvertBusy[ebrKey]) { return; }   // this report is already being converted
+    jitaConvertBusy[ebrKey] = true;
+    jitaConvertButtonState();
+    function fail(xhr) {
+        delete jitaConvertBusy[ebrKey];
+        jitaConvertButtonState();   // whichever button is on the page now, not the one that was clicked
+        jitaAjaxError()(xhr);
+    }
+    // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
+    // newly-created defect (found as the freshly-linked issue that wasn't linked before).
+    $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
+        .done(function (d) {
+            var before = jitaLinkedKeys(d.fields && d.fields.issuelinks);
+            jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
+                .done(function () { jitaGoToNewDefect(ebrKey, before); })   // poll the EBR's links for the new defect, then navigate
+                .fail(fail);
+        }).fail(fail);
+}
+
 // Adds the different buttons to the "command-bar" and defines what they do
 function addButtons() {
     // The native quick-add trigger: we copy its (react-churned) classes to style our buttons like it, and
@@ -1026,25 +1059,11 @@ function addButtons() {
 
     // Create Convert To Defect Button
     addActionButton('convertToDefectButton', 'Convert to Defect');
+    jitaConvertButtonState();   // a button put back while this report's conversion runs comes back disabled
     // When the Convert to Defect button is clicked we trigger the Automation which converts the EBR into an EDR issue
     // .off('click.jita').on(...) so re-running addButtons (React re-renders / SPA nav) never STACKS a second handler
     // on the same button - stacked handlers fired the automation twice and created two defects.
-    $("#convertToDefectButton").off('click.jita').on('click.jita', function () {
-        var $btn = $(this);
-        if ($btn.prop('disabled')) { return; }                 // conversion already in progress - ignore extra clicks
-        $btn.prop('disabled', true);
-        var ebrKey = jitaCurrentKey();
-        function fail(xhr) { $btn.prop('disabled', false); jitaAjaxError()(xhr); }
-        // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
-        // newly-created defect (found as the freshly-linked issue that wasn't linked before).
-        $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
-            .done(function (d) {
-                var before = jitaLinkedKeys(d.fields && d.fields.issuelinks);
-                jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
-                    .done(function () { jitaGoToNewDefect(ebrKey, before); })   // poll the EBR's links for the new defect, then navigate
-                    .fail(fail);
-            }).fail(fail);
-    });
+    $("#convertToDefectButton").off('click.jita').on('click.jita', jitaConvertClick);
 
 
     // Create close button
@@ -3432,13 +3451,20 @@ JiTA.logsig = {
                 if (!found[defect].raw && label) { found[defect].raw = label; }
                 if (!loose) { found[defect].loose = false; }   // any exact hit upgrades the entry from "possibly related"
             }
+            // The badge is one element, classed so rematch() can take it off again, put in front of what the cell holds;
+            // rebuilding the cell through innerHTML re-parsed everything else in it as well.
             function markAnchor(tr, defect, loose) {
                 var cell = tr.lastElementChild;
-                tr.className += loose ? ' sig-hit-loose' : ' sig-hit';
+                tr.classList.add(loose ? 'sig-hit-loose' : 'sig-hit');
                 if (cell) {
                     cell.title = (loose ? 'Possibly related (same crash site) · ' : 'Known exception · ') + defect;
-                    var col = loose ? '#9aa6b2' : '#4c9aff';
-                    cell.innerHTML = '<a href="/browse/' + defect + '" target="_blank" style="color:' + col + ';font-weight:700;margin-right:6px;">[' + (loose ? '~' : '') + defect + ']</a>' + cell.innerHTML;
+                    var a = document.createElement('a');
+                    a.className = 'jita-sig-link';
+                    a.href = '/browse/' + defect;
+                    a.target = '_blank';
+                    a.style.cssText = 'color:' + (loose ? '#9aa6b2' : '#4c9aff') + ';font-weight:700;margin-right:6px;';
+                    a.textContent = '[' + (loose ? '~' : '') + defect + ']';
+                    cell.insertBefore(a, cell.firstChild);
                 }
             }
             var i = 0;
@@ -3491,7 +3517,17 @@ JiTA.logsig = {
     rematch: function () {
         if (!document.getElementById('tableContent')) { return; }   // no parsed log open
         var rows = document.querySelectorAll('#tableContent tbody tr');
-        for (var i = 0; i < rows.length; i++) { rows[i].removeAttribute('data-jita-sig'); }
+        for (var i = 0; i < rows.length; i++) {
+            var r = rows[i];
+            r.removeAttribute('data-jita-sig');
+            // ...and what the last pass drew on the row, so it keeps a badge only if it matches now. Left in place,
+            // every sync put another [EDR-x] in front of the last one, and a match that no longer held stayed up.
+            r.classList.remove('sig-hit', 'sig-hit-loose');
+            var links = r.querySelectorAll('a.jita-sig-link');
+            for (var k = 0; k < links.length; k++) { links[k].parentNode.removeChild(links[k]); }
+            var cell = r.lastElementChild;
+            if (cell && /^(Known exception|Possibly related \(same crash site\)) · /.test(cell.title || '')) { cell.removeAttribute('title'); }
+        }
         JiTA.logsig.applyToTable();
     },
 
@@ -4201,7 +4237,7 @@ JiTA.responses = {
         { title: 'Tutorial/NPE Operations', body: 'During the starter encounters, you should be able to reset yourself to the last checkpoint by clicking on the small question mark in operations panel. You can also attempt to undock/redock, or log in and out of your client. If for some reason you are unable to resolve the issue by doing any of the above, please follow up with the support department as they may be able to assist you further here: https://support.eveonline.com/hc/requests/new' },
         { title: 'ESI Issues', body: 'Thank you for submitting a bug report. For reporting any ESI related issues, please instead use our official ESI Issues GitHub repository: https://github.com/esi/esi-issues or use the #3rd-party-dev-and-esi channel on the EVE Online Discord (https://www.eveonline.com/discord)' },
         { title: 'Not EVE Related', body: 'Thank you for submitting a bug report. We appreciate you taking the time to contact us, however the issue in question is not supported by EVE Online directly or deals with outside factors/services beyond our control.' },
-        { title: 'Security Related', body: 'Thank you for your report, we appreciate your concern and will forward this information to the security team within Fenris Creations. If you have any further substantial evidence which supports your report, please add it to this ticket. Please note that the security team may not respond to this ticket unless additional information is required but you can rest assured that your report will be reviewed. Should you come across other suspicious behavior in the future, we would like to point you to two other communications channels. The customer support department as well as the REPLACE WITH TEAM NAME are not directly involved in detecting and policing Real Money Trading, abuse of macros, bots and other illegitimate third party programs, that responsibility lies with Team Security, a team of specialists responsible for enforcing this side of EVE. The following two channels are the most efficient way of bringing suspected abuse of this kind to their attention:\n- Please file a support ticket or\n- send a mail directly to security@fenriscreations.com.\nMake sure to include the names of the character(s) involved, time of the alleged illicit activity and any other pertinent details you possess. For all other reports of suspected third party program abuse, please utilize the "Report bot" function in the EVE game client. Here are the steps submit a bot report:\n- Right click on the character you wish to report and select show info.\n- Click the button in the upper-left corner of the character information screen to open the action menu.\n- Select "Report Bot".\nMore information on the bot report tool and further instructions on how to operate it can be found in the blog: https://www.eveonline.com/article/the-eve-security-taskforce-report-a-bot/ I will now move this ticket to the attention of the security team.\nThanks and fly safe,' }
+        { title: 'Security Related', body: 'Thank you for your report, we appreciate your concern and will forward this information to the security team within Fenris Creations. If you have any further substantial evidence which supports your report, please add it to this ticket. Please note that the security team may not respond to this ticket unless additional information is required but you can rest assured that your report will be reviewed. Should you come across other suspicious behavior in the future, we would like to point you to two other communications channels. The customer support department as well as the Bug Hunter team are not directly involved in detecting and policing Real Money Trading, abuse of macros, bots and other illegitimate third party programs, that responsibility lies with Team Security, a team of specialists responsible for enforcing this side of EVE. The following two channels are the most efficient way of bringing suspected abuse of this kind to their attention:\n- Please file a support ticket or\n- send a mail directly to security@fenriscreations.com.\nMake sure to include the names of the character(s) involved, time of the alleged illicit activity and any other pertinent details you possess. For all other reports of suspected third party program abuse, please utilize the "Report bot" function in the EVE game client. Here are the steps submit a bot report:\n- Right click on the character you wish to report and select show info.\n- Click the button in the upper-left corner of the character information screen to open the action menu.\n- Select "Report Bot".\nMore information on the bot report tool and further instructions on how to operate it can be found in the blog: https://www.eveonline.com/article/the-eve-security-taskforce-report-a-bot/ I will now move this ticket to the attention of the security team.\nThanks and fly safe,' }
     ],
 
     // ---- repository model: store ONLY the user's deltas, not a full snapshot ----
@@ -5070,7 +5106,9 @@ JiTA.sync = {
                                                       : (JiTA.MAX_RETRIES - retries + 1) * 1000;   // 1s,2s,3s...
                         setTimeout(function () { attempt(retries - 1); }, wait);
                     } else {
-                        reject(new Error('Jira API ' + path + ' failed: HTTP ' + xhr.status));
+                        var err = new Error('Jira API ' + path + ' failed: HTTP ' + xhr.status);
+                        err.status = xhr.status;   // for callers that treat one status differently (the QC month's 400)
+                        reject(err);
                     }
                 });
             })(JiTA.MAX_RETRIES);
@@ -5182,7 +5220,13 @@ JiTA.sync = {
                 });
             });
         }
-        return nextPage();
+        // What this run wrote, or pruned, stays invisible to the shared ranking worker until it rebuilds its indexes:
+        // it keeps them in memory for as long as it lives, across reloads. So once the run ends - done, or failed part
+        // way - drop them if it stored anything. Once per run, not per page: a query in between rebuilds them, and a
+        // full crawl is hundreds of pages. (embedPass drops them as well, but a sync that only changed statuses, or
+        // pruned closed reports, gave it nothing to embed, and it used to return before dropping anything.)
+        function settled() { if (stored > 0) { JiTA.sync._invalidateWorker(); } }
+        return nextPage().then(function (res) { settled(); return res; }, function (e) { settled(); throw e; });
     },
 
     fullSync: function () {
@@ -5402,6 +5446,11 @@ JiTA.sync = {
         });
     },
 
+    // Make the shared ranking worker drop its in-memory indexes; it rebuilds them from the DB on its next query.
+    _invalidateWorker: function () {
+        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+    },
+
     // An EBR just left the OPEN set locally (attached / closed) and was deleted from the DB. Make every open
     // tab drop it from the defect "matching reports" view WITHOUT a manual refresh. Removing the DB row is not
     // enough: the shared ranking worker keeps the report in its in-memory kwCache/vecCache (its vector still
@@ -5414,7 +5463,7 @@ JiTA.sync = {
     _ebrRemoved: function (keys, fromRemote) {
         JiTA.rank._dirtyEbr = true;
         JiTA.rank._dirtyEbrVec = true;
-        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+        JiTA.sync._invalidateWorker();
         if (!fromRemote) { gmSet('sdEbrRemoved', { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId }); }
     },
 
@@ -5534,6 +5583,7 @@ JiTA.rank = {
         return JiTA.worker.call('rankKeyword', {
             text: text, scope: scope, excludeKey: excludeKey,
             filterTerms: (filterTerms && filterTerms.length ? filterTerms : null),
+            gate: JiTA.ui._gateSpec(),   // applied in the worker before its cut, not just after it here
             topN: Math.max((limit || JiTA.TOP_N) * 4, 100)
         }).then(function (r) { return (r && r.results) || []; });
     },
@@ -6060,6 +6110,7 @@ JiTA.rank._workerSemantic = function (text, scope, excludeKey, filterTerms) {
     return JiTA.worker.call('rankSemantic', {
         text: text, scope: scope, excludeKey: excludeKey,
         filterTerms: (filterTerms && filterTerms.length ? filterTerms : null),
+        gate: JiTA.ui._gateSpec(),   // applied in the worker before its cut, not just after it here
         topN: JiTA.rank.CAND * 4
     }).then(function (r) { return (r && r.results) || []; });
 };
@@ -6642,11 +6693,20 @@ JiTA.ui = {
     // Deliberately IN-MEMORY only, like modeOverride: a reload resets them. `passesFilter` is called as a
     // per-candidate predicate inside every ranking loop (BM25 + semantic, defect + report), so filtered docs
     // are dropped BEFORE the TOP_N cut - you always get a full N of matching results, not N-minus-the-filtered.
+    // The shared worker cuts its own list first, so the filters travel with every call to it (_gateSpec) and it
+    // applies the same rule before its cut (passesGate); this predicate still runs on what comes back.
     filters: { status: 'all', createdDays: 0 },   // status: 'all'|'open'|'fixed'; createdDays: 0 = off
 
     // True iff a candidate passes the current session filters. Status applies to DEFECT candidates only (open
     // bug reports are open by definition, so it's a no-op on the reports view even if 'fixed' is left set).
     // Created-within applies to any candidate carrying a `created` date.
+    // The session filters as a ranking call carries them to the worker, or null when none is set.
+    _gateSpec: function () {
+        var f = JiTA.ui.filters;
+        if (!f || ((!f.status || f.status === 'all') && !(f.createdDays > 0))) { return null; }
+        return { status: f.status || 'all', createdDays: f.createdDays || 0, now: Date.now() };
+    },
+
     passesFilter: function (doc) {
         var f = JiTA.ui.filters;
         if (!f) { return true; }
@@ -6820,11 +6880,7 @@ JiTA.ui = {
         menu.style.top = Math.max(6, top) + 'px';
         // Dismiss on outside click / Esc (registered next tick so the opening click doesn't self-close; the
         // funnel itself is excluded so its click handler can toggle the menu shut).
-        JiTA.ui._filterMenuDismiss = function (e) {
-            if (e.type === 'keydown') { if (e.key === 'Escape') { JiTA.ui._closeFilterMenu(); } return; }
-            if (menu.contains(e.target) || (anchor && anchor.contains && anchor.contains(e.target))) { return; }
-            JiTA.ui._closeFilterMenu();
-        };
+        JiTA.ui._filterMenuDismiss = function (e) { JiTA.ui._popDismiss(e, menu, anchor, JiTA.ui._closeFilterMenu); };
         setTimeout(function () {
             document.addEventListener('mousedown', JiTA.ui._filterMenuDismiss, true);
             document.addEventListener('keydown', JiTA.ui._filterMenuDismiss, true);
@@ -6839,6 +6895,19 @@ JiTA.ui = {
             document.removeEventListener('keydown', JiTA.ui._filterMenuDismiss, true);
             JiTA.ui._filterMenuDismiss = null;
         }
+    },
+
+    // The popovers' dismiss rule (the funnel's filter menu, the hide menu), run in the capture phase on document. Esc
+    // closes the popover and only the popover: the key is stopped there, before it reaches menu._esc, which would
+    // close the whole overlay under it - Triage mode included, which then has to fetch its queue all over again.
+    // A mousedown outside the popover (and outside its anchor, which toggles it itself) closes it too.
+    _popDismiss: function (e, menu, anchor, close) {
+        if (e.type === 'keydown') {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+            return;
+        }
+        if (menu.contains(e.target) || (anchor && anchor.contains && anchor.contains(e.target))) { return; }
+        close();
     },
 
     // Soft-refresh the open issue after a "Mark dup": patch the status lozenge text in place instead of a
@@ -7545,11 +7614,7 @@ JiTA.ui = {
         menu.style.left = Math.max(6, left) + 'px';
         menu.style.top = Math.max(6, top) + 'px';
         // Dismiss on outside click or Esc (capture phase, registered next tick so the opening click is ignored).
-        JiTA.ui._hideMenuDismiss = function (e) {
-            if (e.type === 'keydown') { if (e.key === 'Escape') { JiTA.ui._closeHideMenu(); } return; }
-            if (menu.contains(e.target)) { return; }
-            JiTA.ui._closeHideMenu();
-        };
+        JiTA.ui._hideMenuDismiss = function (e) { JiTA.ui._popDismiss(e, menu, null, JiTA.ui._closeHideMenu); };
         setTimeout(function () {
             document.addEventListener('mousedown', JiTA.ui._hideMenuDismiss, true);
             document.addEventListener('keydown', JiTA.ui._hideMenuDismiss, true);
@@ -8583,7 +8648,12 @@ JiTA.menu = {
         JiTA.menu.close();
         JiTA.menu._injectCss();
         var $overlay = $('<div id="jita-menu-overlay"></div>');
-        $overlay.on('click', function (e) { if (e.target === this) { JiTA.menu.close(); } });   // backdrop click
+        // A backdrop click closes the overlay, but only one that began on the backdrop. A drag that starts in the box
+        // (selecting text in a canned response, say) and is let go outside it ends in a click on the backdrop too, and
+        // closing then threw the edit away.
+        var downOnBackdrop = false;
+        $overlay.on('mousedown', function (e) { downOnBackdrop = (e.target === this); });
+        $overlay.on('click', function (e) { if (e.target === this && downOnBackdrop) { JiTA.menu.close(); } });
         var $menu = $('<div id="jita-menu"' + (opts.wide ? ' class="jita-menu-wide"' : '') + '></div>').appendTo($overlay);
         if (opts.title) {
             var $head = $('<div class="jita-menu-head"><h2></h2></div>');
@@ -8592,9 +8662,24 @@ JiTA.menu = {
             $menu.append($head);
         }
         $overlay.appendTo(document.body);
-        JiTA.menu._esc = function (e) { if (e.key === 'Escape') { JiTA.menu.close(); } };
+        // Esc closes the overlay, unless something under it has already taken the key (a popover, an editor, Triage's
+        // own key layer), or it was pressed in a text field: there it only leaves the field, so a half-typed note or
+        // reply is not one keystroke from gone. A second Esc then closes the overlay.
+        JiTA.menu._esc = function (e) {
+            if (e.key !== 'Escape' || e.defaultPrevented) { return; }
+            if (JiTA.menu._isTextField(e.target)) { try { e.target.blur(); } catch (x) { /* ignore */ } return; }
+            JiTA.menu.close();
+        };
         document.addEventListener('keydown', JiTA.menu._esc);
         return { $overlay: $overlay, $menu: $menu, close: JiTA.menu.close };
+    },
+
+    // A field that takes typing: a textarea, an editable element, or an input that holds text (not a checkbox or a
+    // button, where Esc has nothing to leave).
+    _isTextField: function (el) {
+        if (!el) { return false; }
+        if (el.tagName === 'TEXTAREA' || el.isContentEditable) { return true; }
+        return el.tagName === 'INPUT' && /^(text|search|email|url|tel|password|number)?$/i.test(el.type || '');
     },
 
     // Open (toggle): a second click of the menu command closes it again.
@@ -9656,7 +9741,7 @@ function jitaWorkerBody(cfg) {
     }
     // BM25 over a { N, avgdl, df, docs } index. Applies only the excludeKey + filter-box gates (hidden / session
     // filters stay in the tab); a filter-box match with no query-term overlap is kept as a score-0 candidate.
-    function bm25Score(idx, text, excludeKey, limit, filterTerms) {
+    function bm25Score(idx, text, excludeKey, limit, filterTerms, gate) {
         if (!idx || !idx.N) { return []; }
         var q = tokenize(text), qSet = {}, i;
         for (i = 0; i < q.length; i++) { qSet[q[i]] = true; }
@@ -9669,6 +9754,7 @@ function jitaWorkerBody(cfg) {
             var doc = idx.docs[d];
             if (excludeKey && doc.key === excludeKey) { continue; }
             if (hasTerms && !matchTerms(doc.hay, filterTerms)) { continue; }
+            if (!passesGate(doc, gate)) { continue; }
             var score = 0;
             for (var t = 0; t < terms.length; t++) { var tf = doc.tf[terms[t]]; if (!tf) { continue; } var denom = tf + K1 * (1 - B + B * (doc.len / avgdl)); score += idf[terms[t]] * (tf * (K1 + 1)) / denom; }
             if (score > 0 || hasTerms) { scored.push({ key: doc.key, project: doc.project, summary: doc.summary, status: doc.status, resolution: doc.resolution, resolutiondate: doc.resolutiondate, created: doc.created, team: doc.team, score: score }); }
@@ -9775,6 +9861,23 @@ function jitaWorkerBody(cfg) {
         qVec = await embed(text); qText = text; return qVec;
     }
     function matchTerms(hay, terms) { for (var i = 0; i < terms.length; i++) { if (hay.indexOf(terms[i]) === -1) { return false; } } return true; }
+    // The session filters (Status, Created within) a ranking call carries, applied BEFORE the top-N cut. Applied after
+    // it, in the tab, a strict filter left a handful of the top 200 and the panel said nothing matched while real
+    // matches sat just below the cut. The same rule as JiTA.ui.passesFilter (resolved = a resolution, or a closed
+    // status name, as JiTA.util.isResolved); the tab still applies that too, as a backstop. No gate: everything passes.
+    function passesGate(doc, gate) {
+        if (!gate) { return true; }
+        if (gate.status && gate.status !== 'all' && doc.project !== 'EBR') {   // open bug reports are open by definition
+            var resolved = !!doc.resolution || isClosedStatus(doc.status);
+            if (gate.status === 'open' && resolved) { return false; }
+            if (gate.status === 'fixed' && !resolved) { return false; }
+        }
+        if (gate.createdDays > 0) {
+            var t = doc.created ? Date.parse(doc.created) : NaN;
+            if (isNaN(t) || (gate.now - t) > gate.createdDays * 86400000) { return false; }
+        }
+        return true;
+    }
 
     // ---- embed pass (runs HERE now, so no tab ever loads a model) --------------------------------------
     async function embedBatch(texts) {
@@ -9878,9 +9981,14 @@ function jitaWorkerBody(cfg) {
                     await new Promise(function (r) { setTimeout(r, 1500); });
                 }
             }
-            vecCache = null; kwCache = null; logsigCache = null;   // new vectors/text -> rebuild all indexes on the next query
             return { embedded: todo.length };
-        } finally { embedding = false; }
+        } finally {
+            embedding = false;
+            // Rebuild every index on the next query, however the pass ended: new vectors, or none at all - it runs after
+            // every sync, so even with nothing to embed the records under the indexes may have changed. A pass that
+            // failed part way has still written the batches before the failure.
+            dropIndexes();
+        }
     }
     function openDb() {
         if (db) { return Promise.resolve(db); }
@@ -9930,9 +10038,25 @@ function jitaWorkerBody(cfg) {
     }
     // Build BOTH in-worker indexes in a single DB read (held ONCE for all tabs): the vector index (records
     // embedded at the current model version) and the BM25 keyword index, each split defects vs open non-GM EBRs.
-    async function ensureIndexes() {
-        if (vecCache && kwCache && logsigCache) { return; }
-        var recs = await allRecords();
+    //
+    // One build at a time, and never a stale one. Queries arriving together after a drop share one read and one
+    // build (self.onmessage is async, so a hybrid render's keyword and semantic calls used to build twice), and a
+    // build whose read began before a drop is thrown away and redone: kept, it would put back the very records the
+    // drop was for - a report just attached, a status just changed.
+    var idxGen = 0, idxP = null;
+    function dropIndexes() { idxGen++; vecCache = null; kwCache = null; logsigCache = null; }
+    function ensureIndexes() {
+        if (vecCache && kwCache && logsigCache) { return Promise.resolve(); }
+        if (idxP) { return idxP; }
+        var gen = idxGen;
+        idxP = allRecords().then(function (recs) {
+            idxP = null;
+            if (gen !== idxGen) { return ensureIndexes(); }
+            buildIndexes(recs);
+        }, function (e) { idxP = null; throw e; });
+        return idxP;
+    }
+    function buildIndexes(recs) {
         var vD = [], vE = [], kD = [], kE = [], dfD = {}, dfE = {}, lenD = 0, lenE = 0;
         var sigMap = {}, keyToSigs = {}, crashMap = {}, keyToCrash = {};   // logsig
         for (var i = 0; i < recs.length; i++) {
@@ -9979,13 +10103,14 @@ function jitaWorkerBody(cfg) {
         logsigCache = { sigMap: sigMap, keyToSigs: keyToSigs, crashMap: crashMap, keyToCrash: keyToCrash };
     }
     // Cosine == dot product (both vectors are normalized). Return the top-N by score.
-    function cosineTopN(q, entries, topN, excludeKey, filterTerms) {
+    function cosineTopN(q, entries, topN, excludeKey, filterTerms, gate) {
         var hasTerms = filterTerms && filterTerms.length;
         var scored = [];
         for (var i = 0; i < entries.length; i++) {
             var e = entries[i];
             if (excludeKey && e.key === excludeKey) { continue; }
-            if (hasTerms && !matchTerms(e.hay, filterTerms)) { continue; }   // filter-box narrowing (session/UI gates stay in the tab)
+            if (hasTerms && !matchTerms(e.hay, filterTerms)) { continue; }   // filter-box narrowing
+            if (!passesGate(e, gate)) { continue; }                          // session filters; hidden keys and the UI gates stay in the tab
             var v = e.vec, s = 0, n = q.length;
             for (var j = 0; j < n; j++) { s += q[j] * v[j]; }
             scored.push({ key: e.key, project: e.project, summary: e.summary, status: e.status, resolution: e.resolution, resolutiondate: e.resolutiondate, created: e.created, team: e.team, score: s });
@@ -9998,7 +10123,7 @@ function jitaWorkerBody(cfg) {
         await ensureIndexes();
         var entries = payload.scope === 'ebr' ? vecCache.ebr : vecCache.defects;
         var q = await qEmbed(payload.text || '');
-        return { backend: backend, indexed: entries.length, results: cosineTopN(q, entries, payload.topN || 10, payload.excludeKey, payload.filterTerms) };
+        return { backend: backend, indexed: entries.length, results: cosineTopN(q, entries, payload.topN || 10, payload.excludeKey, payload.filterTerms, payload.gate) };
     }
     // Duplicate-defect finder (lead tool): pairwise cosine over the OPEN defects' stored vectors (normalized,
     // so dot == cosine). Returns every unordered pair scoring >= minCos, plus a key->meta map for rendering.
@@ -10040,7 +10165,7 @@ function jitaWorkerBody(cfg) {
         payload = payload || {};
         await ensureIndexes();
         var idx = payload.scope === 'ebr' ? kwCache.ebr : kwCache.defects;
-        return { indexed: idx.N, results: bm25Score(idx, payload.text || '', payload.excludeKey, payload.topN || 200, payload.filterTerms) };
+        return { indexed: idx.N, results: bm25Score(idx, payload.text || '', payload.excludeKey, payload.topN || 200, payload.filterTerms, payload.gate) };
     }
 
     // ---- ISD credits: the monthly leaderboard crawl runs HERE now, so its fetches + politeness sleeps live off
@@ -10602,7 +10727,7 @@ function jitaWorkerBody(cfg) {
                 // Runs directly; shares the crGate rate buckets. Streams no progress (self never drove a pill).
                 result = await crComputeSelf(payload);
             }
-            else if (type === 'invalidate') { vecCache = null; kwCache = null; logsigCache = null; result = { ok: true }; }   // drop all indexes after a sync writes the DB
+            else if (type === 'invalidate') { dropIndexes(); result = { ok: true }; }   // drop all indexes after a sync writes the DB
             else { throw new Error('unknown worker request: ' + type); }
             self.postMessage({ id: id, ok: true, result: result });
         } catch (err) { self.postMessage({ id: id, ok: false, error: String((err && err.message) || err), stack: String((err && err.stack) || '') }); }
@@ -13495,10 +13620,14 @@ JiTA.dv = {
         D._post('/rest/api/3/search/approximate-count', { jql: '(' + where + ') AND key = ' + D._q(key) }).then(function (d) {
             if (gen !== D._gen || !(d && d.count)) { return; }
             (function more() {
-                if (gen !== D._gen || D._activeKey !== key) { return; }
+                if (gen !== D._gen || D._activeKey !== key || !D._mounted) { return; }   // a newer query, another issue, or the list is gone
                 if (D._index[key] != null) { D._syncActive(true); return; }
                 if (!D._more || D._issues.length >= D.FIND_MAX) { return; }
-                D._page(gen).then(more);
+                var pages = D._pages;
+                // On only once the page has landed. One that failed (Jira down, the session expired) leaves _more and the
+                // token as they were, so asking again at once sent the same request in a loop for as long as it kept
+                // failing. The next scroll or seek tries again.
+                D._page(gen).then(function () { if (D._pages > pages) { more(); } });
             })();
         }, function () { /* a key JQL does not know (moved, deleted) - simply not in the list */ });
     },
@@ -14828,7 +14957,7 @@ JiTA.leadduty = {
         return new Promise(function (resolve, reject) {
             $.ajax({ url: JiTA.HOST + path, dataType: 'json', headers: { 'Accept': 'application/json' } })
                 .done(function (d) { resolve(d); })
-                .fail(function (xhr) { reject(new Error('Jira GET ' + path + ' failed: HTTP ' + xhr.status)); });
+                .fail(function (xhr) { var err = new Error('Jira GET ' + path + ' failed: HTTP ' + xhr.status); err.status = xhr.status; reject(err); });
         });
     },
     // Page through /search/jql, collecting issues. Mirrors the worker's crFetchIssues.
@@ -15694,8 +15823,23 @@ JiTA.leadduty = {
             var have = (pool && pool.byKey) || null;
             var need = [];
             for (var k = 0; k < keys.length; k++) { if (!have || !have[keys[k]]) { need.push(keys[k]); } }
+            var FIELDS = ['summary', 'status', 'created', 'reporter'];
             var fetch = need.length
-                ? L._search('key in (' + need.join(', ') + ')', ['summary', 'status', 'created', 'reporter'])
+                ? L._search('key in (' + need.join(', ') + ')', FIELDS).catch(function (e) {
+                    // Jira refuses the whole search (400) when one key in it no longer exists - deleted, or out of this
+                    // Lead's reach - so a single such issue in a frozen sample failed the month's QC tab outright,
+                    // before the "(not found)" row below, which is there for exactly this, was ever reached. Ask for
+                    // each key on its own instead: one that is gone (404) or hidden (403) is simply left out.
+                    if (!e || e.status !== 400) { throw e; }
+                    return Promise.all(need.map(function (key) {
+                        return L._get('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=' + FIELDS.join(',')).then(function (d) {
+                            return (d && d.key) ? [d] : [];
+                        }, function (e2) {
+                            if (e2 && (e2.status === 404 || e2.status === 403)) { return []; }
+                            throw e2;
+                        });
+                    })).then(function (lists) { return [].concat.apply([], lists); });
+                })
                 : Promise.resolve([]);
             return fetch.then(function (rows) {
                 var extra = {};
@@ -17820,7 +17964,8 @@ JiTA.leadduty.apps = {
         var body = r.body || '', items = [], chunks = body.split(/<tr\b/i);
         for (var i = 1; i < chunks.length; i++) {
             var row = chunks[i];
-            var idm = /href\s*=\s*["']\/Admin\/Application\/([0-9a-f-]{36})["']/i.exec(row);
+            // The review link, relative or absolute, with or without a query string or fragment after the id.
+            var idm = /href\s*=\s*["'](?:https?:\/\/[^"'\/]*)?\/Admin\/Application\/([0-9a-f-]{36})(?:[?#][^"']*)?["']/i.exec(row);
             if (!idm) { continue; }
             var cells = [], cm, cre = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
             while ((cm = cre.exec(row))) { cells.push(A._text(cm[1])); }
@@ -17839,9 +17984,12 @@ JiTA.leadduty.apps = {
                 url: A.DETAIL_URL + idm[1]
             });
         }
-        // An applications page with no rows is a real answer (nobody waiting); a page that is not the
-        // applications page at all is not, and must not read as an empty queue.
-        if (!items.length && !/\/Admin\/Application|applications/i.test(body)) { return { ok: false, reason: 'unreadable' }; }
+        // An applications page with no rows is a real answer (nobody waiting), and it looks like one: the queue's table,
+        // with no link to any application in it. Anything else must not read as an empty queue, or the tab, its footer
+        // and the chip would all say nobody is waiting: a page without the table is not the queue, and application
+        // links that no row was read from mean the rows are there but in a shape this parser does not know. (It used
+        // to accept any page with the word "applications" on it, and every VMS page has that in its menu.)
+        if (!items.length && (!/<table\b/i.test(body) || /\/Admin\/Application\/[0-9a-f-]{36}/i.test(body))) { return { ok: false, reason: 'unreadable' }; }
         return { ok: true, items: items };
     },
 
@@ -18580,7 +18728,28 @@ JiTA.worker = {
         JiTA.worker._standAsides = 0;
         JiTA.worker._isLeader = true;
         JiTA.worker._respawns = 0;   // fresh leadership session -> fresh respawn budget
+        // The calls this tab sent over the channel were for another leader, and a tab never hears its own channel
+        // messages, so nobody will answer them now. And every follower may be waiting on a call the old leader took:
+        // say so, before this tab takes any call itself (the channel keeps one sender's messages in order).
+        JiTA.worker._failTabPending('the ranking leader moved to this tab');
+        try { if (JiTA.worker._bc) { JiTA.worker._bc.postMessage({ kind: 'leader', version: JiTA.SCRIPT_VERSION }); } } catch (e) { /* ignore */ }
         JiTA.worker._spawnWorker();
+    },
+
+    // Reject this tab's channel calls now instead of at their op timeout. A leader that took a call (ACKed it) and then
+    // went away - its tab reloaded or closed, the usual way to pick up an update - never answers, and an ACKed call has
+    // only its op timer left: 15 minutes for a credits crawl, with the pill frozen and every Refresh told a run is
+    // already going. ackedOnly spares the calls no leader has taken yet: their own LEADER_ACK_MS timer covers them,
+    // and the new leader may be about to take them.
+    _failTabPending: function (why, ackedOnly) {
+        var pend = JiTA.worker._tabPending;
+        Object.keys(pend).forEach(function (id) {
+            var p = pend[id];
+            if (ackedOnly && p.ackTimer) { return; }
+            clearTimeout(p.timer); if (p.ackTimer) { clearTimeout(p.ackTimer); }
+            delete pend[id];
+            try { p.reject(new Error(why)); } catch (e) { /* ignore */ }
+        });
     },
 
     // (Re)spawn the dedicated worker. Called when we become leader and on every self-heal respawn. A spawn throw,
@@ -18817,6 +18986,8 @@ JiTA.worker = {
             JiTA.worker._applyEvent(m.data);   // a worker event the leader relayed (e.g. embed pass finished)
         } else if (m.kind === 'reelect') {
             JiTA.worker._applyReelect(m.want);   // a tab saw a stale worker -> remember the newer version / step down if we're the stale leader
+        } else if (m.kind === 'leader') {
+            JiTA.worker._failTabPending('the ranking leader changed - try again', true);   // a call the old leader took will never be answered
         }
     },
 
@@ -19793,6 +19964,33 @@ JiTA.changelog = {
         { v: '3.38.14', date: '2026-10-03', items: [
             'Lead duties: a review or check saved while Confluence was unreachable just before the month changed is no longer lost.',
             'Lead duties: something you took back in another browser no longer comes back as done, and marking an item twice no longer stops Undo from restoring it.'
+        ] },
+        { v: '3.38.13', date: '2026-10-03', items: [
+            'With the Status or Created within filter set, similar defects and matching reports now find matches beyond the first 200 candidates instead of saying nothing matched.'
+        ] },
+        { v: '3.38.12', date: '2026-10-03', items: [
+            'A parsed log left open no longer collects another defect badge on its exceptions with every sync, and a badge for a defect that no longer matches goes away.'
+        ] },
+        { v: '3.38.11', date: '2026-10-03', items: [
+            'Lead duties: one deleted or hidden issue in a month\'s quality control sample no longer stops the whole Quality control tab from loading; it shows as not found.',
+            'Lead duties: when the volunteer site shows a page JiTA cannot read, Applications now says so instead of claiming nobody is waiting.'
+        ] },
+        { v: '3.38.10', date: '2026-10-03', items: [
+            'Convert to Defect can no longer create a second defect when you click it again while the first conversion is still running.'
+        ] },
+        { v: '3.38.9', date: '2026-10-03', items: [
+            'The Security Related canned reply no longer contains the placeholder REPLACE WITH TEAM NAME: it now names the Bug Hunter team. A copy you edited yourself keeps your wording.'
+        ] },
+        { v: '3.38.8', date: '2026-10-03', items: [
+            'Selecting text in a window and letting go outside it no longer closes the window, so a half-edited canned response is not lost.',
+            'Esc in a text box now just leaves the box, and Esc on a small menu such as the filters closes only that menu, not the window or Triage mode under it.'
+        ] },
+        { v: '3.38.7', date: '2026-10-03', items: [
+            'If Jira stops answering, or your session expires, while the issue list beside an issue is looking for the open issue, it no longer repeats the same request in an endless loop.'
+        ] },
+        { v: '3.38.6', date: '2026-10-03', items: [
+            'Each sync now refreshes the similar defects and matching reports, so reports closed in the meantime drop out and statuses stay current.',
+            'The credits pill no longer hangs for up to 15 minutes when the Jira tab doing the background work is reloaded or closed.'
         ] },
         { v: '3.38.5', date: '2026-10-03', items: [
             "After an update the What's new pill now comes up reliably: if the page takes it away while still loading, it comes back by itself."
