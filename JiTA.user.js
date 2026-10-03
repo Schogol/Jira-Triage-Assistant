@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.9
+// @version     3.38.10
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -926,6 +926,39 @@ function jitaOpenGmModal(key) {
 }
 
 
+// Bug reports whose Convert to Defect is under way (EBR key -> true). Kept apart from the button: Jira's own
+// re-render replaces it with a fresh, enabled one about two seconds after a click, while the conversion goes on for
+// up to 30 seconds (jitaGoToNewDefect polls for the new defect), and a second click on that one created a second
+// defect. Success always leaves the page (to the defect, or a reload), which clears this; a failure clears its key.
+var jitaConvertBusy = {};
+
+// The Convert to Defect button reflects whether the report on screen is being converted.
+function jitaConvertButtonState() {
+    var key = jitaCurrentKey();
+    $('#convertToDefectButton').prop('disabled', !!(key && jitaConvertBusy[key]));
+}
+
+function jitaConvertClick() {
+    var ebrKey = jitaCurrentKey();
+    if (!ebrKey || jitaConvertBusy[ebrKey]) { return; }   // this report is already being converted
+    jitaConvertBusy[ebrKey] = true;
+    jitaConvertButtonState();
+    function fail(xhr) {
+        delete jitaConvertBusy[ebrKey];
+        jitaConvertButtonState();   // whichever button is on the page now, not the one that was clicked
+        jitaAjaxError()(xhr);
+    }
+    // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
+    // newly-created defect (found as the freshly-linked issue that wasn't linked before).
+    $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
+        .done(function (d) {
+            var before = jitaLinkedKeys(d.fields && d.fields.issuelinks);
+            jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
+                .done(function () { jitaGoToNewDefect(ebrKey, before); })   // poll the EBR's links for the new defect, then navigate
+                .fail(fail);
+        }).fail(fail);
+}
+
 // Adds the different buttons to the "command-bar" and defines what they do
 function addButtons() {
     // The native quick-add trigger: we copy its (react-churned) classes to style our buttons like it, and
@@ -1026,25 +1059,11 @@ function addButtons() {
 
     // Create Convert To Defect Button
     addActionButton('convertToDefectButton', 'Convert to Defect');
+    jitaConvertButtonState();   // a button put back while this report's conversion runs comes back disabled
     // When the Convert to Defect button is clicked we trigger the Automation which converts the EBR into an EDR issue
     // .off('click.jita').on(...) so re-running addButtons (React re-renders / SPA nav) never STACKS a second handler
     // on the same button - stacked handlers fired the automation twice and created two defects.
-    $("#convertToDefectButton").off('click.jita').on('click.jita', function () {
-        var $btn = $(this);
-        if ($btn.prop('disabled')) { return; }                 // conversion already in progress - ignore extra clicks
-        $btn.prop('disabled', true);
-        var ebrKey = jitaCurrentKey();
-        function fail(xhr) { $btn.prop('disabled', false); jitaAjaxError()(xhr); }
-        // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
-        // newly-created defect (found as the freshly-linked issue that wasn't linked before).
-        $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
-            .done(function (d) {
-                var before = jitaLinkedKeys(d.fields && d.fields.issuelinks);
-                jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
-                    .done(function () { jitaGoToNewDefect(ebrKey, before); })   // poll the EBR's links for the new defect, then navigate
-                    .fail(fail);
-            }).fail(fail);
-    });
+    $("#convertToDefectButton").off('click.jita').on('click.jita', jitaConvertClick);
 
 
     // Create close button
@@ -19854,6 +19873,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.10', date: '2026-10-03', items: [
+            'Convert to Defect can no longer create a second defect when you click it again while the first conversion is still running.'
+        ] },
         { v: '3.38.9', date: '2026-10-03', items: [
             'The Security Related canned reply no longer contains the placeholder REPLACE WITH TEAM NAME: it now names the Bug Hunter team. A copy you edited yourself keeps your wording.'
         ] },
