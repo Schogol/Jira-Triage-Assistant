@@ -18,6 +18,8 @@ function sliceFn(sig) {
 }
 const wikiFns = eval('({' + sliceFn('notExcluded: function (ids, pool) {') + '\n'
     + sliceFn('assignedIds: function (record, pool) {') + '})');
+// ...and so is the mirror's merge rule (v3.38.14): only marks still waiting for the ledger are carried over.
+const carry = eval('({' + sliceFn('carry: function (prev, done) {') + '})').carry;
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
@@ -67,9 +69,14 @@ function run(qcThrows, mirrorsReady) {
         },
         report: { publish() { calls.push('publish'); return Promise.resolve({}); } },
         local: {
-            // Pre-seed an offline mark in each mirror, so we can see whether the scheduler clobbers it.
-            get: (k) => Promise.resolve({ done: { [k.indexOf('qc') > 0 ? 'EO-2' : 'p2']: 'OFFLINE' }, pending: ['x'] }),
-            put: (k, rec) => { puts[k] = rec; return Promise.resolve(); }
+            // Pre-seed an offline mark in each mirror (pending: the ledger has not taken it yet), so we can see whether
+            // the scheduler clobbers it - and, next to it, a mark that is NOT pending: one taken back in another
+            // browser, which the ledger rightly lacks and the refresh must not bring back.
+            get: (k) => Promise.resolve(k.indexOf('qc') > 0
+                ? { done: { 'EO-2': 'OFFLINE', 'EBR-1x': 'UNDONE' }, pending: ['EO-2'] }
+                : { done: { p2: 'OFFLINE', p3: 'UNDONE' }, pending: ['p2'] }),
+            put: (k, rec) => { puts[k] = rec; return Promise.resolve(); },
+            carry: carry
         }
     };
     global.JiTA = { leadduty: L, sched: { tabId: 'T' }, dlog: () => {} };
@@ -97,6 +104,8 @@ function run(qcThrows, mirrorsReady) {
     ok('an offline mark is NOT clobbered (wiki)', (a.puts['leadduty:wiki:2026-09'].done || {}).p2 === 'OFFLINE');
     ok('an offline mark is NOT clobbered (QC)', (a.puts['leadduty:qc:2026-08'].done || {})['EO-2'] === 'OFFLINE');
     ok('a pending queue survives the refresh', (a.puts['leadduty:qc:2026-08'].pending || []).length === 1);
+    ok('a mark taken back elsewhere is not brought back (wiki)', !(a.puts['leadduty:wiki:2026-09'].done || {}).p3, JSON.stringify(a.puts['leadduty:wiki:2026-09'].done));
+    ok('...nor in QC', !(a.puts['leadduty:qc:2026-08'].done || {})['EBR-1x'], JSON.stringify(a.puts['leadduty:qc:2026-08'].done));
     ok('the page is republished after both halves', a.calls.indexOf('publish') === a.calls.length - 1, a.calls.join(' '));
     ok('the tick marks itself done', !!gm.leadDutyLastTs && !gm.leadDutyFailTs);
     ok('the lease is released', !gm.leadDutyLease);
