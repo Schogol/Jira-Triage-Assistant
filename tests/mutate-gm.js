@@ -23,9 +23,9 @@ const muts = [
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
     if (src.split(a).length !== 2) { console.log('ANCHOR ' + (src.split(a).length - 1) + 'x: ' + name); allRed = false; return; }
-    fs.writeFileSync('mutgm.js', src.replace(a, () => b));
+    fs.writeFileSync('mutg.js', src.replace(a, () => b));
     let out = '', crashed = false;
-    try { out = execSync('node ' + h, { env: Object.assign({}, process.env, { JITA_SRC: 'mutgm.js' }), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
+    try { out = execSync('node ' + h, { env: Object.assign({}, process.env, { JITA_SRC: 'mutg.js' }), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
     catch (e) { out = e.stdout || ''; crashed = !/FAILURE|passed/.test(out); }
     const fails = out.split('\n').filter((l) => /^  FAIL  /.test(l));
     const red = crashed || fails.length > 0 || /FAILURE/.test(out);
@@ -33,5 +33,5 @@ muts.forEach(([h, name, a, b]) => {
     console.log((red ? 'RED   ' : 'GREEN ') + h.replace('-check.js', '') + '  ' + name + '  (' + fails.length + (crashed ? ', crashed' : '') + ')' +
         (fails[0] ? '  e.g.' + fails[0].replace(/^  FAIL /, '').slice(0, 90) : ''));
 });
-if (fs.existsSync('mutgm.js')) { fs.unlinkSync('mutgm.js'); }
+if (fs.existsSync('mutg.js')) { fs.unlinkSync('mutg.js'); }
 console.log(allRed ? '\nevery mutation caught' : '\nSOME MUTATION SURVIVED');
