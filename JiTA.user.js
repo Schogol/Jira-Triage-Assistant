@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.39.0
+// @version     3.40.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -9942,6 +9942,14 @@ JiTA.credits = {
                 try { jitaStackPills(); } catch (e) { /* ignore */ }
             }
             JiTA.credits.badge.refresh();
+            // The balance from VMS: read it now if the cached one is due, and again when this tab is focused after a
+            // failed read (the ⚠ opens VMS in another tab, so the user comes back here logged in).
+            var B = JiTA.credits.balance;
+            B.refresh(false).then(function () { JiTA.credits.badge.refresh(); }, function () { /* the ⚠ says so */ });
+            if (!B._focusBound) {
+                B._focusBound = true;
+                try { window.addEventListener('focus', function () { B.onFocus(); }); } catch (e) { /* ignore */ }
+            }
         },
         refresh: function () {
             var el = document.getElementById('jita-credits-badge');
@@ -9950,25 +9958,165 @@ JiTA.credits = {
             // While the scheduler recomputes the leaderboard: its "updating…" used to be overwritten by this very refresh,
             // which resolves a moment after it was written, so the badge looked idle through the whole crawl.
             var busy = JiTA.credits._updating ? ' · updating…' : '';
-            JiTA.credits.getSelf(ym).then(function (self) {
-                if (self && self.credits != null) {
-                    el.textContent = '📊 ' + self.credits + ' Credits' + (self.rank != null ? (' · #' + self.rank + '/' + self.total) : '') + busy;
-                    return;
-                }
-                // fallback: derive from the full-leaderboard cache until the first self compute lands
-                JiTA.credits.getCached(ym).then(function (res) {
-                    if (!res) { el.textContent = '📊 credits: -'; return; }
-                    JiTA.link.currentUser().then(function (me) {
-                        var d = JiTA.credits._derive(res, me);
-                        el.textContent = (d.myRow ? ('📊 ' + d.myRow[8] + ' Credits · #' + d.myRank + '/' + d.total) : '📊 credits: n/a') + busy;
-                    });
-                }).catch(function () { /* ignore */ });
+            Promise.all([JiTA.credits.badge._month(ym), JiTA.credits.balance.readSafe()]).then(function (r) {
+                JiTA.credits.badge._paint(el, JiTA.credits.badge._parts(r[0], r[1], busy));
             }).catch(function () { /* ignore */ });
+        },
+
+        // This month's numbers for the viewer: their own total (recomputed every 2 minutes) when there is one, else their
+        // row of the cached leaderboard until the first one lands. Resolves { credits, rank, total }, { na: true } when
+        // they are not on the leaderboard, or null when nothing has been computed yet.
+        _month: function (ym) {
+            var C = JiTA.credits;
+            return C.getSelf(ym).then(function (self) {
+                if (self && self.credits != null) { return { credits: self.credits, rank: self.rank, total: self.total }; }
+                return C.getCached(ym).then(function (res) {
+                    if (!res) { return null; }
+                    return JiTA.link.currentUser().then(function (me) {
+                        var d = C._derive(res, me);
+                        return d.myRow ? { credits: d.myRow[8], rank: d.myRank, total: d.total } : { na: true };
+                    });
+                });
+            });
+        },
+
+        // What the pill says: the balance in VMS, then what this month has earned so far, then the rank. A failed read
+        // of VMS keeps showing the last balance it got, behind a ⚠; a balance never read is left out, never shown as 0.
+        // Resolves { text, warn, warnTitle, title }.
+        _parts: function (month, bal, busy) {
+            var B = JiTA.credits.balance;
+            var have = bal ? (bal.ok ? bal : bal.last) : null;
+            var m = (month && !month.na) ? month : null;
+            var bits = [], lines = [];
+            if (have) { bits.push(have.credits + ' credits'); }
+            if (m) {
+                bits.push(have ? ('+' + m.credits + ' this month') : (m.credits + ' credits this month'));
+                if (m.rank != null) { bits.push('#' + m.rank + '/' + m.total); }
+            } else if (!have) {
+                bits.push(month && month.na ? 'credits: n/a' : 'credits: -');
+            }
+            if (bal && bal.ok) {
+                lines.push('Credit balance in VMS: ' + bal.credits + (bal.updated ? ' (last changed ' + bal.updated + ')' : ''));
+            } else if (bal) {
+                lines.push((have ? ('Credit balance in VMS: ' + have.credits + ', as read on ' + B.when(have.at) + '. ') : '') + B.why(bal));
+            }
+            if (m) { lines.push('Earned so far this month: ' + m.credits + ' credits' + (m.rank != null ? (', rank ' + m.rank + ' of ' + m.total) : '')); }
+            lines.push('Click for the leaderboard');
+            var warn = !!(bal && !bal.ok);
+            return { text: bits.join(' · ') + busy, warn: warn, warnTitle: warn ? (B.why(bal) + ' Click to open your VMS profile.') : '', title: lines.join('\n') };
+        },
+
+        // The pill is three spans: the icon, the ⚠ (empty unless the balance could not be read) and the text. The ⚠
+        // opens VMS instead of the leaderboard.
+        _paint: function (el, p) {
+            var warn = el.querySelector('[data-cb="warn"]'), label = el.querySelector('[data-cb="label"]');
+            if (!label || !warn) {
+                el.textContent = '';
+                var icon = document.createElement('span');
+                icon.textContent = '📊 ';
+                el.appendChild(icon);
+                warn = document.createElement('span');
+                warn.setAttribute('data-cb', 'warn');
+                warn.style.cssText = 'color:#ffd479;cursor:pointer;';
+                warn.addEventListener('click', function (e) { e.stopPropagation(); JiTA.credits.balance.openVms(); });
+                el.appendChild(warn);
+                label = document.createElement('span');
+                label.setAttribute('data-cb', 'label');
+                el.appendChild(label);
+            }
+            warn.textContent = p.warn ? '⚠ ' : '';
+            warn.title = p.warnTitle;
+            label.textContent = p.text;
+            el.title = p.title;
         },
         remove: function () {
             var el = document.getElementById('jita-credits-badge');
             if (el && el.parentNode) { el.parentNode.removeChild(el); }
             try { jitaStackPills(); } catch (e) { /* ignore */ }
+        }
+    },
+
+    // ---- your credit balance, read from your own VMS profile ----------------------------------------------------
+    // The leaderboard counts what you earn this month; what you have to spend is on your profile page in VMS. It is read
+    // with your VMS session through the Lead duties' VMS helpers (GM_xmlhttpRequest; @connect volunteers.eveonline.com),
+    // cached an hour, and a failed read keeps the last good balance in `last`, so the pill can show it behind a ⚠
+    // instead of a guess. A page that could not be read is never a balance of 0.
+    // Record: { ok: true, credits, updated, at } or { ok: false, reason, at, last: { credits, updated, at } }.
+    balance: {
+        URL: 'https://volunteers.eveonline.com/settings/',
+        CACHE_KEY: 'creditsBalance',
+        TTL_MS: 60 * 60 * 1000,      // a good read is kept this long
+        FAIL_MS: 5 * 60 * 1000,      // a failed one is tried again after this long
+        FOCUS_MS: 2 * 60 * 1000,     // back in the tab after a failed read: read again if it is at least this old
+        OPENED_MS: 10 * 1000,        // ...or this old, once the ⚠ has sent the user to VMS
+        _busy: null,
+        _opened: false,              // the ⚠ opened VMS and no read has worked since
+        _focusBound: false,
+
+        read: function () { return JiTA.db.getMeta(JiTA.credits.balance.CACHE_KEY); },
+        readSafe: function () { return Promise.resolve().then(JiTA.credits.balance.read).catch(function () { return null; }); },
+
+        // Read the profile page unless the cached record is still good (or failed only a moment ago). One read at a time.
+        refresh: function (force) {
+            var B = JiTA.credits.balance;
+            if (B._busy) { return B._busy; }
+            var p = B.readSafe().then(function (cached) {
+                var age = cached ? Date.now() - (cached.at || 0) : Infinity;
+                if (!force && cached && age < (cached.ok ? B.TTL_MS : B.FAIL_MS)) { return cached; }
+                return JiTA.leadduty.apps._get(B.URL).then(function (r) {
+                    var res = B._parse(r);
+                    res.at = Date.now();
+                    var good = cached ? (cached.ok ? cached : cached.last) : null;
+                    if (!res.ok && good) { res.last = { credits: good.credits, updated: good.updated, at: good.at }; }
+                    if (res.ok) { B._opened = false; }
+                    return JiTA.db.setMeta(B.CACHE_KEY, res).then(function () { return res; }, function () { return res; });
+                });
+            });
+            B._busy = p.then(function (v) { B._busy = null; return v; }, function (e) { B._busy = null; throw e; });
+            return B._busy;
+        },
+
+        // The profile shows the balance as <dt>Credits</dt><dd>556</dd> and when it last changed as
+        // <dt>Updated</dt><dd>2026-10-02 15:33</dd>. Keyed on those labels, not on the layout around them. The credit
+        // transactions table below has a "Total Credits" column, which is not a <dt> and is never read.
+        _parse: function (r) {
+            var bad = JiTA.leadduty.apps._unusable(r);
+            if (bad) { return bad; }
+            var body = (r && r.body) || '';
+            var m = /<dt\b[^>]*>\s*Credits\s*<\/dt>\s*<dd\b[^>]*>([^<]*)<\/dd>/i.exec(body);
+            var n = m ? m[1].replace(/&nbsp;|&#160;/g, '').replace(/[,\s]/g, '') : '';
+            if (!/^-?\d+(\.\d+)?$/.test(n)) {
+                // No balance on the page. A login form or a link to the SSO means the session has run out.
+                return { ok: false, reason: /login\.eveonline\.com|\/account\/(login|signin)/i.test(body) ? 'login' : 'unreadable' };
+            }
+            var u = /<dt\b[^>]*>\s*Updated\s*<\/dt>\s*<dd\b[^>]*>([^<]*)<\/dd>/i.exec(body);
+            return { ok: true, credits: parseFloat(n), updated: u ? u[1].replace(/^\s+|\s+$/g, '') : '' };
+        },
+
+        why: function (bal) {
+            var r = bal && bal.reason;
+            if (r === 'login') { return 'Log in to VMS to update your credit balance.'; }
+            if (r === 'nogm') { return 'Your credit balance cannot be read from this browser.'; }
+            if (r === 'net') { return 'VMS could not be reached, so your credit balance was not updated.'; }
+            return 'Your VMS profile page could not be read, so your credit balance was not updated.';
+        },
+        when: function (at) { return at ? (new Date(at).toISOString().replace('T', ' ').slice(0, 16) + ' UTC') : 'an earlier visit'; },
+
+        openVms: function () {
+            JiTA.credits.balance._opened = true;
+            try { window.open(JiTA.credits.balance.URL, '_blank', 'noopener'); } catch (e) { /* ignore */ }
+        },
+
+        // This tab got the focus back. After a failed read, read again: soon after the ⚠ sent the user to VMS (they come
+        // back logged in), otherwise only once the failure is a couple of minutes old.
+        onFocus: function () {
+            var B = JiTA.credits.balance;
+            if (!flagOn('credits')) { return Promise.resolve(); }
+            return B.readSafe().then(function (c) {
+                if (!c || c.ok) { return; }
+                if (Date.now() - (c.at || 0) < (B._opened ? B.OPENED_MS : B.FOCUS_MS)) { return; }
+                return B.refresh(true).then(function () { JiTA.credits.badge.refresh(); });
+            }).catch(function () { /* ignore */ });
         }
     },
 
@@ -10007,6 +10155,8 @@ JiTA.credits = {
             var S = JiTA.credits.sched;
             if (!flagOn('credits')) { return; }                 // feature off
             try { JiTA.credits.badge.refresh(); } catch (e) { /* ignore */ }   // cheap: reflect the latest cache each poll
+            // The balance from VMS: a cache read on most polls, a fetch once the cached one is an hour old.
+            try { JiTA.credits.balance.refresh(false).then(function () { JiTA.credits.badge.refresh(); }, function () { /* the ⚠ says so */ }); } catch (e) { /* ignore */ }
             if (JiTA.credits.running) { return; }                  // a job is already running in THIS tab -> never overlap
             var now = JiTA.credits._ymNow();
 
@@ -20471,6 +20621,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.40.0', date: '2026-10-03', features: [
+            'The ISD credits pill now shows your credit balance from VMS, next to the credits you have earned so far this month.',
+            'When VMS cannot be read (you are not logged in there, for example), the pill shows a ⚠ and keeps the last balance it read. Click the ⚠ to open your VMS profile; the balance updates when you come back to the tab.'
+        ] },
         { v: '3.39.0', date: '2026-10-03', features: [
             'What\'s new has two tabs now, New features and Fixed issues, and the pill only comes up for an update that brings something new to use. Fixes are listed without one.'
         ] },
