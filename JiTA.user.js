@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.5
+// @version     3.38.13
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5534,6 +5534,7 @@ JiTA.rank = {
         return JiTA.worker.call('rankKeyword', {
             text: text, scope: scope, excludeKey: excludeKey,
             filterTerms: (filterTerms && filterTerms.length ? filterTerms : null),
+            gate: JiTA.ui._gateSpec(),   // applied in the worker before its cut, not just after it here
             topN: Math.max((limit || JiTA.TOP_N) * 4, 100)
         }).then(function (r) { return (r && r.results) || []; });
     },
@@ -6060,6 +6061,7 @@ JiTA.rank._workerSemantic = function (text, scope, excludeKey, filterTerms) {
     return JiTA.worker.call('rankSemantic', {
         text: text, scope: scope, excludeKey: excludeKey,
         filterTerms: (filterTerms && filterTerms.length ? filterTerms : null),
+        gate: JiTA.ui._gateSpec(),   // applied in the worker before its cut, not just after it here
         topN: JiTA.rank.CAND * 4
     }).then(function (r) { return (r && r.results) || []; });
 };
@@ -6642,11 +6644,20 @@ JiTA.ui = {
     // Deliberately IN-MEMORY only, like modeOverride: a reload resets them. `passesFilter` is called as a
     // per-candidate predicate inside every ranking loop (BM25 + semantic, defect + report), so filtered docs
     // are dropped BEFORE the TOP_N cut - you always get a full N of matching results, not N-minus-the-filtered.
+    // The shared worker cuts its own list first, so the filters travel with every call to it (_gateSpec) and it
+    // applies the same rule before its cut (passesGate); this predicate still runs on what comes back.
     filters: { status: 'all', createdDays: 0 },   // status: 'all'|'open'|'fixed'; createdDays: 0 = off
 
     // True iff a candidate passes the current session filters. Status applies to DEFECT candidates only (open
     // bug reports are open by definition, so it's a no-op on the reports view even if 'fixed' is left set).
     // Created-within applies to any candidate carrying a `created` date.
+    // The session filters as a ranking call carries them to the worker, or null when none is set.
+    _gateSpec: function () {
+        var f = JiTA.ui.filters;
+        if (!f || ((!f.status || f.status === 'all') && !(f.createdDays > 0))) { return null; }
+        return { status: f.status || 'all', createdDays: f.createdDays || 0, now: Date.now() };
+    },
+
     passesFilter: function (doc) {
         var f = JiTA.ui.filters;
         if (!f) { return true; }
@@ -9656,7 +9667,7 @@ function jitaWorkerBody(cfg) {
     }
     // BM25 over a { N, avgdl, df, docs } index. Applies only the excludeKey + filter-box gates (hidden / session
     // filters stay in the tab); a filter-box match with no query-term overlap is kept as a score-0 candidate.
-    function bm25Score(idx, text, excludeKey, limit, filterTerms) {
+    function bm25Score(idx, text, excludeKey, limit, filterTerms, gate) {
         if (!idx || !idx.N) { return []; }
         var q = tokenize(text), qSet = {}, i;
         for (i = 0; i < q.length; i++) { qSet[q[i]] = true; }
@@ -9669,6 +9680,7 @@ function jitaWorkerBody(cfg) {
             var doc = idx.docs[d];
             if (excludeKey && doc.key === excludeKey) { continue; }
             if (hasTerms && !matchTerms(doc.hay, filterTerms)) { continue; }
+            if (!passesGate(doc, gate)) { continue; }
             var score = 0;
             for (var t = 0; t < terms.length; t++) { var tf = doc.tf[terms[t]]; if (!tf) { continue; } var denom = tf + K1 * (1 - B + B * (doc.len / avgdl)); score += idf[terms[t]] * (tf * (K1 + 1)) / denom; }
             if (score > 0 || hasTerms) { scored.push({ key: doc.key, project: doc.project, summary: doc.summary, status: doc.status, resolution: doc.resolution, resolutiondate: doc.resolutiondate, created: doc.created, team: doc.team, score: score }); }
@@ -9775,6 +9787,23 @@ function jitaWorkerBody(cfg) {
         qVec = await embed(text); qText = text; return qVec;
     }
     function matchTerms(hay, terms) { for (var i = 0; i < terms.length; i++) { if (hay.indexOf(terms[i]) === -1) { return false; } } return true; }
+    // The session filters (Status, Created within) a ranking call carries, applied BEFORE the top-N cut. Applied after
+    // it, in the tab, a strict filter left a handful of the top 200 and the panel said nothing matched while real
+    // matches sat just below the cut. The same rule as JiTA.ui.passesFilter (resolved = a resolution, or a closed
+    // status name, as JiTA.util.isResolved); the tab still applies that too, as a backstop. No gate: everything passes.
+    function passesGate(doc, gate) {
+        if (!gate) { return true; }
+        if (gate.status && gate.status !== 'all' && doc.project !== 'EBR') {   // open bug reports are open by definition
+            var resolved = !!doc.resolution || isClosedStatus(doc.status);
+            if (gate.status === 'open' && resolved) { return false; }
+            if (gate.status === 'fixed' && !resolved) { return false; }
+        }
+        if (gate.createdDays > 0) {
+            var t = doc.created ? Date.parse(doc.created) : NaN;
+            if (isNaN(t) || (gate.now - t) > gate.createdDays * 86400000) { return false; }
+        }
+        return true;
+    }
 
     // ---- embed pass (runs HERE now, so no tab ever loads a model) --------------------------------------
     async function embedBatch(texts) {
@@ -9979,13 +10008,14 @@ function jitaWorkerBody(cfg) {
         logsigCache = { sigMap: sigMap, keyToSigs: keyToSigs, crashMap: crashMap, keyToCrash: keyToCrash };
     }
     // Cosine == dot product (both vectors are normalized). Return the top-N by score.
-    function cosineTopN(q, entries, topN, excludeKey, filterTerms) {
+    function cosineTopN(q, entries, topN, excludeKey, filterTerms, gate) {
         var hasTerms = filterTerms && filterTerms.length;
         var scored = [];
         for (var i = 0; i < entries.length; i++) {
             var e = entries[i];
             if (excludeKey && e.key === excludeKey) { continue; }
-            if (hasTerms && !matchTerms(e.hay, filterTerms)) { continue; }   // filter-box narrowing (session/UI gates stay in the tab)
+            if (hasTerms && !matchTerms(e.hay, filterTerms)) { continue; }   // filter-box narrowing
+            if (!passesGate(e, gate)) { continue; }                          // session filters; hidden keys and the UI gates stay in the tab
             var v = e.vec, s = 0, n = q.length;
             for (var j = 0; j < n; j++) { s += q[j] * v[j]; }
             scored.push({ key: e.key, project: e.project, summary: e.summary, status: e.status, resolution: e.resolution, resolutiondate: e.resolutiondate, created: e.created, team: e.team, score: s });
@@ -9998,7 +10028,7 @@ function jitaWorkerBody(cfg) {
         await ensureIndexes();
         var entries = payload.scope === 'ebr' ? vecCache.ebr : vecCache.defects;
         var q = await qEmbed(payload.text || '');
-        return { backend: backend, indexed: entries.length, results: cosineTopN(q, entries, payload.topN || 10, payload.excludeKey, payload.filterTerms) };
+        return { backend: backend, indexed: entries.length, results: cosineTopN(q, entries, payload.topN || 10, payload.excludeKey, payload.filterTerms, payload.gate) };
     }
     // Duplicate-defect finder (lead tool): pairwise cosine over the OPEN defects' stored vectors (normalized,
     // so dot == cosine). Returns every unordered pair scoring >= minCos, plus a key->meta map for rendering.
@@ -10040,7 +10070,7 @@ function jitaWorkerBody(cfg) {
         payload = payload || {};
         await ensureIndexes();
         var idx = payload.scope === 'ebr' ? kwCache.ebr : kwCache.defects;
-        return { indexed: idx.N, results: bm25Score(idx, payload.text || '', payload.excludeKey, payload.topN || 200, payload.filterTerms) };
+        return { indexed: idx.N, results: bm25Score(idx, payload.text || '', payload.excludeKey, payload.topN || 200, payload.filterTerms, payload.gate) };
     }
 
     // ---- ISD credits: the monthly leaderboard crawl runs HERE now, so its fetches + politeness sleeps live off
@@ -19770,6 +19800,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.13', date: '2026-10-03', items: [
+            'With the Status or Created within filter set, similar defects and matching reports now find matches beyond the first 200 candidates instead of saying nothing matched.'
+        ] },
         { v: '3.38.5', date: '2026-10-03', items: [
             "After an update the What's new pill now comes up reliably: if the page takes it away while still loading, it comes back by itself."
         ] },
