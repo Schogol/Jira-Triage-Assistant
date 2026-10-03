@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.23
+// @version     3.38.24
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -3287,11 +3287,14 @@ JiTA.logsig = {
     CRASH_FRAMES: 2,      // crash-site signature uses only the INNERMOST this-many frames (the throw location),
                           // so the same bug reached via a different call path still matches as "possibly related"
 
-    // Split a blob of text into individual EXCEPTION blocks. Stored descriptions have newlines collapsed to
-    // spaces, but "EXCEPTION #" / "EXCEPTION END" / "Stackhash:" all survive as substrings, so this works on
-    // both the (collapsed) defect description and a (re-joined) log block.
+    // Split a blob of text into individual EXCEPTION blocks: each from "EXCEPTION #" up to its "EXCEPTION END",
+    // or up to the next "EXCEPTION #". Stored descriptions have newlines collapsed to spaces, but both markers
+    // survive as substrings, so this works on the (collapsed) defect description and on a (re-joined) log block.
+    // Ending at EXCEPTION END matters: a STACKTRACE pasted after it used to be read as more frames of the
+    // exception, so the defect's signature matched neither the same exception in a parsed log (which the log side
+    // ends there) nor anything else. KEEP IN SYNC with lgSplit in the worker.
     _splitBlocks: function (text) {
-        var blocks = [], re = /EXCEPTION #[\s\S]*?(?=EXCEPTION #|$)/gi, m;
+        var blocks = [], re = /EXCEPTION #[\s\S]*?(?:EXCEPTION END|(?=EXCEPTION #)|$)/gi, m;
         while ((m = re.exec(text))) { blocks.push(m[0]); if (re.lastIndex === m.index) { re.lastIndex++; } }
         return blocks.length ? blocks : [text || ''];
     },
@@ -3308,8 +3311,9 @@ JiTA.logsig = {
         // captured message, so the defect's signature (e.g. "keyerror: 2 22:10:48 client::general error|…")
         // no longer matches the SAME exception seen in the parsed log, whose rows are message-column only
         // ("keyerror: 2|…"). Stripping here normalizes both sides. (Log-side block text has no such prefix,
-        // so this is a no-op there.)
-        text = text.replace(/^[ \t]*\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/gm, '');
+        // so this is a no-op there.) Not only at line starts: a stored description has its lines joined by spaces, so
+        // only the first prefix was stripped and the rest leaked into the message. KEEP IN SYNC with lgFp.
+        text = text.replace(/(^|\s)\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/g, '$1');
         var msg = '', mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text);
         if (mm) { msg = (mm[1] || '').replace(/\s+/g, ' ').trim(); }
         var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.pyx?)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;   // .py OR .pyx (EVE's Cython frames)
@@ -3871,11 +3875,16 @@ JiTA.logsig = {
         // Most-frequent first, then by key for a stable order.
         keys.sort(function (a, b) { return found[b].count - found[a].count || (a < b ? -1 : 1); });
 
+        // A log parsed in Triage mode's attachment viewer sits in a full-screen layer above the page, and a panel on
+        // the page sat under it, unseen. Put it in the viewer then; closing the viewer takes the panel with it.
+        var tc = document.getElementById('tableContent');
+        var host = (tc && tc.closest && tc.closest('#jt-viewer')) || document.body;
         var panel = existing;
+        if (panel && panel.parentNode !== host) { panel.parentNode.removeChild(panel); panel = null; }
         if (!panel) {
             panel = document.createElement('div');
             panel.id = 'jita-logmatch-panel';
-            document.body.appendChild(panel);
+            host.appendChild(panel);
         }
         panel.innerHTML = '';
         JiTA.logsig._panelIdx = {};
@@ -3975,8 +3984,13 @@ JiTA.logsig = {
             }
 
             li.addEventListener('click', function () {
-                var rowsArr = entry.rows;
-                if (!rowsArr.length) { return; }
+                // Only the occurrences on screen: Group Repeats and the filters hide rows, and with 20 identical dumps
+                // the first click scrolled and the next 19 did nothing.
+                var rowsArr = entry.rows.filter(function (r) { return r.isConnected && r.offsetParent !== null; });
+                if (!rowsArr.length) {
+                    if (entry.rows.length) { try { JiTA.ui.toast('Every occurrence is hidden by the filters or Group Repeats.'); } catch (e) { /* ignore */ } }
+                    return;
+                }
                 var i = JiTA.logsig._panelIdx[key] || 0;
                 if (i >= rowsArr.length) { i = 0; }              // wrap around
                 JiTA.logsig._panelIdx[key] = i + 1;
@@ -5756,12 +5770,14 @@ JiTA.rank = {
         var R = JiTA.rank;
         if (R[indexKey] && !R[dirtyKey]) { return Promise.resolve(R[indexKey]); }
         if (R[buildingKey]) { return R[buildingKey]; }
+        // Clean BEFORE the read: a sync write that lands while it builds sets the flag again, and the next call
+        // rebuilds. Cleared after the build, that write was marked clean in an index built without it.
+        R[dirtyKey] = false;
         R[buildingKey] = JiTA.db.allDefects().then(function (records) {
             R[indexKey] = build(records);
-            R[dirtyKey] = false;
             R[buildingKey] = null;
             return R[indexKey];
-        }).catch(function (e) { R[buildingKey] = null; throw e; });
+        }).catch(function (e) { R[dirtyKey] = true; R[buildingKey] = null; throw e; });
         return R[buildingKey];
     },
 
@@ -6349,7 +6365,8 @@ JiTA.rank._hybridResults = function (text, key, filterTerms, scope, bmFn, keywor
 // keyword() when it's permanently unavailable, else kick off the warm-up and give the model a brief window
 // (WARM_WAIT_MS) - resolving to hybrid() if it loads in time (skipping the keyword->hybrid flicker), else
 // keyword() now (prepare()'s later re-render upgrades it once the model is ready).
-JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid) {
+// onUpgrade (optional) is told when a late Hybrid result arrives; without it the open panel is redrawn.
+JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid, onUpgrade) {
     if (forceMode === 'Keyword') { return keywordOnly(); }
     if (!JiTA.worker || !JiTA.worker.usable()) { return keywordOnly(); }   // no shared worker -> keyword only
     // Keyword-first: race the worker-backed hybrid against a short window. If the worker answers in time we show
@@ -6359,7 +6376,14 @@ JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid) {
         var settled = false;
         var timer = setTimeout(function () { if (settled) { return; } settled = true; resolve(keywordOnly()); }, JiTA.embed.WARM_WAIT_MS);
         hybrid().then(function (res) {
-            if (settled) { try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ } return; }   // late: upgrade via a re-render
+            if (settled) {
+                // Late. Only an upgrade is worth a redraw: hybrid() falls back to Keyword by itself, and with no worker
+                // answering that fallback came back about every 12 s and redrew the panel each time, hover cards and all.
+                if (res && res.mode === 'Hybrid') {
+                    try { if (onUpgrade) { onUpgrade(res); } else { JiTA.ui.scheduleRender(); } } catch (e) { /* ignore */ }
+                }
+                return;
+            }
             settled = true; clearTimeout(timer); resolve(res);
         }, function () {
             if (settled) { return; } settled = true; clearTimeout(timer); resolve(keywordOnly());
@@ -6372,7 +6396,7 @@ JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid) {
 // shared terms (item/module names, error strings) that embeddings smooth over are caught by BM25, while
 // paraphrases are caught by the embeddings, so the "obvious" duplicate surfaces far more reliably.
 // Returns { mode: 'Hybrid' | 'Keyword', results: [...] } with a display % already attached to each result.
-JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms) {
+JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, onUpgrade) {
     // Feature A: gently demote a Closed defect that was fixed long before this bug report was filed - it
     // is very unlikely to be the report's real duplicate. Scales whatever score fields the result carries
     // (score / rrf / pct) by the age factor and tags it so the panel can grey it and explain why.
@@ -6403,13 +6427,13 @@ JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms) 
     function hybrid() {
         return JiTA.rank._hybridResults(text, key, filterTerms, 'defects', JiTA.rank.suggest, keywordOnly, demote);
     }
-    return JiTA.rank._pickMode(forceMode, keywordOnly, hybrid);
+    return JiTA.rank._pickMode(forceMode, keywordOnly, hybrid, onUpgrade);
 };
 
 // EDR (defect) -> matching OPEN bug reports, best available ranking. Same hybrid (semantic + BM25, fused
 // with RRF) approach as suggestBest, but over the EBR indexes and with no stale-demotion (open reports have
 // no fix date). Returns { mode: 'Hybrid' | 'Keyword', results: [...] } with a display % per result.
-JiTA.rank.suggestEbrBest = function (text, key, forceMode, filterTerms) {
+JiTA.rank.suggestEbrBest = function (text, key, forceMode, filterTerms, onUpgrade) {
     function keywordOnly() {
         // suggestEbr already attaches a top-relative pct.
         return JiTA.rank.suggestEbr(text, key, JiTA.TOP_N, filterTerms).then(function (list) {
@@ -6420,7 +6444,7 @@ JiTA.rank.suggestEbrBest = function (text, key, forceMode, filterTerms) {
     function hybrid() {
         return JiTA.rank._hybridResults(text, key, filterTerms, 'ebr', JiTA.rank.suggestEbr, keywordOnly);
     }
-    return JiTA.rank._pickMode(forceMode, keywordOnly, hybrid);
+    return JiTA.rank._pickMode(forceMode, keywordOnly, hybrid, onUpgrade);
 };
 
 
@@ -10004,13 +10028,13 @@ function jitaWorkerBody(cfg) {
     }
 
     // ---- logsig: exception-signature mining + queries (ported from JiTA.logsig so tabs hold no logsig index) --
-    function lgSplit(text) {
-        var blocks = [], re = /EXCEPTION #[\s\S]*?(?=EXCEPTION #|$)/gi, m;
+    function lgSplit(text) {   // KEEP IN SYNC with JiTA.logsig._splitBlocks
+        var blocks = [], re = /EXCEPTION #[\s\S]*?(?:EXCEPTION END|(?=EXCEPTION #)|$)/gi, m;
         while ((m = re.exec(text))) { blocks.push(m[0]); if (re.lastIndex === m.index) { re.lastIndex++; } }
         return blocks.length ? blocks : [text || ''];
     }
-    function lgFp(text) {
-        text = (text || '').replace(/^[ \t]*\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/gm, '');
+    function lgFp(text) {   // KEEP IN SYNC with JiTA.logsig._fingerprint
+        text = (text || '').replace(/(^|\s)\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/g, '$1');
         var msg = '', mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text);
         if (mm) { msg = (mm[1] || '').replace(/\s+/g, ' ').trim(); }
         var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.pyx?)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;   // .py OR .pyx (EVE's Cython frames)
@@ -11376,9 +11400,16 @@ JiTA.triage = {
             // page type. The head bar's filter terms ride along exactly as they do in the panel; _cache is
             // dropped whenever they, the view or the ranking mode change.
             var terms = JiTA.ui._filterTerms();
+            // Ranked while the model was still cold, this report would keep its Keyword matches for the session: the
+            // late Hybrid result only ever redrew the sidebar panel. Drop the cached ranking and redraw if it is on screen.
+            var upgrade = function () {
+                if (T._cache[key] !== p) { return; }
+                delete T._cache[key];
+                if (T._open && T._queue[T._idx] && T._queue[T._idx].key === key) { T._render(); }
+            };
             var rank = (defectMode || view === 'simreports')
-                ? JiTA.rank.suggestEbrBest(base.text, key, JiTA.ui.modeOverride, terms)
-                : JiTA.rank.suggestBest(base.text, key, (base.rec && base.rec.created) || item.created || null, JiTA.ui.modeOverride, terms);
+                ? JiTA.rank.suggestEbrBest(base.text, key, JiTA.ui.modeOverride, terms, upgrade)
+                : JiTA.rank.suggestBest(base.text, key, (base.rec && base.rec.created) || item.created || null, JiTA.ui.modeOverride, terms, upgrade);
             return rank.then(function (out) {
                 var results = out.results || [];   // already capped at the user's TOP_N (sdTopN); digits address the first MATCH_KEYS
                 return Promise.all(results.map(function (r) {   // enrich for the row title-peek (a handful of DB reads)
@@ -20292,6 +20323,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.24', date: '2026-10-03', items: [
+            'Triage mode upgrades a report ranked while the model was still loading from Keyword to Hybrid once it is ready, as the panel already did.',
+            'With the ranking worker unreachable, the panel no longer empties and refills every few seconds.',
+            'Defects in log: clicking an entry only steps through occurrences on screen, and the panel shows above Triage mode\'s attachment viewer.',
+            'Defects in log: an exception pasted into a defect with a stack trace after it, or with its log columns, now matches the same exception in a parsed log.'
+        ] },
         { v: '3.38.23', date: '2026-10-03', items: [
             'Defects and reports that arrive while an embedding pass is running get their vectors right after it, instead of waiting for a later sync with changes.',
             'An issue re-synced with new text while it was being embedded no longer keeps the vector of its old text.',
