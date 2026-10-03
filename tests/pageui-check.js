@@ -45,7 +45,7 @@ global.document = {
     createElement: (t) => Node(t.toUpperCase())
 };
 global.jitaDatesTarget = () => ({ row: row0, before: null });
-global.jitaFmtDateShort = (iso) => iso.slice(0, 10);
+global.JiTA = { util: { fmtDate: (iso) => iso.slice(0, 10) } };
 global.$ = { ajax: (o) => { const r = { url: o.url, done(fn) { r.d = fn; return r; }, fail(fn) { r.f = fn; return r; } }; ajax.push(r); return r; } };
 (0, eval)(src.split('\n').filter((l) => /^var (jitaDatesCache|jitaDatesFail|JITA_DATES_TTL_MS) = /.test(l)).map((l) => l.replace(/^var /, 'global.')).join('\n'));
 (0, eval)(fnSrc('jitaShowIssueDates'));
@@ -191,7 +191,7 @@ const translate = async (r) => { results = r.slice(); alerts = []; logs = []; co
     global.JiTA = { triage: { _open: false, open: () => { opened++; } } };
     let t = 5000000;
     Date.now = () => t;
-    (0, eval)('(function () {\n' + cut('            var lastLt = 0, lastGt = 0, lastHash = 0;', '\n        })();') + '\n})();');
+    (0, eval)('(function () {\n' + cut('        var lastLt = 0, lastGt = 0, lastHash = 0;', '\n    })();') + '\n})();');
     const key = (k, extra) => keydown(Object.assign({ key: k, target: { tagName: 'DIV' } }, extra || {}));
     key('<'); t += 150; key('<');
     ok('two taps of < open Triage mode (control)', opened === 1, String(opened));

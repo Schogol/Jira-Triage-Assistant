@@ -70,7 +70,7 @@ const muts = [
     [TK, 'the expansion is forgotten', "                gmSet(JiTA.ui.SIDE_COLLAPSE_KEY, false);\n", ''],
     [TK, 'the panel is not brought into view', "            try { side.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ }\n", ''],
     [TK, 'a collapsed floating panel stays collapsed', "            p.classList.remove('collapsed');\n", ''],
-    [TK, 'launcher acts on one tap', "                    if (now - lastHash >= 400) { lastHash = now; return; }\n", ''],
+    [TK, 'launcher acts on one tap', "                if (now - lastHash >= 400) { lastHash = now; return; }\n", ''],
     [TK, 'launcher switches the panel under an overlay', "if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) {", "if (!JiTA.ui.toggleTrend()) {"],
     [TK, 'launcher never falls back to the list', "if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) { JiTA.trend.openView(); }", "if (!JiTA.menu.isOpen()) { JiTA.ui.toggleTrend(); }"],
     [TK, 'launcher still always opens the list', "if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) { JiTA.trend.openView(); }", "JiTA.trend.openView();"],
