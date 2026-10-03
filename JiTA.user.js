@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.39.0
+// @version     3.39.5
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6416,7 +6416,7 @@ JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid, onUpgrade) {
 JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, onUpgrade) {
     // Feature A: gently demote a Closed defect that was fixed long before this bug report was filed - it
     // is very unlikely to be the report's real duplicate. Scales whatever score fields the result carries
-    // (score / rrf / pct) by the age factor and tags it so the panel can grey it and explain why.
+    // (score / rrf / pct) by the age factor and notes the gap, so the row says why it ranks lower.
     function demote(r) {
         if (!brCreated || !r.resolutiondate || !JiTA.util.isResolved(r.status, r.resolution)) { return; }
         var sf = JiTA.util.staleFactor(brCreated, r.resolutiondate);
@@ -6424,7 +6424,6 @@ JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, 
         if (typeof r.score === 'number') { r.score *= sf.factor; }
         if (typeof r.rrf === 'number') { r.rrf *= sf.factor; }
         if (typeof r.pct === 'number') { r.pct = Math.round(r.pct * sf.factor); }
-        r.stale = true;
         // Note: the meta line already shows the status ("Closed"), so don't repeat it here - just the gap.
         r.staleNote = 'fixed ' + JiTA.util.humanizeAge(sf.ageDays) + ' before report';
     }
@@ -6713,7 +6712,7 @@ JiTA.ui = {
 #jita-sd-filtermenu .jita-fm-view { display: block; width: 100%; margin: 0 0 10px; background: #2c333a; color: #cfd6dd; border: 1px solid #3a434d; border-radius: 5px; padding: 6px; cursor: pointer; font-size: 12px; text-align: center; }\
 #jita-sd-filtermenu .jita-fm-view:hover { color: #fff; border-color: #4c9aff; }\
 #jita-sd-filtermenu .jita-fm-view.on { background: #4c9aff; color: #fff; font-weight: 700; border-color: #4c9aff; }\
-#jita-sd-list li.jita-sd-stale { opacity: .6; }\
+#jita-sd-list li.jita-sd-closed { opacity: .6; }\
 .jita-sd-sum { margin-top: 2px; color: #e6e6e6; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-meta { margin-top: 2px; color: #7a8694; font-size: 10px; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-date { margin-top: 2px; color: #7a8694; font-size: 10px; text-align: right; }\
@@ -8145,8 +8144,9 @@ JiTA.ui = {
     // Shared list-row builder for both views. `target` = the key link's anchor target ('_self' for the
     // EBR->defect list so you navigate in place; '_blank' for the defect->report list so the defect page stays
     // put). `action(key)` returns the trailing control ($ Mark-dup on the EBR view, Attach on the report view).
-    // The staleNote / stale-class bits fire only for stale-demoted defect matches (undefined on reports), and
-    // data-jita-key (read by the report view's incremental attach/slide-in) is harmless on the EBR view.
+    // The staleNote fires only for stale-demoted defect matches, the closed class only for a closed report in the
+    // reporter's list (both undefined elsewhere), and data-jita-key (read by the report view's incremental
+    // attach/slide-in) is harmless on the EBR view.
     // opts.score replaces the relevance % with a text of its own (the trending view's report count); r.note is
     // appended to the meta line. Every other row gets the 🔥 badge when its defect is trending.
     _row: function (r, target, action, opts) {
@@ -8156,7 +8156,7 @@ JiTA.ui = {
         if (r.staleNote) { meta += (meta ? ' · ' : '') + r.staleNote; }   // Feature A: explain the demotion
         if (r.note) { meta += (meta ? ' · ' : '') + r.note; }             // trending: how the count compares, reports after a fix
         var $li = $('<li></li>').attr('data-jita-key', r.key);
-        if (r.stale) { $li.addClass('jita-sd-stale'); }                    // Feature A: grey out stale-closed matches
+        if (r.closed) { $li.addClass('jita-sd-closed'); }                  // a closed report among this reporter's reports
         // Feature C: hover preview - a styled card (built in _showTip) showing the summary, full description
         // (incl. reproduction steps) and status, so the triager can judge a match without navigating.
         $li.on('mouseenter', function () { JiTA.ui._showTip(r, this, meta); });
@@ -8596,7 +8596,7 @@ JiTA.ui = {
                         resolution: (f.resolution && f.resolution.name) || null,
                         created: f.created || null,
                         description: JiTA.util.toPlainText(f.description),
-                        stale: JiTA.util.isClosedStatus(status)   // grey out closed reports so the open ones stand out
+                        closed: JiTA.util.isClosedStatus(status)   // grey out closed reports so the open ones stand out
                     });
                 }
                 if (!rows.length) { JiTA.ui.setStatus('No other reports from this reporter.'); return; }
@@ -11878,7 +11878,7 @@ JiTA.triage = {
             for (var i = 0; i < res.results.length; i++) {
                 (function (r, n) {
                     var $li = $('<li></li>').attr('data-jt-n', n);
-                    if (r.stale) { $li.addClass('jt-stale'); }   // a CLOSED report in the reporter list
+                    if (r.closed) { $li.addClass('jt-closed'); }   // a CLOSED report in the reporter list
                     var $n = $('<span class="jt-n"></span>').text(n).appendTo($li);
                     if (noAttach) { $n.addClass('jt-n-nokey').attr('title', 'No hotkey - these are bug reports, and a report cannot be attached to another report'); }
                     else if (n > T.MATCH_KEYS) { $n.addClass('jt-n-nokey').attr('title', 'No hotkey - only matches 1-' + T.MATCH_KEYS + ' are digit-addressable'); }
@@ -12451,7 +12451,7 @@ JiTA.triage = {
                         key: iss.key, summary: f.summary || '', status: status,
                         resolution: (f.resolution && f.resolution.name) || null,
                         created: f.created || null, description: JiTA.util.toPlainText(f.description),
-                        stale: JiTA.util.isClosedStatus(status)   // grey the closed ones so the open ones stand out
+                        closed: JiTA.util.isClosedStatus(status)   // grey the closed ones so the open ones stand out
                     });
                 }
                 return { rows: out, noId: false };
@@ -12732,7 +12732,7 @@ JiTA.triage = {
                 '.jita-triage-view .jt-list { list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; align-content: start; }' +
                 '.jita-triage-view .jt-list li { padding: 6px 8px; border: 1px solid #2c333a; border-radius: 6px; background: #22272b; }' +
                 '.jita-triage-view .jt-list li.armed { border-color: #ffb547; background: #2e2a1e; }' +
-                '.jita-triage-view .jt-list li.jt-stale { opacity: .55; }' +   // a CLOSED report in the reporter list
+                '.jita-triage-view .jt-list li.jt-closed { opacity: .55; }' +   // a CLOSED report in the reporter list
 
                 '.jita-triage-view .jt-n { display: inline-block; min-width: 16px; text-align: center; background: #3a434d; color: #cfd6dd; border-radius: 4px; font-size: 10px; font-weight: 700; margin-right: 8px; }' +
                 '.jita-triage-view .jt-n-nokey { opacity: .45; }' +
@@ -20471,6 +20471,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.39.5', date: '2026-10-03', fixes: [
+            'Closed defects fixed long before a report are no longer greyed out in the panel or in Triage mode. They still rank lower and still say how long before the report they were fixed.'
+        ] },
         { v: '3.39.0', date: '2026-10-03', features: [
             'What\'s new has two tabs now, New features and Fixed issues, and the pill only comes up for an update that brings something new to use. Fixes are listed without one.'
         ] },
