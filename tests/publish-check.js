@@ -188,6 +188,32 @@ R.schedule = () => { R._scheduled = (R._scheduled || 0) + 1; };
     await R.publish(true);
     ok('a healthy pool publishes again immediately', writes === 1, writes + ' write(s)');
 
+    // A read that FAILED is not a ledger with nothing in it, and neither half may be published as one (v3.38.15):
+    // without the QC ledger the page says the month was never sampled, without the page tree nothing is excluded.
+    const goodRead = L.ledger.read;
+    L.ledger.read = (key) => (key === L.QC_LEDGER_KEY ? Promise.reject(new Error('HTTP 503')) : goodRead(key));
+    writes = 0;
+    const noQc = await R.publish(true);
+    ok('a QC ledger that cannot be read is not published as an unsampled month', writes === 0 &&
+        !!(noQc && noQc.skipped && /quality control ledger could not be read/.test(noQc.skipped)), JSON.stringify(noQc));
+    L.ledger.read = goodRead;
+    L.pool.ensureFresh = () => Promise.reject(new Error('the crawl failed'));
+    const noPool = await R.publish(true);
+    ok('a page tree that cannot be read is not published as one that excludes nothing', writes === 0 &&
+        !!(noPool && noPool.skipped && /page tree could not be read/.test(noPool.skipped)), JSON.stringify(noPool));
+
+    // Each Lead's browser rescans the tree on its own clock. The scan time is on the page, but in the stamp: as
+    // content it made the browsers disagree on every tick and take turns rewriting an unchanged page (v3.38.15).
+    const DAY = 86400000;
+    L.pool.ensureFresh = () => healthy().then((p) => Object.assign({}, p, { fetchedAt: Date.now() - 3 * DAY }));
+    await R.publish(true);
+    writes = 0;
+    L.pool.ensureFresh = () => healthy().then((p) => Object.assign({}, p, { fetchedAt: Date.now() - DAY }));
+    const other = await R.publish(false);
+    ok('a browser that scanned the page tree at another time writes nothing', writes === 0 && !!(other && other.skipped === 'unchanged'), JSON.stringify(other));
+    ok('...and the scan time is still on the page, in its stamp', /last scanned on /.test(page.body.split('\n')[0]), page.body.slice(0, 240));
+    L.pool.ensureFresh = healthy;
+
     // ---- 8. An OLDER build never overwrites a page a newer one published -----------------------------
     // Three Leads is three browsers on three machines, so there is no BroadcastChannel and no Web Lock
     // between them the way JiTA.worker has between tabs of one browser - the shared Confluence property is
