@@ -94,7 +94,7 @@ function waitForKeyElements(selectorTxt, actionFunction, bWaitOnce, iframeSelect
 // on separate ticks (setTimeout), so these carry state across that gap. `rows` = the raw file text;
 // `oc`/`lc`/`pdm`/`dx` = which igbr.zip attachment was opened. (pdmdata / today / driverAge are now locals - the
 // driver age is written straight into #driverAge by renderRequirements; menu_settings was an unused handle.)
-var rows, oc, lc, pdm, dx;
+var rows, jitaIgbrFile = null;   // the header-less igbr.zip file a click just opened ('oc', 'lc', 'pdm', 'dx'); SwapUI takes it
 
 // The EVE client log header row. Used both to DETECT a logs.txt (its content has this line) and to LOCATE the
 // right CodeMirror editor to swap. Kept in ONE place so if CCP ever changes the header, it's a one-line edit
@@ -192,13 +192,14 @@ var SELECTORS = {
 // verbatim (and the rules run together, no separators, exactly as the old inline strings did).
 var SCROLLBAR_CSS =
     '*::-webkit-scrollbar { width: 11px !important; height: 11px !important;}' +
-    '*::-webkit-scrollbar-thumb { border-radius: 10px !important; background: linear-gradient(left, #96A6BF, #63738C) !important;box-shadow: inset 0 0 1px 1px #828f9e !important;}' +
+    '*::-webkit-scrollbar-thumb { border-radius: 10px !important; background: linear-gradient(to right, #96A6BF, #63738C) !important;box-shadow: inset 0 0 1px 1px #828f9e !important;}' +
     '.notion-scroller.horizontal { margin-bottom: 30px !important;}' +
     '.notion-scroller.vertical { margin-bottom: 0px !important;}';
 
 
 // Listener which triggers when the locally saved "scrollbar" value is changed. If the new value is false we remove the custom scrollbar. If the new value is true we add the custom scrollbar.
 GM_addValueChangeListener("scrollbar", function(key, oldValue, newValue, remote) {
+    if (JITA_NO_JIRA_UI) { return; }   // the wiki and the Forge frame never get the scrollbar
     if (!newValue) {
         $('style:contains("*::-webkit-scrollbar { width: 11px !important; height: 11px !important;}")').remove();
     } else {
@@ -209,13 +210,17 @@ GM_addValueChangeListener("scrollbar", function(key, oldValue, newValue, remote)
 
 // Listener which triggers when the locally saved "buttons" value is changed. If the new value is false we remove the custom buttons. If the new value is true we add the custom buttons.
 GM_addValueChangeListener("buttons", function(key, oldValue, newValue, remote) {
+    if (JITA_NO_JIRA_UI) { return; }
+    // Another tab's toggle: keep this tab's copy of the setting in step, or the button observer puts the buttons
+    // straight back within 200 ms.
+    savedVariables[FLAG.buttons][1] = !!newValue;
     if (!newValue) {
         $('#translateButton').remove();
         $('#GMButton').remove();
         $('#convertToDefectButton').remove();
         $('#closeButton').remove();
     } else {
-        addButtons();
+        ensureButtonsPresent();   // a bug report only: addButtons() alone put them on a defect too
     }
 });
 
@@ -455,7 +460,9 @@ if (!JITA_NO_JIRA_UI) { jitaButtonObserver.observe(document.body, { childList: t
 // scroll to see them. Mirror them into the top header bar (the empty space between the breadcrumb and the
 // lock / watch / share / … action icons) so they're visible at a glance. Same-origin REST read, cached per
 // issue. Always on for issue pages; cheap early-exit once mounted for the current issue.
-var jitaDatesCache = {};   // issueKey -> { created, updated } ISO strings
+var jitaDatesCache = {};   // issueKey -> { created, updated, at } ISO strings + when they were fetched
+var jitaDatesFail = {};    // issueKey -> when its last fetch failed
+var JITA_DATES_TTL_MS = 60 * 1000;   // refetch dates this old (an edit moves Updated), and retry a failed fetch after this
 function jitaFmtDateShort(iso) {
     var d = new Date(iso);
     if (isNaN(d.getTime())) { return ''; }
@@ -495,24 +502,20 @@ function jitaShowIssueDates() {
     }
     var key = (bc.textContent || '').trim();
     if (!key) { return; }
+    // Jira's own dates are hidden (jitaHideNativeDates), so these are the only ones on screen: they used to be fetched
+    // once per tab, so a later visit showed the first visit's Updated, and a fetch that failed once never ran again.
+    var now = Date.now(), c = jitaDatesCache[key];
+    var due = (!c || now - c.at >= JITA_DATES_TTL_MS) && !(jitaDatesFail[key] && now - jitaDatesFail[key] < JITA_DATES_TTL_MS);
     var existing = document.getElementById('jita-issue-dates');
-    if (existing && existing.getAttribute('data-key') === key && existing.isConnected) { return; }   // already shown for this issue
-    var tgt = jitaDatesTarget();
-    if (!tgt) { return; }   // header not ready yet; the observer will retry
-    if (existing && existing.parentNode) { existing.parentNode.removeChild(existing); }
-
-    var el = document.createElement('div');
-    el.id = 'jita-issue-dates';
-    el.setAttribute('data-key', key);
-    // Absolutely positioned near the LEFT edge of the sticky header bar (its positioning context), vertically
-    // centered with the icons. A small left inset (not 0) clears the bar's left clip/overflow so the first
-    // characters aren't cut off. Two stacked rows; each row is a flex with the LABEL left and the DATE pushed
-    // to the right (margin-left:auto), and the rows stretch to the same width so the dates line up right-bound.
-    el.style.cssText = 'position:absolute; left:24px; top:50%; transform:translateY(-50%);' +
-        ' display:flex; flex-direction:column; gap:1px;' +
-        ' font-size:12px; line-height:1.35; color:var(--ds-text-subtle,#8c9bab); white-space:nowrap; user-select:none;';
-    el.textContent = '…';
-    tgt.row.insertBefore(el, tgt.before);   // before:null -> append
+    var el = (existing && existing.getAttribute('data-key') === key && existing.isConnected) ? existing : null;
+    if (el && (!due || el.getAttribute('data-fetching'))) { return; }   // shown, and fresh or on its way
+    if (!el && !c && !due) { return; }                                    // nothing to show: the fetch failed a moment ago
+    if (!el) {
+        var tgt = jitaDatesTarget();
+        if (!tgt) { return; }   // header not ready yet; the observer will retry
+        if (existing && existing.parentNode) { existing.parentNode.removeChild(existing); }
+        el = jitaNewDatesEl(key, tgt);
+    }
 
     function paint(created, updated) {
         if (el.getAttribute('data-key') !== key || !el.isConnected) { return; }   // navigated away meanwhile
@@ -535,14 +538,39 @@ function jitaShowIssueDates() {
         part('Updated', updated);
     }
 
-    if (jitaDatesCache[key]) { paint(jitaDatesCache[key].created, jitaDatesCache[key].updated); return; }
+    if (c) { paint(c.created, c.updated); }
+    if (!due) { return; }
+    el.setAttribute('data-fetching', '1');
     $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + key + '?fields=created,updated', dataType: 'json' })
         .done(function (d) {
             var f = (d && d.fields) || {};
-            jitaDatesCache[key] = { created: f.created || null, updated: f.updated || null };
+            delete jitaDatesFail[key];
+            jitaDatesCache[key] = { created: f.created || null, updated: f.updated || null, at: Date.now() };
+            el.removeAttribute('data-fetching');
             paint(jitaDatesCache[key].created, jitaDatesCache[key].updated);
         })
-        .fail(function () { if (el.isConnected) { el.textContent = ''; } });
+        .fail(function () {
+            jitaDatesFail[key] = Date.now();
+            el.removeAttribute('data-fetching');
+            if (!jitaDatesCache[key] && el.parentNode) { el.parentNode.removeChild(el); }   // gone, so a later pass tries again
+        });
+}
+
+// The header's dates element for `key`, placed in the header bar (tgt from jitaDatesTarget) and showing '…'.
+function jitaNewDatesEl(key, tgt) {
+    var el = document.createElement('div');
+    el.id = 'jita-issue-dates';
+    el.setAttribute('data-key', key);
+    // Absolutely positioned near the LEFT edge of the sticky header bar (its positioning context), vertically
+    // centered with the icons. A small left inset (not 0) clears the bar's left clip/overflow so the first
+    // characters aren't cut off. Two stacked rows; each row is a flex with the LABEL left and the DATE pushed
+    // to the right (margin-left:auto), and the rows stretch to the same width so the dates line up right-bound.
+    el.style.cssText = 'position:absolute; left:24px; top:50%; transform:translateY(-50%);' +
+        ' display:flex; flex-direction:column; gap:1px;' +
+        ' font-size:12px; line-height:1.35; color:var(--ds-text-subtle,#8c9bab); white-space:nowrap; user-select:none;';
+    el.textContent = '…';
+    tgt.row.insertBefore(el, tgt.before);   // before:null -> append
+    return el;
 }
 
 // Jira renders the issue's Created/Updated timestamps a second time at the very BOTTOM of the right context
@@ -697,6 +725,8 @@ var JITA_GM_CATEGORIES = ['Gameplay', 'Billing & Account', 'Technical', 'Other']
 // Returns the $.ajax promise; the caller inspects the response / handles errors.
 function jitaInvokeAutomationRule(numericId, ruleId, userInputs) {
     var cloudId = $('meta[name="ajs-cloud-id"]').attr('content');
+    // Without it the request goes to .../jira/undefined/... and fails with a 404 that explains nothing.
+    if (!cloudId) { return $.Deferred().reject({ status: 0, jitaError: 'Could not read the Jira cloud id from the page - reload it and try again.' }).promise(); }
     var body = { objects: ['ari:cloud:jira:' + cloudId + ':issue/' + numericId] };
     if (userInputs) { body.userInputs = userInputs; }
     return $.ajax({
@@ -719,9 +749,33 @@ function jitaInvokeGmAutomation(key, category) {
                         if (inv && inv.status === 'SUCCESS') { resolve(resp); }
                         else { reject(new Error('Automation did not report success.')); }
                     })
-                    .fail(function (xhr) { reject(new Error('Automation invocation failed (HTTP ' + xhr.status + ').')); });
+                    .fail(function (xhr) { reject(new Error((xhr && xhr.jitaError) || ('Automation invocation failed (HTTP ' + xhr.status + ').'))); });
             })
             .fail(function (xhr) { reject(new Error('Could not read the issue id (HTTP ' + xhr.status + ').')); });
+    });
+}
+
+// Poll a report's status until it reads closed (resolves true) or the tries run out (false). First check after 1.5s
+// (gives the automation a head start), then every 2s. Network blips just consume a try, so a flaky connection
+// degrades to "not confirmed" rather than hanging forever. A conversion's SUCCESS only means the rule started; the
+// report closing is the proof it did its work.
+function jitaWaitClosed(key, tries) {
+    return new Promise(function (resolve) {
+        (function step(n) {
+            setTimeout(function () {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status', dataType: 'json' })
+                    .done(function (d) {
+                        var st = (d && d.fields && d.fields.status && d.fields.status.name) || '';
+                        if (JiTA.util.isClosedStatus(st)) { resolve(true); return; }
+                        if (n <= 0) { resolve(false); return; }
+                        step(n - 1);
+                    })
+                    .fail(function () {
+                        if (n <= 0) { resolve(false); return; }
+                        step(n - 1);
+                    });
+            }, n === tries ? 1500 : 2000);
+        })(tries);
     });
 }
 
@@ -815,20 +869,24 @@ function jitaGoToNewDefect(ebrKey, beforeKeys) {
     var before = {};
     (beforeKeys || []).forEach(function (k) { before[k] = true; });
     var tries = 0;
-    (function poll() {
+    function again() {
+        if (tries >= 30) { window.location.reload(false); return; }
+        tries++; setTimeout(poll, 1000);
+    }
+    function poll() {
+        // The user has moved on to another issue (Jira is one page): neither take them away from it nor reload it
+        // under a comment they may be typing. The report shows the result when they come back to it.
+        if (jitaCurrentKey() !== ebrKey) { return; }
         $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
             .done(function (d) {
                 var fresh = jitaLinkedKeys(d.fields && d.fields.issuelinks).filter(function (k) { return !before[k]; });
                 var defect = fresh.filter(function (k) { return /^(EDR|EO|PLAT)-/.test(k); })[0] || fresh[0];
                 if (defect) { window.location.href = '/browse/' + defect; return; }
-                if (tries >= 30) { window.location.reload(false); return; }
-                tries++; setTimeout(poll, 1000);
+                again();
             })
-            .fail(function () {
-                if (tries >= 30) { window.location.reload(false); return; }
-                tries++; setTimeout(poll, 1000);
-            });
-    })();
+            .fail(again);
+    }
+    poll();
 }
 
 // The category + optional-note modal opened by the "Assign to GM" button.
@@ -861,6 +919,9 @@ function jitaOpenGmModal(key) {
     // the note and run the automation after the Lead had backed out.
     var CLOSED = new Error('closed');
     function alive() { return !!(ov.$overlay[0] && ov.$overlay[0].isConnected); }
+    // The note already on the ticket from an earlier attempt. Convert re-enables after a failed automation, and
+    // pressing it again posted the same note a second time.
+    var notePosted = null;
 
     $go.on('click', function () {
         if (!selected) { $status.css('color', '#ff8f8f').text('Please pick a category first.'); return; }
@@ -874,7 +935,8 @@ function jitaOpenGmModal(key) {
             // Ticket present -> post the note (if any), then run the conversion automation.
             $go.text('Converting…');
             $status.text(note ? 'Posting note to Zendesk…' : 'Running automation…');
-            var pre = note ? JiTA.responses.postInternalNote(note).then(function (res) {
+            var pre = (note && note !== notePosted) ? JiTA.responses.postInternalNote(note).then(function (res) {
+                if (res && (res.ok || res.clicked)) { notePosted = note; }   // clicked but not confirmed: it may well be there
                 if (!res || !res.ok) { throw new Error((res && res.error) || 'Could not post the note.'); }
             }) : Promise.resolve();
             return pre.then(function () {
@@ -883,13 +945,20 @@ function jitaOpenGmModal(key) {
                 invoked = true;
                 return jitaInvokeGmAutomation(key, selected);
             }).then(function () {
-                $status.css('color', '#7fdca4').text('Automation started - this report will close in a few seconds…');
-                var waited = 0;
-                var t = setInterval(function () {
-                    waited += 500;
-                    if ($('strong:contains(Issue Updated)')[0]) { clearInterval(t); window.location.reload(false); }
-                    else if (waited >= 20000) { clearInterval(t); if (alive()) { ov.close(); } }   // not an overlay opened since
-                }, 500);
+                // SUCCESS only means the rule STARTED: with no linked Zendesk ticket, or more than one, it stops on its own,
+                // comments and leaves the report open. A conversion closes the report, so wait for that over REST (not
+                // for Jira's English "Issue Updated" flag), and when it does not come, say so instead of vanishing.
+                $status.css('color', '#7fdca4').text('Automation started - waiting for the report to close…');
+                return jitaWaitClosed(key, 10).then(function (closed) {
+                    if (closed) {
+                        if (jitaCurrentKey() === key) { window.location.reload(false); } else if (alive()) { ov.close(); }
+                        return;
+                    }
+                    var msg = 'The report is still open 20 seconds later. The rule may have stopped: with no linked Zendesk ticket, or more than one, it leaves a comment and the report open. Check its comments before converting again.';
+                    if (!alive()) { JiTA.ui.toast(msg); return; }
+                    $go.text('Started');   // stays disabled: a slow rule may still finish, and a second run converts twice
+                    $status.css('color', '#ffd479').text(msg);
+                });
             });
         }).catch(function (e) {
             if (!alive()) {
@@ -899,7 +968,8 @@ function jitaOpenGmModal(key) {
                 return;
             }
             $go.prop('disabled', false).css('opacity', '').text('Convert');
-            $status.css('color', '#ff8f8f').text('Failed: ' + (e && e.message || e));
+            $status.css('color', '#ff8f8f').text('Failed: ' + (e && e.message || e) +
+                (notePosted ? ' The note is already on the ticket, so Convert will not post it again.' : ''));
         });
     });
 
@@ -946,7 +1016,7 @@ function jitaConvertClick() {
     function fail(xhr) {
         delete jitaConvertBusy[ebrKey];
         jitaConvertButtonState();   // whichever button is on the page now, not the one that was clicked
-        jitaAjaxError()(xhr);
+        jitaAjaxError(xhr && xhr.jitaError)(xhr);
     }
     // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
     // newly-created defect (found as the freshly-linked issue that wasn't linked before).
@@ -954,9 +1024,28 @@ function jitaConvertClick() {
         .done(function (d) {
             var before = jitaLinkedKeys(d.fields && d.fields.issuelinks);
             jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
-                .done(function () { jitaGoToNewDefect(ebrKey, before); })   // poll the EBR's links for the new defect, then navigate
+                .done(function (resp) {
+                    // As for the GM rule: anything but SUCCESS means nothing is converting. Say so, rather than poll for
+                    // a defect that will never come and then reload the page in silence.
+                    var inv = resp && resp.invocations && resp.invocations[0];
+                    if (!inv || inv.status !== 'SUCCESS') { fail({ status: 0, jitaError: 'The conversion automation did not start (' + ((inv && inv.status) || 'no answer') + ').' }); return; }
+                    jitaGoToNewDefect(ebrKey, before);   // poll the EBR's links for the new defect, then navigate
+                })
                 .fail(fail);
         }).fail(fail);
+}
+
+// The Close button: open the status menu and pick "Closed" once Jira has rendered it. It clicked after a fixed
+// 100 ms; on a slow page the option was not there yet, and the menu stayed open with nothing said.
+function jitaCloseClick() {
+    $(SELECTORS.STATUS_FIELD_WRAP).find('button').click();
+    var t0 = Date.now();
+    (function pick() {
+        var opt = $("div[data-testid='issue.fields.status.common.ui.status-lozenge.3']").children().find('span:contains(Closed)');
+        if (opt.length) { opt.click(); return; }
+        if (Date.now() - t0 >= 3000) { alert('The Closed option did not appear in the status menu - set the status by hand. Report issues to Schogol :).'); return; }
+        setTimeout(pick, 100);
+    })();
 }
 
 // Adds the different buttons to the "command-bar" and defines what they do
@@ -1029,6 +1118,13 @@ function addButtons() {
                 if (tr[0]) { $title.text(tr[0]); }
                 if (tr[1]) { setBlockText($desc.children().eq(0), tr[1]); }
                 if (tr[2]) { setBlockText($desc.children().eq(1), tr[2]); }
+                // Some came back and some did not: a translated title beside an untranslated description is easy to
+                // take for the whole report, so say which parts are still in the original.
+                var missed = ['title', 'description', 'steps to reproduce'].filter(function (n, i) { return tr[i] === null; });
+                if (missed.length) {
+                    alert('Only part of this report was translated: the ' + missed.join(' and the ') + ' could not be translated and ' +
+                        (missed.length === 1 ? 'is' : 'are') + ' still in the original language. Try Translate again in a moment.');
+                }
 
                 // The Triage Assistant reads its search query straight from these same DOM nodes (see
                 // JiTA.ui.getIssueText), so now that they hold the ENGLISH translation, re-run the similar-
@@ -1040,7 +1136,8 @@ function addButtons() {
                     && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) {
                     JiTA.ui.render(JiTA.ui.currentKey);
                 }
-            });
+            })
+            .catch(function (e) { console.log('[JiTA] translate failed:', e); });
     });
 
 
@@ -1069,10 +1166,7 @@ function addButtons() {
     // Create close button
     addActionButton('closeButton', 'Close');
     // When the Close button is clicked we change the status to Closed by simulating clicks on the relevant buttons. This is extremely janky right now because I cant figure out a better way to do this.
-    $("#closeButton").off('click.jita').on('click.jita', function () {
-        $(SELECTORS.STATUS_FIELD_WRAP).find("button").click();
-        setTimeout(function(){$("div[data-testid='issue.fields.status.common.ui.status-lozenge.3']").children().find("span:contains(Closed)").click();}, 100);
-    });
+    $("#closeButton").off('click.jita').on('click.jita', jitaCloseClick);
 };
 
 
@@ -1119,6 +1213,7 @@ waitForKeyElements(cmSelector, SwapUI);
             var el = nodes[i];
             if (el.classList.contains('jita-log-hiding')) { continue; }
             if (el.querySelector && (el.querySelector('#gpanel') || el.querySelector('#tableContent'))) { continue; }   // already our parsed UI
+            if (jitaInEditable(el)) { continue; }   // a draft in the comment box, never a log viewer: it used to blink out for 2.5 s per line
             var t = el.textContent || '';
             // Hide header-based logs (any layout, matched by header text) OR, while a header-less igbr.zip file is
             // being loaded by a click (jitaParserPending === the current click generation), the code-block it lands
@@ -1154,10 +1249,10 @@ waitForKeyElements(cmSelector, SwapUI);
 // The click binding is namespaced and .off()'d first so re-firing can never stack duplicate handlers: the SPA
 // re-rendering the attachment list makes waitForKeyElements match a fresh span and re-run this callback.
 var IGBR_FILES = [
-    { name: 'outstandingcalls.txt', setFlag: function () { oc = true; } },
-    { name: 'lastcrashes.txt',      setFlag: function () { lc = true; } },
-    { name: 'PDMData.txt',          setFlag: function () { pdm = true; } },
-    { name: 'dxdiag.txt',           setFlag: function () { dx = true; } }
+    { name: 'outstandingcalls.txt', setFlag: function () { jitaIgbrFile = 'oc'; } },
+    { name: 'lastcrashes.txt',      setFlag: function () { jitaIgbrFile = 'lc'; } },
+    { name: 'PDMData.txt',          setFlag: function () { jitaIgbrFile = 'pdm'; } },
+    { name: 'dxdiag.txt',           setFlag: function () { jitaIgbrFile = 'dx'; } }
 ];
 IGBR_FILES.forEach(function (f) {
     waitForKeyElements('span[data-item-title="true"]:contains(' + f.name + ')', function () {
@@ -1208,6 +1303,7 @@ if (!JITA_NO_JIRA_UI) {
     }, true);
 }
 function jitaRunParserWhenLoaded(setFlag) {
+    if (!flagOn('parser')) { return; }   // a click while the parser is off must leave nothing pending for later
     var myGen = ++jitaParserGen;
     var CB = SELECTORS.CODE_BLOCK;
     // These igbr.zip files have no header row, so the signature observer can't catch them. Instead mark a parse as
@@ -1284,7 +1380,34 @@ function readCodeBlock() {
 function mountParser(viewHtml, parseFn) {
     readCodeBlock();
     $(SELECTORS.CODE_BLOCK).html(viewHtml);
-    setTimeout(parseFn, 250);
+    setTimeout(function () { jitaRunParse(parseFn); }, 250);
+}
+
+// Run a parser; if it throws, end the spinner with a message instead of leaving it going over a page whose raw
+// text is already gone.
+function jitaRunParse(parseFn) {
+    try { parseFn(); } catch (e) {
+        console.log('[JiTA] log parser failed:', e);
+        var l = document.getElementById('loader');
+        if (l) { l.style.display = 'none'; }
+        var tc = document.getElementById('tableContent');
+        if (tc && tc.tBodies && tc.tBodies[0]) {
+            var tr = document.createElement('tr'), td = tr.insertCell(0);
+            td.colSpan = 20;
+            td.textContent = 'This file could not be parsed (' + (e && e.message || e) + '). Open raw to read it.';
+            tc.tBodies[0].appendChild(tr);
+            tc.style.display = 'table';
+        }
+    }
+}
+
+// True for a log container inside a rich-text editor the user is typing in (a ``` block in the comment box or the
+// description), as against the attachment viewer. Judged by the HOST, not by CodeMirror's own contenteditable:
+// an editable-but-read-only viewer carries contenteditable="true" too.
+function jitaInEditable(el) {
+    var ed = el && el.closest ? (el.closest('.cm-editor') || el) : null;
+    var host = ed && ed.parentElement;
+    return !!(host && host.closest && host.closest('[contenteditable="true"], .ProseMirror'));
 }
 
 
@@ -1297,11 +1420,25 @@ function SwapUI() {
     // Scope everything to the ONE editor that holds the log header row: the page can contain OTHER CodeMirror
     // editors (a ``` code block in the comment box is also a .cm-editor / .cm-content), and operating on all of
     // them read the wrong (comment) text into `rows` AND injected the "Logfile Parser" UI into the comment box.
-    var $logEd = $(SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")").first().closest('.cm-editor');
+    // The header-less igbr.zip file a click asked for, taken once whichever branch runs: a flag left set by a click
+    // while the parser was off used to pick the wrong parser for the next file.
+    var igbr = jitaIgbrFile;
+    jitaIgbrFile = null;
+    // Never the comment box: a ``` block there is a CodeMirror editor too, and a log header pasted into it turned the
+    // box being typed in into the parser's chrome.
+    var $logEd = $(SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")").filter(function () { return !jitaInEditable(this); }).first().closest('.cm-editor');
     if ($logEd.length && !$(SELECTORS.CODE_BLOCK).length && flagOn('parser')) {
         var $cm = $logEd.find('.cm-content').first().attr('data-jita-cmsrc', '1');   // mark the exact source editor
         rows = getCmDocText();                                                       // reads the marked .cm-content
         $cm.removeAttr('data-jita-cmsrc');
+        // A read that came back without the log (CodeMirror's internals moved) replaced the readable raw log with an
+        // empty table, and said nothing. Leave the viewer as it is.
+        if (!rows || rows.indexOf(LOG_HDR) === -1) {
+            console.warn('[JiTA] could not read the log text from the viewer, so it was left as it is');
+            jitaParserPending = 0;
+            jitaRevealLogs();
+            return;
+        }
         $logEd.html(html);
         // The parser's scrollable #table is position:absolute (top:85px; bottom:0), so it sizes itself
         // against the nearest positioned ancestor. In the old <span> viewer that ancestor filled the screen;
@@ -1309,7 +1446,7 @@ function SwapUI() {
         // clips every row. Pin #table to the viewport instead (the media viewer is full-screen) so all rows
         // are visible and scrollable.
         $('#table').css({ position: 'fixed', top: '95px', bottom: '0', left: '0', width: '100%' });
-        setTimeout(ParseLogs, 250);
+        setTimeout(function () { jitaRunParse(ParseLogs); }, 250);
         // NB: no early return here. The <span> checks below are no-ops on this layout (no code-block span),
         // but we must fall through to the "$('#gpanel a').click(...)" handler at the end of SwapUI so the
         // Toggle Notice / Warnings / Errors / Exceptions filter buttons get wired up.
@@ -1327,32 +1464,28 @@ function SwapUI() {
         mountParser(McHtml, ParseMcLogs);
     }
 
-    else if (oc && flagOn('parser')) {
-        oc = false;
+    else if (igbr === 'oc' && flagOn('parser')) {
         mountParser(ocHtml, ParseOcLogs);
     }
 
-    else if (lc && flagOn('parser')) {
-        lc = false;
+    else if (igbr === 'lc' && flagOn('parser')) {
         mountParser(lcHtml, ParseOcLogs);
     }
 
-    else if (dx && flagOn('parser')) {
+    else if (igbr === 'dx' && flagOn('parser')) {
         readCodeBlock();
         $(SELECTORS.CODE_BLOCK).append(dxdiagHtml);
         // Parse the raw dxdiag text into a triage summary (crash history + GPU driver recency + system). Guarded.
         try { renderDxdiag(rows); } catch (e) { $('#dxdiag').text('Could not evaluate dxdiag.'); }
-        dx = false;
     }
 
-    else if (pdm && flagOn('parser')) {
+    else if (igbr === 'pdm' && flagOn('parser')) {
         readCodeBlock();
         $(SELECTORS.CODE_BLOCK).append(pdmHtml);
-        var pdmdata = convertTextToObject(rows);
         // Judge the machine against EVE's system requirements and render a per-component breakdown into the
-        // Quick Info box (verdict + OS/CPU/RAM/GPU/DirectX rows + driver age). Guarded end-to-end.
-        try { renderRequirements(pdmdata); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
-        pdm = false;
+        // Quick Info box (verdict + OS/CPU/RAM/GPU/DirectX rows + driver age). Guarded end-to-end, the reading of
+        // the file included: malformed PDM text used to throw before the view was revealed.
+        try { renderRequirements(convertTextToObject(rows)); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
     };
 
     // The parsed view is now mounted (or this wasn't a parse branch) - clear any pending non-header parse and
@@ -1371,72 +1504,62 @@ function SwapUI() {
 // inside its own layer) gets the identical filter/search/Group-Repeats behavior. Bind once per fresh mount -
 // the chrome is rebuilt on every mount, so handlers never stack.
 function jitaWireLogControls() {
-    // Functionality for the buttons in the gpanel to toggle show / hide specific table rows
-    $("#gpanel a").click(function() {
-        switch ($(this).hasClass('toggle')) {
-            case false:
-                $('.'+$(this).attr('id')).css({'display':'none'});
-                $(this).not($('#onlyexception, #showAll')).addClass('toggle');
-                break;
-            default:
-                $('.'+$(this).attr('id')).css({'display':'table-row'});
-                $(this).removeClass('toggle');
-                break;
-        };
-        switch ($(this).attr('id')) {
-            case "onlyexception":
-                $('tr:not(.exception):not(#fixedHead)').css({'display':'none'});
-                $('tr.exception').css({'display':'table-row'});
-                $('#gnav a#notice, #gnav a#error, #gnav a#warning').addClass('toggle');
-                $('#gnav a#exception').removeClass('toggle');
-                break;
-            case "showAll":
-                $('tr').css({'display':'table-row'});
-                $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');
-                break;
-            default:
-                break;
+    // The gpanel buttons only keep their .toggle state (a type toggle carries it while its rows are hidden, Group
+    // Repeats while grouping is off); jitaApplyLogFilter then recomputes the parsed table's rows from it. There used
+    // to be a second handler that hid rows by class across the whole PAGE: Only Exceptions hid the table header (the
+    // ':not(#fixedHead)' matched nothing - it is a class) and any Jira table behind the viewer, Show All forced every
+    // <tr> on the page visible, and the filter pass after it only ever recomputed the table body.
+    $("#gpanel a").click(function (ev) {
+        if (ev && ev.preventDefault) { ev.preventDefault(); }
+        var id = $(this).attr('id');
+        if (id === 'onlyexception') {
+            $('#gnav a#notice, #gnav a#error, #gnav a#warning').addClass('toggle');
+            $('#gnav a#exception').removeClass('toggle');
+        } else if (id === 'showAll') {
+            $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');
+        } else {
+            $(this).toggleClass('toggle');
         }
+        jitaApplyLogFilter();
     });
 
-    // Live search box (Feature D): filter rows by text, composing with the type toggles above. A row is
-    // shown iff it matches the (case-insensitive) query AND its message-type isn't currently toggled off.
-    // jitaApplyLogFilter recomputes visibility from the toggle state (including the "Only Exceptions" combo,
-    // which also hides info rows) so search and the toggle buttons never fight. Wired only on the main log
-    // parser, the one layout that has the search input.
+    // Live search box (Feature D): filter rows by text, composing with the type toggles above.
     if ($('#jita-log-search').length) {
-        var jitaApplyLogFilter = function () {
-            // Drop the previous Nx badges before measuring row text, so a stale "52×" can't pollute the search
-            // match; jitaRegroupLog() re-adds them from the new visibility at the end of this pass.
-            var pb = document.querySelectorAll('#tableContent .jita-rep-badge');
-            for (var pi = 0; pi < pb.length; pi++) { if (pb[pi].parentNode) { pb[pi].parentNode.removeChild(pb[pi]); } }
-            var q = ($('#jita-log-search').val() || '').toLowerCase();
-            var off = {};
-            $('#gnav a.toggle').each(function () { off[$(this).attr('id')] = true; });
-            var onlyExc = off.notice && off.warning && off.error && !off.exception;   // the "Only Exceptions" state
-            $('#tableContent tbody tr').each(function () {
-                var cls = this.className || '';
-                var hiddenByToggle = onlyExc
-                    ? !/\bexception\b/.test(cls)
-                    : ((off.notice && /\bnotice\b/.test(cls)) ||
-                       (off.warning && /\bwarning\b/.test(cls)) ||
-                       (off.error && /\berror\b/.test(cls)) ||
-                       (off.exception && /\bexception\b/.test(cls)));
-                var matches = !q || (this.textContent || '').toLowerCase().indexOf(q) >= 0;
-                this.style.display = (!hiddenByToggle && matches) ? 'table-row' : 'none';
-            });
-            // Re-collapse identical runs against the visibility we just computed (hiding a type can make
-            // previously-separated duplicates adjacent, so the "Nx" grouping must be recalculated here).
-            jitaRegroupLog();
-        };
         var jitaSearchTimer = null;
         $('#jita-log-search').on('input', function () {
             if (jitaSearchTimer) { clearTimeout(jitaSearchTimer); }
             jitaSearchTimer = setTimeout(jitaApplyLogFilter, 120);   // debounce for large logs
         });
-        // Re-apply the text filter after any toggle / Only-Exceptions / Show-All click so the two compose.
-        $('#gpanel a').on('click', function () { setTimeout(jitaApplyLogFilter, 0); });
     }
+}
+
+// Recompute the parsed table's rows from the toggle state and the search box. A row is shown iff it matches the
+// (case-insensitive) query AND its message type is not toggled off; the "Only Exceptions" combination hides info
+// rows too. Only #tableContent's body is touched.
+function jitaApplyLogFilter() {
+    if (!document.getElementById('tableContent')) { return; }
+    // Drop the previous Nx badges before measuring row text, so a stale "52×" can't pollute the search
+    // match; jitaRegroupLog() re-adds them from the new visibility at the end of this pass.
+    var pb = document.querySelectorAll('#tableContent .jita-rep-badge');
+    for (var pi = 0; pi < pb.length; pi++) { if (pb[pi].parentNode) { pb[pi].parentNode.removeChild(pb[pi]); } }
+    var q = ($('#jita-log-search').val() || '').toLowerCase();
+    var off = {};
+    $('#gnav a.toggle').each(function () { off[$(this).attr('id')] = true; });
+    var onlyExc = off.notice && off.warning && off.error && !off.exception;   // the "Only Exceptions" state
+    $('#tableContent tbody tr').each(function () {
+        var cls = this.className || '';
+        var hiddenByToggle = onlyExc
+            ? !/\bexception\b/.test(cls)
+            : ((off.notice && /\bnotice\b/.test(cls)) ||
+               (off.warning && /\bwarning\b/.test(cls)) ||
+               (off.error && /\berror\b/.test(cls)) ||
+               (off.exception && /\bexception\b/.test(cls)));
+        var matches = !q || (this.textContent || '').toLowerCase().indexOf(q) >= 0;
+        this.style.display = (!hiddenByToggle && matches) ? 'table-row' : 'none';
+    });
+    // Re-collapse identical runs against the visibility we just computed (hiding a type can make
+    // previously-separated duplicates adjacent, so the "Nx" grouping must be recalculated here).
+    jitaRegroupLog();
 }
 
 
@@ -1517,22 +1640,23 @@ function ParseMcLogs() {
  * Fill the table with the log data
  */
     for (var i = 1; i < rows.length; ++i) {
+        if (!rows[i].trim()) { continue; }   // a blank line is not a call
         var cols = rows[i].split("\t");
 
         if (cols[1] == "machoNet::GetTime (RemoteServiceCall)") {
             averageDuration = averageDuration + Number(cols[2]);
             count++;
             if (Number(peak) < Number(cols[2])) {
-                peak = cols[2];
+                peak = Number(cols[2]);   // the last column still carries the line's \r
             }
         }
 
         logs.tableInfo.push([cols[0], cols[1], cols[2]]);
     }
-    $('#averageMacho').html('Average machoNet::GetTime duration: ' + Math.round(averageDuration / count) + 'ms <i class="fa-regular fa-circle-question" title="machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue."></i>');
-    $('#peakMacho').html('Peak machoNet::GetTime duration: ' + peak + 'ms <i class="fa-regular fa-circle-question" title="Clicking this row scrolls to the highest GetTime value withing this log file."></i>');
-    $('#peakMacho').on('click', function(){$(".peakMachoCell")[0].scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" })})
-    logs.showRow((rows.length - 2));
+    $('#averageMacho').html('Average machoNet::GetTime duration: ' + (count ? Math.round(averageDuration / count) + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue."></i>');
+    $('#peakMacho').html('Peak machoNet::GetTime duration: ' + (count ? peak + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="Clicking this row scrolls to the highest GetTime value withing this log file."></i>');
+    $('#peakMacho').on('click', function () { var p = $('.peakMachoCell')[0]; if (p) { p.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } });
+    logs.showRow(logs.tableInfo.length);   // every call read; rows.length - 2 dropped the last one
 
 
 
@@ -1664,20 +1788,20 @@ function ParsePhLogs() {
             packetsSent.innerHTML = table[i][15];
             sessionCount = row.insertCell(++cellIndex);
 
-            if (table[i][16] >= "2") {
+            if (Number(table[i][16]) >= 2) {   // as numbers: '10' >= '2' is false as text
                 sessionCount.className += 'red';
             }
 
             sessionCount.innerHTML = table[i][16];
             tidiFactor = row.insertCell(++cellIndex);
 
-            if (table[i][17] <= "0.2") {
+            if (Number(table[i][17]) <= 0.2) {
                 tidiFactor.className += 'red';
             }
-            else if (table[i][17] <= "0.8") {
+            else if (Number(table[i][17]) <= 0.8) {
                 tidiFactor.className += 'yellow';
             }
-            else if (table[i][17] >= "1.05") {
+            else if (Number(table[i][17]) >= 1.05) {
                 tidiFactor.className += 'red';
             }
 
@@ -1691,10 +1815,11 @@ function ParsePhLogs() {
  * Fill the table with the log data
  */
     for (var i = 1; i < rows.length; ++i) {
+        if (!rows[i].trim()) { continue; }   // a blank line is not a sample
         var cols = rows[i].split("\t");
         logs.tableInfo.push([cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6], cols[7], cols[8], cols[9], cols[10], cols[11], cols[12], cols[13], cols[14], cols[15], cols[16], cols[17]]);
     }
-    logs.showRow((rows.length - 2));
+    logs.showRow(logs.tableInfo.length);   // every sample read; rows.length - 2 dropped the last one
 
  /**
  * Clickhandler for when the user clicks on the FPS /spf row. We toggle between spf and FPS on click
@@ -1735,7 +1860,7 @@ function ParseLogs() {
  * rowQuantity: Quantity of rows which will be loaded
  */
     logs.showRow = function(rowQuantity) {
-        var excTime, sttTime = "";
+        var excTime = "", sttTime = "";   // both start empty: an undefined excTime gave the first row a top border
         var table = logs.tableInfo;
         var tableContent = document.getElementById('tableContent');
         var tableContentRowsLength = 0;
@@ -1794,7 +1919,7 @@ function ParseLogs() {
  * If the time of the current message is the same time as it was when the exception started
  * then add the 'exception' class to the row
  */
-            if (table[i][0] == excTime) {
+            if (excTime && table[i][0] == excTime) {   // outside a block excTime is '', and so is a logging-error row's time
                 row.className += ' exception';
             }
 
@@ -1856,9 +1981,13 @@ function ParseLogs() {
  */
     for (var i = 1; i < rows.length; ++i) {
         var cols = rows[i].split("\t");
-        logs.tableInfo.push([cols[0], cols[1], cols[2], cols[3]]);
+        // Fewer than four columns (an empty Facility or Type collapses with its tab, or a line has no tabs at all) used
+        // to throw on the missing message and leave the spinner going: keep the time, if there is one, and the rest
+        // of the line as the message. A message with a tab of its own keeps its tail.
+        if (cols.length < 4) { cols = cols.length > 1 ? [cols[0], '', '', cols.slice(1).join(' ')] : ['', '', '', rows[i]]; }
+        logs.tableInfo.push([cols[0], cols[1], cols[2], cols.slice(3).join('\t')]);
     }
-    logs.showRow((rows.length - 1));
+    logs.showRow(logs.tableInfo.length);
 
 
  /**
@@ -2674,8 +2803,12 @@ function evalRequirements(pdm) {
         var mv = gpu ? Number(gpu.VIDEO_MEMORY) : NaN;
         if (!isNaN(mv) && mv > 0) { rows.push({ label: 'GPU', tier: reqTier(mv, M.vram, 0.03), detail: reqGpuDetail(gpu, M.vram) }); }
         else { rows.push({ label: 'GPU', tier: 'na', detail: pdmGpuName(gpu) || 'integrated' }); }
+    } else if (type) {
+        rows.push({ label: 'OS', tier: 'fail', detail: 'Unsupported OS (' + type + ')' });
     } else {
-        rows.push({ label: 'OS', tier: 'fail', detail: 'Unsupported / unknown OS' + (type ? ' (' + type + ')' : '') });
+        // No OS block (or CCP renamed OS.TYPE): nothing was judged, so the verdict is "could not be evaluated", not
+        // the red "does not meet the minimum" every such file used to get.
+        rows.push({ label: 'OS', tier: 'na', detail: 'OS not found in PDM data' });
     }
 
     return { overall: worstTier(rows.map(function (r) { return r.tier; })), rows: rows, driver: reqDriverInfo(gpu) };
@@ -2750,11 +2883,11 @@ function convertTextToObject(text) {
             stack.push(currentObject);
         } else if (line.startsWith("}")) {
             stack.pop();
-            currentObject = stack[stack.length - 1];
+            currentObject = stack.length ? stack[stack.length - 1] : result;   // a stray '}' at the root is not a crash
         } else if (line.includes(":")) {
-            var keyValue = line.split(":");
-            var key = keyValue[0].trim();
-            var value = keyValue[1].trim();
+            var at = line.indexOf(":");   // the first colon: 'TIME: 12:34:56' keeps its whole value
+            var key = line.slice(0, at).trim();
+            var value = line.slice(at + 1).trim();
 
             if (value === "{EMPTY}") {
                 value = "";
@@ -2806,7 +2939,7 @@ var DX_BUGCHECK = {
     0x124: 'WHEA_UNCORRECTABLE_ERROR', 0x133: 'DPC_WATCHDOG_VIOLATION', 0x139: 'KERNEL_SECURITY_CHECK_FAILURE',
     0x1000007E: 'SYSTEM_THREAD_EXCEPTION_NOT_HANDLED_M', 0x1000008E: 'KERNEL_MODE_EXCEPTION_NOT_HANDLED_M'
 };
-// Common NT exception codes (BSOD P2 on some bugchecks; APPCRASH P7).
+// Common NT exception codes (BSOD P2 on some bugchecks; APPCRASH P7, BEX P8).
 var DX_EXCEPTION = {
     'c0000005': 'ACCESS_VIOLATION', '80000003': 'BREAKPOINT', 'c000001d': 'ILLEGAL_INSTRUCTION',
     'c0000094': 'INTEGER_DIVIDE_BY_ZERO', 'c00000fd': 'STACK_OVERFLOW', 'c0000374': 'HEAP_CORRUPTION',
@@ -2822,10 +2955,11 @@ function dxExceptionName(hex) {
     return DX_EXCEPTION[key] || null;
 }
 
-// Parse the "Windows Error Reporting" section into [{ name, p:{P1..P10} }, ...] (dxdiag lists newest first).
+// Parse the "Windows Error Reporting" section into [{ name, p:{P1..P10} }, ...] (dxdiag lists newest first), or
+// null when the file has no such section (truncated, or a dxdiag we cannot read): that is not an empty history.
 function parseWER(text) {
     var out = [], idx = text.indexOf('Windows Error Reporting');
-    if (idx < 0) { return out; }
+    if (idx < 0) { return null; }
     var blocks = text.substring(idx).split(/\+\+\+\s*WER\d+\s*\+\+\+/);
     for (var i = 1; i < blocks.length; i++) {
         var b = blocks[i];
@@ -2837,13 +2971,22 @@ function parseWER(text) {
     return out;
 }
 
-// Classify a WER entry: 'eve' (exefile.exe crash), 'app' (other app crash), or 'kernel' (BSOD / live dump).
-// App crashes put the faulting app's filename in P1; kernel dumps put a hex bugcheck code there instead.
+// Classify a WER entry by its event name: 'eve' (an exefile.exe crash), 'evehang' (exefile.exe stopped
+// responding), 'kernel' (BSOD / live dump), 'app' (another program's crash), or null for anything that is not a
+// crash (RADAR_PRE_LEAK memory diagnostics, other programs' hangs, update failures...). Going by P1 alone counted
+// a leak report or a hang of exefile.exe as an EVE client crash. App crashes put the program's file name in P1.
+var DX_APP_CRASH = /^(APPCRASH|BEX|BEX64|MoAppCrash|MoBEX|CLR20r3)$/i;
 function dxWerKind(e) {
-    var p1 = e.p.P1 || '';
-    if (/\.exe/i.test(p1)) { return /exefile\.exe/i.test(p1) ? 'eve' : 'app'; }
-    if (/bluescreen|livekernel|kernel/i.test(e.name)) { return 'kernel'; }
-    return 'app';
+    var name = e.name || '', eve = /exefile\.exe/i.test(e.p.P1 || '');
+    if (/bluescreen|livekernel/i.test(name)) { return 'kernel'; }
+    if (DX_APP_CRASH.test(name)) { return eve ? 'eve' : 'app'; }
+    if (/^AppHang/i.test(name)) { return eve ? 'evehang' : null; }
+    return null;
+}
+
+// The exception code of an app crash: P7 for APPCRASH, but P8 for BEX / BEX64, where P7 is the offset.
+function dxCrashCode(e) {
+    return /^(BEX|BEX64|MoBEX)$/i.test(e.name || '') ? e.p.P8 : e.p.P7;
 }
 
 // First "Label: value" line in the dxdiag text (labels are right-aligned, so allow leading whitespace).
@@ -2853,15 +2996,32 @@ function dxFirst(text, label) {
     return m ? m[1].trim() : '';
 }
 
-// dxdiag dates use the reporter's locale (US default M/D/YYYY). Parse leniently; if the "month" is > 12 the
-// locale must be D/M, so swap. Returns a Date or null.
-function dxParseDate(s) {
-    var m = String(s == null ? '' : s).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (!m) { return null; }
-    var mm = +m[1], dd = +m[2], yy = +m[3];
-    if (mm > 12 && dd <= 12) { var t = mm; mm = dd; dd = t; }
+// dxdiag dates use the reporter's locale: US M/D/YYYY by default, D.M.YYYY in much of Europe, YYYY-MM-DD in
+// others. Only '/' used to be read, so a German driver date gave no date, no age and no over-a-year warning.
+// `order` ('dm' or 'md', from dxDateOrder) settles a slash or dash date whose day is 12 or less; without it
+// a "month" over 12 still means D/M. Returns a Date or null.
+function dxParseDate(s, order) {
+    s = String(s == null ? '' : s);
+    var m, yy, mm, dd;
+    if ((m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/))) { yy = +m[1]; mm = +m[2]; dd = +m[3]; }
+    else if ((m = s.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/))) { dd = +m[1]; mm = +m[2]; yy = +m[3]; }   // dotted dates are D.M.Y
+    else if ((m = s.match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/))) {
+        mm = +m[1]; dd = +m[2]; yy = +m[3];
+        if ((order === 'dm' && dd <= 12) || (mm > 12 && dd <= 12)) { var t = mm; mm = dd; dd = t; }
+    }
+    else { return null; }
     var d = new Date(yy, mm - 1, dd);
-    return isNaN(d.getTime()) ? null : d;
+    return (isNaN(d.getTime()) || d.getMonth() !== mm - 1 || d.getDate() !== dd) ? null : d;   // no 31.02 rolled into March
+}
+// The order of the slash / dash dates in this dxdiag: 'dm' once any of them has a first part over 12, 'md' once
+// any has a second part over 12, else null (every date in the file is ambiguous).
+function dxDateOrder(text) {
+    var re = /(?:^|[^\d.\/-])(\d{1,2})[\/-](\d{1,2})[\/-]\d{4}/g, m;
+    while ((m = re.exec(text))) {
+        if (+m[1] > 12) { return 'dm'; }
+        if (+m[2] > 12) { return 'md'; }
+    }
+    return null;
 }
 function dxFmtDate(d) {
     var MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -2893,7 +3053,7 @@ function dxNvidiaDriver(ver) {
     return t.slice(0, 3) + '.' + t.slice(3);
 }
 // Display devices -> [{ name, version, driverDate }]. dxdiag repeats a card once per attached monitor, so dedupe.
-function dxGpus(text) {
+function dxGpus(text, order) {
     var out = [], seen = {}, start = text.indexOf('Display Devices');
     if (start < 0) { return out; }
     var blocks = text.substring(start).split(/Card name:[ \t]*/).slice(1);
@@ -2908,7 +3068,7 @@ function dxGpus(text) {
         var key = name + '|' + ver;
         if (seen[key]) { return; }
         seen[key] = 1;
-        out.push({ name: name, version: ver, driverDate: dm ? dxParseDate(dm[1]) : null, role: role });
+        out.push({ name: name, version: ver, driverDate: dm ? dxParseDate(dm[1], order) : null, role: role });
     });
     return out;
 }
@@ -2916,27 +3076,33 @@ function dxGpus(text) {
 // Build the dxdiag Quick-Info summary and drop it into #dxdiag.
 function renderDxdiag(text) {
     var COL = { crit: '#ff8f8f', warn: '#ffd479', ok: '#7fdca4' };
-    var reportDate = dxParseDate(dxFirst(text, 'Time of this report'));
+    var order = dxDateOrder(text);
+    var reportDate = dxParseDate(dxFirst(text, 'Time of this report'), order);
     var html = '';
 
-    var eve = [], kernel = [], app = [];
-    parseWER(text).forEach(function (e) {
+    var wer = parseWER(text), eve = [], hangs = [], kernel = [], app = [];
+    (wer || []).forEach(function (e) {
         var k = dxWerKind(e);
-        (k === 'eve' ? eve : k === 'kernel' ? kernel : app).push(e);
+        if (k) { (k === 'eve' ? eve : k === 'evehang' ? hangs : k === 'kernel' ? kernel : app).push(e); }
     });
 
-    // EVE client crashes - the headline. APPCRASH P4 = faulting module, P7 = exception code.
+    // EVE client crashes - the headline. P4 = faulting module; the exception code is P7 (P8 for BEX).
     if (eve.length) {
         html += '<div style="font-weight:700; color:' + COL.crit + '; margin:2px 0 4px;">&#9888; ' + eve.length +
             ' EVE client crash' + (eve.length === 1 ? '' : 'es') + ' (exefile.exe)</div>' +
             '<table style="border-collapse:collapse; font-size:12px; line-height:1.5; margin-bottom:8px;">';
         eve.forEach(function (e) {
-            var mod = e.p.P4 || '', exc = dxExceptionName(e.p.P7) || e.p.P7 || '';
+            var code = dxCrashCode(e), mod = e.p.P4 || '', exc = dxExceptionName(code) || code || '';
             var detail = [exc, mod].filter(Boolean).map(reqEscape).join(' in ');
             html += '<tr><td style="padding:0 8px 0 0; color:#9aa6b2; vertical-align:top; white-space:nowrap;">' +
                 reqEscape(e.name) + '</td><td style="padding:0; color:#e6e6e6;">' + (detail || '&ndash;') + '</td></tr>';
         });
         html += '</table>';
+    }
+    // The client hanging is worth knowing, but it is not a crash.
+    if (hangs.length) {
+        html += '<div style="font-size:12px; color:' + COL.warn + '; margin-bottom:8px;">&#9888; ' + hangs.length +
+            ' EVE client hang' + (hangs.length === 1 ? '' : 's') + ' (exefile.exe stopped responding)</div>';
     }
 
     // Kernel crashes (BSOD / live dumps), grouped by decoded bugcheck name.
@@ -2960,12 +3126,14 @@ function renderDxdiag(text) {
         }
     }
 
+    if (!wer) {
+        html += '<div style="font-size:12px; color:' + COL.warn + '; margin-bottom:8px;">WER section not found - crash history unknown.</div>';
+    } else if (!eve.length && !kernel.length) {
+        html += '<div style="font-size:12px; color:' + COL.ok + '; margin-bottom:8px;">&#10003; No EVE or system crashes in WER history.</div>';
+    }
     if (app.length) {
         html += '<div style="font-size:11px; color:#9aa6b2; margin-bottom:8px;">+ ' + app.length +
             ' other app crash' + (app.length === 1 ? '' : 'es') + ' in history</div>';
-    }
-    if (!eve.length && !kernel.length) {
-        html += '<div style="font-size:12px; color:' + COL.ok + '; margin-bottom:8px;">&#10003; No crashes in WER history.</div>';
     }
 
     // dxdiag's own Direct3D probe crash.
@@ -2975,7 +3143,7 @@ function renderDxdiag(text) {
     }
 
     // GPU(s): driver DATE + age (recency), version as fallback. Warn (amber) when the driver is over a year old.
-    var gpus = dxGpus(text);
+    var gpus = dxGpus(text, order);
     if (gpus.length) {
         html += '<div style="font-size:12px; line-height:1.6;">';
         gpus.forEach(function (g) {
@@ -3012,7 +3180,9 @@ function renderDxdiag(text) {
         .filter(Boolean).map(reqEscape).join(' · ');
     if (sys) { html += '<div style="font-size:11px; color:#9aa6b2; margin-top:8px;">' + sys + '</div>'; }
 
-    $('#dxdiag').html(html || 'Could not read dxdiag.');
+    // Nothing recognised at all: say so rather than show a lone "WER section not found".
+    if (!wer && !gpus.length && !sys) { html = 'Could not read dxdiag: no crash history, display devices or system details found.'; }
+    $('#dxdiag').html(html);
 }
 
 // Floating Div for the dxdiag.txt file: the triage summary overlay (crash history / GPU driver recency / system).
@@ -3251,7 +3421,7 @@ JiTA.logsig = {
     // Every OTHER defect that shares a signature with `key` (deduped across all of the key's signatures),
     // each with its status/resolution. Drives the inline "Same exception" section on a defect. [] when none.
     siblingsForKey: function (key) {
-        if (JiTA.worker && JiTA.worker._started) { return JiTA.worker.call('logsig', { op: 'siblings', key: key }).catch(function () { return JiTA.logsig._siblingsLocal(key); }); }
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'siblings', key: key }).catch(function () { return JiTA.logsig._siblingsLocal(key); }); }
         return JiTA.logsig._siblingsLocal(key);
     },
     _siblingsLocal: function (key) {
@@ -3277,7 +3447,7 @@ JiTA.logsig = {
     // sibling - i.e. the SAME bug reached via a DIFFERENT call path. Looser than siblingsForKey; drives the
     // "Possibly related" hint. [] when none.
     relatedForKey: function (key) {
-        if (JiTA.worker && JiTA.worker._started) { return JiTA.worker.call('logsig', { op: 'related', key: key }).catch(function () { return JiTA.logsig._relatedLocal(key); }); }
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'related', key: key }).catch(function () { return JiTA.logsig._relatedLocal(key); }); }
         return JiTA.logsig._relatedLocal(key);
     },
     _relatedLocal: function (key) {
@@ -3310,7 +3480,7 @@ JiTA.logsig = {
     // first (the freshly-recurring exceptions a triager most wants to see), with cluster size as the
     // tiebreaker. Drives the "Exception clusters" overview.
     clusters: function () {
-        if (JiTA.worker && JiTA.worker._started) { return JiTA.worker.call('logsig', { op: 'clusters' }).catch(function () { return JiTA.logsig._clustersLocal(); }); }
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'clusters' }).catch(function () { return JiTA.logsig._clustersLocal(); }); }
         return JiTA.logsig._clustersLocal();
     },
     _clustersLocal: function () {
@@ -3544,7 +3714,7 @@ JiTA.logsig = {
     // swallow the whole rest of the log (hundreds of unrelated `file.py(NN) func` lines) and the stack
     // signature would never match the clean one in the index. Resolves to { defect -> { defect, count, msg } }.
     matchText: function (text) {
-        if (JiTA.worker && JiTA.worker._started) { return JiTA.worker.call('logsig', { op: 'match', text: text }).catch(function () { return JiTA.logsig._matchTextLocal(text); }); }
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'match', text: text }).catch(function () { return JiTA.logsig._matchTextLocal(text); }); }
         return JiTA.logsig._matchTextLocal(text);
     },
     _matchTextLocal: function (text) {
@@ -4058,6 +4228,27 @@ JiTA.util = {
         if (isNaN(t)) { return null; }
         var mins = Math.ceil(((now == null ? Date.now() : now) - t) / 60000) + 5;
         return '-' + Math.max(mins, 5) + 'm';
+    },
+
+    // Copy to the clipboard, falling back to the old selection + execCommand path where the async API is
+    // unavailable or refused (it needs a secure context and a user gesture; a button click is one, but a
+    // browser policy can still say no). Rejects when nothing was copied, so the caller can say so.
+    copy: function (text) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); }
+        } catch (e) { /* fall through */ }
+        return new Promise(function (resolve, reject) {
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                var ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (ok) { resolve(); } else { reject(new Error('copy refused')); }
+            } catch (e2) { reject(e2); }
+        });
     },
 
     delay: function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); },
@@ -4781,7 +4972,7 @@ JiTA.responses = {
                     var cleared = ed && (ed.textContent || '').trim() === '';
                     var disabled = !!(addBtn && addBtn.disabled);
                     if (cleared || disabled) { clearInterval(iv); resolve({ ok: true }); }
-                    else if (waited >= 8000) { clearInterval(iv); resolve({ ok: false, error: 'Could not confirm the note posted (composer did not reset).' }); }
+                    else if (waited >= 8000) { clearInterval(iv); resolve({ ok: false, clicked: true, error: 'Could not confirm the note posted (composer did not reset).' }); }
                 }, 200);
             }
         });
@@ -4997,6 +5188,9 @@ JiTA.db = {
                 for (var i = 0; i < items.length; i++) { apply(store, items[i]); }
                 tx.oncomplete = function () { resolve(items.length); };
                 tx.onerror = function (e) { reject(e.target.error); };
+                // A commit that fails (QuotaExceededError) fires only abort: without this the promise never settled and
+                // JiTA.sync.running stayed true, so every Sync now said "already running" until a reload.
+                tx.onabort = function () { reject(tx.error || new Error('IndexedDB transaction aborted')); };
             });
         });
     },
@@ -5461,8 +5655,10 @@ JiTA.sync = {
     },
 
     // Make the shared ranking worker drop its in-memory indexes; it rebuilds them from the DB on its next query.
+    // Resolves once the worker has them dropped (or could not be reached); never rejects.
     _invalidateWorker: function () {
-        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }
+        return JiTA.worker.call('invalidate').then(function () {}, function () { /* ignore */ });
     },
 
     // An EBR just left the OPEN set locally (attached / closed) and was deleted from the DB. Make every open
@@ -5471,14 +5667,17 @@ JiTA.sync = {
     // ranks in on the semantic channel), and a plain reload won't fix it - the worker survives the reload and
     // the 30-min sync throttle (recentlySynced) skips the catch-up that would re-prune + re-index. So we (a)
     // mark THIS tab's EBR keyword/vector indexes dirty, (b) drop the shared worker's indexes via 'invalidate'
-    // (it rebuilds from the current DB, minus the removed report, on the next query), and (c) unless this is a
-    // cross-tab echo, tell the other tabs (the listener near startup re-renders them). The acting tab handles
-    // its own row UI (softRefreshStatus / _fadeOutAndReplace), so we deliberately don't re-render it here.
+    // (it rebuilds from the current DB, minus the removed report, on the next query), and (c) tell the other tabs
+    // (the listener near startup re-renders them) once that has landed, so none of them ranks against the old
+    // indexes. The other tabs only mark their own indexes: one removal used to drop the shared worker's indexes
+    // once per open tab, and it could rebuild them as often. The acting tab handles its own row UI
+    // (softRefreshStatus / _fadeOutAndReplace), so we deliberately don't re-render it here.
     _ebrRemoved: function (keys, fromRemote) {
         JiTA.rank._dirtyEbr = true;
         JiTA.rank._dirtyEbrVec = true;
-        JiTA.sync._invalidateWorker();
-        if (!fromRemote) { gmSet('sdEbrRemoved', { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId }); }
+        if (fromRemote) { return; }
+        var note = { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId };
+        JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });
     },
 
     // Menu entry point for the single "Sync now" button: sync the defect dataset, then the bug-report
@@ -5492,8 +5691,9 @@ JiTA.sync = {
     // Quiet background catch-up used by the auto-sync scheduler. BOTH datasets AUTO-INITIALIZE on the first
     // run (full build when the DB is empty) and then run incremental catch-ups: DEFECTS (EDR/EO) and OPEN
     // BUG REPORTS (EBRs). No start/finish toasts; re-embeds / refreshes the open panel only on actual changes.
+    // Resolves true when it completed, false when it failed, and null when another sync was already running.
     autoSync: function () {
-        if (JiTA.sync.running) { return Promise.resolve(); }
+        if (JiTA.sync.running) { return Promise.resolve(null); }
         JiTA.sync.running = true;
         var defectStored = 0, ebrChanged = false;
         return JiTA.db.countDefectsOnly().then(function (n) {
@@ -5515,11 +5715,13 @@ JiTA.sync = {
                 if (ebrChanged) { JiTA.translate.prepare(); }                        // translate any new foreign reports
                 if (defectStored > 0 && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
                 if (ebrChanged && JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
+                return true;
             });
         }).catch(function (e) {
             JiTA.sync.running = false;
             JiTA.db.setMeta('lastError', String(e && e.message || e));
             console.log('[JiTA] auto-sync error:', e && e.message || e);
+            return false;
         });
     }
 };
@@ -5588,7 +5790,7 @@ JiTA.rank = {
     // Keyword (BM25) defect candidates. Routes to the shared worker's index (so tabs don't build one), gating
     // tab-side; on worker failure, falls back to a locally-built BM25 index (the ONLY time _index is built here).
     suggest: function (text, excludeKey, limit, filterTerms) {
-        if (JiTA.worker && JiTA.worker._started) {
+        if (JiTA.worker && JiTA.worker.usable()) {
             return JiTA.rank._workerKeyword(text, 'defects', excludeKey, filterTerms, limit)
                 .then(function (cands) { return JiTA.rank._gateScored(cands, 'defects').slice(0, limit || JiTA.TOP_N); })
                 .catch(function () { return JiTA.rank._suggestLocal(text, excludeKey, limit, filterTerms); });
@@ -5626,7 +5828,7 @@ JiTA.rank = {
             for (var p = 0; p < scored.length; p++) { scored[p].pct = top > 0 ? Math.round(scored[p].score / top * 100) : 0; }
             return scored;
         }
-        if (JiTA.worker && JiTA.worker._started) {
+        if (JiTA.worker && JiTA.worker.usable()) {
             return JiTA.rank._workerKeyword(text, 'ebr', excludeKey, filterTerms, limit)
                 .then(function (cands) { return withPct(JiTA.rank._gateScored(cands, 'ebr').slice(0, limit || JiTA.TOP_N)); })
                 .catch(function () { return JiTA.rank._suggestEbrLocal(text, excludeKey, limit, filterTerms); });
@@ -5930,11 +6132,11 @@ JiTA.embed = {
     prepare: function (force) {
         // With the shared worker, embedding runs THERE (one model for all tabs) - no main-thread model load.
         // Any tab can trigger it; the request routes to the single leader worker, which is single-flight.
-        if (JiTA.worker && JiTA.worker._started) {
+        if (JiTA.worker && JiTA.worker.usable()) {
             if (JiTA.embed._preparing) { return JiTA.embed._preparing; }
             JiTA.embed._preparing = JiTA.worker.call('embedPass').then(function (r) {
                 JiTA.embed._preparing = null;
-                if (r && r.embedded > 0) { try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ } }   // new vectors -> re-rank the open view
+                // The call is only acknowledged here; the pass reports its end with embedPassDone, which re-renders.
             }, function (e) {
                 JiTA.embed._preparing = null;
                 console.log('[JiTA] worker embed pass skipped:', (e && e.message) || e);
@@ -6122,7 +6324,7 @@ JiTA.rank._fuse = function (sem, bm, demote) {
 // Returns the worker's top-K score-sorted candidate list, or rejects if the worker is unavailable (caller then
 // keyword-falls-back). filterTerms is applied in the worker; the remaining session/UI gates run tab-side below.
 JiTA.rank._workerSemantic = function (text, scope, excludeKey, filterTerms) {
-    if (!JiTA.worker || !JiTA.worker._started) { return Promise.reject(new Error('worker off')); }
+    if (!JiTA.worker || !JiTA.worker.usable()) { return Promise.reject(new Error('worker off')); }
     return JiTA.worker.call('rankSemantic', {
         text: text, scope: scope, excludeKey: excludeKey,
         filterTerms: (filterTerms && filterTerms.length ? filterTerms : null),
@@ -6166,7 +6368,7 @@ JiTA.rank._hybridResults = function (text, key, filterTerms, scope, bmFn, keywor
 // onUpgrade (optional) is told when a late Hybrid result arrives; without it the open panel is redrawn.
 JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid, onUpgrade) {
     if (forceMode === 'Keyword') { return keywordOnly(); }
-    if (!JiTA.worker || !JiTA.worker._started) { return keywordOnly(); }   // no shared worker -> keyword only
+    if (!JiTA.worker || !JiTA.worker.usable()) { return keywordOnly(); }   // no shared worker -> keyword only
     // Keyword-first: race the worker-backed hybrid against a short window. If the worker answers in time we show
     // Hybrid straight away; otherwise show Keyword now and, once the (cold-starting) worker finally responds,
     // re-render to upgrade to Hybrid. hybrid() itself keyword-falls-back if the worker errors.
@@ -7282,8 +7484,7 @@ JiTA.ui = {
         gmSet('sdPanelStyle', next);
         $('#jita-sd-panel').remove();
         $('#jita-side-group').remove();
-        if (JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.render(JiTA.ui.currentKey); }
-        else if (JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.renderReports(JiTA.ui.currentKey); }
+        JiTA.ui._rerenderCurrent();
         refreshMenu();
     },
 
@@ -8734,6 +8935,10 @@ JiTA.menu = {
         return $row;
     },
 
+    // True while $el is still on the page. render() rebuilds the overlay inside the same #jita-menu, so a completion
+    // that only checked for #jita-menu wrote into the old, detached copy of its status line after a redraw.
+    _live: function ($el) { return !!($el && $el[0] && document.body && document.body.contains($el[0])); },
+
     render: function () {
         var $p = $('#jita-menu');
         if (!$p.length) { return; }
@@ -8845,10 +9050,7 @@ JiTA.menu = {
                 if (v === JiTA.TOP_N) { return; }
                 JiTA.TOP_N = v;
                 gmSet('sdTopN', v);
-                // Re-render whichever view is open so the new count takes effect immediately.
-                var k = JiTA.ui.currentKey;
-                if (k && /^EBR-/.test(k)) { JiTA.ui.render(k); }
-                else if (k && JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k); }
+                JiTA.ui._rerenderCurrent();   // so the new count takes effect immediately
             }
             $cnt.on('change', commitTopN);
             $cnt.on('keydown', function (e) { if (e.key === 'Enter') { commitTopN(); } });
@@ -8875,9 +9077,7 @@ JiTA.menu = {
             var $clrHidden = $('<button class="jita-btn"></button>').text('Unhide all')
                 .on('click', function () {
                     JiTA.hidden.clear();
-                    var k = JiTA.ui.currentKey;
-                    if (k && /^EBR-/.test(k)) { JiTA.ui.render(k); }
-                    else if (k && JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k); }
+                    JiTA.ui._rerenderCurrent();
                     refreshMenu();
                 });
             if (!hiddenN) { $clrHidden.prop('disabled', true); }
@@ -8891,7 +9091,7 @@ JiTA.menu = {
                 return JiTA.db.countEbr().then(function (e) {
                     return JiTA.db.getMeta('dbBuiltAtDefects').then(function (bd) {
                         return JiTA.db.getMeta('dbBuiltAtEbr').then(function (be) {
-                            if (!document.getElementById('jita-menu')) { return; }
+                            if (!JiTA.menu._live($status)) { return; }
                             var line = d + ' defects · ' + e + ' open bug reports indexed locally';
                             var built = [];
                             if (bd) { built.push('defects ' + JiTA.util.fmtDate(bd)); }
@@ -8937,11 +9137,11 @@ JiTA.menu = {
                     return JiTA.conf.deleteProperty(page, pr.id).then(function () { out.push('cleanup ok'); },
                         function () { out.push('cleanup failed (a jita_leadduty_probe property was left behind)'); });
                 }).then(function () {
-                    if (!document.getElementById('jita-menu')) { return; }
+                    if (!JiTA.menu._live($ldStatus)) { return; }
                     $test.prop('disabled', false);
                     $ldStatus.text('Ledger page ' + page + ': ' + out.join(' · '));
                 }, function (e) {
-                    if (!document.getElementById('jita-menu')) { return; }
+                    if (!JiTA.menu._live($ldStatus)) { return; }
                     $test.prop('disabled', false);
                     $ldStatus.text('Ledger page ' + page + ': ' + (out.length ? (out.join(' · ') + ' · ') : '') + String(e && e.message || e));
                 });
@@ -8958,7 +9158,7 @@ JiTA.menu = {
                     JiTA.conf.getProperty(page, JiTA.leadduty.LEDGER_KEY),
                     JiTA.conf.getProperty(page, JiTA.leadduty.QC_LEDGER_KEY)
                 ]).then(function (r) {
-                    if (!document.getElementById('jita-menu')) { return; }
+                    if (!JiTA.menu._live($ldStatus)) { return; }
                     $show.prop('disabled', false);
                     var wiki = r[0], qc = r[1], bits = [];
                     if (window.console) {
@@ -8979,7 +9179,7 @@ JiTA.menu = {
                     bits.push('full JSON in the console (F12)');
                     $ldStatus.text(bits.join(' · '));
                 }, function (e) {
-                    if (!document.getElementById('jita-menu')) { return; }
+                    if (!JiTA.menu._live($ldStatus)) { return; }
                     $show.prop('disabled', false);
                     $ldStatus.text(String(e && e.message || e));
                 });
@@ -9015,12 +9215,12 @@ JiTA.menu = {
                         var line = JiTA.leadduty._poolLine(pool);
                         return JiTA.leadduty.report.publish(false).catch(function () { /* reported below */ })
                             .then(function () {
-                                if (!document.getElementById('jita-menu')) { return; }
+                                if (!JiTA.menu._live($ldStatus)) { return; }
                                 $rescan.prop('disabled', false);
                                 $ldStatus.text(line + ' · ' + JiTA.leadduty.report.lastLine());
                             });
                     }, function (e) {
-                        if (!document.getElementById('jita-menu')) { return; }
+                        if (!JiTA.menu._live($ldStatus)) { return; }
                         $rescan.prop('disabled', false);
                         $ldStatus.text(String(e && e.message || e));
                     });
@@ -9034,11 +9234,11 @@ JiTA.menu = {
                     $pub.prop('disabled', true);
                     $ldStatus.text('Publishing the ledger page…');
                     JiTA.leadduty.report.publish(true).then(function () {
-                        if (!document.getElementById('jita-menu')) { return; }
+                        if (!JiTA.menu._live($ldStatus)) { return; }
                         $pub.prop('disabled', false);
                         $ldStatus.text(JiTA.leadduty.report.lastLine() + ' · reload the Confluence page to see it');
                     }, function () {
-                        if (!document.getElementById('jita-menu')) { return; }
+                        if (!JiTA.menu._live($ldStatus)) { return; }
                         $pub.prop('disabled', false);
                         $ldStatus.text(JiTA.leadduty.report.lastLine());
                     });
@@ -9052,11 +9252,14 @@ JiTA.menu = {
                     $wipe.prop('disabled', true);
                     $ldStatus.text('Clearing the ledgers…');
                     var out = [];
+                    // A failed read OR delete is reported for its key and the wipe goes on: the handler used to cover
+                    // the read alone, so a refused DELETE left the button disabled on "Clearing the ledgers…" and
+                    // the mirror and the scheduler's clocks never reset.
                     function drop(key) {
                         return JiTA.conf.getProperty(page, key).then(function (prop) {
                             if (!prop) { out.push(key + ': already absent'); return; }
                             return JiTA.conf.deleteProperty(page, prop.id).then(function () { out.push(key + ': deleted'); });
-                        }, function (e) { out.push(key + ': ' + String(e && e.message || e)); });
+                        }).catch(function (e) { out.push(key + ': ' + String(e && e.message || e)); });
                     }
                     drop(JiTA.leadduty.LEDGER_KEY).then(function () {
                         return drop(JiTA.leadduty.QC_LEDGER_KEY);
@@ -9082,9 +9285,13 @@ JiTA.menu = {
                         JiTA.leadduty.ui._qc = null;
                         JiTA.leadduty.ui._qcWarm = null;
                         JiTA.leadduty.qc._actorCache = {};
-                        if (!document.getElementById('jita-menu')) { return; }
+                        if (!JiTA.menu._live($ldStatus)) { return; }
                         $wipe.prop('disabled', false);
                         $ldStatus.text(out.join(' · ') + ' · local mirror and pool cache cleared · rebuild starts within a minute');
+                    }).catch(function (e) {
+                        if (!JiTA.menu._live($ldStatus)) { return; }
+                        $wipe.prop('disabled', false);
+                        $ldStatus.text((out.length ? out.join(' · ') + ' · ' : '') + 'clearing stopped: ' + String(e && e.message || e));
                     });
                 });
             }
@@ -9093,7 +9300,7 @@ JiTA.menu = {
                 var me = JiTA.leadduty.me();
                 var who = 'You are ' + ((me && me.handle) || '?') + ' · roster: ' + JiTA.leadduty.ROSTER().join(', ');
                 JiTA.db.getMeta(JiTA.leadduty.pool.CACHE_KEY).then(function (raw) {
-                    if (!document.getElementById('jita-menu') || $ldStatus.text()) { return; }
+                    if (!JiTA.menu._live($ldStatus) || $ldStatus.text()) { return; }
                     var line = who;
                     if (raw && raw.pages) { line = JiTA.leadduty._poolLine(JiTA.leadduty.pool._applyExclusions(raw)) + ' · ' + who; }
                     // A failed publish is otherwise invisible: it happens 20s after a ledger write with no UI
@@ -9128,6 +9335,7 @@ JiTA.menu = {
         $('<h3>Debug</h3>').appendTo($dbg);
         var w = JiTA.worker;
         var wstat = !w._started ? 'not started'
+                  : !w.usable() ? 'gave up (the worker could not run in this browser)'
                   : (w._isLeader ? 'this tab is the worker LEADER' : 'follower (leader is another tab)');
         $('<div class="jita-menu-status"></div>')
             .text('Worker: ' + wstat + ' · this tab v' + (JiTA.SCRIPT_VERSION || '?')).appendTo($dbg);
@@ -9142,7 +9350,7 @@ JiTA.menu = {
         var $wbk = $('<div class="jita-menu-status">Worker backend: checking…</div>').appendTo($dbg);
         if (w._started) {
             JiTA.worker.call('ping', null, { timeoutMs: 8000 }).then(function (r) {
-                if (!document.getElementById('jita-menu')) { return; }
+                if (!JiTA.menu._live($wbk)) { return; }
                 var b = (r && r.backend) || 'unknown';
                 var label = (b === 'none' || b === 'unknown') ? (b + ' (model not loaded yet - open a bug report to trigger it)')
                           : /webgpu/i.test(b) ? (b + ' (GPU)')
@@ -9206,9 +9414,17 @@ JiTA.menu = {
 // empty DBs need nothing: their first full build stamps the current version.
 JiTA.migrate = {
     _done: false,
+    RETRY_MS: 30 * 1000,
+    // A sync holds the single-flight `running` flag, and the refetches would then do nothing, for the rest of the
+    // session. Look again once it is over.
+    _later: function () {
+        JiTA.migrate._done = false;
+        setTimeout(function () { try { JiTA.migrate.run(); } catch (e) { /* swallow */ } }, JiTA.migrate.RETRY_MS);
+    },
     run: function () {
         if (JiTA.migrate._done) { return; }            // once per session
         JiTA.migrate._done = true;
+        if (JiTA.sync.running) { JiTA.migrate._later(); return; }
         if (!flagOn('similarDefects')) { return; }            // Triage Assistant off -> nothing to migrate
         JiTA.db.countDefectsOnly().then(function (nDef) {
             return JiTA.db.getMeta('dataVersionDefects').then(function (dv) {
@@ -9217,6 +9433,7 @@ JiTA.migrate = {
                     return JiTA.db.getMeta('dataVersionEbr').then(function (ev) {
                         var ebrStale = nEbr > 0 && (Number(ev) || 0) < JiTA.DATA_VERSION;
                         if (!defStale && !ebrStale) { return; }
+                        if (JiTA.sync.running) { JiTA.migrate._later(); return; }   // one started while we read
                         console.log('[JiTA] local DB schema out of date (defects v' + (Number(dv) || 0) +
                             ', reports v' + (Number(ev) || 0) + ' < v' + JiTA.DATA_VERSION +
                             ') - auto re-fetching to backfill new fields');
@@ -9246,6 +9463,9 @@ JiTA.sched = {
     STARTUP_DELAY_MS: 20 * 1000,   // wait a bit after load so we don't compete with first paint / initial render
     LEASE_TTL_MS: 5 * 60 * 1000,   // a lease older than this is treated as abandoned (tab closed mid-sync)
     LEASE_KEY: 'sdSyncLease',
+    HEARTBEAT_MS: 60 * 1000,       // a running sync re-stamps its lease this often, so a long first crawl keeps it
+    FAIL_MS: 5 * 60 * 1000,        // after a failed auto-sync (expired session, Jira down), wait this long before the next
+    FAIL_KEY: 'sdSyncFailTs',      // when the last auto-sync failed, shared across tabs; 0 once one completes
     LAST_SYNC_KEY: 'sdLastSyncTs',  // epoch ms of the last completed sync (any kind), persisted + shared across tabs
     tabId: 'tab-' + Math.floor(Math.random() * 1e9) + '-' + Date.now(),
     _timer: null,
@@ -9278,16 +9498,35 @@ JiTA.sched = {
         }
         return false;
     },
+    _releaseLease: function () {
+        var l = gmGet(JiTA.sched.LEASE_KEY, null);
+        if (l && l.tabId === JiTA.sched.tabId) { gmSet(JiTA.sched.LEASE_KEY, null); }
+    },
 
     tick: function () {
+        var S = JiTA.sched;
         if (!flagOn('similarDefects')) { return; }            // feature disabled
-        if (JiTA.sched.recentlySynced()) { return; }    // a sync ran < INTERVAL_MS ago (persisted) - don't re-fetch on reload
-        if (!JiTA.sched._acquireLease()) { return; }    // another tab is the syncer right now
-        JiTA.sync.autoSync();
+        if (S.recentlySynced()) { return; }    // a sync ran < INTERVAL_MS ago (persisted) - don't re-fetch on reload
+        // A failed run (an expired session, Jira down) used to be retried on every 30 s poll, in every tab.
+        var failed = gmGet(S.FAIL_KEY, 0) || 0;
+        if (failed && (Date.now() - failed) < S.FAIL_MS) { return; }
+        if (JiTA.sync.running) { return; }               // a sync of this tab's own is going
+        if (!S._acquireLease()) { return; }    // another tab is the syncer right now
+        // The lease was stamped once, so a first full crawl that ran past LEASE_TTL_MS let a second tab start its own
+        // sync, writing its paging token over this one's. Keep it fresh while the sync runs, and free it after.
+        var hb = setInterval(function () { gmSet(S.LEASE_KEY, { tabId: S.tabId, ts: Date.now() }); }, S.HEARTBEAT_MS);
+        return JiTA.sync.autoSync().then(function (done) {
+            clearInterval(hb);
+            S._releaseLease();
+            if (done === true) { gmSet(S.FAIL_KEY, 0); }
+            else if (done === false) { gmSet(S.FAIL_KEY, Date.now()); }
+        });
     },
 
     start: function () {
         if (JiTA.sched._timer) { return; }
+        // Free the lease when the tab goes away, so another tab can take the sync up at once (the TTL is the backstop).
+        try { window.addEventListener('pagehide', function () { JiTA.sched._releaseLease(); }); } catch (e) { /* ignore */ }
         setTimeout(function () {
             try { JiTA.sched.tick(); } catch (e) { /* swallow */ }
             // Poll every POLL_MS (≪ INTERVAL_MS). tick() itself only acts once recentlySynced() reports that
@@ -9401,7 +9640,7 @@ JiTA.credits = {
     // the pill. No in-tab fallback - if the worker is unavailable we reject so callers surface an error/retry.
     computeMonth: function (y, m, mentor) {
         var C = JiTA.credits;
-        if (!(JiTA.worker && JiTA.worker._started)) { return Promise.reject(new Error('credits: worker unavailable')); }
+        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.reject(new Error('credits: worker unavailable')); }
         var tag = (JiTA.sched.tabId) + ':' + (++C._tagSeq);
         C._workerTag = tag;
         return JiTA.worker.call('creditsMonth', { y: y, m: m, mentor: mentor || null, tag: tag }, { timeoutMs: C.WORKER_TIMEOUT_MS })
@@ -9454,7 +9693,7 @@ JiTA.credits = {
     // crawl. Resolves the self record (also written to creditsSelf:<ym>); rejects if the worker is unavailable.
     computeSelf: function (y, m) {
         var C = JiTA.credits, ym = y + '-' + (m < 10 ? '0' : '') + m;   // ym inline (was C._monthBounds, now worker-side)
-        if (!(JiTA.worker && JiTA.worker._started)) { return Promise.reject(new Error('credits: worker unavailable')); }
+        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.reject(new Error('credits: worker unavailable')); }
         return JiTA.link.currentUser().then(function (me) {
             if (!me) { return null; }
             return C.getCached(ym).then(function (full) {
@@ -9755,6 +9994,7 @@ JiTA.credits = {
 // runs as-is in the worker. Never called in the page (references self/indexedDB/import only when run as a worker).
 function jitaWorkerBody(cfg) {
     var pipe = null, backend = 'none', db = null, vecCache = null, kwCache = null, logsigCache = null, BATCH = 8, embedding = false;
+    var pipeP = null, dbP = null, embedAgain = false;   // the model / DB being opened, and a pass asked for while one ran
     var LG_MIN = 2, LG_CRASH = 2;   // logsig: min stack frames to trust a signature; innermost frames for the crash-site sig
     var K1 = 1.5, B = 0.75, STOP = {};
     ('the a an and or of to in for on with is are was were be been it this that these those as at by from we you they i he she his her its their our your not no but if then than so such can will would should could may might do does did has have had into over under out up down off about your yours').split(' ').forEach(function (w) { STOP[w] = true; });
@@ -9850,8 +10090,25 @@ function jitaWorkerBody(cfg) {
         return found;
     }
 
-    async function loadModel() {
-        if (pipe) { return pipe; }
+    // One load at a time: the delayed embed pass and the open panel's first query both asked before the first
+    // load finished, built a second pipeline (a second WebGPU session) and dropped one of them undisposed.
+    function loadModel() {
+        if (pipe) { return Promise.resolve(pipe); }
+        if (!pipeP) {
+            pipeP = loadModelOnce().then(function (p) { pipeP = null; return p; }, function (e) { pipeP = null; throw e; });
+        }
+        return pipeP;
+    }
+    // Drop the pipeline (it may be dead after a device loss), releasing its session rather than leaving it to the
+    // garbage collector; the next loadModel builds a fresh one.
+    function dropPipe() {
+        var p = pipe;
+        pipe = null; backend = 'none';
+        if (p && typeof p.dispose === 'function') {
+            try { var d = p.dispose(); if (d && typeof d.then === 'function') { d.then(null, function () { /* ignore */ }); } } catch (e) { /* ignore */ }
+        }
+    }
+    async function loadModelOnce() {
         var mod = await import(cfg.LIB);
         mod.env.allowLocalModels = false;
         mod.env.useBrowserCache = true;                                   // cache weights in CacheStorage after first download
@@ -9954,6 +10211,9 @@ function jitaWorkerBody(cfg) {
                         var cur = g.result;
                         if (!cur) { return; }                                             // deleted meanwhile -> skip
                         if ((cur.enText || null) !== (rec.enText || null)) { return; }     // translated since we embedded -> stale vector, skip
+                        // Re-synced with new text since we read it: the sync cleared the vector, and ours is of the old text.
+                        // Stored with the current model version, no later pass would have looked at it again.
+                        if ((cur.textHash || null) !== (rec.textHash || null)) { return; }
                         cur.embedding = vecs[j]; cur.embeddingModelVersion = cfg.MODEL_VERSION;
                         store.put(cur);
                     };
@@ -9966,46 +10226,19 @@ function jitaWorkerBody(cfg) {
     }
     // Embed every stored record lacking a current-version embedding (defects + open non-GM EBRs), in batches,
     // writing as we go. Single-flight; resumable. On a bad/NaN batch, reset the model and retry a few times.
+    // Asked again while it runs (an auto-sync stored new defects, translate finished a report), it goes round once
+    // more when done: that request used to be answered "busy" and dropped, leaving those records without vectors
+    // until some later sync happened to bring changes.
     async function embedPass() {
-        if (embedding) { return { embedded: 0, busy: true }; }
+        if (embedding) { embedAgain = true; return { embedded: 0, busy: true }; }
         embedding = true;
+        var total = 0;
         try {
-            await loadModel();
-            var recs = await allRecords();
-            var todo = [];
-            for (var i = 0; i < recs.length; i++) {
-                var r = recs[i];
-                if (r.project === 'EBR' && (isClosedStatus(r.status) || isGmTeam(r.team))) { continue; }   // not ranked -> don't embed
-                if (r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION) { continue; }
-                todo.push(r);
-            }
-            if (!todo.length) { return { embedded: 0 }; }
-            var idx = 0, retries = 0, lastPost = 0;
-            // Post re-embed progress to the tab(s) so a long pass (minutes on CPU) is visible. Throttled to
-            // ~every 50 records; the tab shows it in the panel status (see _applyEvent 'embedPassProgress').
-            function postProgress() { try { self.postMessage({ event: 'embedPassProgress', done: idx, total: todo.length }); } catch (e) { /* only meaningful in a worker */ } }
-            postProgress();   // 0 / total up front so the pass is visible immediately
-            while (idx < todo.length) {
-                var slice = todo.slice(idx, idx + BATCH);
-                var texts = slice.map(function (x) { return effectiveText(x); });   // English translation for foreign reports, else cleaned original
-                try {
-                    var vecs = await Promise.race([
-                        embedBatch(texts),
-                        new Promise(function (_r, rej) { setTimeout(function () { rej(new Error('embed batch timeout')); }, 45000); })   // watchdog: a hung GPU batch
-                    ]);
-                    var bad = false;
-                    for (var g = 0; g < vecs.length; g++) { if (!vecs[g] || !vecs[g].length || !isFinite(vecs[g][0])) { bad = true; break; } }
-                    if (bad) { throw new Error('NaN/empty embedding (likely GPU device loss)'); }
-                    await putEmbeddingsMerged(slice, vecs);   // MERGE (not clobber): preserves a concurrent translate-write's enText/lang
-                    idx += slice.length; retries = 0;
-                    if (idx - lastPost >= 50 || idx >= todo.length) { lastPost = idx; postProgress(); }
-                } catch (e) {
-                    pipe = null;                                  // drop the (possibly dead) pipeline and rebuild
-                    if (++retries > 3) { throw e; }
-                    await new Promise(function (r) { setTimeout(r, 1500); });
-                }
-            }
-            return { embedded: todo.length };
+            do {
+                embedAgain = false;
+                total += await embedOnce();
+            } while (embedAgain);
+            return { embedded: total };
         } finally {
             embedding = false;
             // Rebuild every index on the next query, however the pass ended: new vectors, or none at all - it runs after
@@ -10014,9 +10247,60 @@ function jitaWorkerBody(cfg) {
             dropIndexes();
         }
     }
+    // One round of embedPass; resolves the number of records embedded.
+    async function embedOnce() {
+        await loadModel();
+        var recs = await allRecords();
+        var todo = [];
+        for (var i = 0; i < recs.length; i++) {
+            var r = recs[i];
+            if (r.project === 'EBR' && (isClosedStatus(r.status) || isGmTeam(r.team))) { continue; }   // not ranked -> don't embed
+            if (r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION) { continue; }
+            todo.push(r);
+        }
+        if (!todo.length) { return 0; }
+        var idx = 0, retries = 0, lastPost = 0, skipped = 0, skipRun = 0;
+        // Post re-embed progress to the tab(s) so a long pass (minutes on CPU) is visible. Throttled to
+        // ~every 50 records; the tab shows it in the panel status (see _applyEvent 'embedPassProgress').
+        function postProgress() { try { self.postMessage({ event: 'embedPassProgress', done: idx, total: todo.length }); } catch (e) { /* only meaningful in a worker */ } }
+        postProgress();   // 0 / total up front so the pass is visible immediately
+        while (idx < todo.length) {
+            var slice = todo.slice(idx, idx + BATCH);
+            var texts = slice.map(function (x) { return effectiveText(x); });   // English translation for foreign reports, else cleaned original
+            var wd = null;
+            try {
+                var vecs = await Promise.race([
+                    embedBatch(texts),
+                    new Promise(function (_r, rej) { wd = setTimeout(function () { rej(new Error('embed batch timeout')); }, 45000); })   // watchdog: a hung GPU batch
+                ]);
+                clearTimeout(wd);
+                var bad = false;
+                for (var g = 0; g < vecs.length; g++) { if (!vecs[g] || !vecs[g].length || !isFinite(vecs[g][0])) { bad = true; break; } }
+                if (bad) { throw new Error('NaN/empty embedding (likely GPU device loss)'); }
+                await putEmbeddingsMerged(slice, vecs);   // MERGE (not clobber): preserves a concurrent translate-write's enText/lang
+                idx += slice.length; retries = 0; skipRun = 0;
+                if (idx - lastPost >= 50 || idx >= todo.length) { lastPost = idx; postProgress(); }
+            } catch (e) {
+                clearTimeout(wd);
+                dropPipe();                                   // drop the (possibly dead) pipeline and rebuild
+                try { console.warn('[JiTA worker] embed batch failed (try ' + (retries + 1) + '): ' + ((e && e.message) || e)); } catch (_e) { /* ignore */ }
+                if (++retries > 3) {
+                    // The work is listed in the same order every time, so a slice that always fails used to stop every
+                    // pass at the same place. Leave it for a later pass and go on - unless slice after slice fails,
+                    // which is the device, not the text.
+                    if (++skipRun > 2) { throw e; }
+                    idx += slice.length; skipped += slice.length; retries = 0;
+                    continue;
+                }
+                await new Promise(function (r) { setTimeout(r, 1500); });
+            }
+        }
+        return todo.length - skipped;
+    }
     function openDb() {
         if (db) { return Promise.resolve(db); }
-        return new Promise(function (resolve, reject) {
+        if (dbP) { return dbP; }   // concurrent first calls used to open (and leak) a connection each
+        dbP = new Promise(function (resolve, reject) {
             var req = indexedDB.open(cfg.DB_NAME, cfg.DB_VERSION);   // pristine in a worker (no consent-gate wrapper)
             // Mirror the tab's schema (JiTA.db.open) so whichever context wins the open race at a
             // NEW DB_VERSION creates the stores. Without this the worker could bump the version with
@@ -10049,6 +10333,9 @@ function jitaWorkerBody(cfg) {
             req.onerror = function () { reject(req.error); };
             req.onblocked = function () { /* older connection elsewhere; it closes on versionchange */ };
         });
+        var settle = function () { dbP = null; };
+        dbP.then(settle, settle);
+        return dbP;
     }
     function allRecords() {
         return openDb().then(function (d) {
@@ -10733,7 +11020,7 @@ function jitaWorkerBody(cfg) {
             else if (type === 'embedPass') {
                 // Long-running (minutes on a full rebuild): ACK immediately so the caller's RPC never times out,
                 // and post an 'embedPassDone' event when the background pass actually finishes.
-                if (embedding) { result = { started: false, busy: true }; }
+                if (embedding) { embedAgain = true; result = { started: false, busy: true, queued: true }; }   // runs again when this pass ends
                 else {
                     embedPass().then(function (rr) { self.postMessage({ event: 'embedPassDone', embedded: (rr && rr.embedded) || 0 }); },
                         function (er) { self.postMessage({ event: 'embedPassError', error: String((er && er.message) || er) }); });
@@ -11751,25 +12038,7 @@ JiTA.triage = {
     // Poll a report's status until it reads closed (resolves true) or the tries run out (false). First check
     // after 1.5s (gives the automation a head start), then every 2s - ~10s worst case. Network blips just
     // consume a try, so a flaky connection degrades to "not confirmed" rather than hanging forever.
-    _waitClosed: function (key, tries) {
-        return new Promise(function (resolve) {
-            (function step(n) {
-                setTimeout(function () {
-                    $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status', dataType: 'json' })
-                        .done(function (d) {
-                            var st = (d && d.fields && d.fields.status && d.fields.status.name) || '';
-                            if (JiTA.util.isClosedStatus(st)) { resolve(true); return; }
-                            if (n <= 0) { resolve(false); return; }
-                            step(n - 1);
-                        })
-                        .fail(function () {
-                            if (n <= 0) { resolve(false); return; }
-                            step(n - 1);
-                        });
-                }, n === tries ? 1500 : 2000);
-            })(tries);
-        });
-    },
+    _waitClosed: function (key, tries) { return jitaWaitClosed(key, tries); },
 
     _exec: function (type, a) {
         var T = JiTA.triage, item = T._queue[T._idx];
@@ -12463,7 +12732,7 @@ JiTA.dupfind = {
     compute: function () {
         var D = JiTA.dupfind;
         if (D._running) { return; }
-        if (!(JiTA.worker && JiTA.worker._started)) { D._status('Ranking worker unavailable - reload the tab and retry.'); return; }
+        if (!(JiTA.worker && JiTA.worker.usable())) { D._status('Ranking worker unavailable - reload the tab and retry.'); return; }
         D._running = true;
         $('#jd-recompute').prop('disabled', true);
         $('#jd-body').empty().append($('<div class="jd-empty"></div>').text('Scanning all open defects pairwise - this can take a little while on the first run…'));
@@ -12615,7 +12884,7 @@ JiTA.dupfind = {
                 if (ghostKeys.length) {
                     JiTA.db.deleteDefects(ghostKeys).then(function () {
                         JiTA.rank._dirty = true; JiTA.rank._dirtyVec = true;   // defect keyword + vector indexes
-                        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+                        if (JiTA.worker && JiTA.worker.usable()) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
                         if (window.console) { console.log('[JiTA] dupfind: deleted ' + ghostKeys.length + ' moved-key ghost record(s): ' + ghostKeys.join(', ')); }
                     }).catch(function () { /* best effort - the next full rebuild drops them anyway */ });
                 }
@@ -17239,7 +17508,7 @@ JiTA.leadduty.ui = {
             $('<button class="jita-btn ld-mini" title="Copy a message listing every open follow-up for this person">Copy message</button>')
                 .on('click', function () {
                     var $btn = $(this);
-                    U._copy($msg.val()).then(function () { U._flashBtn($btn, 'Copied'); },
+                    JiTA.util.copy($msg.val()).then(function () { U._flashBtn($btn, 'Copied'); },
                         function () { $msg.show(); $toggle.text('Hide text'); $msg.trigger('select'); U._status('Could not reach the clipboard - the text is selected, copy it with Ctrl+C.'); });
                 }).appendTo($gact);
 
@@ -17656,26 +17925,6 @@ JiTA.leadduty.ui = {
         }, true);
     },
 
-    // Copy to the clipboard, falling back to the old selection + execCommand path where the async API is
-    // unavailable or refused (it needs a secure context and a user gesture; a button click is one, but a
-    // browser policy can still say no). Rejects so the caller can show the text and let Ctrl+C finish it.
-    _copy: function (text) {
-        try {
-            if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); }
-        } catch (e) { /* fall through */ }
-        return new Promise(function (resolve, reject) {
-            try {
-                var ta = document.createElement('textarea');
-                ta.value = text;
-                ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
-                document.body.appendChild(ta);
-                ta.select();
-                var ok = document.execCommand('copy');
-                document.body.removeChild(ta);
-                if (ok) { resolve(); } else { reject(new Error('copy refused')); }
-            } catch (e2) { reject(e2); }
-        });
-    },
 
     // Brief "it worked" on a button, then back to its own label. Cheaper to read than a status line that
     // the eye is nowhere near when the button is clicked.
@@ -18724,6 +18973,8 @@ JiTA.worker = {
     _failStreak: 0,      // consecutive worker failures with no successful RPC in between (reset on any success)
     _recovering: false,  // re-entry guard: a death is already being handled
     _gaveUp: false,      // hit GIVEUP_AFTER -> stop trying to be leader
+    _otherLeader: false, // another tab announced itself leader after this one gave up: calls can go to it
+    _spawnedGpu: null,   // the backend the running worker was built for (true = WebGPU), to notice a switch
     _maxSeenVersion: JiTA.SCRIPT_VERSION,  // highest userscript version known to exist across tabs; we never take/keep leadership with a worker OLDER than this
     _standAsides: 0,     // times we've ceded the lock to let a newer tab lead (bounded by MAX_STANDASIDE)
 
@@ -18743,6 +18994,22 @@ JiTA.worker = {
         // Two spaced attempts cover a leader whose worker isn't up yet on the first try.
         setTimeout(JiTA.worker._checkWorkerVersion, 12000);
         setTimeout(JiTA.worker._checkWorkerVersion, 30000);
+        // The GPU / CPU switch in Settings reloads the tab it was clicked in, which rebuilds the worker only when that
+        // tab leads. From a follower the leader went on embedding on the old backend, so the leader listens too.
+        if (typeof GM_addValueChangeListener === 'function') {
+            ['sdTryWebgpu', 'sdForceCpu'].forEach(function (k) {
+                try { GM_addValueChangeListener(k, function (n, o, v, remote) { if (remote) { JiTA.worker._backendChanged(); } }); } catch (e) { /* ignore */ }
+            });
+        }
+    },
+
+    // The embedding backend setting changed in another tab: a leader whose worker was built for the other backend
+    // rebuilds it. In-flight calls fail, as on any respawn; their callers fall back or retry.
+    _backendChanged: function () {
+        var gpu = !!(gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false));
+        if (!JiTA.worker._isLeader || !JiTA.worker._worker || JiTA.worker._spawnedGpu === gpu) { return; }
+        if (window.console) { console.log('[JiTA worker] embedding backend switched to ' + (gpu ? 'GPU' : 'CPU') + ' in another tab - rebuilding the worker'); }
+        JiTA.worker._spawnWorker();
     },
 
     // Queue for the leader lock; on winning it, become leader and hold the lock (via an unresolved promise) until
@@ -18807,6 +19074,7 @@ JiTA.worker = {
         if (!JiTA.worker._isLeader || JiTA.worker._gaveUp) { return; }
         JiTA.worker._killWorker();   // tear down any previous handle first (defensive)
         try {
+            JiTA.worker._spawnedGpu = !!(gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false));   // what _src() builds it for
             var url = URL.createObjectURL(new Blob([JiTA.worker._src()], { type: 'text/javascript' }));
             var w = new Worker(url, { type: 'module' });
             JiTA.worker._worker = w;
@@ -18821,9 +19089,7 @@ JiTA.worker = {
             // doesn't compete with first paint. Single-flight in the worker, so a concurrent prepare() is harmless.
             setTimeout(function () {
                 if (JiTA.worker._worker !== w) { return; }   // a respawn replaced this worker meanwhile
-                JiTA.worker._workerCall('embedPass').then(function (r) {
-                    if (r && r.embedded > 0) { if (window.console) { console.log('[JiTA worker] embed pass: ' + r.embedded + ' embedded'); } try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ } }
-                }, function () { /* ignore */ });
+                JiTA.worker._workerCall('embedPass').then(null, function () { /* ignore: the pass reports its end itself (embedPassDone) */ });
             }, 8000);
         } catch (e) {
             if (window.console) { console.log('[JiTA worker] worker spawn failed:', e); }
@@ -18928,10 +19194,18 @@ JiTA.worker = {
         }
     },
 
+    // Whether to send work to the ranking worker at all. A tab that gave up leading (the worker cannot run here) has
+    // no worker unless another tab has taken the lead since; without this, every call waited out the 6 s ACK and
+    // the callers' own fallbacks never ran, because they only checked that the worker had been started.
+    usable: function () {
+        return JiTA.worker._started && (!JiTA.worker._gaveUp || JiTA.worker._otherLeader);
+    },
+
     // Public: call the ranking worker from ANY tab. Resolves with the worker's result (or rejects on timeout /
     // no leader). Leader shortcuts straight to its worker; followers route over the channel.
     call: function (type, payload, opts) {
         opts = opts || {};
+        if (!JiTA.worker.usable()) { return Promise.reject(new Error('the ranking worker is not available in this tab')); }
         var timeoutMs = opts.timeoutMs || JiTA.worker.RPC_TIMEOUT_MS;   // long crawls (credits) pass a bigger cap
         if (JiTA.worker._isLeader && JiTA.worker._worker) { return JiTA.worker._workerCall(type, payload, timeoutMs); }
         // Leader but its worker is momentarily down (respawn / self-heal): fail fast. Routing our own req over the
@@ -18987,6 +19261,12 @@ JiTA.worker = {
             try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // re-rank the open view now the new vectors exist
             return;
         }
+        // A failed pass used to be dropped here, so nothing was logged and its last "Embedding N / M" stayed on screen.
+        if (d.event === 'embedPassError') {
+            if (window.console) { console.log('[JiTA worker] embed pass failed:', d.error); }
+            try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // the view's own status replaces the progress line
+            return;
+        }
         // Live re-embed progress (worker embedPass posts this ~every 50 records). Show it in the panel status so a
         // long pass is visible; embedPassDone's re-render replaces it with real results when the pass finishes.
         if (d.event === 'embedPassProgress') {
@@ -19036,6 +19316,7 @@ JiTA.worker = {
         } else if (m.kind === 'reelect') {
             JiTA.worker._applyReelect(m.want);   // a tab saw a stale worker -> remember the newer version / step down if we're the stale leader
         } else if (m.kind === 'leader') {
+            JiTA.worker._otherLeader = true;   // somebody leads again, even if this tab gave up
             JiTA.worker._failTabPending('the ranking leader changed - try again', true);   // a call the old leader took will never be answered
         }
     },
@@ -19169,28 +19450,35 @@ JiTA.declutter = {
     // ---- apply: hide selected, un-hide anything we'd hidden that is no longer selected. Idempotent + safe;
     // called from the shared observer so it survives re-renders and SPA navigation.
     apply: function () {
-        var type = JiTA.declutter._type();
-        if (!type) { return; }
-        var cfg = JiTA.declutter._cfg(type);
-        function reconcile(items, wanted) {
-            for (var i = 0; i < items.length; i++) {
-                var el = items[i].el, hide = JiTA.declutter._has(wanted, items[i].label || items[i].name);
-                try {
-                    if (hide && el.getAttribute('data-jita-declutter') !== '1') {
-                        el.setAttribute('data-jita-declutter', '1');
-                        el.style.setProperty('display', 'none', 'important');
-                    } else if (!hide && el.getAttribute('data-jita-declutter') === '1') {
-                        el.style.removeProperty('display');
-                        el.removeAttribute('data-jita-declutter');
-                    }
-                } catch (e) { /* ignore */ }
-            }
+        var D = JiTA.declutter, type = D._type(), cfg = type ? D._cfg(type) : null, keep = [];
+        // What this pass hides. Off an issue, or with nothing chosen for its type, that is nothing, and there is no
+        // detection pass to run on every mutation batch (it used to run on boards too, and with an empty config).
+        if (cfg && (cfg.fields.length || cfg.sections.length)) {
+            var pick = function (items, wanted) {
+                for (var i = 0; i < items.length; i++) {
+                    if (D._has(wanted, items[i].label || items[i].name) && keep.indexOf(items[i].el) === -1) { keep.push(items[i].el); }
+                }
+            };
+            pick(D._fieldRows(), cfg.fields);
+            pick(D._sections(), cfg.sections);
         }
-        reconcile(JiTA.declutter._fieldRows(), cfg.fields);
-        reconcile(JiTA.declutter._sections(), cfg.sections);
+        // Un-hide everything hidden that this pass does not keep: a choice cleared, an issue left, or a container an
+        // earlier pass climbed to while a section title stood alone on the page. Reconciling only the elements found
+        // this pass left that one hidden for good, with every panel Jira later mounted inside it.
+        var hidden = document.querySelectorAll('[data-jita-declutter="1"]');
+        for (var h = 0; h < hidden.length; h++) {
+            if (keep.indexOf(hidden[h]) !== -1) { continue; }
+            try { hidden[h].style.removeProperty('display'); hidden[h].removeAttribute('data-jita-declutter'); } catch (e) { /* ignore */ }
+        }
+        for (var k = 0; k < keep.length; k++) {
+            try {
+                if (keep[k].getAttribute('data-jita-declutter') !== '1') { keep[k].setAttribute('data-jita-declutter', '1'); }
+                keep[k].style.setProperty('display', 'none', 'important');
+            } catch (e) { /* ignore */ }
+        }
         // Remember how many elements we currently have hidden, so the observer's cheap synchronous guard
         // (reassertFast) can tell when a Jira re-render has wiped some of them and re-hide before the next paint.
-        JiTA.declutter._lastHidden = document.querySelectorAll('[data-jita-declutter="1"]').length;
+        D._lastHidden = keep.length;
     },
 
     // Cheap synchronous guard, called from the DOM observer on every mutation batch (a microtask, so it runs
@@ -19295,7 +19583,8 @@ JiTA.ocr = {
 
     _libP: null, _worker: null, _workerKey: '', _q: null, _idleT: 0,
     _tgt: null, _btn: null, _layer: null, _box: null, _sel: null, _card: null, _drag: null,
-    _job: null, _runId: 0, _pix: null, _lang: null, _progress: null,
+    _job: null, _runId: 0, _pix: null, _pixP: null, _lang: null, _progress: null, _txSeq: 0, _engineBeat: 0,
+    ENGINE_STALL_MS: 120 * 1000,   // give up on an engine start nothing has been heard from for this long
     _labelCache: {}, _langOverride: {}, _cssDone: false,
 
     // ---- language -------------------------------------------------------------------------------------------
@@ -19378,11 +19667,26 @@ JiTA.ocr = {
                 O._workerKey = '';   // mid-switch: never reuse a half-initialised worker
                 return w0.reinitialize(langs, 1).then(function () { return w0; });
             }
-            var opts = $.extend({ logger: function (m) { if (O._progress) { try { O._progress(m); } catch (e) { /* ignore */ } } } }, O._workerOpts());
+            var opts = $.extend({ logger: function (m) { O._engineBeat = Date.now(); if (O._progress) { try { O._progress(m); } catch (e) { /* ignore */ } } } }, O._workerOpts());
             return T.createWorker(langs, 1, opts);   // 1 = OEM.LSTM_ONLY
         }).then(function (w) {
             O._worker = w;
             return w.setParameters({ tessedit_pageseg_mode: '6' }).then(function () { O._workerKey = key; return w; });   // 6 = one uniform block
+        });
+    },
+    // _engine, given up once it has gone ENGINE_STALL_MS without a word. The engine and its language model download
+    // inside Tesseract's own worker, and one that stalled (a connection dropped mid-download) never settled: every
+    // later read queued behind it until reload. Its progress messages keep a slow download going.
+    _engineTimed: function (code) {
+        var O = JiTA.ocr;
+        O._engineBeat = Date.now();
+        return new Promise(function (resolve, reject) {
+            var iv = setInterval(function () {
+                if (Date.now() - O._engineBeat < O.ENGINE_STALL_MS) { return; }
+                clearInterval(iv);
+                reject(new Error('the text reader stopped responding while it was starting - try again'));
+            }, 5000);
+            O._engine(code).then(function (w) { clearInterval(iv); resolve(w); }, function (e) { clearInterval(iv); reject(e); });
         });
     },
     _resetEngine: function () {
@@ -19410,6 +19714,7 @@ JiTA.ocr = {
     _pixels: function (img) {
         var O = JiTA.ocr, src = img.currentSrc || img.src;
         if (O._pix && O._pix.src === src) { return Promise.resolve(O._pix); }
+        if (O._pixP && O._pixP.src === src) { return O._pixP.p; }   // being fetched for an earlier box: one download per image
         try {
             var c = document.createElement('canvas'); c.width = 1; c.height = 1;
             var g = c.getContext('2d');
@@ -19418,10 +19723,14 @@ JiTA.ocr = {
             O._pix = { src: src, img: img, w: img.naturalWidth, h: img.naturalHeight };
             return Promise.resolve(O._pix);
         } catch (e) { /* cross-origin -> fetch the bytes below */ }
-        return O._fetchBlob(src).then(function (blob) { return createImageBitmap(blob); }).then(function (bmp) {
+        var p = O._fetchBlob(src).then(function (blob) { return createImageBitmap(blob); }).then(function (bmp) {
             O._pix = { src: src, img: bmp, w: bmp.width, h: bmp.height };
             return O._pix;
         });
+        var done = function () { if (O._pixP && O._pixP.p === p) { O._pixP = null; } };
+        O._pixP = { src: src, p: p };
+        p.then(done, done);   // a failed fetch is not kept: the next box tries again
+        return p;
     },
     _fetchBlob: function (url) {
         return new Promise(function (resolve, reject) {
@@ -19522,7 +19831,7 @@ JiTA.ocr = {
         return O._enqueue(function () {
             if (runId !== O._runId) { return null; }   // superseded before it started
             var t0 = Date.now();
-            return O._engine(code).then(function (w) {
+            return O._engineTimed(code).then(function (w) {
                 var best = null, i = 0;
                 function next() {
                     if (runId !== O._runId) { return null; }
@@ -19602,7 +19911,7 @@ JiTA.ocr = {
         }
         O._teardown();
         O._tgt = t;
-        O._pix = null;
+        O._pix = null; O._pixP = null;
         O._lang = null;
         O._css();
         O._mountButton();
@@ -19616,7 +19925,7 @@ JiTA.ocr = {
         var O = JiTA.ocr;
         O._exit();
         if (O._btn && O._btn.parentNode) { O._btn.parentNode.removeChild(O._btn); }
-        O._btn = null; O._tgt = null; O._pix = null; O._lang = null;
+        O._btn = null; O._tgt = null; O._pix = null; O._pixP = null; O._lang = null;
     },
 
     // ---- selection mode -------------------------------------------------------------------------------------
@@ -19668,7 +19977,9 @@ JiTA.ocr = {
         O._resolveLang().then(function (lang) {
             if (O._tgt !== cur) { return; }
             if (!O._lang) { O._lang = lang; }
-            O._enqueue(function () { return O._engine(O._lang.code).then(function () { O._armIdle(); }); }).then(null, function () { /* surfaced on the real run */ });
+            O._enqueue(function () {
+                return O._engineTimed(O._lang.code).then(function () { O._armIdle(); }, function (e) { O._resetEngine(); throw e; });
+            }).then(null, function () { /* surfaced on the real run */ });
         });
     },
     _exit: function () {
@@ -19773,9 +20084,10 @@ JiTA.ocr = {
     _start: function (r, cb) {
         var O = JiTA.ocr, tgt = O._tgt;
         O._showCard(r);
+        var card = O._card;   // this box's card: a box drawn before the pixels arrive replaces it
         O._status('Reading text…', 'busy');
         O._pixels(tgt.img).then(function (pix) {
-            if (O._tgt !== tgt || !O._card) { return; }
+            if (O._tgt !== tgt || O._card !== card) { return; }
             // No extra margin around the box: tested, even 2 px pulls the edge of the neighbouring line in as junk.
             var x0 = Math.floor((r.x - cb.x) / cb.w * pix.w), y0 = Math.floor((r.y - cb.y) / cb.h * pix.h);
             var x1 = Math.ceil((r.x + r.w - cb.x) / cb.w * pix.w), y1 = Math.ceil((r.y + r.h - cb.y) / cb.h * pix.h);
@@ -19783,6 +20095,7 @@ JiTA.ocr = {
             O._job = { pix: pix, rect: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, screen: r };
             O._run();
         }, function (e) {
+            if (O._card !== card) { return; }
             O._status('Could not read the image (' + (e && e.message || e) + ').', 'err');
         });
     },
@@ -19792,7 +20105,10 @@ JiTA.ocr = {
         var runId = ++O._runId;
         O._status('Reading text…', 'busy');
         O._setText('', '');
-        var langP = O._lang ? Promise.resolve(O._lang) : O._resolveLang().then(function (L) { O._lang = L; return L; });
+        var langP = O._lang ? Promise.resolve(O._lang) : O._resolveLang().then(function (L) {
+            if (!O._lang) { O._lang = L; }   // picked from the dropdown meanwhile: that wins
+            return O._lang;
+        });
         langP.then(function (lang) {
             if (runId !== O._runId) { return null; }
             O._cardLang(lang);
@@ -19833,8 +20149,9 @@ JiTA.ocr = {
         if (c.querySelector('.jo-join').checked) { src = O._join(src, code); }
         if (!src.replace(/\s+/g, '')) { return Promise.resolve(); }
         O._status('Translating…', 'busy');
+        var seq = ++O._txSeq;   // Translate again, Join lines and a new run can overlap: only the newest lands
         return jitaTranslateFree(src).then(function (en) {
-            if (runId !== O._runId || O._card !== c) { return; }
+            if (runId !== O._runId || O._card !== c || seq !== O._txSeq) { return; }
             if (en === null) { O._status('Translation failed - Google is rate-limiting. Try again in a moment.', 'err'); return; }
             c.querySelector('.jo-tx').textContent = en;
             O._status('', '');
@@ -19879,10 +20196,17 @@ JiTA.ocr = {
             copies[k].addEventListener('click', function () {
                 var btn = this, what = btn.getAttribute('data-what');
                 var txt = what === 'tx' ? c.querySelector('.jo-tx').textContent : c.querySelector('.jo-src').value;
-                O._copy(txt).then(function () {
-                    var was = btn.textContent;
-                    btn.textContent = 'Copied';
+                // It used to say "Copied" whatever happened: the fallback ignored execCommand's answer, and a refused
+                // clipboard write was an unhandled rejection.
+                var flash = function (label) {
+                    var was = btn.getAttribute('data-label') || btn.textContent;
+                    btn.setAttribute('data-label', was);
+                    btn.textContent = label;
                     setTimeout(function () { btn.textContent = was; }, 1200);
+                };
+                JiTA.util.copy(txt).then(function () { flash('Copied'); }, function () {
+                    flash('Copy failed');
+                    O._status('Could not reach the clipboard - select the text and press Ctrl+C.', 'err');
                 });
             });
         }
@@ -19939,17 +20263,6 @@ JiTA.ocr = {
         JiTA.ocr._placeCard();
     },
     _meta: function (t) { var c = JiTA.ocr._card; if (c) { c.querySelector('.jo-meta').textContent = t; } },
-    _copy: function (text) {
-        try { if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); } } catch (e) { /* fall through */ }
-        return new Promise(function (resolve) {
-            var ta = document.createElement('textarea');
-            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-            document.body.appendChild(ta); ta.select();
-            try { document.execCommand('copy'); } catch (e) { /* ignore */ }
-            document.body.removeChild(ta);
-            resolve();
-        });
-    },
 
     _css: function () {
         var O = JiTA.ocr;
@@ -20015,6 +20328,57 @@ JiTA.changelog = {
             'With the ranking worker unreachable, the panel no longer empties and refills every few seconds.',
             'Defects in log: clicking an entry only steps through occurrences on screen, and the panel shows above Triage mode\'s attachment viewer.',
             'Defects in log: an exception pasted into a defect with a stack trace after it, or with its log columns, now matches the same exception in a parsed log.'
+        ] },
+        { v: '3.38.23', date: '2026-10-03', items: [
+            'Defects and reports that arrive while an embedding pass is running get their vectors right after it, instead of waiting for a later sync with changes.',
+            'An issue re-synced with new text while it was being embedded no longer keeps the vector of its old text.',
+            'One report that cannot be embedded no longer stops every embedding pass at the same place; it is skipped and tried again next time.',
+            'A sync whose database write fails at the last step (a full disk) now fails instead of leaving "A sync is already running" until reload.'
+        ] },
+        { v: '3.38.22', date: '2026-10-03', items: [
+            'Screenshot translation: a box drawn while the image was still loading no longer gets the earlier box\'s text or error, and the image is downloaded once.',
+            'Screenshot translation: a language you pick is no longer replaced by the one from the labels, and an older translation never lands over a newer one.',
+            'Screenshot translation: a text reader that stops responding while it starts is given up after two minutes instead of blocking until reload.',
+            'Copy buttons say "Copy failed" when the clipboard refuses, instead of "Copied".'
+        ] },
+        { v: '3.38.21', date: '2026-10-03', items: [
+            'Lead duties: Clear ledger no longer hangs on "Clearing the ledgers…" when Confluence refuses a delete; it says which one failed and finishes the rest.',
+            'Lead duties: the chip goes away as soon as JiTA finds the account is not a Lead, instead of staying until reload.',
+            'The What\'s new pill no longer comes back for changes already read when a tab still running an older version is closed or dismissed.',
+            'Settings: a result that arrives after the menu was redrawn is no longer written into the old copy of the menu.'
+        ] },
+        { v: '3.38.20', date: '2026-10-03', items: [
+            'The Created / Updated dates in the issue header are fetched again after a minute, so an edit shows, and a fetch that failed is retried.',
+            'Declutter no longer leaves a panel hidden until reload when Jira draws a section title before the rest of the page.',
+            'Switching Extra Buttons off in one tab keeps them off in the others, and switching them on no longer puts them on defects.',
+            'Translate says when only part of a report could be translated, instead of leaving an untranslated part beside a translated one.',
+            'On the wiki, the Lead duties chip and the What\'s new pill step aside for menus, holding a launcher key no longer opens it, and the scrollbar thumb has its colour again.'
+        ] },
+        { v: '3.38.19', date: '2026-10-03', items: [
+            'Background sync: a long first sync keeps its claim, so a second tab no longer starts its own beside it, and a tab that closes frees the claim at once.',
+            'Background sync: after a failed run (an expired session, Jira down) it waits five minutes before trying again, instead of retrying every 30 seconds.',
+            'Attaching or closing a report no longer makes every open tab rebuild the shared ranking indexes once each.',
+            'Switching between GPU and CPU embedding now takes effect even when the tab you switch in is not the one running the shared worker.',
+            'A failed embedding pass no longer leaves its progress text standing, and a database upgrade check no longer gives up when a sync happens to be running.'
+        ] },
+        { v: '3.38.18', date: '2026-10-03', items: [
+            'dxdiag Quick Info: memory-leak reports and hangs of the EVE client are no longer counted as client crashes; a hang gets its own amber line.',
+            'dxdiag Quick Info: a file without crash history says "crash history unknown" instead of a green all-clear, and BEX crashes show their real exception code.',
+            'dxdiag Quick Info: driver dates written as 15.08.2023 or 2023-08-15 are read, so the driver age and the over-a-year warning show for them too.',
+            'PDM Quick Info: a file without an OS block says it could not be evaluated, instead of "does not meet the minimum requirements".'
+        ] },
+        { v: '3.38.17', date: '2026-10-03', items: [
+            'Parsed logs: Only Exceptions no longer hides the table header or parts of Jira behind the log, and Show All no longer forces Jira\'s own tables open.',
+            'Parsed logs: a line with a missing column no longer leaves the spinner going forever, logging errors are no longer marked as exceptions, and the first row lost its stray border.',
+            'A log header pasted into a comment no longer turns the comment box into the log parser, and a log the viewer could not hand over is left readable instead of emptied.',
+            'Process Health colours 10 or more sessions red again and compares time dilation as numbers; Method Calls no longer shows NaN or drops its last row.',
+            'PDM data: a value containing a colon is read whole, and an oddly formed file no longer stops the summary from showing.'
+        ] },
+        { v: '3.38.16', date: '2026-10-03', items: [
+            'Convert to Support Ticket: trying again after a failed conversion no longer posts the GM note a second time.',
+            'Convert to Support Ticket now waits for the report to close, and says so if it stays open, instead of the window disappearing after 20 seconds without a word.',
+            'Convert to Defect no longer takes you away from, or reloads, an issue you moved on to while it converted, and says so when the conversion does not start.',
+            'The Close button now waits for Jira\'s status menu instead of giving up after a tenth of a second.'
         ] },
         { v: '3.38.15', date: '2026-10-03', items: [
             'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
@@ -20631,8 +20995,10 @@ JiTA.changelog = {
     },
 
     markSeen: function () {
-        var C = JiTA.changelog;
-        gmSet(C.SEEN_KEY, C.latest().v);
+        var C = JiTA.changelog, seen = String(gmGet(C.SEEN_KEY, '') || '');
+        // Only ever forward: a tab still on an older version marking its own latest as seen moved the mark back, and
+        // every updated tab then showed the pill again for changes already read.
+        if (!seen || JiTA.worker._verCmp(C.latest().v, seen) > 0) { gmSet(C.SEEN_KEY, C.latest().v); }
         C.remove();
     },
 
@@ -20777,6 +21143,13 @@ JiTA.changelog = {
 function jitaArmLeadDuties() {
     var mounted = false;
     function arm() {
+        // Armed from the cached verdict, and resolveMe() now says this account is not a Lead (any more): take the chip
+        // down, and the Settings section with it. It used to stay for the rest of the session.
+        if (mounted && !JiTA.leadduty.isLead()) {
+            try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }   // removes the chip for a non-Lead
+            try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { /* swallow */ }
+            return;
+        }
         if (mounted || !JiTA.leadduty.isLead()) { return; }
         mounted = true;
         try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }
@@ -20810,6 +21183,9 @@ if (JITA_IS_WIKI) {
         if (!window.indexedDB) { return; }
         setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { /* swallow */ } }, 1200);
         try { JiTA.changelog.start(); } catch (e) { /* swallow */ }   // the "What's new" pill after an update
+        // The Lead chip and the What's new pill sit over the same Atlaskit sidebar here as on Jira, but Jira's shared
+        // observer (which steps them aside for a menu) never runs on the wiki. Watch for menus here as well.
+        try { new MutationObserver(function () { try { jitaPillsYieldSoon(); } catch (e) { /* ignore */ } }).observe(document.body, { childList: true, subtree: true }); } catch (e) { /* ignore */ }
     })();
 }
 
@@ -20878,7 +21254,7 @@ if (JITA_IS_WIKI) {
         (function () {
             var lastLt = 0, lastGt = 0, lastHash = 0;
             document.addEventListener('keydown', function (e) {
-                if (e.ctrlKey || e.metaKey || e.altKey) { return; }
+                if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || e.isComposing) { return; }   // a held key repeats in under 400 ms
                 if (e.key !== '<' && e.key !== '>' && e.key !== '#') { return; }
                 var t = e.target;
                 if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
