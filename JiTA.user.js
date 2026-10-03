@@ -94,7 +94,7 @@ function waitForKeyElements(selectorTxt, actionFunction, bWaitOnce, iframeSelect
 // on separate ticks (setTimeout), so these carry state across that gap. `rows` = the raw file text;
 // `oc`/`lc`/`pdm`/`dx` = which igbr.zip attachment was opened. (pdmdata / today / driverAge are now locals - the
 // driver age is written straight into #driverAge by renderRequirements; menu_settings was an unused handle.)
-var rows, oc, lc, pdm, dx;
+var rows, jitaIgbrFile = null;   // the header-less igbr.zip file a click just opened ('oc', 'lc', 'pdm', 'dx'); SwapUI takes it
 
 // The EVE client log header row. Used both to DETECT a logs.txt (its content has this line) and to LOCATE the
 // right CodeMirror editor to swap. Kept in ONE place so if CCP ever changes the header, it's a one-line edit
@@ -697,6 +697,8 @@ var JITA_GM_CATEGORIES = ['Gameplay', 'Billing & Account', 'Technical', 'Other']
 // Returns the $.ajax promise; the caller inspects the response / handles errors.
 function jitaInvokeAutomationRule(numericId, ruleId, userInputs) {
     var cloudId = $('meta[name="ajs-cloud-id"]').attr('content');
+    // Without it the request goes to .../jira/undefined/... and fails with a 404 that explains nothing.
+    if (!cloudId) { return $.Deferred().reject({ status: 0, jitaError: 'Could not read the Jira cloud id from the page - reload it and try again.' }).promise(); }
     var body = { objects: ['ari:cloud:jira:' + cloudId + ':issue/' + numericId] };
     if (userInputs) { body.userInputs = userInputs; }
     return $.ajax({
@@ -719,9 +721,33 @@ function jitaInvokeGmAutomation(key, category) {
                         if (inv && inv.status === 'SUCCESS') { resolve(resp); }
                         else { reject(new Error('Automation did not report success.')); }
                     })
-                    .fail(function (xhr) { reject(new Error('Automation invocation failed (HTTP ' + xhr.status + ').')); });
+                    .fail(function (xhr) { reject(new Error((xhr && xhr.jitaError) || ('Automation invocation failed (HTTP ' + xhr.status + ').'))); });
             })
             .fail(function (xhr) { reject(new Error('Could not read the issue id (HTTP ' + xhr.status + ').')); });
+    });
+}
+
+// Poll a report's status until it reads closed (resolves true) or the tries run out (false). First check after 1.5s
+// (gives the automation a head start), then every 2s. Network blips just consume a try, so a flaky connection
+// degrades to "not confirmed" rather than hanging forever. A conversion's SUCCESS only means the rule started; the
+// report closing is the proof it did its work.
+function jitaWaitClosed(key, tries) {
+    return new Promise(function (resolve) {
+        (function step(n) {
+            setTimeout(function () {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status', dataType: 'json' })
+                    .done(function (d) {
+                        var st = (d && d.fields && d.fields.status && d.fields.status.name) || '';
+                        if (JiTA.util.isClosedStatus(st)) { resolve(true); return; }
+                        if (n <= 0) { resolve(false); return; }
+                        step(n - 1);
+                    })
+                    .fail(function () {
+                        if (n <= 0) { resolve(false); return; }
+                        step(n - 1);
+                    });
+            }, n === tries ? 1500 : 2000);
+        })(tries);
     });
 }
 
@@ -815,20 +841,24 @@ function jitaGoToNewDefect(ebrKey, beforeKeys) {
     var before = {};
     (beforeKeys || []).forEach(function (k) { before[k] = true; });
     var tries = 0;
-    (function poll() {
+    function again() {
+        if (tries >= 30) { window.location.reload(false); return; }
+        tries++; setTimeout(poll, 1000);
+    }
+    function poll() {
+        // The user has moved on to another issue (Jira is one page): neither take them away from it nor reload it
+        // under a comment they may be typing. The report shows the result when they come back to it.
+        if (jitaCurrentKey() !== ebrKey) { return; }
         $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
             .done(function (d) {
                 var fresh = jitaLinkedKeys(d.fields && d.fields.issuelinks).filter(function (k) { return !before[k]; });
                 var defect = fresh.filter(function (k) { return /^(EDR|EO|PLAT)-/.test(k); })[0] || fresh[0];
                 if (defect) { window.location.href = '/browse/' + defect; return; }
-                if (tries >= 30) { window.location.reload(false); return; }
-                tries++; setTimeout(poll, 1000);
+                again();
             })
-            .fail(function () {
-                if (tries >= 30) { window.location.reload(false); return; }
-                tries++; setTimeout(poll, 1000);
-            });
-    })();
+            .fail(again);
+    }
+    poll();
 }
 
 // The category + optional-note modal opened by the "Assign to GM" button.
@@ -861,6 +891,9 @@ function jitaOpenGmModal(key) {
     // the note and run the automation after the Lead had backed out.
     var CLOSED = new Error('closed');
     function alive() { return !!(ov.$overlay[0] && ov.$overlay[0].isConnected); }
+    // The note already on the ticket from an earlier attempt. Convert re-enables after a failed automation, and
+    // pressing it again posted the same note a second time.
+    var notePosted = null;
 
     $go.on('click', function () {
         if (!selected) { $status.css('color', '#ff8f8f').text('Please pick a category first.'); return; }
@@ -874,7 +907,8 @@ function jitaOpenGmModal(key) {
             // Ticket present -> post the note (if any), then run the conversion automation.
             $go.text('Converting…');
             $status.text(note ? 'Posting note to Zendesk…' : 'Running automation…');
-            var pre = note ? JiTA.responses.postInternalNote(note).then(function (res) {
+            var pre = (note && note !== notePosted) ? JiTA.responses.postInternalNote(note).then(function (res) {
+                if (res && (res.ok || res.clicked)) { notePosted = note; }   // clicked but not confirmed: it may well be there
                 if (!res || !res.ok) { throw new Error((res && res.error) || 'Could not post the note.'); }
             }) : Promise.resolve();
             return pre.then(function () {
@@ -883,13 +917,20 @@ function jitaOpenGmModal(key) {
                 invoked = true;
                 return jitaInvokeGmAutomation(key, selected);
             }).then(function () {
-                $status.css('color', '#7fdca4').text('Automation started - this report will close in a few seconds…');
-                var waited = 0;
-                var t = setInterval(function () {
-                    waited += 500;
-                    if ($('strong:contains(Issue Updated)')[0]) { clearInterval(t); window.location.reload(false); }
-                    else if (waited >= 20000) { clearInterval(t); if (alive()) { ov.close(); } }   // not an overlay opened since
-                }, 500);
+                // SUCCESS only means the rule STARTED: with no linked Zendesk ticket, or more than one, it stops on its own,
+                // comments and leaves the report open. A conversion closes the report, so wait for that over REST (not
+                // for Jira's English "Issue Updated" flag), and when it does not come, say so instead of vanishing.
+                $status.css('color', '#7fdca4').text('Automation started - waiting for the report to close…');
+                return jitaWaitClosed(key, 10).then(function (closed) {
+                    if (closed) {
+                        if (jitaCurrentKey() === key) { window.location.reload(false); } else if (alive()) { ov.close(); }
+                        return;
+                    }
+                    var msg = 'The report is still open 20 seconds later. The rule may have stopped: with no linked Zendesk ticket, or more than one, it leaves a comment and the report open. Check its comments before converting again.';
+                    if (!alive()) { JiTA.ui.toast(msg); return; }
+                    $go.text('Started');   // stays disabled: a slow rule may still finish, and a second run converts twice
+                    $status.css('color', '#ffd479').text(msg);
+                });
             });
         }).catch(function (e) {
             if (!alive()) {
@@ -899,7 +940,8 @@ function jitaOpenGmModal(key) {
                 return;
             }
             $go.prop('disabled', false).css('opacity', '').text('Convert');
-            $status.css('color', '#ff8f8f').text('Failed: ' + (e && e.message || e));
+            $status.css('color', '#ff8f8f').text('Failed: ' + (e && e.message || e) +
+                (notePosted ? ' The note is already on the ticket, so Convert will not post it again.' : ''));
         });
     });
 
@@ -946,7 +988,7 @@ function jitaConvertClick() {
     function fail(xhr) {
         delete jitaConvertBusy[ebrKey];
         jitaConvertButtonState();   // whichever button is on the page now, not the one that was clicked
-        jitaAjaxError()(xhr);
+        jitaAjaxError(xhr && xhr.jitaError)(xhr);
     }
     // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
     // newly-created defect (found as the freshly-linked issue that wasn't linked before).
@@ -954,9 +996,28 @@ function jitaConvertClick() {
         .done(function (d) {
             var before = jitaLinkedKeys(d.fields && d.fields.issuelinks);
             jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
-                .done(function () { jitaGoToNewDefect(ebrKey, before); })   // poll the EBR's links for the new defect, then navigate
+                .done(function (resp) {
+                    // As for the GM rule: anything but SUCCESS means nothing is converting. Say so, rather than poll for
+                    // a defect that will never come and then reload the page in silence.
+                    var inv = resp && resp.invocations && resp.invocations[0];
+                    if (!inv || inv.status !== 'SUCCESS') { fail({ status: 0, jitaError: 'The conversion automation did not start (' + ((inv && inv.status) || 'no answer') + ').' }); return; }
+                    jitaGoToNewDefect(ebrKey, before);   // poll the EBR's links for the new defect, then navigate
+                })
                 .fail(fail);
         }).fail(fail);
+}
+
+// The Close button: open the status menu and pick "Closed" once Jira has rendered it. It clicked after a fixed
+// 100 ms; on a slow page the option was not there yet, and the menu stayed open with nothing said.
+function jitaCloseClick() {
+    $(SELECTORS.STATUS_FIELD_WRAP).find('button').click();
+    var t0 = Date.now();
+    (function pick() {
+        var opt = $("div[data-testid='issue.fields.status.common.ui.status-lozenge.3']").children().find('span:contains(Closed)');
+        if (opt.length) { opt.click(); return; }
+        if (Date.now() - t0 >= 3000) { alert('The Closed option did not appear in the status menu - set the status by hand. Report issues to Schogol :).'); return; }
+        setTimeout(pick, 100);
+    })();
 }
 
 // Adds the different buttons to the "command-bar" and defines what they do
@@ -1069,10 +1130,7 @@ function addButtons() {
     // Create close button
     addActionButton('closeButton', 'Close');
     // When the Close button is clicked we change the status to Closed by simulating clicks on the relevant buttons. This is extremely janky right now because I cant figure out a better way to do this.
-    $("#closeButton").off('click.jita').on('click.jita', function () {
-        $(SELECTORS.STATUS_FIELD_WRAP).find("button").click();
-        setTimeout(function(){$("div[data-testid='issue.fields.status.common.ui.status-lozenge.3']").children().find("span:contains(Closed)").click();}, 100);
-    });
+    $("#closeButton").off('click.jita').on('click.jita', jitaCloseClick);
 };
 
 
@@ -1119,6 +1177,7 @@ waitForKeyElements(cmSelector, SwapUI);
             var el = nodes[i];
             if (el.classList.contains('jita-log-hiding')) { continue; }
             if (el.querySelector && (el.querySelector('#gpanel') || el.querySelector('#tableContent'))) { continue; }   // already our parsed UI
+            if (jitaInEditable(el)) { continue; }   // a draft in the comment box, never a log viewer: it used to blink out for 2.5 s per line
             var t = el.textContent || '';
             // Hide header-based logs (any layout, matched by header text) OR, while a header-less igbr.zip file is
             // being loaded by a click (jitaParserPending === the current click generation), the code-block it lands
@@ -1154,10 +1213,10 @@ waitForKeyElements(cmSelector, SwapUI);
 // The click binding is namespaced and .off()'d first so re-firing can never stack duplicate handlers: the SPA
 // re-rendering the attachment list makes waitForKeyElements match a fresh span and re-run this callback.
 var IGBR_FILES = [
-    { name: 'outstandingcalls.txt', setFlag: function () { oc = true; } },
-    { name: 'lastcrashes.txt',      setFlag: function () { lc = true; } },
-    { name: 'PDMData.txt',          setFlag: function () { pdm = true; } },
-    { name: 'dxdiag.txt',           setFlag: function () { dx = true; } }
+    { name: 'outstandingcalls.txt', setFlag: function () { jitaIgbrFile = 'oc'; } },
+    { name: 'lastcrashes.txt',      setFlag: function () { jitaIgbrFile = 'lc'; } },
+    { name: 'PDMData.txt',          setFlag: function () { jitaIgbrFile = 'pdm'; } },
+    { name: 'dxdiag.txt',           setFlag: function () { jitaIgbrFile = 'dx'; } }
 ];
 IGBR_FILES.forEach(function (f) {
     waitForKeyElements('span[data-item-title="true"]:contains(' + f.name + ')', function () {
@@ -1208,6 +1267,7 @@ if (!JITA_NO_JIRA_UI) {
     }, true);
 }
 function jitaRunParserWhenLoaded(setFlag) {
+    if (!flagOn('parser')) { return; }   // a click while the parser is off must leave nothing pending for later
     var myGen = ++jitaParserGen;
     var CB = SELECTORS.CODE_BLOCK;
     // These igbr.zip files have no header row, so the signature observer can't catch them. Instead mark a parse as
@@ -1284,7 +1344,34 @@ function readCodeBlock() {
 function mountParser(viewHtml, parseFn) {
     readCodeBlock();
     $(SELECTORS.CODE_BLOCK).html(viewHtml);
-    setTimeout(parseFn, 250);
+    setTimeout(function () { jitaRunParse(parseFn); }, 250);
+}
+
+// Run a parser; if it throws, end the spinner with a message instead of leaving it going over a page whose raw
+// text is already gone.
+function jitaRunParse(parseFn) {
+    try { parseFn(); } catch (e) {
+        console.log('[JiTA] log parser failed:', e);
+        var l = document.getElementById('loader');
+        if (l) { l.style.display = 'none'; }
+        var tc = document.getElementById('tableContent');
+        if (tc && tc.tBodies && tc.tBodies[0]) {
+            var tr = document.createElement('tr'), td = tr.insertCell(0);
+            td.colSpan = 20;
+            td.textContent = 'This file could not be parsed (' + (e && e.message || e) + '). Open raw to read it.';
+            tc.tBodies[0].appendChild(tr);
+            tc.style.display = 'table';
+        }
+    }
+}
+
+// True for a log container inside a rich-text editor the user is typing in (a ``` block in the comment box or the
+// description), as against the attachment viewer. Judged by the HOST, not by CodeMirror's own contenteditable:
+// an editable-but-read-only viewer carries contenteditable="true" too.
+function jitaInEditable(el) {
+    var ed = el && el.closest ? (el.closest('.cm-editor') || el) : null;
+    var host = ed && ed.parentElement;
+    return !!(host && host.closest && host.closest('[contenteditable="true"], .ProseMirror'));
 }
 
 
@@ -1297,11 +1384,25 @@ function SwapUI() {
     // Scope everything to the ONE editor that holds the log header row: the page can contain OTHER CodeMirror
     // editors (a ``` code block in the comment box is also a .cm-editor / .cm-content), and operating on all of
     // them read the wrong (comment) text into `rows` AND injected the "Logfile Parser" UI into the comment box.
-    var $logEd = $(SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")").first().closest('.cm-editor');
+    // The header-less igbr.zip file a click asked for, taken once whichever branch runs: a flag left set by a click
+    // while the parser was off used to pick the wrong parser for the next file.
+    var igbr = jitaIgbrFile;
+    jitaIgbrFile = null;
+    // Never the comment box: a ``` block there is a CodeMirror editor too, and a log header pasted into it turned the
+    // box being typed in into the parser's chrome.
+    var $logEd = $(SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")").filter(function () { return !jitaInEditable(this); }).first().closest('.cm-editor');
     if ($logEd.length && !$(SELECTORS.CODE_BLOCK).length && flagOn('parser')) {
         var $cm = $logEd.find('.cm-content').first().attr('data-jita-cmsrc', '1');   // mark the exact source editor
         rows = getCmDocText();                                                       // reads the marked .cm-content
         $cm.removeAttr('data-jita-cmsrc');
+        // A read that came back without the log (CodeMirror's internals moved) replaced the readable raw log with an
+        // empty table, and said nothing. Leave the viewer as it is.
+        if (!rows || rows.indexOf(LOG_HDR) === -1) {
+            console.warn('[JiTA] could not read the log text from the viewer, so it was left as it is');
+            jitaParserPending = 0;
+            jitaRevealLogs();
+            return;
+        }
         $logEd.html(html);
         // The parser's scrollable #table is position:absolute (top:85px; bottom:0), so it sizes itself
         // against the nearest positioned ancestor. In the old <span> viewer that ancestor filled the screen;
@@ -1309,7 +1410,7 @@ function SwapUI() {
         // clips every row. Pin #table to the viewport instead (the media viewer is full-screen) so all rows
         // are visible and scrollable.
         $('#table').css({ position: 'fixed', top: '95px', bottom: '0', left: '0', width: '100%' });
-        setTimeout(ParseLogs, 250);
+        setTimeout(function () { jitaRunParse(ParseLogs); }, 250);
         // NB: no early return here. The <span> checks below are no-ops on this layout (no code-block span),
         // but we must fall through to the "$('#gpanel a').click(...)" handler at the end of SwapUI so the
         // Toggle Notice / Warnings / Errors / Exceptions filter buttons get wired up.
@@ -1327,32 +1428,28 @@ function SwapUI() {
         mountParser(McHtml, ParseMcLogs);
     }
 
-    else if (oc && flagOn('parser')) {
-        oc = false;
+    else if (igbr === 'oc' && flagOn('parser')) {
         mountParser(ocHtml, ParseOcLogs);
     }
 
-    else if (lc && flagOn('parser')) {
-        lc = false;
+    else if (igbr === 'lc' && flagOn('parser')) {
         mountParser(lcHtml, ParseOcLogs);
     }
 
-    else if (dx && flagOn('parser')) {
+    else if (igbr === 'dx' && flagOn('parser')) {
         readCodeBlock();
         $(SELECTORS.CODE_BLOCK).append(dxdiagHtml);
         // Parse the raw dxdiag text into a triage summary (crash history + GPU driver recency + system). Guarded.
         try { renderDxdiag(rows); } catch (e) { $('#dxdiag').text('Could not evaluate dxdiag.'); }
-        dx = false;
     }
 
-    else if (pdm && flagOn('parser')) {
+    else if (igbr === 'pdm' && flagOn('parser')) {
         readCodeBlock();
         $(SELECTORS.CODE_BLOCK).append(pdmHtml);
-        var pdmdata = convertTextToObject(rows);
         // Judge the machine against EVE's system requirements and render a per-component breakdown into the
-        // Quick Info box (verdict + OS/CPU/RAM/GPU/DirectX rows + driver age). Guarded end-to-end.
-        try { renderRequirements(pdmdata); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
-        pdm = false;
+        // Quick Info box (verdict + OS/CPU/RAM/GPU/DirectX rows + driver age). Guarded end-to-end, the reading of
+        // the file included: malformed PDM text used to throw before the view was revealed.
+        try { renderRequirements(convertTextToObject(rows)); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
     };
 
     // The parsed view is now mounted (or this wasn't a parse branch) - clear any pending non-header parse and
@@ -1371,72 +1468,62 @@ function SwapUI() {
 // inside its own layer) gets the identical filter/search/Group-Repeats behavior. Bind once per fresh mount -
 // the chrome is rebuilt on every mount, so handlers never stack.
 function jitaWireLogControls() {
-    // Functionality for the buttons in the gpanel to toggle show / hide specific table rows
-    $("#gpanel a").click(function() {
-        switch ($(this).hasClass('toggle')) {
-            case false:
-                $('.'+$(this).attr('id')).css({'display':'none'});
-                $(this).not($('#onlyexception, #showAll')).addClass('toggle');
-                break;
-            default:
-                $('.'+$(this).attr('id')).css({'display':'table-row'});
-                $(this).removeClass('toggle');
-                break;
-        };
-        switch ($(this).attr('id')) {
-            case "onlyexception":
-                $('tr:not(.exception):not(#fixedHead)').css({'display':'none'});
-                $('tr.exception').css({'display':'table-row'});
-                $('#gnav a#notice, #gnav a#error, #gnav a#warning').addClass('toggle');
-                $('#gnav a#exception').removeClass('toggle');
-                break;
-            case "showAll":
-                $('tr').css({'display':'table-row'});
-                $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');
-                break;
-            default:
-                break;
+    // The gpanel buttons only keep their .toggle state (a type toggle carries it while its rows are hidden, Group
+    // Repeats while grouping is off); jitaApplyLogFilter then recomputes the parsed table's rows from it. There used
+    // to be a second handler that hid rows by class across the whole PAGE: Only Exceptions hid the table header (the
+    // ':not(#fixedHead)' matched nothing - it is a class) and any Jira table behind the viewer, Show All forced every
+    // <tr> on the page visible, and the filter pass after it only ever recomputed the table body.
+    $("#gpanel a").click(function (ev) {
+        if (ev && ev.preventDefault) { ev.preventDefault(); }
+        var id = $(this).attr('id');
+        if (id === 'onlyexception') {
+            $('#gnav a#notice, #gnav a#error, #gnav a#warning').addClass('toggle');
+            $('#gnav a#exception').removeClass('toggle');
+        } else if (id === 'showAll') {
+            $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');
+        } else {
+            $(this).toggleClass('toggle');
         }
+        jitaApplyLogFilter();
     });
 
-    // Live search box (Feature D): filter rows by text, composing with the type toggles above. A row is
-    // shown iff it matches the (case-insensitive) query AND its message-type isn't currently toggled off.
-    // jitaApplyLogFilter recomputes visibility from the toggle state (including the "Only Exceptions" combo,
-    // which also hides info rows) so search and the toggle buttons never fight. Wired only on the main log
-    // parser, the one layout that has the search input.
+    // Live search box (Feature D): filter rows by text, composing with the type toggles above.
     if ($('#jita-log-search').length) {
-        var jitaApplyLogFilter = function () {
-            // Drop the previous Nx badges before measuring row text, so a stale "52×" can't pollute the search
-            // match; jitaRegroupLog() re-adds them from the new visibility at the end of this pass.
-            var pb = document.querySelectorAll('#tableContent .jita-rep-badge');
-            for (var pi = 0; pi < pb.length; pi++) { if (pb[pi].parentNode) { pb[pi].parentNode.removeChild(pb[pi]); } }
-            var q = ($('#jita-log-search').val() || '').toLowerCase();
-            var off = {};
-            $('#gnav a.toggle').each(function () { off[$(this).attr('id')] = true; });
-            var onlyExc = off.notice && off.warning && off.error && !off.exception;   // the "Only Exceptions" state
-            $('#tableContent tbody tr').each(function () {
-                var cls = this.className || '';
-                var hiddenByToggle = onlyExc
-                    ? !/\bexception\b/.test(cls)
-                    : ((off.notice && /\bnotice\b/.test(cls)) ||
-                       (off.warning && /\bwarning\b/.test(cls)) ||
-                       (off.error && /\berror\b/.test(cls)) ||
-                       (off.exception && /\bexception\b/.test(cls)));
-                var matches = !q || (this.textContent || '').toLowerCase().indexOf(q) >= 0;
-                this.style.display = (!hiddenByToggle && matches) ? 'table-row' : 'none';
-            });
-            // Re-collapse identical runs against the visibility we just computed (hiding a type can make
-            // previously-separated duplicates adjacent, so the "Nx" grouping must be recalculated here).
-            jitaRegroupLog();
-        };
         var jitaSearchTimer = null;
         $('#jita-log-search').on('input', function () {
             if (jitaSearchTimer) { clearTimeout(jitaSearchTimer); }
             jitaSearchTimer = setTimeout(jitaApplyLogFilter, 120);   // debounce for large logs
         });
-        // Re-apply the text filter after any toggle / Only-Exceptions / Show-All click so the two compose.
-        $('#gpanel a').on('click', function () { setTimeout(jitaApplyLogFilter, 0); });
     }
+}
+
+// Recompute the parsed table's rows from the toggle state and the search box. A row is shown iff it matches the
+// (case-insensitive) query AND its message type is not toggled off; the "Only Exceptions" combination hides info
+// rows too. Only #tableContent's body is touched.
+function jitaApplyLogFilter() {
+    if (!document.getElementById('tableContent')) { return; }
+    // Drop the previous Nx badges before measuring row text, so a stale "52×" can't pollute the search
+    // match; jitaRegroupLog() re-adds them from the new visibility at the end of this pass.
+    var pb = document.querySelectorAll('#tableContent .jita-rep-badge');
+    for (var pi = 0; pi < pb.length; pi++) { if (pb[pi].parentNode) { pb[pi].parentNode.removeChild(pb[pi]); } }
+    var q = ($('#jita-log-search').val() || '').toLowerCase();
+    var off = {};
+    $('#gnav a.toggle').each(function () { off[$(this).attr('id')] = true; });
+    var onlyExc = off.notice && off.warning && off.error && !off.exception;   // the "Only Exceptions" state
+    $('#tableContent tbody tr').each(function () {
+        var cls = this.className || '';
+        var hiddenByToggle = onlyExc
+            ? !/\bexception\b/.test(cls)
+            : ((off.notice && /\bnotice\b/.test(cls)) ||
+               (off.warning && /\bwarning\b/.test(cls)) ||
+               (off.error && /\berror\b/.test(cls)) ||
+               (off.exception && /\bexception\b/.test(cls)));
+        var matches = !q || (this.textContent || '').toLowerCase().indexOf(q) >= 0;
+        this.style.display = (!hiddenByToggle && matches) ? 'table-row' : 'none';
+    });
+    // Re-collapse identical runs against the visibility we just computed (hiding a type can make
+    // previously-separated duplicates adjacent, so the "Nx" grouping must be recalculated here).
+    jitaRegroupLog();
 }
 
 
@@ -1517,22 +1604,23 @@ function ParseMcLogs() {
  * Fill the table with the log data
  */
     for (var i = 1; i < rows.length; ++i) {
+        if (!rows[i].trim()) { continue; }   // a blank line is not a call
         var cols = rows[i].split("\t");
 
         if (cols[1] == "machoNet::GetTime (RemoteServiceCall)") {
             averageDuration = averageDuration + Number(cols[2]);
             count++;
             if (Number(peak) < Number(cols[2])) {
-                peak = cols[2];
+                peak = Number(cols[2]);   // the last column still carries the line's \r
             }
         }
 
         logs.tableInfo.push([cols[0], cols[1], cols[2]]);
     }
-    $('#averageMacho').html('Average machoNet::GetTime duration: ' + Math.round(averageDuration / count) + 'ms <i class="fa-regular fa-circle-question" title="machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue."></i>');
-    $('#peakMacho').html('Peak machoNet::GetTime duration: ' + peak + 'ms <i class="fa-regular fa-circle-question" title="Clicking this row scrolls to the highest GetTime value withing this log file."></i>');
-    $('#peakMacho').on('click', function(){$(".peakMachoCell")[0].scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" })})
-    logs.showRow((rows.length - 2));
+    $('#averageMacho').html('Average machoNet::GetTime duration: ' + (count ? Math.round(averageDuration / count) + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue."></i>');
+    $('#peakMacho').html('Peak machoNet::GetTime duration: ' + (count ? peak + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="Clicking this row scrolls to the highest GetTime value withing this log file."></i>');
+    $('#peakMacho').on('click', function () { var p = $('.peakMachoCell')[0]; if (p) { p.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } });
+    logs.showRow(logs.tableInfo.length);   // every call read; rows.length - 2 dropped the last one
 
 
 
@@ -1664,20 +1752,20 @@ function ParsePhLogs() {
             packetsSent.innerHTML = table[i][15];
             sessionCount = row.insertCell(++cellIndex);
 
-            if (table[i][16] >= "2") {
+            if (Number(table[i][16]) >= 2) {   // as numbers: '10' >= '2' is false as text
                 sessionCount.className += 'red';
             }
 
             sessionCount.innerHTML = table[i][16];
             tidiFactor = row.insertCell(++cellIndex);
 
-            if (table[i][17] <= "0.2") {
+            if (Number(table[i][17]) <= 0.2) {
                 tidiFactor.className += 'red';
             }
-            else if (table[i][17] <= "0.8") {
+            else if (Number(table[i][17]) <= 0.8) {
                 tidiFactor.className += 'yellow';
             }
-            else if (table[i][17] >= "1.05") {
+            else if (Number(table[i][17]) >= 1.05) {
                 tidiFactor.className += 'red';
             }
 
@@ -1691,10 +1779,11 @@ function ParsePhLogs() {
  * Fill the table with the log data
  */
     for (var i = 1; i < rows.length; ++i) {
+        if (!rows[i].trim()) { continue; }   // a blank line is not a sample
         var cols = rows[i].split("\t");
         logs.tableInfo.push([cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6], cols[7], cols[8], cols[9], cols[10], cols[11], cols[12], cols[13], cols[14], cols[15], cols[16], cols[17]]);
     }
-    logs.showRow((rows.length - 2));
+    logs.showRow(logs.tableInfo.length);   // every sample read; rows.length - 2 dropped the last one
 
  /**
  * Clickhandler for when the user clicks on the FPS /spf row. We toggle between spf and FPS on click
@@ -1735,7 +1824,7 @@ function ParseLogs() {
  * rowQuantity: Quantity of rows which will be loaded
  */
     logs.showRow = function(rowQuantity) {
-        var excTime, sttTime = "";
+        var excTime = "", sttTime = "";   // both start empty: an undefined excTime gave the first row a top border
         var table = logs.tableInfo;
         var tableContent = document.getElementById('tableContent');
         var tableContentRowsLength = 0;
@@ -1794,7 +1883,7 @@ function ParseLogs() {
  * If the time of the current message is the same time as it was when the exception started
  * then add the 'exception' class to the row
  */
-            if (table[i][0] == excTime) {
+            if (excTime && table[i][0] == excTime) {   // outside a block excTime is '', and so is a logging-error row's time
                 row.className += ' exception';
             }
 
@@ -1856,9 +1945,13 @@ function ParseLogs() {
  */
     for (var i = 1; i < rows.length; ++i) {
         var cols = rows[i].split("\t");
-        logs.tableInfo.push([cols[0], cols[1], cols[2], cols[3]]);
+        // Fewer than four columns (an empty Facility or Type collapses with its tab, or a line has no tabs at all) used
+        // to throw on the missing message and leave the spinner going: keep the time, if there is one, and the rest
+        // of the line as the message. A message with a tab of its own keeps its tail.
+        if (cols.length < 4) { cols = cols.length > 1 ? [cols[0], '', '', cols.slice(1).join(' ')] : ['', '', '', rows[i]]; }
+        logs.tableInfo.push([cols[0], cols[1], cols[2], cols.slice(3).join('\t')]);
     }
-    logs.showRow((rows.length - 1));
+    logs.showRow(logs.tableInfo.length);
 
 
  /**
@@ -2674,8 +2767,12 @@ function evalRequirements(pdm) {
         var mv = gpu ? Number(gpu.VIDEO_MEMORY) : NaN;
         if (!isNaN(mv) && mv > 0) { rows.push({ label: 'GPU', tier: reqTier(mv, M.vram, 0.03), detail: reqGpuDetail(gpu, M.vram) }); }
         else { rows.push({ label: 'GPU', tier: 'na', detail: pdmGpuName(gpu) || 'integrated' }); }
+    } else if (type) {
+        rows.push({ label: 'OS', tier: 'fail', detail: 'Unsupported OS (' + type + ')' });
     } else {
-        rows.push({ label: 'OS', tier: 'fail', detail: 'Unsupported / unknown OS' + (type ? ' (' + type + ')' : '') });
+        // No OS block (or CCP renamed OS.TYPE): nothing was judged, so the verdict is "could not be evaluated", not
+        // the red "does not meet the minimum" every such file used to get.
+        rows.push({ label: 'OS', tier: 'na', detail: 'OS not found in PDM data' });
     }
 
     return { overall: worstTier(rows.map(function (r) { return r.tier; })), rows: rows, driver: reqDriverInfo(gpu) };
@@ -2750,11 +2847,11 @@ function convertTextToObject(text) {
             stack.push(currentObject);
         } else if (line.startsWith("}")) {
             stack.pop();
-            currentObject = stack[stack.length - 1];
+            currentObject = stack.length ? stack[stack.length - 1] : result;   // a stray '}' at the root is not a crash
         } else if (line.includes(":")) {
-            var keyValue = line.split(":");
-            var key = keyValue[0].trim();
-            var value = keyValue[1].trim();
+            var at = line.indexOf(":");   // the first colon: 'TIME: 12:34:56' keeps its whole value
+            var key = line.slice(0, at).trim();
+            var value = line.slice(at + 1).trim();
 
             if (value === "{EMPTY}") {
                 value = "";
@@ -2806,7 +2903,7 @@ var DX_BUGCHECK = {
     0x124: 'WHEA_UNCORRECTABLE_ERROR', 0x133: 'DPC_WATCHDOG_VIOLATION', 0x139: 'KERNEL_SECURITY_CHECK_FAILURE',
     0x1000007E: 'SYSTEM_THREAD_EXCEPTION_NOT_HANDLED_M', 0x1000008E: 'KERNEL_MODE_EXCEPTION_NOT_HANDLED_M'
 };
-// Common NT exception codes (BSOD P2 on some bugchecks; APPCRASH P7).
+// Common NT exception codes (BSOD P2 on some bugchecks; APPCRASH P7, BEX P8).
 var DX_EXCEPTION = {
     'c0000005': 'ACCESS_VIOLATION', '80000003': 'BREAKPOINT', 'c000001d': 'ILLEGAL_INSTRUCTION',
     'c0000094': 'INTEGER_DIVIDE_BY_ZERO', 'c00000fd': 'STACK_OVERFLOW', 'c0000374': 'HEAP_CORRUPTION',
@@ -2822,10 +2919,11 @@ function dxExceptionName(hex) {
     return DX_EXCEPTION[key] || null;
 }
 
-// Parse the "Windows Error Reporting" section into [{ name, p:{P1..P10} }, ...] (dxdiag lists newest first).
+// Parse the "Windows Error Reporting" section into [{ name, p:{P1..P10} }, ...] (dxdiag lists newest first), or
+// null when the file has no such section (truncated, or a dxdiag we cannot read): that is not an empty history.
 function parseWER(text) {
     var out = [], idx = text.indexOf('Windows Error Reporting');
-    if (idx < 0) { return out; }
+    if (idx < 0) { return null; }
     var blocks = text.substring(idx).split(/\+\+\+\s*WER\d+\s*\+\+\+/);
     for (var i = 1; i < blocks.length; i++) {
         var b = blocks[i];
@@ -2837,13 +2935,22 @@ function parseWER(text) {
     return out;
 }
 
-// Classify a WER entry: 'eve' (exefile.exe crash), 'app' (other app crash), or 'kernel' (BSOD / live dump).
-// App crashes put the faulting app's filename in P1; kernel dumps put a hex bugcheck code there instead.
+// Classify a WER entry by its event name: 'eve' (an exefile.exe crash), 'evehang' (exefile.exe stopped
+// responding), 'kernel' (BSOD / live dump), 'app' (another program's crash), or null for anything that is not a
+// crash (RADAR_PRE_LEAK memory diagnostics, other programs' hangs, update failures...). Going by P1 alone counted
+// a leak report or a hang of exefile.exe as an EVE client crash. App crashes put the program's file name in P1.
+var DX_APP_CRASH = /^(APPCRASH|BEX|BEX64|MoAppCrash|MoBEX|CLR20r3)$/i;
 function dxWerKind(e) {
-    var p1 = e.p.P1 || '';
-    if (/\.exe/i.test(p1)) { return /exefile\.exe/i.test(p1) ? 'eve' : 'app'; }
-    if (/bluescreen|livekernel|kernel/i.test(e.name)) { return 'kernel'; }
-    return 'app';
+    var name = e.name || '', eve = /exefile\.exe/i.test(e.p.P1 || '');
+    if (/bluescreen|livekernel/i.test(name)) { return 'kernel'; }
+    if (DX_APP_CRASH.test(name)) { return eve ? 'eve' : 'app'; }
+    if (/^AppHang/i.test(name)) { return eve ? 'evehang' : null; }
+    return null;
+}
+
+// The exception code of an app crash: P7 for APPCRASH, but P8 for BEX / BEX64, where P7 is the offset.
+function dxCrashCode(e) {
+    return /^(BEX|BEX64|MoBEX)$/i.test(e.name || '') ? e.p.P8 : e.p.P7;
 }
 
 // First "Label: value" line in the dxdiag text (labels are right-aligned, so allow leading whitespace).
@@ -2853,15 +2960,32 @@ function dxFirst(text, label) {
     return m ? m[1].trim() : '';
 }
 
-// dxdiag dates use the reporter's locale (US default M/D/YYYY). Parse leniently; if the "month" is > 12 the
-// locale must be D/M, so swap. Returns a Date or null.
-function dxParseDate(s) {
-    var m = String(s == null ? '' : s).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (!m) { return null; }
-    var mm = +m[1], dd = +m[2], yy = +m[3];
-    if (mm > 12 && dd <= 12) { var t = mm; mm = dd; dd = t; }
+// dxdiag dates use the reporter's locale: US M/D/YYYY by default, D.M.YYYY in much of Europe, YYYY-MM-DD in
+// others. Only '/' used to be read, so a German driver date gave no date, no age and no over-a-year warning.
+// `order` ('dm' or 'md', from dxDateOrder) settles a slash or dash date whose day is 12 or less; without it
+// a "month" over 12 still means D/M. Returns a Date or null.
+function dxParseDate(s, order) {
+    s = String(s == null ? '' : s);
+    var m, yy, mm, dd;
+    if ((m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/))) { yy = +m[1]; mm = +m[2]; dd = +m[3]; }
+    else if ((m = s.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/))) { dd = +m[1]; mm = +m[2]; yy = +m[3]; }   // dotted dates are D.M.Y
+    else if ((m = s.match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/))) {
+        mm = +m[1]; dd = +m[2]; yy = +m[3];
+        if ((order === 'dm' && dd <= 12) || (mm > 12 && dd <= 12)) { var t = mm; mm = dd; dd = t; }
+    }
+    else { return null; }
     var d = new Date(yy, mm - 1, dd);
-    return isNaN(d.getTime()) ? null : d;
+    return (isNaN(d.getTime()) || d.getMonth() !== mm - 1 || d.getDate() !== dd) ? null : d;   // no 31.02 rolled into March
+}
+// The order of the slash / dash dates in this dxdiag: 'dm' once any of them has a first part over 12, 'md' once
+// any has a second part over 12, else null (every date in the file is ambiguous).
+function dxDateOrder(text) {
+    var re = /(?:^|[^\d.\/-])(\d{1,2})[\/-](\d{1,2})[\/-]\d{4}/g, m;
+    while ((m = re.exec(text))) {
+        if (+m[1] > 12) { return 'dm'; }
+        if (+m[2] > 12) { return 'md'; }
+    }
+    return null;
 }
 function dxFmtDate(d) {
     var MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -2893,7 +3017,7 @@ function dxNvidiaDriver(ver) {
     return t.slice(0, 3) + '.' + t.slice(3);
 }
 // Display devices -> [{ name, version, driverDate }]. dxdiag repeats a card once per attached monitor, so dedupe.
-function dxGpus(text) {
+function dxGpus(text, order) {
     var out = [], seen = {}, start = text.indexOf('Display Devices');
     if (start < 0) { return out; }
     var blocks = text.substring(start).split(/Card name:[ \t]*/).slice(1);
@@ -2908,7 +3032,7 @@ function dxGpus(text) {
         var key = name + '|' + ver;
         if (seen[key]) { return; }
         seen[key] = 1;
-        out.push({ name: name, version: ver, driverDate: dm ? dxParseDate(dm[1]) : null, role: role });
+        out.push({ name: name, version: ver, driverDate: dm ? dxParseDate(dm[1], order) : null, role: role });
     });
     return out;
 }
@@ -2916,27 +3040,33 @@ function dxGpus(text) {
 // Build the dxdiag Quick-Info summary and drop it into #dxdiag.
 function renderDxdiag(text) {
     var COL = { crit: '#ff8f8f', warn: '#ffd479', ok: '#7fdca4' };
-    var reportDate = dxParseDate(dxFirst(text, 'Time of this report'));
+    var order = dxDateOrder(text);
+    var reportDate = dxParseDate(dxFirst(text, 'Time of this report'), order);
     var html = '';
 
-    var eve = [], kernel = [], app = [];
-    parseWER(text).forEach(function (e) {
+    var wer = parseWER(text), eve = [], hangs = [], kernel = [], app = [];
+    (wer || []).forEach(function (e) {
         var k = dxWerKind(e);
-        (k === 'eve' ? eve : k === 'kernel' ? kernel : app).push(e);
+        if (k) { (k === 'eve' ? eve : k === 'evehang' ? hangs : k === 'kernel' ? kernel : app).push(e); }
     });
 
-    // EVE client crashes - the headline. APPCRASH P4 = faulting module, P7 = exception code.
+    // EVE client crashes - the headline. P4 = faulting module; the exception code is P7 (P8 for BEX).
     if (eve.length) {
         html += '<div style="font-weight:700; color:' + COL.crit + '; margin:2px 0 4px;">&#9888; ' + eve.length +
             ' EVE client crash' + (eve.length === 1 ? '' : 'es') + ' (exefile.exe)</div>' +
             '<table style="border-collapse:collapse; font-size:12px; line-height:1.5; margin-bottom:8px;">';
         eve.forEach(function (e) {
-            var mod = e.p.P4 || '', exc = dxExceptionName(e.p.P7) || e.p.P7 || '';
+            var code = dxCrashCode(e), mod = e.p.P4 || '', exc = dxExceptionName(code) || code || '';
             var detail = [exc, mod].filter(Boolean).map(reqEscape).join(' in ');
             html += '<tr><td style="padding:0 8px 0 0; color:#9aa6b2; vertical-align:top; white-space:nowrap;">' +
                 reqEscape(e.name) + '</td><td style="padding:0; color:#e6e6e6;">' + (detail || '&ndash;') + '</td></tr>';
         });
         html += '</table>';
+    }
+    // The client hanging is worth knowing, but it is not a crash.
+    if (hangs.length) {
+        html += '<div style="font-size:12px; color:' + COL.warn + '; margin-bottom:8px;">&#9888; ' + hangs.length +
+            ' EVE client hang' + (hangs.length === 1 ? '' : 's') + ' (exefile.exe stopped responding)</div>';
     }
 
     // Kernel crashes (BSOD / live dumps), grouped by decoded bugcheck name.
@@ -2960,12 +3090,14 @@ function renderDxdiag(text) {
         }
     }
 
+    if (!wer) {
+        html += '<div style="font-size:12px; color:' + COL.warn + '; margin-bottom:8px;">WER section not found - crash history unknown.</div>';
+    } else if (!eve.length && !kernel.length) {
+        html += '<div style="font-size:12px; color:' + COL.ok + '; margin-bottom:8px;">&#10003; No EVE or system crashes in WER history.</div>';
+    }
     if (app.length) {
         html += '<div style="font-size:11px; color:#9aa6b2; margin-bottom:8px;">+ ' + app.length +
             ' other app crash' + (app.length === 1 ? '' : 'es') + ' in history</div>';
-    }
-    if (!eve.length && !kernel.length) {
-        html += '<div style="font-size:12px; color:' + COL.ok + '; margin-bottom:8px;">&#10003; No crashes in WER history.</div>';
     }
 
     // dxdiag's own Direct3D probe crash.
@@ -2975,7 +3107,7 @@ function renderDxdiag(text) {
     }
 
     // GPU(s): driver DATE + age (recency), version as fallback. Warn (amber) when the driver is over a year old.
-    var gpus = dxGpus(text);
+    var gpus = dxGpus(text, order);
     if (gpus.length) {
         html += '<div style="font-size:12px; line-height:1.6;">';
         gpus.forEach(function (g) {
@@ -3012,7 +3144,9 @@ function renderDxdiag(text) {
         .filter(Boolean).map(reqEscape).join(' · ');
     if (sys) { html += '<div style="font-size:11px; color:#9aa6b2; margin-top:8px;">' + sys + '</div>'; }
 
-    $('#dxdiag').html(html || 'Could not read dxdiag.');
+    // Nothing recognised at all: say so rather than show a lone "WER section not found".
+    if (!wer && !gpus.length && !sys) { html = 'Could not read dxdiag: no crash history, display devices or system details found.'; }
+    $('#dxdiag').html(html);
 }
 
 // Floating Div for the dxdiag.txt file: the triage summary overlay (crash history / GPU driver recency / system).
@@ -4767,7 +4901,7 @@ JiTA.responses = {
                     var cleared = ed && (ed.textContent || '').trim() === '';
                     var disabled = !!(addBtn && addBtn.disabled);
                     if (cleared || disabled) { clearInterval(iv); resolve({ ok: true }); }
-                    else if (waited >= 8000) { clearInterval(iv); resolve({ ok: false, error: 'Could not confirm the note posted (composer did not reset).' }); }
+                    else if (waited >= 8000) { clearInterval(iv); resolve({ ok: false, clicked: true, error: 'Could not confirm the note posted (composer did not reset).' }); }
                 }, 200);
             }
         });
@@ -11760,25 +11894,7 @@ JiTA.triage = {
     // Poll a report's status until it reads closed (resolves true) or the tries run out (false). First check
     // after 1.5s (gives the automation a head start), then every 2s - ~10s worst case. Network blips just
     // consume a try, so a flaky connection degrades to "not confirmed" rather than hanging forever.
-    _waitClosed: function (key, tries) {
-        return new Promise(function (resolve) {
-            (function step(n) {
-                setTimeout(function () {
-                    $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + key + '?fields=status', dataType: 'json' })
-                        .done(function (d) {
-                            var st = (d && d.fields && d.fields.status && d.fields.status.name) || '';
-                            if (JiTA.util.isClosedStatus(st)) { resolve(true); return; }
-                            if (n <= 0) { resolve(false); return; }
-                            step(n - 1);
-                        })
-                        .fail(function () {
-                            if (n <= 0) { resolve(false); return; }
-                            step(n - 1);
-                        });
-                }, n === tries ? 1500 : 2000);
-            })(tries);
-        });
-    },
+    _waitClosed: function (key, tries) { return jitaWaitClosed(key, tries); },
 
     _exec: function (type, a) {
         var T = JiTA.triage, item = T._queue[T._idx];
@@ -20059,6 +20175,25 @@ JiTA.changelog = {
             'Attaching or closing a report no longer makes every open tab rebuild the shared ranking indexes once each.',
             'Switching between GPU and CPU embedding now takes effect even when the tab you switch in is not the one running the shared worker.',
             'A failed embedding pass no longer leaves its progress text standing, and a database upgrade check no longer gives up when a sync happens to be running.'
+        ] },
+        { v: '3.38.18', date: '2026-10-03', items: [
+            'dxdiag Quick Info: memory-leak reports and hangs of the EVE client are no longer counted as client crashes; a hang gets its own amber line.',
+            'dxdiag Quick Info: a file without crash history says "crash history unknown" instead of a green all-clear, and BEX crashes show their real exception code.',
+            'dxdiag Quick Info: driver dates written as 15.08.2023 or 2023-08-15 are read, so the driver age and the over-a-year warning show for them too.',
+            'PDM Quick Info: a file without an OS block says it could not be evaluated, instead of "does not meet the minimum requirements".'
+        ] },
+        { v: '3.38.17', date: '2026-10-03', items: [
+            'Parsed logs: Only Exceptions no longer hides the table header or parts of Jira behind the log, and Show All no longer forces Jira\'s own tables open.',
+            'Parsed logs: a line with a missing column no longer leaves the spinner going forever, logging errors are no longer marked as exceptions, and the first row lost its stray border.',
+            'A log header pasted into a comment no longer turns the comment box into the log parser, and a log the viewer could not hand over is left readable instead of emptied.',
+            'Process Health colours 10 or more sessions red again and compares time dilation as numbers; Method Calls no longer shows NaN or drops its last row.',
+            'PDM data: a value containing a colon is read whole, and an oddly formed file no longer stops the summary from showing.'
+        ] },
+        { v: '3.38.16', date: '2026-10-03', items: [
+            'Convert to Support Ticket: trying again after a failed conversion no longer posts the GM note a second time.',
+            'Convert to Support Ticket now waits for the report to close, and says so if it stays open, instead of the window disappearing after 20 seconds without a word.',
+            'Convert to Defect no longer takes you away from, or reloads, an issue you moved on to while it converted, and says so when the conversion does not start.',
+            'The Close button now waits for Jira\'s status menu instead of giving up after a tenth of a second.'
         ] },
         { v: '3.38.15', date: '2026-10-03', items: [
             'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
