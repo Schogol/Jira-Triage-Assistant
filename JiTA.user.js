@@ -4220,7 +4220,7 @@ JiTA.responses = {
         { title: 'Tutorial/NPE Operations', body: 'During the starter encounters, you should be able to reset yourself to the last checkpoint by clicking on the small question mark in operations panel. You can also attempt to undock/redock, or log in and out of your client. If for some reason you are unable to resolve the issue by doing any of the above, please follow up with the support department as they may be able to assist you further here: https://support.eveonline.com/hc/requests/new' },
         { title: 'ESI Issues', body: 'Thank you for submitting a bug report. For reporting any ESI related issues, please instead use our official ESI Issues GitHub repository: https://github.com/esi/esi-issues or use the #3rd-party-dev-and-esi channel on the EVE Online Discord (https://www.eveonline.com/discord)' },
         { title: 'Not EVE Related', body: 'Thank you for submitting a bug report. We appreciate you taking the time to contact us, however the issue in question is not supported by EVE Online directly or deals with outside factors/services beyond our control.' },
-        { title: 'Security Related', body: 'Thank you for your report, we appreciate your concern and will forward this information to the security team within Fenris Creations. If you have any further substantial evidence which supports your report, please add it to this ticket. Please note that the security team may not respond to this ticket unless additional information is required but you can rest assured that your report will be reviewed. Should you come across other suspicious behavior in the future, we would like to point you to two other communications channels. The customer support department as well as the REPLACE WITH TEAM NAME are not directly involved in detecting and policing Real Money Trading, abuse of macros, bots and other illegitimate third party programs, that responsibility lies with Team Security, a team of specialists responsible for enforcing this side of EVE. The following two channels are the most efficient way of bringing suspected abuse of this kind to their attention:\n- Please file a support ticket or\n- send a mail directly to security@fenriscreations.com.\nMake sure to include the names of the character(s) involved, time of the alleged illicit activity and any other pertinent details you possess. For all other reports of suspected third party program abuse, please utilize the "Report bot" function in the EVE game client. Here are the steps submit a bot report:\n- Right click on the character you wish to report and select show info.\n- Click the button in the upper-left corner of the character information screen to open the action menu.\n- Select "Report Bot".\nMore information on the bot report tool and further instructions on how to operate it can be found in the blog: https://www.eveonline.com/article/the-eve-security-taskforce-report-a-bot/ I will now move this ticket to the attention of the security team.\nThanks and fly safe,' }
+        { title: 'Security Related', body: 'Thank you for your report, we appreciate your concern and will forward this information to the security team within Fenris Creations. If you have any further substantial evidence which supports your report, please add it to this ticket. Please note that the security team may not respond to this ticket unless additional information is required but you can rest assured that your report will be reviewed. Should you come across other suspicious behavior in the future, we would like to point you to two other communications channels. The customer support department as well as the Bug Hunter team are not directly involved in detecting and policing Real Money Trading, abuse of macros, bots and other illegitimate third party programs, that responsibility lies with Team Security, a team of specialists responsible for enforcing this side of EVE. The following two channels are the most efficient way of bringing suspected abuse of this kind to their attention:\n- Please file a support ticket or\n- send a mail directly to security@fenriscreations.com.\nMake sure to include the names of the character(s) involved, time of the alleged illicit activity and any other pertinent details you possess. For all other reports of suspected third party program abuse, please utilize the "Report bot" function in the EVE game client. Here are the steps submit a bot report:\n- Right click on the character you wish to report and select show info.\n- Click the button in the upper-left corner of the character information screen to open the action menu.\n- Select "Report Bot".\nMore information on the bot report tool and further instructions on how to operate it can be found in the blog: https://www.eveonline.com/article/the-eve-security-taskforce-report-a-bot/ I will now move this ticket to the attention of the security team.\nThanks and fly safe,' }
     ],
 
     // ---- repository model: store ONLY the user's deltas, not a full snapshot ----
@@ -5201,7 +5201,13 @@ JiTA.sync = {
                 });
             });
         }
-        return nextPage();
+        // What this run wrote, or pruned, stays invisible to the shared ranking worker until it rebuilds its indexes:
+        // it keeps them in memory for as long as it lives, across reloads. So once the run ends - done, or failed part
+        // way - drop them if it stored anything. Once per run, not per page: a query in between rebuilds them, and a
+        // full crawl is hundreds of pages. (embedPass drops them as well, but a sync that only changed statuses, or
+        // pruned closed reports, gave it nothing to embed, and it used to return before dropping anything.)
+        function settled() { if (stored > 0) { JiTA.sync._invalidateWorker(); } }
+        return nextPage().then(function (res) { settled(); return res; }, function (e) { settled(); throw e; });
     },
 
     fullSync: function () {
@@ -5421,6 +5427,11 @@ JiTA.sync = {
         });
     },
 
+    // Make the shared ranking worker drop its in-memory indexes; it rebuilds them from the DB on its next query.
+    _invalidateWorker: function () {
+        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+    },
+
     // An EBR just left the OPEN set locally (attached / closed) and was deleted from the DB. Make every open
     // tab drop it from the defect "matching reports" view WITHOUT a manual refresh. Removing the DB row is not
     // enough: the shared ranking worker keeps the report in its in-memory kwCache/vecCache (its vector still
@@ -5433,7 +5444,7 @@ JiTA.sync = {
     _ebrRemoved: function (keys, fromRemote) {
         JiTA.rank._dirtyEbr = true;
         JiTA.rank._dirtyEbrVec = true;
-        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+        JiTA.sync._invalidateWorker();
         if (!fromRemote) { gmSet('sdEbrRemoved', { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId }); }
     },
 
@@ -6839,11 +6850,7 @@ JiTA.ui = {
         menu.style.top = Math.max(6, top) + 'px';
         // Dismiss on outside click / Esc (registered next tick so the opening click doesn't self-close; the
         // funnel itself is excluded so its click handler can toggle the menu shut).
-        JiTA.ui._filterMenuDismiss = function (e) {
-            if (e.type === 'keydown') { if (e.key === 'Escape') { JiTA.ui._closeFilterMenu(); } return; }
-            if (menu.contains(e.target) || (anchor && anchor.contains && anchor.contains(e.target))) { return; }
-            JiTA.ui._closeFilterMenu();
-        };
+        JiTA.ui._filterMenuDismiss = function (e) { JiTA.ui._popDismiss(e, menu, anchor, JiTA.ui._closeFilterMenu); };
         setTimeout(function () {
             document.addEventListener('mousedown', JiTA.ui._filterMenuDismiss, true);
             document.addEventListener('keydown', JiTA.ui._filterMenuDismiss, true);
@@ -6858,6 +6865,19 @@ JiTA.ui = {
             document.removeEventListener('keydown', JiTA.ui._filterMenuDismiss, true);
             JiTA.ui._filterMenuDismiss = null;
         }
+    },
+
+    // The popovers' dismiss rule (the funnel's filter menu, the hide menu), run in the capture phase on document. Esc
+    // closes the popover and only the popover: the key is stopped there, before it reaches menu._esc, which would
+    // close the whole overlay under it - Triage mode included, which then has to fetch its queue all over again.
+    // A mousedown outside the popover (and outside its anchor, which toggles it itself) closes it too.
+    _popDismiss: function (e, menu, anchor, close) {
+        if (e.type === 'keydown') {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+            return;
+        }
+        if (menu.contains(e.target) || (anchor && anchor.contains && anchor.contains(e.target))) { return; }
+        close();
     },
 
     // Soft-refresh the open issue after a "Mark dup": patch the status lozenge text in place instead of a
@@ -7564,11 +7584,7 @@ JiTA.ui = {
         menu.style.left = Math.max(6, left) + 'px';
         menu.style.top = Math.max(6, top) + 'px';
         // Dismiss on outside click or Esc (capture phase, registered next tick so the opening click is ignored).
-        JiTA.ui._hideMenuDismiss = function (e) {
-            if (e.type === 'keydown') { if (e.key === 'Escape') { JiTA.ui._closeHideMenu(); } return; }
-            if (menu.contains(e.target)) { return; }
-            JiTA.ui._closeHideMenu();
-        };
+        JiTA.ui._hideMenuDismiss = function (e) { JiTA.ui._popDismiss(e, menu, null, JiTA.ui._closeHideMenu); };
         setTimeout(function () {
             document.addEventListener('mousedown', JiTA.ui._hideMenuDismiss, true);
             document.addEventListener('keydown', JiTA.ui._hideMenuDismiss, true);
@@ -8602,7 +8618,12 @@ JiTA.menu = {
         JiTA.menu.close();
         JiTA.menu._injectCss();
         var $overlay = $('<div id="jita-menu-overlay"></div>');
-        $overlay.on('click', function (e) { if (e.target === this) { JiTA.menu.close(); } });   // backdrop click
+        // A backdrop click closes the overlay, but only one that began on the backdrop. A drag that starts in the box
+        // (selecting text in a canned response, say) and is let go outside it ends in a click on the backdrop too, and
+        // closing then threw the edit away.
+        var downOnBackdrop = false;
+        $overlay.on('mousedown', function (e) { downOnBackdrop = (e.target === this); });
+        $overlay.on('click', function (e) { if (e.target === this && downOnBackdrop) { JiTA.menu.close(); } });
         var $menu = $('<div id="jita-menu"' + (opts.wide ? ' class="jita-menu-wide"' : '') + '></div>').appendTo($overlay);
         if (opts.title) {
             var $head = $('<div class="jita-menu-head"><h2></h2></div>');
@@ -8611,9 +8632,24 @@ JiTA.menu = {
             $menu.append($head);
         }
         $overlay.appendTo(document.body);
-        JiTA.menu._esc = function (e) { if (e.key === 'Escape') { JiTA.menu.close(); } };
+        // Esc closes the overlay, unless something under it has already taken the key (a popover, an editor, Triage's
+        // own key layer), or it was pressed in a text field: there it only leaves the field, so a half-typed note or
+        // reply is not one keystroke from gone. A second Esc then closes the overlay.
+        JiTA.menu._esc = function (e) {
+            if (e.key !== 'Escape' || e.defaultPrevented) { return; }
+            if (JiTA.menu._isTextField(e.target)) { try { e.target.blur(); } catch (x) { /* ignore */ } return; }
+            JiTA.menu.close();
+        };
         document.addEventListener('keydown', JiTA.menu._esc);
         return { $overlay: $overlay, $menu: $menu, close: JiTA.menu.close };
+    },
+
+    // A field that takes typing: a textarea, an editable element, or an input that holds text (not a checkbox or a
+    // button, where Esc has nothing to leave).
+    _isTextField: function (el) {
+        if (!el) { return false; }
+        if (el.tagName === 'TEXTAREA' || el.isContentEditable) { return true; }
+        return el.tagName === 'INPUT' && /^(text|search|email|url|tel|password|number)?$/i.test(el.type || '');
     },
 
     // Open (toggle): a second click of the menu command closes it again.
@@ -9897,9 +9933,14 @@ function jitaWorkerBody(cfg) {
                     await new Promise(function (r) { setTimeout(r, 1500); });
                 }
             }
-            vecCache = null; kwCache = null; logsigCache = null;   // new vectors/text -> rebuild all indexes on the next query
             return { embedded: todo.length };
-        } finally { embedding = false; }
+        } finally {
+            embedding = false;
+            // Rebuild every index on the next query, however the pass ended: new vectors, or none at all - it runs after
+            // every sync, so even with nothing to embed the records under the indexes may have changed. A pass that
+            // failed part way has still written the batches before the failure.
+            dropIndexes();
+        }
     }
     function openDb() {
         if (db) { return Promise.resolve(db); }
@@ -9949,9 +9990,25 @@ function jitaWorkerBody(cfg) {
     }
     // Build BOTH in-worker indexes in a single DB read (held ONCE for all tabs): the vector index (records
     // embedded at the current model version) and the BM25 keyword index, each split defects vs open non-GM EBRs.
-    async function ensureIndexes() {
-        if (vecCache && kwCache && logsigCache) { return; }
-        var recs = await allRecords();
+    //
+    // One build at a time, and never a stale one. Queries arriving together after a drop share one read and one
+    // build (self.onmessage is async, so a hybrid render's keyword and semantic calls used to build twice), and a
+    // build whose read began before a drop is thrown away and redone: kept, it would put back the very records the
+    // drop was for - a report just attached, a status just changed.
+    var idxGen = 0, idxP = null;
+    function dropIndexes() { idxGen++; vecCache = null; kwCache = null; logsigCache = null; }
+    function ensureIndexes() {
+        if (vecCache && kwCache && logsigCache) { return Promise.resolve(); }
+        if (idxP) { return idxP; }
+        var gen = idxGen;
+        idxP = allRecords().then(function (recs) {
+            idxP = null;
+            if (gen !== idxGen) { return ensureIndexes(); }
+            buildIndexes(recs);
+        }, function (e) { idxP = null; throw e; });
+        return idxP;
+    }
+    function buildIndexes(recs) {
         var vD = [], vE = [], kD = [], kE = [], dfD = {}, dfE = {}, lenD = 0, lenE = 0;
         var sigMap = {}, keyToSigs = {}, crashMap = {}, keyToCrash = {};   // logsig
         for (var i = 0; i < recs.length; i++) {
@@ -10621,7 +10678,7 @@ function jitaWorkerBody(cfg) {
                 // Runs directly; shares the crGate rate buckets. Streams no progress (self never drove a pill).
                 result = await crComputeSelf(payload);
             }
-            else if (type === 'invalidate') { vecCache = null; kwCache = null; logsigCache = null; result = { ok: true }; }   // drop all indexes after a sync writes the DB
+            else if (type === 'invalidate') { dropIndexes(); result = { ok: true }; }   // drop all indexes after a sync writes the DB
             else { throw new Error('unknown worker request: ' + type); }
             self.postMessage({ id: id, ok: true, result: result });
         } catch (err) { self.postMessage({ id: id, ok: false, error: String((err && err.message) || err), stack: String((err && err.stack) || '') }); }
@@ -13514,10 +13571,14 @@ JiTA.dv = {
         D._post('/rest/api/3/search/approximate-count', { jql: '(' + where + ') AND key = ' + D._q(key) }).then(function (d) {
             if (gen !== D._gen || !(d && d.count)) { return; }
             (function more() {
-                if (gen !== D._gen || D._activeKey !== key) { return; }
+                if (gen !== D._gen || D._activeKey !== key || !D._mounted) { return; }   // a newer query, another issue, or the list is gone
                 if (D._index[key] != null) { D._syncActive(true); return; }
                 if (!D._more || D._issues.length >= D.FIND_MAX) { return; }
-                D._page(gen).then(more);
+                var pages = D._pages;
+                // On only once the page has landed. One that failed (Jira down, the session expired) leaves _more and the
+                // token as they were, so asking again at once sent the same request in a loop for as long as it kept
+                // failing. The next scroll or seek tries again.
+                D._page(gen).then(function () { if (D._pages > pages) { more(); } });
             })();
         }, function () { /* a key JQL does not know (moved, deleted) - simply not in the list */ });
     },
@@ -18579,7 +18640,28 @@ JiTA.worker = {
         JiTA.worker._standAsides = 0;
         JiTA.worker._isLeader = true;
         JiTA.worker._respawns = 0;   // fresh leadership session -> fresh respawn budget
+        // The calls this tab sent over the channel were for another leader, and a tab never hears its own channel
+        // messages, so nobody will answer them now. And every follower may be waiting on a call the old leader took:
+        // say so, before this tab takes any call itself (the channel keeps one sender's messages in order).
+        JiTA.worker._failTabPending('the ranking leader moved to this tab');
+        try { if (JiTA.worker._bc) { JiTA.worker._bc.postMessage({ kind: 'leader', version: JiTA.SCRIPT_VERSION }); } } catch (e) { /* ignore */ }
         JiTA.worker._spawnWorker();
+    },
+
+    // Reject this tab's channel calls now instead of at their op timeout. A leader that took a call (ACKed it) and then
+    // went away - its tab reloaded or closed, the usual way to pick up an update - never answers, and an ACKed call has
+    // only its op timer left: 15 minutes for a credits crawl, with the pill frozen and every Refresh told a run is
+    // already going. ackedOnly spares the calls no leader has taken yet: their own LEADER_ACK_MS timer covers them,
+    // and the new leader may be about to take them.
+    _failTabPending: function (why, ackedOnly) {
+        var pend = JiTA.worker._tabPending;
+        Object.keys(pend).forEach(function (id) {
+            var p = pend[id];
+            if (ackedOnly && p.ackTimer) { return; }
+            clearTimeout(p.timer); if (p.ackTimer) { clearTimeout(p.ackTimer); }
+            delete pend[id];
+            try { p.reject(new Error(why)); } catch (e) { /* ignore */ }
+        });
     },
 
     // (Re)spawn the dedicated worker. Called when we become leader and on every self-heal respawn. A spawn throw,
@@ -18816,6 +18898,8 @@ JiTA.worker = {
             JiTA.worker._applyEvent(m.data);   // a worker event the leader relayed (e.g. embed pass finished)
         } else if (m.kind === 'reelect') {
             JiTA.worker._applyReelect(m.want);   // a tab saw a stale worker -> remember the newer version / step down if we're the stale leader
+        } else if (m.kind === 'leader') {
+            JiTA.worker._failTabPending('the ranking leader changed - try again', true);   // a call the old leader took will never be answered
         }
     },
 
@@ -19791,6 +19875,20 @@ JiTA.changelog = {
     ENTRIES: [
         { v: '3.38.10', date: '2026-10-03', items: [
             'Convert to Defect can no longer create a second defect when you click it again while the first conversion is still running.'
+        ] },
+        { v: '3.38.9', date: '2026-10-03', items: [
+            'The Security Related canned reply no longer contains the placeholder REPLACE WITH TEAM NAME: it now names the Bug Hunter team. A copy you edited yourself keeps your wording.'
+        ] },
+        { v: '3.38.8', date: '2026-10-03', items: [
+            'Selecting text in a window and letting go outside it no longer closes the window, so a half-edited canned response is not lost.',
+            'Esc in a text box now just leaves the box, and Esc on a small menu such as the filters closes only that menu, not the window or Triage mode under it.'
+        ] },
+        { v: '3.38.7', date: '2026-10-03', items: [
+            'If Jira stops answering, or your session expires, while the issue list beside an issue is looking for the open issue, it no longer repeats the same request in an endless loop.'
+        ] },
+        { v: '3.38.6', date: '2026-10-03', items: [
+            'Each sync now refreshes the similar defects and matching reports, so reports closed in the meantime drop out and statuses stay current.',
+            'The credits pill no longer hangs for up to 15 minutes when the Jira tab doing the background work is reloaded or closed.'
         ] },
         { v: '3.38.5', date: '2026-10-03', items: [
             "After an update the What's new pill now comes up reliably: if the page takes it away while still loading, it comes back by itself."
