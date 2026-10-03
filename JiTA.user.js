@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.15
+// @version     3.38.27
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -10793,6 +10793,8 @@ JiTA.triage = {
     _queueError: null, // last queue-fetch failure, shown by _render's empty state
     _qGen: 0,          // pagination generation: an order-toggle refetch invalidates the previous background crawl
     _queueDone: true,  // false while background pages are still appending (drives the "…" on the counter)
+    _queuePartial: false,   // the crawl stopped short (a page failed, or QUEUE_MAX): the counter says so
+    _shownKey: null,   // the report whose match list is on screen; digits attach only from a list that was shown
     LAST_KEY: 'jitaTriageLast',   // persisted { key, created } of the last VIEWED report - the resume point (bug-report mode)
     LAST_DEF_KEY: 'jitaTriageLastDef',   // the same for Defect mode
     // Each queue persists its OWN edited JQL (WITHOUT an order by - the order toggle appends that), so
@@ -10951,6 +10953,7 @@ JiTA.triage = {
         var jql = T._queueJql() + ' ORDER BY created ' + (T.order() === 'newest' ? 'DESC' : 'ASC');
         T._queueError = null;
         T._queueDone = false;
+        T._queuePartial = false;
         T._queue = [];
         T._renderList();
         return new Promise(function (resolve) {
@@ -10976,6 +10979,7 @@ JiTA.triage = {
                         page(data.nextPageToken);   // keep crawling in the background
                     } else {
                         T._queueDone = true;
+                        if (data.nextPageToken) { T._stoppedShort('the queue is capped at ' + T.QUEUE_MAX + ' reports'); }
                         finishPage();
                         if (!wasFirst && T._resume) { T._trySeekResume(); }   // last chance: position "after" or give up
                         T._queueProgress();
@@ -10984,12 +10988,25 @@ JiTA.triage = {
                     if (!T._open || gen !== T._qGen) { if (first) { first = false; resolve(); } return; }
                     T._queueDone = true;   // background failure: keep what we have, stop the "…"
                     if (first) { T._queueError = String(e && e.message || e); }   // surfaced by _render's empty state
+                    else { T._stoppedShort('a later page failed (' + String(e && e.message || e) + ')'); }
                     finishPage();
                     T._queueProgress();
                 });
             }
             page(null);
         });
+    },
+
+    // The crawl stopped before the end of the backlog. The counter used to read like a complete queue ("1 / 200").
+    _stoppedShort: function (why) {
+        var T = JiTA.triage;
+        T._queuePartial = true;
+        if (T._open) { T._setMsg('Only part of the queue is loaded: ' + why + '. Reopen Triage mode to load it again.', true); }
+    },
+    // "n / m", then "…" while pages are still arriving, or " (partial)" when the crawl stopped short.
+    _counter: function () {
+        var T = JiTA.triage;
+        return (T._idx + 1) + ' / ' + T._queue.length + (!T._queueDone ? '…' : (T._queuePartial ? ' (partial)' : ''));
     },
 
     // Reflect background queue growth without a full re-render: bump the "n / m…" counter, and if the user was
@@ -11002,7 +11019,7 @@ JiTA.triage = {
             return;
         }
         var el = document.getElementById('jt-progress');
-        if (el) { el.textContent = (T._idx + 1) + ' / ' + T._queue.length + (T._queueDone ? '' : '…'); }
+        if (el) { el.textContent = T._counter(); }
     },
 
     // Resume: jump to the last VIEWED report (persisted across sessions). If it left the backlog meanwhile
@@ -11013,6 +11030,9 @@ JiTA.triage = {
     _trySeekResume: function () {
         var T = JiTA.triage, R = T._resume;
         if (!R || !T._open) { return false; }
+        // The user took over on the report on screen (an armed action, the G picker, an open attachment, a
+        // translation): a deep page landing must not re-render under it and jump to another report. Drop the resume.
+        if (T._armed || T._gmPick || T._viewerNode || T._txShown) { T._resume = null; return false; }
         var newest = T.order() === 'newest';
         function isAfter(c) {   // strictly after the target in the current walk direction
             if (!c || !R.created) { return false; }
@@ -11102,7 +11122,10 @@ JiTA.triage = {
                 })).then(function () { return { rec: base.rec, text: base.text, mode: out.mode, results: results, view: view }; });
             });
         });
-        p.catch(function () { delete T._cache[key]; });   // allow a retry on revisit
+        // Allow a retry on revisit - from the cache this ranking went into: read at failure time, a cache replaced
+        // meanwhile (a filter change, an attach) lost the newer ranking of the same report.
+        var cache = T._cache;
+        p.catch(function () { if (cache[key] === p) { delete cache[key]; } });
         T._cache[key] = p;
         return p;
     },
@@ -11294,7 +11317,10 @@ JiTA.triage = {
                 rows = text;                      // module-global input of the Parse* family (same as SwapUI)
                 $body.html(html);                 // the Logfile Parser chrome (#gheader + #gpanel + #table)
                 jitaWireLogControls();            // type toggles + Group Repeats + live search
-                setTimeout(function () { try { ParseLogs(); } catch (e) { $body.text('Parse failed: ' + (e && e.message || e)); } }, 250);
+                setTimeout(function () {
+                    if (T._viewerNode !== v) { return; }   // switched to another attachment meanwhile: it would parse that one's text
+                    try { ParseLogs(); } catch (e) { $body.text('Parse failed: ' + (e && e.message || e)); }
+                }, 250);
                 return;
             }
             var slice = text.length > T.TEXT_VIEW_MAX ? text.slice(0, T.TEXT_VIEW_MAX) : text;
@@ -11357,6 +11383,7 @@ JiTA.triage = {
     _render: function () {
         var T = JiTA.triage;
         if (!T._open) { return; }
+        T._shownKey = null;
         T._disarm(); T._gmPick = false;
         T._txShown = false; T._curRec = null;   // fresh report -> desc box shows the original again (E re-toggles)
         try { JiTA.ui._hideTip(true); } catch (e) { /* a removed row never fires mouseleave - drop its tip here */ }
@@ -11377,8 +11404,11 @@ JiTA.triage = {
             return;
         }
         var item = T._queue[T._idx], key = item.key;
-        T._rememberPos(item);   // resume point for the next session (debounced - see _rememberPos)
-        $('#jt-progress').text((T._idx + 1) + ' / ' + T._queue.length + (T._queueDone ? '' : '…'));   // "…" = background pages still arriving
+        // The resume point for the next session (debounced - see _rememberPos). Not while a resume is still looking for
+        // its target deeper in the queue: rendering the first report meanwhile overwrote it, so closing before the
+        // deep page arrived resumed the next session at the top.
+        if (!T._resume) { T._rememberPos(item); }
+        $('#jt-progress').text(T._counter());
         $rep.empty(); $mat.empty();
         var $h = $('<div class="jt-rephead"></div>').appendTo($rep);
         $('<a class="jt-key" target="_blank" rel="noopener"></a>').attr('href', '/browse/' + key).text(key).appendTo($h);
@@ -11416,6 +11446,7 @@ JiTA.triage = {
             paintRec(res.rec || {});
             $mat.empty();
             $('#jt-mode').text(res.mode || '');   // the head bar is a sibling of this list, so it survives the empty()
+            T._shownKey = key;   // the list below is what a digit now attaches from
             // In either report<->report view the rows are REPORTS, so no digit can attach them (you cannot
             // attach one report to another) and the reporter list carries no relevance score to show. The trending
             // view lists DEFECTS, so its digits attach exactly as the ranked matches do.
@@ -11646,7 +11677,10 @@ JiTA.triage = {
     _armAttach: function (n, pressedKey) {
         var T = JiTA.triage, item = T._queue[T._idx];
         var res = T._cache[item.key];
-        if (!res) { T._setMsg('Still ranking - try again in a moment.', true); return; }
+        // The cache holds the ranking while it is still pending, so two quick presses of a digit each queued their own
+        // callback: the first armed and the second executed the moment ranking landed - attaching to a match nobody
+        // had seen. Attach only from the list on screen.
+        if (!res || T._shownKey !== item.key) { T._setMsg('Still ranking - try again in a moment.', true); return; }
         res.then(function (r) {
             if (!T._open || !T._queue[T._idx] || T._queue[T._idx].key !== item.key) { return; }
             // The list's own view decides, not the funnel's flags: a ranking cached under a report view is a list of
@@ -11768,7 +11802,11 @@ JiTA.triage = {
                 });
             }
             if (type === 'trash') {
-                return Promise.resolve(jitaCloseAsWontDo(key)).then(function () { return 'Closed ' + key + ' as Won\'t Do'; });
+                // jQuery rejects with the jqXHR itself, which has no message: the user saw "Failed: [object Object]".
+                return new Promise(function (resolve, reject) {
+                    jitaCloseAsWontDo(key).done(function () { resolve('Closed ' + key + ' as Won\'t Do'); })
+                        .fail(function (xhr) { reject(new Error('could not close it - ' + JiTA.dv._errText(xhr))); });
+                });
             }
             if (type === 'gm') {
                 // The invocation reporting SUCCESS only means the rule STARTED - with no (or multiple) linked
@@ -12169,16 +12207,36 @@ JiTA.triage = {
         T._fetchQueue().then(function () { T._render(); T._prefetch(); });
     },
 
+    // A report left the open set (attached, trashed, sent to the GMs): count it, take it out of the queue parked by a
+    // switch of queues, and drop it from the local DB and tell the indexes / other tabs, as the panel buttons do
+    // (best effort - the next sync prunes it anyway). Shared by _afterAction and _afterAttachReport.
+    _dropReport: function (key) {
+        var T = JiTA.triage;
+        T._done++;
+        T._dropFromStash(key);
+        return JiTA.db.deleteDefects([key]).then(function () {
+            try { JiTA.sync._ebrRemoved([key]); } catch (e) { /* ignore */ }
+        }).catch(function () { /* best effort */ });
+    },
+    // A report attached from the defect queue stayed in the bug-report queue parked by the switch: still counted in
+    // n / m, and acting on it only said it had changed server-side.
+    _dropFromStash: function (key) {
+        var T = JiTA.triage;
+        Object.keys(T._stash).forEach(function (mode) {
+            var s = T._stash[mode];
+            if (mode === T._mode || !s || !s.queue) { return; }
+            for (var i = 0; i < s.queue.length; i++) {
+                if (s.queue[i].key === key) { s.queue.splice(i, 1); if (s.idx > i) { s.idx--; } return; }
+            }
+        });
+    },
+
     // Defect mode: a matching REPORT was attached to the current defect. The report leaves the open set (DB row +
     // cross-tab signal, exactly like the panel buttons); the DEFECT stays current so more reports can be attached
     // to it. The ranking cache is dropped so the attached report vanishes from every list it was prefetched into.
     _afterAttachReport: function (defectKey, reportKey, okMsg) {
         var T = JiTA.triage;
-        void defectKey;
-        T._done++;
-        return JiTA.db.deleteDefects([reportKey]).then(function () {
-            try { JiTA.sync._ebrRemoved([reportKey]); } catch (e) { /* ignore */ }
-        }).catch(function () { /* best effort - the next sync prunes it anyway */ }).then(function () {
+        return T._dropReport(reportKey).then(function () {
             T._cache = {};
             T._busy = false;
             if (!T._open) { return; }
@@ -12189,12 +12247,7 @@ JiTA.triage = {
 
     _afterAction: function (key, okMsg) {
         var T = JiTA.triage;
-        T._done++;
-        // Mirror the panel attach buttons: the report just left the open set - drop it from the local DB and
-        // tell the indexes/tabs (worker invalidate + cross-tab broadcast).
-        return JiTA.db.deleteDefects([key]).then(function () {
-            try { JiTA.sync._ebrRemoved([key]); } catch (e) { /* ignore */ }
-        }).catch(function () { /* DB cleanup is best-effort; the next sync prunes it anyway */ }).then(function () {
+        return T._dropReport(key).then(function () {
             delete T._cache[key];
             var i = -1;
             for (var q = 0; q < T._queue.length; q++) { if (T._queue[q].key === key) { i = q; break; } }
@@ -19979,6 +20032,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.27', date: '2026-10-03', items: [
+            'Triage mode: pressing a digit twice while the matches are still ranking no longer attaches to a match you never saw; it waits for the list.',
+            'Triage mode: a report attached from the defect queue is gone from the bug-report queue too, and a queue that stopped loading early says so.',
+            'Triage mode: resuming where you left off no longer jumps away from an action, attachment or translation you have open, nor loses its place.',
+            'Triage mode: a Won\'t Do that Jira refuses says why instead of "[object Object]", and switching attachments quickly no longer mixes up two logs.'
+        ] },
         { v: '3.38.15', date: '2026-10-03', items: [
             'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
             'Lead duties: the Leads\' browsers no longer keep rewriting the ledger page just because each scanned the page tree at a different time.',
