@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.39.0
+// @version     3.39.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -114,10 +114,11 @@ var JITA_IS_FORGE_FRAME = (function () {
     try { return /(^|\.)atlassian-dev\.net$/i.test(location.hostname); } catch (e) { return false; }
 })();
 
-// True on a CONFLUENCE page (same host as Jira, under /wiki). The script is matched there for ONE reason:
-// the Lead-duties chip and overlay belong where the documentation is actually read, so a page can be marked
-// proof-read on the page itself. Nothing else applies - there is no Jira DOM to decorate, no issue to parse,
-// and a wiki tab has no business electing the embedding-worker leader or driving the defect sync.
+// True on a CONFLUENCE page (same host as Jira, under /wiki). The script is matched there for the Lead-duties
+// chip and overlay, which belong where the documentation is actually read, so a page can be marked proof-read on
+// the page itself; the What's new pill and Settings come along. Nothing else applies - there is no Jira DOM to
+// decorate, no issue to parse, and a wiki tab has no business electing the embedding-worker leader or driving the
+// defect sync.
 var JITA_IS_WIKI = (function () {
     try { return /^\/wiki(\/|$)/i.test(location.pathname) && !/(^|\.)atlassian-dev\.net$/i.test(location.hostname); } catch (e) { return false; }
 })();
@@ -226,7 +227,7 @@ GM_addValueChangeListener("buttons", function(key, oldValue, newValue, remote) {
 
 
 // Iterate through all variables in savedVariables and load their locally saved values or set them to true if they are not set yet
-for (let i = 0; i < savedVariables.length; i++) {
+for (var i = 0; i < savedVariables.length; i++) {
     savedVariables[i][1] = GM_getValue (savedVariables[i][0], "");
     if (savedVariables[i][1] === "") {
         // Every feature now defaults ON for a fresh install (the Triage Assistant graduated from its opt-in
@@ -328,7 +329,7 @@ var issueItem = 'a[data-testid="issue.views.issue-base.foundation.breadcrumbs.cu
 waitForKeyElements (issueItem, checkIssueType);
 
 // The current issue's key (e.g. "EBR-67728"), read from the breadcrumb. Returns '' when not on an issue.
-function jitaCurrentKey() { return $.trim($(issueItem).text()); }
+function jitaCurrentKey() { return $.trim($(issueItem).first().text()); }
 
 
 // Check if the issue is a Bug report. If it is then we add the extra buttons
@@ -463,32 +464,17 @@ if (!JITA_NO_JIRA_UI) { jitaButtonObserver.observe(document.body, { childList: t
 var jitaDatesCache = {};   // issueKey -> { created, updated, at } ISO strings + when they were fetched
 var jitaDatesFail = {};    // issueKey -> when its last fetch failed
 var JITA_DATES_TTL_MS = 60 * 1000;   // refetch dates this old (an edit moves Updated), and retry a failed fetch after this
-function jitaFmtDateShort(iso) {
-    var d = new Date(iso);
-    if (isNaN(d.getTime())) { return ''; }
-    var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    function p(n) { return (n < 10 ? '0' : '') + n; }
-    return p(d.getDate()) + ' ' + MON[d.getMonth()] + ' ' + d.getFullYear();
-}
 
 // Find where to drop the dates element. The lock / watch / share / … icons live in the sticky header bar
 // #jira-issue-header-actions, which spans the full width of the issue's right-most context column but only
 // contains the (right-aligned) action-icon group - so the whole empty left part of that bar is the "red box".
 // We anchor to that bar and absolutely-position the dates at its LEFT edge (the bar is position:sticky, i.e. a
 // positioning context, so left:0 lands on the red-box border and top:50% keeps it level with the icons). The
-// breadcrumb is in a SEPARATE left structure, so it can't be used as a row anchor. Fallbacks probe the sticky-
-// header testid, then derive the bar from the watch button.
+// breadcrumb is in a SEPARATE left structure, so it can't be used as a row anchor. The fallback probes the
+// sticky-header testid.
 function jitaDatesTarget() {
     var bar = document.getElementById(SELECTORS.HEADER_ACTIONS_ID)
         || document.querySelector(SELECTORS.STICKY_HEADER);
-    if (!bar) {
-        var watch = document.querySelector('button[data-testid="issue.watchers.action-button.root"]')
-            || document.querySelector('button[data-testid*="watch" i]')
-            || document.querySelector('button[aria-label*="watch" i]');
-        bar = (watch && watch.closest)
-            ? (watch.closest('#' + SELECTORS.HEADER_ACTIONS_ID) || watch.closest(SELECTORS.STICKY_HEADER))
-            : null;
-    }
     if (!bar) { return null; }
     return { row: bar, before: null };   // before:null -> append; the element is absolutely positioned at left:0
 }
@@ -528,7 +514,7 @@ function jitaShowIssueDates() {
             var lbl = document.createElement('span');
             lbl.textContent = label;
             var val = document.createElement('span');
-            val.textContent = jitaFmtDateShort(iso);
+            val.textContent = JiTA.util.fmtDate(iso);
             val.style.marginLeft = 'auto';   // push the date to the right edge of the (stretched) row
             row.appendChild(lbl);
             row.appendChild(val);
@@ -576,11 +562,11 @@ function jitaNewDatesEl(key, tgt) {
 // Jira renders the issue's Created/Updated timestamps a second time at the very BOTTOM of the right context
 // column (the spot you'd otherwise have to scroll to). Now that we mirror them into the top header, hide that
 // native block so the date isn't shown twice. Jira gives those rows stable testids
-// ("created-date.ui.read.meta-date" / "updated-date.ui.read.meta-date"), so we target them directly. Idempotent.
+// ("created-date.ui.read.meta-date" / "updated-date.ui.read.meta-date"), so we target exactly those two: a suffix
+// match also hid any other date Jira lists there, such as Resolved, which is not mirrored anywhere. Idempotent.
 function jitaHideNativeDates() {
     var nodes = document.querySelectorAll(
-        '[data-testid="created-date.ui.read.meta-date"], [data-testid="updated-date.ui.read.meta-date"],' +
-        ' [data-testid$="-date.ui.read.meta-date"]');
+        '[data-testid="created-date.ui.read.meta-date"], [data-testid="updated-date.ui.read.meta-date"]');
     for (var i = 0; i < nodes.length; i++) {
         var n = nodes[i];
         if (n.getAttribute('data-jita-hidden-dates')) { continue; }   // already hidden
@@ -588,13 +574,6 @@ function jitaHideNativeDates() {
         n.setAttribute('data-jita-hidden-dates', '1');
     }
 }
-
-// Initial nudge in case the header is already present before the first DOM mutation fires.
-waitForKeyElements(issueItem, function () {
-    try { jitaShowIssueDates(); } catch (e) { /* ignore */ }
-    try { jitaHideNativeDates(); } catch (e) { /* ignore */ }
-    try { if (typeof JiTA !== 'undefined' && JiTA.declutter) { JiTA.declutter.apply(); } } catch (e) { /* ignore */ }
-});
 
 
 // Free, keyless translation via Google (no API key, no cost - replaces the old paid Cloud Translation v2
@@ -701,13 +680,11 @@ function jitaTranslateRR(text, ep) {
 }
 
 
-// Standard $.ajax error handler for the action buttons: log the raw response, then alert `msg` (default: the
-// generic failure text) followed by the shared "check console / report to Schogol" tail. Returns the handler.
-function jitaAjaxError(msg) {
-    return function (data) {
-        console.log(JSON.stringify(data));
-        alert((msg || 'This failed for some reason.') + ' Check Console for errors and report issues to Schogol :).');
-    };
+// Standard error report for the action buttons: log the raw response, then alert `msg` (default: the generic
+// failure text) followed by the shared "check console / report to Schogol" tail.
+function jitaAjaxError(data, msg) {
+    console.log(JSON.stringify(data));
+    alert((msg || 'This failed for some reason.') + ' Check Console for errors and report issues to Schogol :).');
 }
 
 // ---- "Assign to GM" -> Convert-to-Support-Ticket flow ----
@@ -731,7 +708,7 @@ function jitaInvokeAutomationRule(numericId, ruleId, userInputs) {
     if (userInputs) { body.userInputs = userInputs; }
     return $.ajax({
         url: 'https://fenriscreations.atlassian.net/gateway/api/automation/internal-api/jira/' + cloudId + '/pro/rest/v1/rules/manual/invocation/' + ruleId,
-        type: 'POST', contentType: 'application/json', charset: 'utf-8',
+        type: 'POST', contentType: 'application/json',
         data: JSON.stringify(body)
     });
 }
@@ -846,7 +823,7 @@ function jitaCloseAsWontDo(key) {
     key = key || jitaCurrentKey();
     return $.ajax({
         url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + key + '/transitions',
-        type: 'POST', contentType: 'application/json', charset: 'utf-8',
+        type: 'POST', contentType: 'application/json',
         headers: { 'X-Atlassian-Token': 'no-check' },
         data: JSON.stringify({ transition: { id: JITA_CLOSE_TRANSITION }, fields: { resolution: { id: JITA_WONTDO_RESOLUTION } } })
     });
@@ -1016,7 +993,7 @@ function jitaConvertClick() {
     function fail(xhr) {
         delete jitaConvertBusy[ebrKey];
         jitaConvertButtonState();   // whichever button is on the page now, not the one that was clicked
-        jitaAjaxError(xhr && xhr.jitaError)(xhr);
+        jitaAjaxError(xhr, xhr && xhr.jitaError);
     }
     // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
     // newly-created defect (found as the freshly-linked issue that wasn't linked before).
@@ -1053,8 +1030,8 @@ function addButtons() {
     // The native quick-add trigger: we copy its (react-churned) classes to style our buttons like it, and
     // insert ours right after it.
     var TRIGGER_SEL = SELECTORS.QUICK_ADD_TRIGGER;
-    let buttonClass = $(TRIGGER_SEL).attr('class');
-    let innerSpanClass = $(TRIGGER_SEL).find('span').eq(0).attr('class');
+    var buttonClass = $(TRIGGER_SEL).attr('class');
+    var innerSpanClass = $(TRIGGER_SEL).find('span').eq(0).attr('class');
 
     // Build one command-bar button (styled to match the trigger) and insert it after the trigger, unless it's
     // already present. A native <button> is keyboard-focusable in natural DOM order and takes its accessible
@@ -1241,7 +1218,7 @@ waitForKeyElements(cmSelector, SwapUI);
 })();
 
 
-// outstandingcalls.txt / lastcrashes.txt / PDMData.txt live inside the igbr.zip and - unlike the log /
+// outstandingcalls.txt / lastcrashes.txt / PDMData.txt / dxdiag.txt live inside the igbr.zip and - unlike the log /
 // processHealth / methodCalls files - have NO header row in their content to detect them by. So the only way to
 // tell them apart is WHICH file button was clicked: watch for each file's entry in the attachment list, and when
 // its button is clicked, poll for the freshly-loaded text (jitaRunParserWhenLoaded) and set the matching parser
@@ -1274,7 +1251,7 @@ IGBR_FILES.forEach(function (f) {
 //   3. #tableContent present - our (or another file's) parser markup is currently mounted, so the raw file text
 //      isn't showing; keep waiting for the viewer to swap it back in.
 //   4. HEADER_SIG - a header-based file (log / processHealth / methodCalls) loaded instead; those are handled
-//      by waitForKeyElements+SwapUI, so we must not grab them as our oc/lc/pdm file.
+//      by waitForKeyElements+SwapUI, so we must not grab them as our oc/lc/pdm/dx file.
 //   5. Cancel-on-navigate (the jitaParserGen bump below) - the poller watches a SHARED code-block, so if you open
 //      an EMPTY tracked file (its poller keeps waiting - no content ever arrives) and then click ANOTHER file
 //      before MAX, that file's content lands in the same span and would trip the stale poller, parsing it into
@@ -1282,7 +1259,7 @@ IGBR_FILES.forEach(function (f) {
 //      Guards #1/#2 don't catch this: an UNtracked file (fitting.txt / prefs.ini / ...) has no click handler to
 //      bump the generation, and its content arrives well before the #2 timeout. So we bump the generation on
 //      EVERY file-entry click, which kills any pending poller the moment you navigate away.
-// `setFlag` marks which parser branch SwapUI takes (oc / lc / pdm).
+// `setFlag` marks which parser branch SwapUI takes (oc / lc / pdm / dx).
 var jitaParserGen = 0;
 var jitaParserPending = 0;   // generation of an in-flight header-less (igbr.zip file-button) parse, or 0; drives the observer's pending-hide
 function jitaRevealLogs() {   // reveal every container the flash suppressor hid (shared by SwapUI + the poller)
@@ -1826,8 +1803,8 @@ function ParsePhLogs() {
  */
     var clickHandler = function() {
         return function() {
-            let FPS = 'FPS <i class="fa-regular fa-circle-question" title="Frames per second"></i>'
-            let spf = 'spf <i class="fa-regular fa-circle-question" title="Seconds per frame"></i>'
+            var FPS = 'FPS <i class="fa-regular fa-circle-question" title="Frames per second"></i>'
+            var spf = 'spf <i class="fa-regular fa-circle-question" title="Seconds per frame"></i>'
             $('#tableContent > thead > tr > th:nth-child(10)').html($(this).html() == FPS ? spf : FPS);
             $('#tableContent > tbody > tr > td:nth-child(10)').each(function() {
                 $(this).text(Math.round(1 / $(this).text() *10000) /10000);
@@ -1935,8 +1912,8 @@ function ParseLogs() {
 
 
  /**
- * If excTime is not empty but it doesnt match the time of the current row,
- * then add the 'borderbot' class to the row and set excTime to its default value
+ * If excTime is not empty but it doesnt match the time of the current row (the block above has ended),
+ * then add the 'bordertop' class to the row and set excTime to its default value
  */
             if (excTime != "" && table[i][0] != excTime) {
                 row.className += ' bordertop';
@@ -1955,8 +1932,8 @@ function ParseLogs() {
 
 
  /**
- * If sttTime is not empty but it doesnt match the time of the current row,
- * then add the 'borderbot' class to the row and set sttTime to its default value
+ * If sttTime is not empty but it doesnt match the time of the current row (the block above has ended),
+ * then add the 'bordertop' class to the row and set sttTime to its default value
  */
             if (sttTime != "" && table[i][0] != sttTime) {
                 row.className += ' bordertop';
@@ -2284,8 +2261,6 @@ var css = `
       left: 50%;
       top: 50%;
       z-index: 1;
-      width: 150px;
-      height: 150px;
       margin: -75px 0 0 -75px;
       border: 16px solid #f3f3f3;
       border-radius: 50%;
@@ -2304,24 +2279,6 @@ var css = `
     @keyframes spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
-    }
-
-    .animate-bottom {
-      position: relative;
-      -webkit-animation-name: animatebottom;
-      -webkit-animation-duration: 1s;
-      animation-name: animatebottom;
-      animation-duration: 1s
-    }
-
-    @-webkit-keyframes animatebottom {
-      from { bottom:-100px; opacity:0 }
-      to { bottom:0px; opacity:1 }
-    }
-
-    @keyframes animatebottom {
-      from{ bottom:-100px; opacity:0 }
-      to{ bottom:0; opacity:1 }
     }
 
     .fixedHead {
@@ -2350,25 +2307,9 @@ var css = `
 
 // Additional CSS only for the LogParser
 var cssLogParser = `
-    td:first-child, th:first-child {
-       padding: 4px 8px;
-    }
-
-    th {
-      vertical-align: top;
-      text-align: left;
-      font-weight: bold;
-      background-color: #282d33;
-      color: aliceblue;
-    }
-
     td {
       vertical-align: top;
       text-align: left;
-      font-family: Courier New;
-      font-size: 11px;
-      font-weight: normal;
-      border-right: 1.5px solid #aaaaaa;
     }
 
     .row {
@@ -2438,23 +2379,6 @@ var cssLogParser = `
     #button a:hover {
       background-color: rgba(204,204,204,.4);
       color: #FFF;
-    }
-
-    .timeCol {
-      width: 139.766px;
-      text-align: center;
-    }
-
-    .facilityCol {
-      width: 265px;
-    }
-
-    .typeCol {
-      width: 70px;
-    }
-
-    .messageCol {
-      width: auto;
     }
 
     .bordertop {
@@ -3198,17 +3122,16 @@ var dxdiagHtml = `
 
 
 /* =========================================================================================
- * Similar Defects feature (Phase 1: local DB + sync + BM25 keyword ranking + suggestions UI)
+ * Triage Assistant core (local DB + sync + ranking + suggestions UI)
  *
- * Builds a local IndexedDB cache of all issues in the EDR and EO projects, and on a bug report
- * (EBR) page shows a floating panel of the most relevant existing defects. Phase 1 ranks by BM25
- * keyword similarity (fully local, no model); a later phase swaps in local semantic embeddings,
- * which is why records already reserve `embedding` / `embeddingModelVersion` fields.
+ * Builds a local IndexedDB cache of every issue in the EDR, EO and PLAT projects plus the open bug
+ * reports, and on a bug report (EBR) shows the most relevant existing defects (on a defect, the open
+ * reports that match it). Ranking fuses BM25 keywords with local semantic embeddings, both held by
+ * the shared worker (JiTA.worker).
  *
  * Everything lives under the JiTA namespace to avoid polluting globals. Plain var/function +
  * Promises + jQuery, matching the rest of this file. Jira REST calls are same-origin and rely on
- * the browser session cookie (no auth header / no GM_xmlhttpRequest needed), exactly like the
- * existing Translate / Convert-to-Defect calls.
+ * the browser session cookie (no auth header needed), like the Convert to Defect and Close calls.
  * ========================================================================================= */
 var JiTA = {
     HOST: 'https://fenriscreations.atlassian.net',
@@ -3889,8 +3812,7 @@ JiTA.logsig = {
         panel.innerHTML = '';
         JiTA.logsig._panelIdx = {};
 
-        var collapsed = false;
-        collapsed = !!gmGet(JiTA.logsig.COLLAPSE_KEY, false);
+        var collapsed = !!gmGet(JiTA.logsig.COLLAPSE_KEY, false);
         panel.className = collapsed ? 'collapsed' : '';
 
         var head = document.createElement('div');
@@ -4040,8 +3962,7 @@ JiTA.logsig = {
 
     // Restore a saved {left, top}, clamped on-screen (same approach as the Similar Defects panel).
     _applyPos: function (panel) {
-        var pos = null;
-        pos = gmGet(JiTA.logsig.POS_KEY, null);
+        var pos = gmGet(JiTA.logsig.POS_KEY, null);
         if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') { return; }
         var w = panel.offsetWidth || 300, h = panel.offsetHeight || 60;
         var left = Math.min(Math.max(0, pos.left), Math.max(0, window.innerWidth - w));
@@ -4186,8 +4107,7 @@ JiTA.util = {
         return (rec && rec.enText) ? rec.enText : JiTA.util.cleanForCompare(rec.summary, rec.description);
     },
 
-    // High-frequency English function words; used by detectLang's stopword-ratio test.
-    // English-DISTINCTIVE function words. Deliberately EXCLUDES words that are also common in the main non-English
+    // English-DISTINCTIVE function words, used by detectLang's stopword-ratio test. Deliberately EXCLUDES words that are also common in the main non-English
     // languages in the corpus (Spanish/Portuguese/German/French) - a, no, me, as, do, so, in, on, an, i, if - so a
     // foreign Latin report scores near zero here instead of being mistaken for English.
     EN_STOP: { 'the':1,'be':1,'to':1,'of':1,'and':1,'that':1,'have':1,'it':1,'for':1,'not':1,'with':1,'you':1,'at':1,'this':1,'but':1,'by':1,'from':1,'they':1,'we':1,'or':1,'will':1,'all':1,'would':1,'there':1,'what':1,'which':1,'when':1,'can':1,'is':1,'are':1,'was':1,'were':1,'been':1,'has':1,'had':1,'did':1,'then':1,'them':1,'my':1,'your':1,'just':1,'how':1,'about':1,'over':1,'than':1,'only':1,'also':1,'these':1,'those':1,'our':1,'should':1,'could':1,'because':1,'while':1,'their':1,'who':1,'get':1,'like':1,'out':1,'up':1,'now':1,'into':1,'some':1 },
@@ -4306,8 +4226,7 @@ JiTA.util = {
         var ageDays = Math.round((created - fixed) / (1000 * 60 * 60 * 24));
         if (ageDays <= GRACE) { return { factor: 1, ageDays: ageDays }; }
         var f = 1 - (1 - FLOOR) * (ageDays - GRACE) / (FULL - GRACE);
-        if (f < FLOOR) { f = FLOOR; }
-        if (f > 1) { f = 1; }
+        if (f < FLOOR) { f = FLOOR; }   // past FULL days; ageDays > GRACE keeps f below 1
         return { factor: f, ageDays: ageDays };
     },
 
@@ -4351,8 +4270,7 @@ JiTA.hidden = {
 
     _load: function () {
         if (JiTA.hidden._map) { return JiTA.hidden._map; }
-        var m = {};
-        m = gmGet(JiTA.hidden.KEY, {}) || {};
+        var m = gmGet(JiTA.hidden.KEY, {}) || {};
         if (!m || typeof m !== 'object') { m = {}; }
         JiTA.hidden._map = m;
         return m;
@@ -5727,7 +5645,7 @@ JiTA.sync = {
 };
 
 
-/* ---- ranking: BM25 keyword similarity (Phase 1) ---- */
+/* ---- ranking: BM25 keyword similarity (the tab's fallback; the shared worker holds the main index) ---- */
 JiTA.rank = {
     _index: null,       // { N, avgdl, df:{}, docs:[{key,project,summary,status,tf:{},len}] }
     _dirty: true,       // set true whenever sync writes; triggers a rebuild on next query
@@ -7397,8 +7315,7 @@ JiTA.ui = {
     // smaller than when the position was saved). Switching to left/top overrides the default right/bottom
     // anchoring from the CSS. A null/invalid saved value leaves the default bottom-right placement alone.
     _applyPos: function ($p) {
-        var pos = null;
-        pos = gmGet(JiTA.ui.POS_KEY, null);
+        var pos = gmGet(JiTA.ui.POS_KEY, null);
         if (!pos || typeof pos.left !== 'number' || typeof pos.top !== 'number') { return; }
         var el = $p[0];
         var w = el.offsetWidth || 340, h = el.offsetHeight || 60;
@@ -7571,8 +7488,7 @@ JiTA.ui = {
             '</div>'
         );
         // Restore the saved minimized state before showing the panel.
-        var collapsed = false;
-        collapsed = !!gmGet(JiTA.ui.COLLAPSE_KEY, false);
+        var collapsed = !!gmGet(JiTA.ui.COLLAPSE_KEY, false);
         if (collapsed) { $p.addClass('collapsed'); }
         $p.find('#jita-sd-collapse').text(collapsed ? '+' : '–');
         $p.find('#jita-sd-collapse').on('click', function () {
@@ -7632,8 +7548,7 @@ JiTA.ui = {
         var old = document.getElementById('jita-side-group');
         if (old && old.parentNode) { old.parentNode.removeChild(old); }
 
-        var collapsed = false;
-        collapsed = !!gmGet(JiTA.ui.SIDE_COLLAPSE_KEY, false);
+        var collapsed = !!gmGet(JiTA.ui.SIDE_COLLAPSE_KEY, false);
 
         var group = null, headerClickTarget = null;
 
@@ -8875,7 +8790,6 @@ JiTA.menu = {
 #jita-menu .jita-num { width: 56px; flex: 0 0 auto; background: #2c333a; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 5px 8px; font-size: 12px; text-align: center; }\
 #jita-menu .jita-num:focus { outline: none; border-color: #4c9aff; }\
 #jita-menu .jita-menu-status { color: #9aa6b2; font-size: 11px; padding: 8px 0 0; }\
-#jita-menu .jita-resp-list { display: flex; flex-direction: column; gap: 8px; padding: 6px 0; }\
 #jita-menu .jita-resp-item { display: flex; flex-direction: column; gap: 4px; border: 1px solid #2c333a; border-radius: 6px; padding: 8px; position: relative; }\
 #jita-menu .jita-resp-title { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 4px; padding: 5px 26px 5px 8px; font-size: 12px; font-weight: 600; }\
 #jita-menu .jita-resp-body { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 4px; padding: 5px 8px; font-size: 12px; resize: vertical; font-family: inherit; line-height: 1.4; }\
@@ -8994,8 +8908,8 @@ JiTA.menu = {
             if (!flagOn('similarDefects')) {
                 $('#jita-sd-panel').remove();
                 $('#jita-side-group').remove();
-                if (typeof JiTA !== 'undefined') { JiTA.ui.currentKey = null; }
-            } else if (typeof JiTA !== 'undefined') {
+                JiTA.ui.currentKey = null;
+            } else {
                 JiTA.ui.ensure();
             }
         }));
@@ -9033,7 +8947,7 @@ JiTA.menu = {
         // ---- Canned responses (Zendesk Support panel) ----
         // A repository of reusable replies, shown as a dropdown in the Zendesk Support activity panel (picking
         // one replaces the editor). The actual editing happens in a roomier standalone window
-        // (JiTA.responses.openEditor); here we just expose the entry point + a quick "Restore defaults".
+        // (JiTA.responses.openEditor, which also holds Restore defaults); here we just expose the entry point.
         // Edits persist in GM storage and reach the Forge-iframe dropdown live.
         var $resp = $('<div class="jita-menu-sect"></div>');
         $('<h3>Canned responses</h3>').appendTo($resp);
@@ -9060,7 +8974,7 @@ JiTA.menu = {
             $ta.append($actions);
 
             // Panel style (integrated sidebar vs floating box). JiTA.ui.toggleStyle() re-mounts in place.
-            var sidebarOn = (typeof JiTA !== 'undefined' && JiTA.ui.mode() === 'sidebar');
+            var sidebarOn = (JiTA.ui.mode() === 'sidebar');
             var $styleRow = $('<div class="jita-menu-row"></div>');
             $('<span class="lbl">Panel style</span>')
                 .append($('<span class="sub"></span>').text('Currently: ' + (sidebarOn ? 'Sidebar (integrated)' : 'Floating (draggable box)')))
@@ -9428,14 +9342,11 @@ JiTA.menu = {
 // device loss. This build makes WebGPU the default, so clear that stale lock ONCE (and arm `sdTryWebgpu`) to
 // give GPU a fresh attempt. Any future device loss re-sets the lock as normal, so the crash-loop guard still
 // works and the menu toggle can still force CPU.
-(function () {
-    if (typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') { return; }
-    if (!GM_getValue('sdGpuDefault_v1', false)) {
-        GM_setValue('sdForceCpu', false);
-        GM_setValue('sdTryWebgpu', true);
-        GM_setValue('sdGpuDefault_v1', true);
-    }
-})();
+if (!gmGet('sdGpuDefault_v1', false)) {
+    gmSet('sdForceCpu', false);
+    gmSet('sdTryWebgpu', true);
+    gmSet('sdGpuDefault_v1', true);
+}
 
 
 /* ---- data-schema migration: auto-rebuild a local DB that predates a stored-field change ---- */
@@ -9485,8 +9396,8 @@ JiTA.migrate = {
 };
 
 
-/* ---- background auto-sync scheduler (Phase 3) ---- */
-// Keeps the local DB fresh without the user clicking "Sync defects now": auto-initializes both datasets on
+/* ---- background auto-sync scheduler ---- */
+// Keeps the local DB fresh without the user clicking "Sync now": auto-initializes both datasets on
 // first run and then runs incremental catch-ups roughly every INTERVAL_MS. A best-effort cross-tab lease
 // (GM storage) keeps multiple open Jira tabs from all syncing at once; the in-tab `running` flag prevents
 // overlap within a tab. We POLL on a short timer (POLL_MS) and let the persisted recentlySynced() gate
@@ -9574,19 +9485,20 @@ JiTA.sched = {
 };
 
 
-/* ---- ISD monthly credit tracker: live current-month credit calc (+ leaderboard, later phases) ----
+/* ---- ISD monthly credit tracker: live current-month credits and the group leaderboard ----
  * Ports scratchpad/monthly_report.py to run IN-BROWSER against the logged-in ISD's Jira SESSION (read-only,
  * no API token). Same credit formula and attribution rules, so the live number matches the authoritative
  * month-end Python run. The computed per-member table is cached in the meta store (key credits:<YYYY-MM>);
- * a past month is computed once more after it ends (see sched.tick) and then left alone; the current month is refreshed on demand / by a
- * throttled background job (added in a later phase).
+ * a past month is computed once more after it ends (see sched.tick) and then left alone; the current month is
+ * refreshed on demand and by a throttled background job (sched). The crawl itself runs in the shared worker
+ * (crComputeMonth / crComputeSelf in jitaWorkerBody); this side dispatches it and keeps the cache.
  *
  * PARITY: keep this in lockstep with monthly_report.py. Mirrored here: the credit formula, projects
  * (EO/PLAT/EDR) + resolutions (Fixed/Done/Released), clone dedup via the "Cloners" link (union-find),
- * reopen-aware Attached/Trashed attribution, automation-account re-credit (a BR converted to a defect sets
- * -> Attached as the automation app account; credit the assignee who triggered it), Team -> GM reassignment
- * changelog crawl (date-gated), old-account (<handle>@ccpgames.com) bridging, and the hardcoded leads bonus.
- * Change one, change both.
+ * reopen-aware Attached attribution, automation-account re-credit (a BR converted to a defect sets
+ * -> Attached as the automation app account; credit the assignee who triggered it), Trashed vs Reassigned
+ * (a close carrying CCP's convert-to-support comment is a reassign), old-account (<handle>@ccpgames.com)
+ * bridging, and the hardcoded leads bonus. Change one, change both.
  */
 JiTA.credits = {
     // ---- config (mirror monthly_report.py) ----
@@ -9601,11 +9513,6 @@ JiTA.credits = {
     // CCP's convert-to-support automation closes the report AS the member and leaves this exact comment. A
     // Closed report carrying it is a REASSIGN (worth reassigned credit), not a TRASH - see the crawl's reassign split.
     CONVERT_COMMENT: 'BR converted to support ticket. Zendesk ticket has been unlinked. Closing bug report.',
-    TEAM_JQL: 'Team[Team]',
-    TEAM_CF: 'customfield_10001',
-    GM_TEAM_ID: '38',                                              // short id (button / JQL)
-    GM_TEAM_FULL_ID: 'ef4edd53-c099-4431-82af-9b4bd717cb88-38',   // full id (changelog `to`)
-    GM_TEAM_NAME: 'EO - GameMasters',                             // changelog `toString`
     AUTOMATION_ID: '557058:f58131cb-b67d-43c7-b30d-6b58d40bd077', // "Automation for Jira" app account
     AUTOMATION_EMAIL: 'workato@ccpgames.com',
     DEDUP_LINK_TYPES: { 'Cloners': true },
@@ -15270,10 +15177,7 @@ JiTA.leadduty = {
         var ny = p.m === 12 ? p.y + 1 : p.y, nm = p.m === 12 ? 1 : p.m + 1;
         return { start: p.y + '-' + JiTA.leadduty._p2(p.m) + '-01', end: ny + '-' + JiTA.leadduty._p2(nm) + '-01' };
     },
-    _today: function () {
-        var d = new Date();
-        return d.getUTCFullYear() + '-' + JiTA.leadduty._p2(d.getUTCMonth() + 1) + '-' + JiTA.leadduty._p2(d.getUTCDate());
-    },
+
     // Whole months between a YYYY-MM-DD review stamp and today; '' (never reviewed) yields null.
     _monthsSince: function (ymd) {
         if (!ymd) { return null; }
@@ -15283,14 +15187,6 @@ JiTA.leadduty = {
         return (now.y * 12 + now.m) - (y * 12 + m);
     },
 
-    // Accept a raw page id or any Confluence URL shape that carries one.
-    _pageId: function (raw) {
-        var s = String(raw == null ? '' : raw).replace(/^\s+|\s+$/g, '');
-        if (!s) { return ''; }
-        if (/^\d+$/.test(s)) { return s; }
-        var m = /[?&]pageId=(\d+)/.exec(s) || /\/pages\/(\d+)/.exec(s);
-        return m ? m[1] : '';
-    },
     rootPage: function () { return JiTA.leadduty.ROOT_PAGE; },
     // Deliberately a SEPARATE page from the root: the documentation root can stay locked while this one
     // carries the Lead-writable state.
@@ -18413,7 +18309,6 @@ JiTA.leadduty.apps = {
                 state: st ? A._text(st[1]) : (stage ? stage.one : ''),
                 stage: stage ? stage.key : '',
                 applied: dates[0] || '',
-                updated: dates[1] || dates[0] || '',
                 url: A.DETAIL_URL + idm[1]
             });
         }
@@ -18562,12 +18457,11 @@ JiTA.leadduty.apps = {
     APP_SERVICE: 'ApplicationService',
     NOTE_SERVICE: 'AdministratorService',
     ACTIONS: {
-        // `notifies` drives the wording of the confirm. Declining tells a real person no; resetting does
-        // not. That distinction is the single most important thing on this screen and must never be
-        // flattened into "are you sure?".
-        accept:  { btn: 'btn-approve', method: 'ApplicationAccept',  notifies: false, verb: 'move on' },
-        decline: { btn: 'btn-decline', method: 'ApplicationDecline', notifies: true,  verb: 'decline' },
-        reset:   { btn: 'btn-reset',   method: 'ApplicationDecline', notifies: false, verb: 'reset' }
+        // Declining tells a real person no; resetting does not. That distinction is the single most important
+        // thing on this screen and must never be flattened into "are you sure?": _armApp words each confirm by key.
+        accept:  { btn: 'btn-approve', method: 'ApplicationAccept' },
+        decline: { btn: 'btn-decline', method: 'ApplicationDecline' },
+        reset:   { btn: 'btn-reset',   method: 'ApplicationDecline' }
     },
 
     // What a specific application currently offers, read from its own page. Resolves
@@ -19089,8 +18983,8 @@ JiTA.leadduty.sched = {
  * elected LEADER via the Web Locks API and owns a single dedicated module worker; every tab talks to the
  * leader over a BroadcastChannel. The worker (built from a blob) imports transformers.js, opens the same-origin
  * IndexedDB (pristine in a worker - Atlassian's consent gate only wraps the main document), holds the model +
- * ranking indexes, and answers rank queries. Tabs become thin clients. Feature-flagged and additive: nothing
- * calls into it yet (this milestone just proves leader election + RPC + a shared worker across tabs).
+ * ranking indexes, and answers rank queries. Tabs become thin clients: ranking, the log signatures, the duplicate
+ * finder, embedding and the ISD credits crawl all run there (the credits crawl has no in-tab fallback).
  */
 JiTA.worker = {
     CHANNEL: 'jita-rank-v1',
@@ -19464,9 +19358,8 @@ JiTA.worker = {
         }
     },
 
-    // The dedicated worker's source (a module). Minimal for this milestone: lazy-load the model, answer 'ping'
-    // and 'embed'. Later milestones add the vector/keyword indexes + ranking here and return just ranked keys.
-    // The worker source: the real jitaWorkerBody function, serialized + immediately invoked with runtime config.
+    // The worker's source (a module): the real jitaWorkerBody function, serialized and immediately invoked with
+    // the runtime config. It sees nothing of the page, so everything it needs travels in `cfg`.
     _src: function () {
         var C = JiTA.credits;
         var cfg = {
@@ -19479,8 +19372,7 @@ JiTA.worker = {
                 PROJECTS: C.PROJECTS, RESOLUTIONS: C.RESOLUTIONS, GROUP: C.GROUP, OLD_DOMAIN: C.OLD_DOMAIN,
                 EBR: C.EBR, ATTACHED_STATUS: C.ATTACHED_STATUS, CLOSED_STATUS: C.CLOSED_STATUS,
                 OPEN_STATUS: C.OPEN_STATUS, CONVERT_COMMENT: C.CONVERT_COMMENT,
-                TEAM_JQL: C.TEAM_JQL, TEAM_CF: C.TEAM_CF, GM_TEAM_ID: C.GM_TEAM_ID, GM_TEAM_FULL_ID: C.GM_TEAM_FULL_ID,
-                GM_TEAM_NAME: C.GM_TEAM_NAME, AUTOMATION_ID: C.AUTOMATION_ID, AUTOMATION_EMAIL: C.AUTOMATION_EMAIL,
+                AUTOMATION_ID: C.AUTOMATION_ID, AUTOMATION_EMAIL: C.AUTOMATION_EMAIL,
                 DEDUP_LINK_TYPES: C.DEDUP_LINK_TYPES, PROJECT_RANK: C.PROJECT_RANK, LEADS: C.LEADS, LEAD_BONUS: C.LEAD_BONUS,
                 PAGE_SIZE: C.PAGE_SIZE, CRAWL_DELAY_MS: C.CRAWL_DELAY_MS, CONCURRENCY: C.CONCURRENCY,
                 RATE_LIMITS: C.RATE_LIMITS, RATE_SAFETY: C.RATE_SAFETY
@@ -19497,8 +19389,8 @@ JiTA.worker = {
  * issue-type and are re-applied across Jira's React re-renders via jitaButtonObserver, the same way
  * jitaHideNativeDates works. Matching is by visible text, so it covers standard + custom fields and Connect
  * app panels without depending on instance-specific field ids.
- * The field-row / section-card SELECTORS in _fieldRows()/_sections() are the parts most likely to need a
- * tweak if Atlassian changes the issue-view markup - they're grouped there for exactly that reason.
+ * The selectors live in SELECTORS (FIELD_HEADING, GROUP_TITLE); _fieldRows() / _sections() are the parts
+ * most likely to need a tweak if Atlassian changes the issue-view markup.
  */
 JiTA.declutter = {
     // Which persisted bucket applies to the open issue.
@@ -19522,10 +19414,8 @@ JiTA.declutter = {
     // Skip our own overlays/panels so we never detect (or hide) JiTA's own headings/fields.
     _mine: function (el) { return !!(el.closest && el.closest('[id^="jita"], #gpanel')); },
 
-    // ---- detection (the selectors most likely to need live tuning) ----
-    // Details field rows -> [{ label, el }]. Each sidebar field is wrapped in a testid starting
-    // "issue.views.field"; take the OUTERMOST such wrapper and read its heading as the label.
-    // Each Details field has a heading container "issue-field-heading-styled-field-heading.<key>" whose label
+    // ---- detection (the parts most likely to need live tuning) ----
+    // Details field rows -> [{ label, el }]. Each Details field has a heading container "issue-field-heading-styled-field-heading.<key>" whose label
     // text lives in a "*field-heading-title" element (with a multiline variant used by Labels / Team). We read
     // the clean label from there and hide the whole ROW (the ancestor that also holds the value).
     _fieldRows: function () {
@@ -19554,9 +19444,7 @@ JiTA.declutter = {
         }
         return el;
     },
-    // Collapsible sections -> [{ name, el }] (el = the card to hide). Section headers are <h2> in the issue
-    // view (Details, More fields, Development, Automation, Sentry, Zendesk Support, ...).
-    // Sections are collapsible groups titled "issue-view-layout-group.common.ui.collapsible-group-factory.title"
+    // Collapsible sections -> [{ name, el }] (el = the card to hide). Sections are collapsible groups titled "issue-view-layout-group.common.ui.collapsible-group-factory.title"
     // (Details, Development, More fields, Automation, Sentry, Zendesk Support, ...). Hide the whole enclosing
     // <section>, not just the title, and read the name without its sub-title (e.g. "More fields" alone).
     _sections: function () {
@@ -20471,6 +20359,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.39.1', date: '2026-10-03', fixes: [
+            'Only the Created and Updated dates at the bottom of an issue are hidden now, since they show at the top. Any other date Jira lists there stays visible.',
+            'Internal cleanup, no other visible change.'
+        ] },
         { v: '3.39.0', date: '2026-10-03', features: [
             'What\'s new has two tabs now, New features and Fixed issues, and the pill only comes up for an update that brings something new to use. Fixes are listed without one.'
         ] },
@@ -21355,8 +21247,8 @@ JiTA.changelog = {
 };
 
 
-/* ---- init: watch the DOM and (re)inject the panel across Atlassian's React re-renders / SPA nav ---- */
-// Mount the Lead-duties chip + menu command for a Lead. Shared by the Jira boot below and the Confluence
+/* ---- boot: the Lead-duties arming both boots share, then the Confluence boot and the Jira boot ---- */
+// Mount the Lead-duties chip for a Lead. Shared by the Jira boot below and the Confluence
 // boot: the cached verdict (leadDutyMe) arms it synchronously on every load after the first, and resolveMe()
 // re-checks it against Jira shortly after so a first-ever load (or a changed account) lights up a moment later.
 function jitaArmLeadDuties() {
@@ -21394,7 +21286,7 @@ function jitaArmLeadDuties() {
 }
 
 
-// ---- Confluence boot: Lead duties and nothing else -------------------------------------------------------
+// ---- Confluence boot: Lead duties and the What's new pill, nothing else ---------------------------------
 // No Jira DOM to observe, no issue to parse, no defect sync, and deliberately no worker leader election - a
 // wiki tab must never become the tab that owns the embedding model for everyone.
 if (JITA_IS_WIKI) {
@@ -21409,8 +21301,9 @@ if (JITA_IS_WIKI) {
 }
 
 
+// ---- Jira boot: watch the DOM and (re)inject the panel across Atlassian's React re-renders / SPA nav ----
 (function () {
-    if (JITA_NO_JIRA_UI) { return; }      // Forge iframe runs only the responses dropdown; Confluence only Lead duties (above)
+    if (JITA_NO_JIRA_UI) { return; }      // the Forge iframe runs only the responses dropdown, Confluence its own boot (above)
     // "What's new" after an update. Scheduled first, so nothing that boots after it can keep it from showing; start()
     // still waits for the page to settle, and the observer below puts the pill back if anything takes it away.
     try { JiTA.changelog.start(); } catch (eCl) { /* swallow */ }
@@ -21469,40 +21362,37 @@ if (JITA_IS_WIKI) {
     // the disabled-feature / already-open cases. Double-tap '>' opens the duplicate finder. Double-tap '#' switches the
     // Triage Assistant panel to the trending defects and back on a bug report, and opens the standalone trending list
     // anywhere else. (Inside Triage mode the overlay's own key layer handles '#', so it never reaches here.)
-    if (!JITA_IS_FORGE_FRAME) {
-        (function () {
-            var lastLt = 0, lastGt = 0, lastHash = 0;
-            document.addEventListener('keydown', function (e) {
-                if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || e.isComposing) { return; }   // a held key repeats in under 400 ms
-                if (e.key !== '<' && e.key !== '>' && e.key !== '#') { return; }
-                var t = e.target;
-                if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
-                if (typeof JiTA === 'undefined') { return; }
-                var now = Date.now();
-                if (e.key === '<') {   // double-tap '<' -> Triage mode
-                    if (!JiTA.triage || JiTA.triage._open) { return; }
-                    if (now - lastLt < 400) { lastLt = 0; try { JiTA.triage.open(); } catch (e2) { /* ignore */ } }
-                    else { lastLt = now; }
-                    return;
-                }
-                if (e.key === '#') {   // double-tap '#' -> Trending defects
-                    if (!JiTA.trend || document.querySelector('#jita-menu.jita-trend-view')) { return; }
-                    if (now - lastHash >= 400) { lastHash = now; return; }
-                    lastHash = 0;
-                    // An open overlay covers the panel, so there is nothing on screen to switch: the list replaces it.
-                    try { if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) { JiTA.trend.openView(); } } catch (e4) { /* ignore */ }
-                    return;
-                }
-                // double-tap '>' -> Duplicate-defect finder (Shift+'<' on QWERTZ - the hidden siblings share a key)
-                if (!JiTA.dupfind || document.querySelector('#jita-menu.jita-dup-view')) { return; }
-                if (now - lastGt < 400) { lastGt = 0; try { JiTA.dupfind.openView(); } catch (e3) { /* ignore */ } }
-                else { lastGt = now; }
-            });
-        })();
-    }
+    (function () {
+        var lastLt = 0, lastGt = 0, lastHash = 0;
+        document.addEventListener('keydown', function (e) {
+            if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || e.isComposing) { return; }   // a held key repeats in under 400 ms
+            if (e.key !== '<' && e.key !== '>' && e.key !== '#') { return; }
+            var t = e.target;
+            if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
+            var now = Date.now();
+            if (e.key === '<') {   // double-tap '<' -> Triage mode
+                if (!JiTA.triage || JiTA.triage._open) { return; }
+                if (now - lastLt < 400) { lastLt = 0; try { JiTA.triage.open(); } catch (e2) { /* ignore */ } }
+                else { lastLt = now; }
+                return;
+            }
+            if (e.key === '#') {   // double-tap '#' -> Trending defects
+                if (!JiTA.trend || document.querySelector('#jita-menu.jita-trend-view')) { return; }
+                if (now - lastHash >= 400) { lastHash = now; return; }
+                lastHash = 0;
+                // An open overlay covers the panel, so there is nothing on screen to switch: the list replaces it.
+                try { if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) { JiTA.trend.openView(); } } catch (e4) { /* ignore */ }
+                return;
+            }
+            // double-tap '>' -> Duplicate-defect finder (Shift+'<' on QWERTZ - the hidden siblings share a key)
+            if (!JiTA.dupfind || document.querySelector('#jita-menu.jita-dup-view')) { return; }
+            if (now - lastGt < 400) { lastGt = 0; try { JiTA.dupfind.openView(); } catch (e3) { /* ignore */ } }
+            else { lastGt = now; }
+        });
+    })();
     // start the periodic background catch-up sync
     try { JiTA.sched.start(); } catch (e) { /* swallow */ }
-    // Shared ranking worker: elect a leader + spawn the one worker all tabs share (additive; nothing routes to it yet).
+    // Shared ranking worker: elect a leader + spawn the one worker all tabs share (ranking, embedding, credits).
     try { JiTA.worker.start(); } catch (e) { /* swallow */ }
     // ISD credit tracker: show the corner badge (from cache) and start the throttled background recompute.
     if (flagOn('credits')) {
