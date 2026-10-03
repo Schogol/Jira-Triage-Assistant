@@ -13,7 +13,7 @@ const es = src.indexOf('\n    ENTRIES: ['), ee = src.indexOf('\n    ],', es);   
 const oldest = (src.slice(es, ee).match(/\{ v: '[\d.]+'/g) || []).map((s) => s.slice(6, -1)).pop();
 if (!shipped || !oldest) { throw new Error('could not read the shipped version on ' + BASE + ' or the oldest entry'); }
 
-const entryRe = (v) => new RegExp("\\n        \\{ v: '" + v.replace(/\./g, '\\.') + "', date: '[\\d-]+', items: \\[[\\s\\S]*?\\n        \\] \\},?");
+const entryRe = (v) => new RegExp("\\n        \\{ v: '" + v.replace(/\./g, '\\.') + "', date: '[\\d-]+', (?:features|fixes|items): \\[[\\s\\S]*?\\n        \\] \\},?");
 const drop = (v) => (t) => { const m = entryRe(v).exec(t); if (!m) { throw new Error('no entry for ' + v); } return t.replace(m[0], ''); };
 const cases = [
     ['an entry for the version on ' + BASE + ' (' + shipped + ') is dropped', drop(shipped)],

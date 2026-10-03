@@ -14,8 +14,21 @@ const muts = [
     [H, 'seeing it is never remembered', 'if (!seen || JiTA.worker._verCmp(C.latest().v, seen) > 0) { gmSet(C.SEEN_KEY, C.latest().v); }\n        C.remove();', 'C.remove();'],
     [H, 'the oldest version is remembered as seen', 'gmSet(C.SEEN_KEY, C.latest().v);', 'gmSet(C.SEEN_KEY, C.ENTRIES[C.ENTRIES.length - 1].v);'],
     [H, 'the pill never counts', 'if (fresh.length === 1) {', 'if (fresh.length >= 1) {'],
-    [H, 'shows inside the Zendesk frame', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseen().length > 0;', 'return JiTA.changelog.unseen().length > 0;'],
-    [H, 'shows with nothing new', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseen().length > 0;', 'return !JITA_IS_FORGE_FRAME;'],
+    [H, 'shows inside the Zendesk frame', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return JiTA.changelog.unseenFeatures().length > 0;'],
+    [H, 'shows with nothing new', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return !JITA_IS_FORGE_FRAME;'],
+    // ---- only features bring the pill (v3.39.0) ----
+    [H, 'a fix-only update brings the pill', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseen().length > 0;'],
+    [H, 'the pill counts the fix-only updates too', '        if (lbl) { lbl.textContent = C.label(C.unseenFeatures()); }', '        if (lbl) { lbl.textContent = C.label(C.unseen()); }'],
+    [H, 'any entry counts as a feature', "    hasFeatures: function (e) { return JiTA.changelog._list(e, 'features').length > 0; },", '    hasFeatures: function (e) { return !!e; },'],
+    // ---- the two tabs ----
+    [H, 'a tab lists every version', '        return C.ENTRIES.filter(function (e) { return C._list(e, kind).length > 0; }).map(function (e) {', '        return C.ENTRIES.map(function (e) {'],
+    [H, 'a tab shows the other kind\'s items', '            return { v: e.v, date: e.date, items: C._list(e, kind), isNew:', "            return { v: e.v, date: e.date, items: C._list(e, kind === 'features' ? 'fixes' : 'features'), isNew:"],
+    [H, 'nothing is marked new in the tabs', 'items: C._list(e, kind), isNew: !!fresh[e.v],', 'items: C._list(e, kind), isNew: false,'],
+    [H, 'the list always opens on New features', "        return (!C._newCount('features') && C._newCount('fixes')) ? 'fixes' : 'features';", "        return 'features';"],
+    [H, 'the tabs do not say what is new in them', "                .text(tb.label + (counts[tb.kind] ? ' (' + counts[tb.kind] + ' new)' : '')).appendTo($tabs);", '                .text(tb.label).appendTo($tabs);'],
+    [H, 'clicking a tab does nothing', "        $tabs.on('click', '.jcl-tab', function () { paint($(this).attr('data-tab')); });\n", ''],
+    [H, 'opening the list is not seeing it', '        paint(tab || C._startTab());\n        C.markSeen();', '        paint(tab || C._startTab());'],
+    [H, 'the old part loses its divider', '                if (!older && r.old) {', '                if (false) {'],
     [H, 'the date lands a month off', "JiTA.changelog.MONTHS[parseInt(p[1], 10) - 1]", "JiTA.changelog.MONTHS[parseInt(p[1], 10)]"],
     [H, 'the day loses its leading zero', "return p[2] + ' ' + JiTA.changelog.MONTHS", "return parseInt(p[2], 10) + ' ' + JiTA.changelog.MONTHS"],
     // ---- the pill ----
@@ -24,7 +37,7 @@ const muts = [
     [H, 'the x only hides the pill', 'x.addEventListener(\'click\', function (e) { e.stopPropagation(); JiTA.changelog.markSeen(); });', 'x.addEventListener(\'click\', function (e) { e.stopPropagation(); JiTA.changelog.remove(); });'],
     [H, 'the x also opens the list', 'x.addEventListener(\'click\', function (e) { e.stopPropagation(); JiTA.changelog.markSeen(); });', 'x.addEventListener(\'click\', function (e) { JiTA.changelog.markSeen(); });'],
     [H, 'clicking the pill does nothing', "            el.addEventListener('click', function () { JiTA.changelog.openView(); });\n", "            el.addEventListener('click', function () {});\n"],
-    [H, 'the corner is not restacked', "        if (lbl) { lbl.textContent = C.label(C.unseen()); }\n        try { jitaStackPills(); } catch (e) { /* ignore */ }", "        if (lbl) { lbl.textContent = C.label(C.unseen()); }"],
+    [H, 'the corner is not restacked', "        if (lbl) { lbl.textContent = C.label(C.unseenFeatures()); }   // the updates that bring features, not every one\n        try { jitaStackPills(); } catch (e) { /* ignore */ }", "        if (lbl) { lbl.textContent = C.label(C.unseenFeatures()); }"],
     // ---- the pill comes back (v3.38.5) ----
     [H, 'ensure puts the pill up before the page settles', 'if (!C._armed || document.getElementById(C.PILL_ID)) { return; }', 'if (document.getElementById(C.PILL_ID)) { return; }'],
     [H, 'ensure redraws a pill that is up', 'if (!C._armed || document.getElementById(C.PILL_ID)) { return; }', 'if (!C._armed) { return; }'],
