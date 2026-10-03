@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.15
+// @version     3.38.20
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -192,13 +192,14 @@ var SELECTORS = {
 // verbatim (and the rules run together, no separators, exactly as the old inline strings did).
 var SCROLLBAR_CSS =
     '*::-webkit-scrollbar { width: 11px !important; height: 11px !important;}' +
-    '*::-webkit-scrollbar-thumb { border-radius: 10px !important; background: linear-gradient(left, #96A6BF, #63738C) !important;box-shadow: inset 0 0 1px 1px #828f9e !important;}' +
+    '*::-webkit-scrollbar-thumb { border-radius: 10px !important; background: linear-gradient(to right, #96A6BF, #63738C) !important;box-shadow: inset 0 0 1px 1px #828f9e !important;}' +
     '.notion-scroller.horizontal { margin-bottom: 30px !important;}' +
     '.notion-scroller.vertical { margin-bottom: 0px !important;}';
 
 
 // Listener which triggers when the locally saved "scrollbar" value is changed. If the new value is false we remove the custom scrollbar. If the new value is true we add the custom scrollbar.
 GM_addValueChangeListener("scrollbar", function(key, oldValue, newValue, remote) {
+    if (JITA_NO_JIRA_UI) { return; }   // the wiki and the Forge frame never get the scrollbar
     if (!newValue) {
         $('style:contains("*::-webkit-scrollbar { width: 11px !important; height: 11px !important;}")').remove();
     } else {
@@ -209,13 +210,17 @@ GM_addValueChangeListener("scrollbar", function(key, oldValue, newValue, remote)
 
 // Listener which triggers when the locally saved "buttons" value is changed. If the new value is false we remove the custom buttons. If the new value is true we add the custom buttons.
 GM_addValueChangeListener("buttons", function(key, oldValue, newValue, remote) {
+    if (JITA_NO_JIRA_UI) { return; }
+    // Another tab's toggle: keep this tab's copy of the setting in step, or the button observer puts the buttons
+    // straight back within 200 ms.
+    savedVariables[FLAG.buttons][1] = !!newValue;
     if (!newValue) {
         $('#translateButton').remove();
         $('#GMButton').remove();
         $('#convertToDefectButton').remove();
         $('#closeButton').remove();
     } else {
-        addButtons();
+        ensureButtonsPresent();   // a bug report only: addButtons() alone put them on a defect too
     }
 });
 
@@ -455,7 +460,9 @@ if (!JITA_NO_JIRA_UI) { jitaButtonObserver.observe(document.body, { childList: t
 // scroll to see them. Mirror them into the top header bar (the empty space between the breadcrumb and the
 // lock / watch / share / … action icons) so they're visible at a glance. Same-origin REST read, cached per
 // issue. Always on for issue pages; cheap early-exit once mounted for the current issue.
-var jitaDatesCache = {};   // issueKey -> { created, updated } ISO strings
+var jitaDatesCache = {};   // issueKey -> { created, updated, at } ISO strings + when they were fetched
+var jitaDatesFail = {};    // issueKey -> when its last fetch failed
+var JITA_DATES_TTL_MS = 60 * 1000;   // refetch dates this old (an edit moves Updated), and retry a failed fetch after this
 function jitaFmtDateShort(iso) {
     var d = new Date(iso);
     if (isNaN(d.getTime())) { return ''; }
@@ -495,24 +502,20 @@ function jitaShowIssueDates() {
     }
     var key = (bc.textContent || '').trim();
     if (!key) { return; }
+    // Jira's own dates are hidden (jitaHideNativeDates), so these are the only ones on screen: they used to be fetched
+    // once per tab, so a later visit showed the first visit's Updated, and a fetch that failed once never ran again.
+    var now = Date.now(), c = jitaDatesCache[key];
+    var due = (!c || now - c.at >= JITA_DATES_TTL_MS) && !(jitaDatesFail[key] && now - jitaDatesFail[key] < JITA_DATES_TTL_MS);
     var existing = document.getElementById('jita-issue-dates');
-    if (existing && existing.getAttribute('data-key') === key && existing.isConnected) { return; }   // already shown for this issue
-    var tgt = jitaDatesTarget();
-    if (!tgt) { return; }   // header not ready yet; the observer will retry
-    if (existing && existing.parentNode) { existing.parentNode.removeChild(existing); }
-
-    var el = document.createElement('div');
-    el.id = 'jita-issue-dates';
-    el.setAttribute('data-key', key);
-    // Absolutely positioned near the LEFT edge of the sticky header bar (its positioning context), vertically
-    // centered with the icons. A small left inset (not 0) clears the bar's left clip/overflow so the first
-    // characters aren't cut off. Two stacked rows; each row is a flex with the LABEL left and the DATE pushed
-    // to the right (margin-left:auto), and the rows stretch to the same width so the dates line up right-bound.
-    el.style.cssText = 'position:absolute; left:24px; top:50%; transform:translateY(-50%);' +
-        ' display:flex; flex-direction:column; gap:1px;' +
-        ' font-size:12px; line-height:1.35; color:var(--ds-text-subtle,#8c9bab); white-space:nowrap; user-select:none;';
-    el.textContent = '…';
-    tgt.row.insertBefore(el, tgt.before);   // before:null -> append
+    var el = (existing && existing.getAttribute('data-key') === key && existing.isConnected) ? existing : null;
+    if (el && (!due || el.getAttribute('data-fetching'))) { return; }   // shown, and fresh or on its way
+    if (!el && !c && !due) { return; }                                    // nothing to show: the fetch failed a moment ago
+    if (!el) {
+        var tgt = jitaDatesTarget();
+        if (!tgt) { return; }   // header not ready yet; the observer will retry
+        if (existing && existing.parentNode) { existing.parentNode.removeChild(existing); }
+        el = jitaNewDatesEl(key, tgt);
+    }
 
     function paint(created, updated) {
         if (el.getAttribute('data-key') !== key || !el.isConnected) { return; }   // navigated away meanwhile
@@ -535,14 +538,39 @@ function jitaShowIssueDates() {
         part('Updated', updated);
     }
 
-    if (jitaDatesCache[key]) { paint(jitaDatesCache[key].created, jitaDatesCache[key].updated); return; }
+    if (c) { paint(c.created, c.updated); }
+    if (!due) { return; }
+    el.setAttribute('data-fetching', '1');
     $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + key + '?fields=created,updated', dataType: 'json' })
         .done(function (d) {
             var f = (d && d.fields) || {};
-            jitaDatesCache[key] = { created: f.created || null, updated: f.updated || null };
+            delete jitaDatesFail[key];
+            jitaDatesCache[key] = { created: f.created || null, updated: f.updated || null, at: Date.now() };
+            el.removeAttribute('data-fetching');
             paint(jitaDatesCache[key].created, jitaDatesCache[key].updated);
         })
-        .fail(function () { if (el.isConnected) { el.textContent = ''; } });
+        .fail(function () {
+            jitaDatesFail[key] = Date.now();
+            el.removeAttribute('data-fetching');
+            if (!jitaDatesCache[key] && el.parentNode) { el.parentNode.removeChild(el); }   // gone, so a later pass tries again
+        });
+}
+
+// The header's dates element for `key`, placed in the header bar (tgt from jitaDatesTarget) and showing '…'.
+function jitaNewDatesEl(key, tgt) {
+    var el = document.createElement('div');
+    el.id = 'jita-issue-dates';
+    el.setAttribute('data-key', key);
+    // Absolutely positioned near the LEFT edge of the sticky header bar (its positioning context), vertically
+    // centered with the icons. A small left inset (not 0) clears the bar's left clip/overflow so the first
+    // characters aren't cut off. Two stacked rows; each row is a flex with the LABEL left and the DATE pushed
+    // to the right (margin-left:auto), and the rows stretch to the same width so the dates line up right-bound.
+    el.style.cssText = 'position:absolute; left:24px; top:50%; transform:translateY(-50%);' +
+        ' display:flex; flex-direction:column; gap:1px;' +
+        ' font-size:12px; line-height:1.35; color:var(--ds-text-subtle,#8c9bab); white-space:nowrap; user-select:none;';
+    el.textContent = '…';
+    tgt.row.insertBefore(el, tgt.before);   // before:null -> append
+    return el;
 }
 
 // Jira renders the issue's Created/Updated timestamps a second time at the very BOTTOM of the right context
@@ -1029,6 +1057,13 @@ function addButtons() {
                 if (tr[0]) { $title.text(tr[0]); }
                 if (tr[1]) { setBlockText($desc.children().eq(0), tr[1]); }
                 if (tr[2]) { setBlockText($desc.children().eq(1), tr[2]); }
+                // Some came back and some did not: a translated title beside an untranslated description is easy to
+                // take for the whole report, so say which parts are still in the original.
+                var missed = ['title', 'description', 'steps to reproduce'].filter(function (n, i) { return tr[i] === null; });
+                if (missed.length) {
+                    alert('Only part of this report was translated: the ' + missed.join(' and the ') + ' could not be translated and ' +
+                        (missed.length === 1 ? 'is' : 'are') + ' still in the original language. Try Translate again in a moment.');
+                }
 
                 // The Triage Assistant reads its search query straight from these same DOM nodes (see
                 // JiTA.ui.getIssueText), so now that they hold the ENGLISH translation, re-run the similar-
@@ -1040,7 +1075,8 @@ function addButtons() {
                     && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) {
                     JiTA.ui.render(JiTA.ui.currentKey);
                 }
-            });
+            })
+            .catch(function (e) { console.log('[JiTA] translate failed:', e); });
     });
 
 
@@ -7258,8 +7294,7 @@ JiTA.ui = {
         gmSet('sdPanelStyle', next);
         $('#jita-sd-panel').remove();
         $('#jita-side-group').remove();
-        if (JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.render(JiTA.ui.currentKey); }
-        else if (JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.renderReports(JiTA.ui.currentKey); }
+        JiTA.ui._rerenderCurrent();
         refreshMenu();
     },
 
@@ -8821,10 +8856,7 @@ JiTA.menu = {
                 if (v === JiTA.TOP_N) { return; }
                 JiTA.TOP_N = v;
                 gmSet('sdTopN', v);
-                // Re-render whichever view is open so the new count takes effect immediately.
-                var k = JiTA.ui.currentKey;
-                if (k && /^EBR-/.test(k)) { JiTA.ui.render(k); }
-                else if (k && JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k); }
+                JiTA.ui._rerenderCurrent();   // so the new count takes effect immediately
             }
             $cnt.on('change', commitTopN);
             $cnt.on('keydown', function (e) { if (e.key === 'Enter') { commitTopN(); } });
@@ -8851,9 +8883,7 @@ JiTA.menu = {
             var $clrHidden = $('<button class="jita-btn"></button>').text('Unhide all')
                 .on('click', function () {
                     JiTA.hidden.clear();
-                    var k = JiTA.ui.currentKey;
-                    if (k && /^EBR-/.test(k)) { JiTA.ui.render(k); }
-                    else if (k && JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k); }
+                    JiTA.ui._rerenderCurrent();
                     refreshMenu();
                 });
             if (!hiddenN) { $clrHidden.prop('disabled', true); }
@@ -19138,28 +19168,35 @@ JiTA.declutter = {
     // ---- apply: hide selected, un-hide anything we'd hidden that is no longer selected. Idempotent + safe;
     // called from the shared observer so it survives re-renders and SPA navigation.
     apply: function () {
-        var type = JiTA.declutter._type();
-        if (!type) { return; }
-        var cfg = JiTA.declutter._cfg(type);
-        function reconcile(items, wanted) {
-            for (var i = 0; i < items.length; i++) {
-                var el = items[i].el, hide = JiTA.declutter._has(wanted, items[i].label || items[i].name);
-                try {
-                    if (hide && el.getAttribute('data-jita-declutter') !== '1') {
-                        el.setAttribute('data-jita-declutter', '1');
-                        el.style.setProperty('display', 'none', 'important');
-                    } else if (!hide && el.getAttribute('data-jita-declutter') === '1') {
-                        el.style.removeProperty('display');
-                        el.removeAttribute('data-jita-declutter');
-                    }
-                } catch (e) { /* ignore */ }
-            }
+        var D = JiTA.declutter, type = D._type(), cfg = type ? D._cfg(type) : null, keep = [];
+        // What this pass hides. Off an issue, or with nothing chosen for its type, that is nothing, and there is no
+        // detection pass to run on every mutation batch (it used to run on boards too, and with an empty config).
+        if (cfg && (cfg.fields.length || cfg.sections.length)) {
+            var pick = function (items, wanted) {
+                for (var i = 0; i < items.length; i++) {
+                    if (D._has(wanted, items[i].label || items[i].name) && keep.indexOf(items[i].el) === -1) { keep.push(items[i].el); }
+                }
+            };
+            pick(D._fieldRows(), cfg.fields);
+            pick(D._sections(), cfg.sections);
         }
-        reconcile(JiTA.declutter._fieldRows(), cfg.fields);
-        reconcile(JiTA.declutter._sections(), cfg.sections);
+        // Un-hide everything hidden that this pass does not keep: a choice cleared, an issue left, or a container an
+        // earlier pass climbed to while a section title stood alone on the page. Reconciling only the elements found
+        // this pass left that one hidden for good, with every panel Jira later mounted inside it.
+        var hidden = document.querySelectorAll('[data-jita-declutter="1"]');
+        for (var h = 0; h < hidden.length; h++) {
+            if (keep.indexOf(hidden[h]) !== -1) { continue; }
+            try { hidden[h].style.removeProperty('display'); hidden[h].removeAttribute('data-jita-declutter'); } catch (e) { /* ignore */ }
+        }
+        for (var k = 0; k < keep.length; k++) {
+            try {
+                if (keep[k].getAttribute('data-jita-declutter') !== '1') { keep[k].setAttribute('data-jita-declutter', '1'); }
+                keep[k].style.setProperty('display', 'none', 'important');
+            } catch (e) { /* ignore */ }
+        }
         // Remember how many elements we currently have hidden, so the observer's cheap synchronous guard
         // (reassertFast) can tell when a Jira re-render has wiped some of them and re-hide before the next paint.
-        JiTA.declutter._lastHidden = document.querySelectorAll('[data-jita-declutter="1"]').length;
+        D._lastHidden = keep.length;
     },
 
     // Cheap synchronous guard, called from the DOM observer on every mutation batch (a microtask, so it runs
@@ -19979,6 +20016,13 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.20', date: '2026-10-03', items: [
+            'The Created / Updated dates in the issue header are fetched again after a minute, so an edit shows, and a fetch that failed is retried.',
+            'Declutter no longer leaves a panel hidden until reload when Jira draws a section title before the rest of the page.',
+            'Switching Extra Buttons off in one tab keeps them off in the others, and switching them on no longer puts them on defects.',
+            'Translate says when only part of a report could be translated, instead of leaving an untranslated part beside a translated one.',
+            'On the wiki, the Lead duties chip and the What\'s new pill step aside for menus, holding a launcher key no longer opens it, and the scrollbar thumb has its colour again.'
+        ] },
         { v: '3.38.15', date: '2026-10-03', items: [
             'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
             'Lead duties: the Leads\' browsers no longer keep rewriting the ledger page just because each scanned the page tree at a different time.',
@@ -20773,6 +20817,9 @@ if (JITA_IS_WIKI) {
         if (!window.indexedDB) { return; }
         setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { /* swallow */ } }, 1200);
         try { JiTA.changelog.start(); } catch (e) { /* swallow */ }   // the "What's new" pill after an update
+        // The Lead chip and the What's new pill sit over the same Atlaskit sidebar here as on Jira, but Jira's shared
+        // observer (which steps them aside for a menu) never runs on the wiki. Watch for menus here as well.
+        try { new MutationObserver(function () { try { jitaPillsYieldSoon(); } catch (e) { /* ignore */ } }).observe(document.body, { childList: true, subtree: true }); } catch (e) { /* ignore */ }
     })();
 }
 
@@ -20841,7 +20888,7 @@ if (JITA_IS_WIKI) {
         (function () {
             var lastLt = 0, lastGt = 0, lastHash = 0;
             document.addEventListener('keydown', function (e) {
-                if (e.ctrlKey || e.metaKey || e.altKey) { return; }
+                if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || e.isComposing) { return; }   // a held key repeats in under 400 ms
                 if (e.key !== '<' && e.key !== '>' && e.key !== '#') { return; }
                 var t = e.target;
                 if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
