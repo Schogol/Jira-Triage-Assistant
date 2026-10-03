@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.15
+// @version     3.38.17
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -94,7 +94,7 @@ function waitForKeyElements(selectorTxt, actionFunction, bWaitOnce, iframeSelect
 // on separate ticks (setTimeout), so these carry state across that gap. `rows` = the raw file text;
 // `oc`/`lc`/`pdm`/`dx` = which igbr.zip attachment was opened. (pdmdata / today / driverAge are now locals - the
 // driver age is written straight into #driverAge by renderRequirements; menu_settings was an unused handle.)
-var rows, oc, lc, pdm, dx;
+var rows, jitaIgbrFile = null;   // the header-less igbr.zip file a click just opened ('oc', 'lc', 'pdm', 'dx'); SwapUI takes it
 
 // The EVE client log header row. Used both to DETECT a logs.txt (its content has this line) and to LOCATE the
 // right CodeMirror editor to swap. Kept in ONE place so if CCP ever changes the header, it's a one-line edit
@@ -1119,6 +1119,7 @@ waitForKeyElements(cmSelector, SwapUI);
             var el = nodes[i];
             if (el.classList.contains('jita-log-hiding')) { continue; }
             if (el.querySelector && (el.querySelector('#gpanel') || el.querySelector('#tableContent'))) { continue; }   // already our parsed UI
+            if (jitaInEditable(el)) { continue; }   // a draft in the comment box, never a log viewer: it used to blink out for 2.5 s per line
             var t = el.textContent || '';
             // Hide header-based logs (any layout, matched by header text) OR, while a header-less igbr.zip file is
             // being loaded by a click (jitaParserPending === the current click generation), the code-block it lands
@@ -1154,10 +1155,10 @@ waitForKeyElements(cmSelector, SwapUI);
 // The click binding is namespaced and .off()'d first so re-firing can never stack duplicate handlers: the SPA
 // re-rendering the attachment list makes waitForKeyElements match a fresh span and re-run this callback.
 var IGBR_FILES = [
-    { name: 'outstandingcalls.txt', setFlag: function () { oc = true; } },
-    { name: 'lastcrashes.txt',      setFlag: function () { lc = true; } },
-    { name: 'PDMData.txt',          setFlag: function () { pdm = true; } },
-    { name: 'dxdiag.txt',           setFlag: function () { dx = true; } }
+    { name: 'outstandingcalls.txt', setFlag: function () { jitaIgbrFile = 'oc'; } },
+    { name: 'lastcrashes.txt',      setFlag: function () { jitaIgbrFile = 'lc'; } },
+    { name: 'PDMData.txt',          setFlag: function () { jitaIgbrFile = 'pdm'; } },
+    { name: 'dxdiag.txt',           setFlag: function () { jitaIgbrFile = 'dx'; } }
 ];
 IGBR_FILES.forEach(function (f) {
     waitForKeyElements('span[data-item-title="true"]:contains(' + f.name + ')', function () {
@@ -1208,6 +1209,7 @@ if (!JITA_NO_JIRA_UI) {
     }, true);
 }
 function jitaRunParserWhenLoaded(setFlag) {
+    if (!flagOn('parser')) { return; }   // a click while the parser is off must leave nothing pending for later
     var myGen = ++jitaParserGen;
     var CB = SELECTORS.CODE_BLOCK;
     // These igbr.zip files have no header row, so the signature observer can't catch them. Instead mark a parse as
@@ -1284,7 +1286,34 @@ function readCodeBlock() {
 function mountParser(viewHtml, parseFn) {
     readCodeBlock();
     $(SELECTORS.CODE_BLOCK).html(viewHtml);
-    setTimeout(parseFn, 250);
+    setTimeout(function () { jitaRunParse(parseFn); }, 250);
+}
+
+// Run a parser; if it throws, end the spinner with a message instead of leaving it going over a page whose raw
+// text is already gone.
+function jitaRunParse(parseFn) {
+    try { parseFn(); } catch (e) {
+        console.log('[JiTA] log parser failed:', e);
+        var l = document.getElementById('loader');
+        if (l) { l.style.display = 'none'; }
+        var tc = document.getElementById('tableContent');
+        if (tc && tc.tBodies && tc.tBodies[0]) {
+            var tr = document.createElement('tr'), td = tr.insertCell(0);
+            td.colSpan = 20;
+            td.textContent = 'This file could not be parsed (' + (e && e.message || e) + '). Open raw to read it.';
+            tc.tBodies[0].appendChild(tr);
+            tc.style.display = 'table';
+        }
+    }
+}
+
+// True for a log container inside a rich-text editor the user is typing in (a ``` block in the comment box or the
+// description), as against the attachment viewer. Judged by the HOST, not by CodeMirror's own contenteditable:
+// an editable-but-read-only viewer carries contenteditable="true" too.
+function jitaInEditable(el) {
+    var ed = el && el.closest ? (el.closest('.cm-editor') || el) : null;
+    var host = ed && ed.parentElement;
+    return !!(host && host.closest && host.closest('[contenteditable="true"], .ProseMirror'));
 }
 
 
@@ -1297,11 +1326,25 @@ function SwapUI() {
     // Scope everything to the ONE editor that holds the log header row: the page can contain OTHER CodeMirror
     // editors (a ``` code block in the comment box is also a .cm-editor / .cm-content), and operating on all of
     // them read the wrong (comment) text into `rows` AND injected the "Logfile Parser" UI into the comment box.
-    var $logEd = $(SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")").first().closest('.cm-editor');
+    // The header-less igbr.zip file a click asked for, taken once whichever branch runs: a flag left set by a click
+    // while the parser was off used to pick the wrong parser for the next file.
+    var igbr = jitaIgbrFile;
+    jitaIgbrFile = null;
+    // Never the comment box: a ``` block there is a CodeMirror editor too, and a log header pasted into it turned the
+    // box being typed in into the parser's chrome.
+    var $logEd = $(SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")").filter(function () { return !jitaInEditable(this); }).first().closest('.cm-editor');
     if ($logEd.length && !$(SELECTORS.CODE_BLOCK).length && flagOn('parser')) {
         var $cm = $logEd.find('.cm-content').first().attr('data-jita-cmsrc', '1');   // mark the exact source editor
         rows = getCmDocText();                                                       // reads the marked .cm-content
         $cm.removeAttr('data-jita-cmsrc');
+        // A read that came back without the log (CodeMirror's internals moved) replaced the readable raw log with an
+        // empty table, and said nothing. Leave the viewer as it is.
+        if (!rows || rows.indexOf(LOG_HDR) === -1) {
+            console.warn('[JiTA] could not read the log text from the viewer, so it was left as it is');
+            jitaParserPending = 0;
+            jitaRevealLogs();
+            return;
+        }
         $logEd.html(html);
         // The parser's scrollable #table is position:absolute (top:85px; bottom:0), so it sizes itself
         // against the nearest positioned ancestor. In the old <span> viewer that ancestor filled the screen;
@@ -1309,7 +1352,7 @@ function SwapUI() {
         // clips every row. Pin #table to the viewport instead (the media viewer is full-screen) so all rows
         // are visible and scrollable.
         $('#table').css({ position: 'fixed', top: '95px', bottom: '0', left: '0', width: '100%' });
-        setTimeout(ParseLogs, 250);
+        setTimeout(function () { jitaRunParse(ParseLogs); }, 250);
         // NB: no early return here. The <span> checks below are no-ops on this layout (no code-block span),
         // but we must fall through to the "$('#gpanel a').click(...)" handler at the end of SwapUI so the
         // Toggle Notice / Warnings / Errors / Exceptions filter buttons get wired up.
@@ -1327,32 +1370,28 @@ function SwapUI() {
         mountParser(McHtml, ParseMcLogs);
     }
 
-    else if (oc && flagOn('parser')) {
-        oc = false;
+    else if (igbr === 'oc' && flagOn('parser')) {
         mountParser(ocHtml, ParseOcLogs);
     }
 
-    else if (lc && flagOn('parser')) {
-        lc = false;
+    else if (igbr === 'lc' && flagOn('parser')) {
         mountParser(lcHtml, ParseOcLogs);
     }
 
-    else if (dx && flagOn('parser')) {
+    else if (igbr === 'dx' && flagOn('parser')) {
         readCodeBlock();
         $(SELECTORS.CODE_BLOCK).append(dxdiagHtml);
         // Parse the raw dxdiag text into a triage summary (crash history + GPU driver recency + system). Guarded.
         try { renderDxdiag(rows); } catch (e) { $('#dxdiag').text('Could not evaluate dxdiag.'); }
-        dx = false;
     }
 
-    else if (pdm && flagOn('parser')) {
+    else if (igbr === 'pdm' && flagOn('parser')) {
         readCodeBlock();
         $(SELECTORS.CODE_BLOCK).append(pdmHtml);
-        var pdmdata = convertTextToObject(rows);
         // Judge the machine against EVE's system requirements and render a per-component breakdown into the
-        // Quick Info box (verdict + OS/CPU/RAM/GPU/DirectX rows + driver age). Guarded end-to-end.
-        try { renderRequirements(pdmdata); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
-        pdm = false;
+        // Quick Info box (verdict + OS/CPU/RAM/GPU/DirectX rows + driver age). Guarded end-to-end, the reading of
+        // the file included: malformed PDM text used to throw before the view was revealed.
+        try { renderRequirements(convertTextToObject(rows)); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
     };
 
     // The parsed view is now mounted (or this wasn't a parse branch) - clear any pending non-header parse and
@@ -1371,72 +1410,62 @@ function SwapUI() {
 // inside its own layer) gets the identical filter/search/Group-Repeats behavior. Bind once per fresh mount -
 // the chrome is rebuilt on every mount, so handlers never stack.
 function jitaWireLogControls() {
-    // Functionality for the buttons in the gpanel to toggle show / hide specific table rows
-    $("#gpanel a").click(function() {
-        switch ($(this).hasClass('toggle')) {
-            case false:
-                $('.'+$(this).attr('id')).css({'display':'none'});
-                $(this).not($('#onlyexception, #showAll')).addClass('toggle');
-                break;
-            default:
-                $('.'+$(this).attr('id')).css({'display':'table-row'});
-                $(this).removeClass('toggle');
-                break;
-        };
-        switch ($(this).attr('id')) {
-            case "onlyexception":
-                $('tr:not(.exception):not(#fixedHead)').css({'display':'none'});
-                $('tr.exception').css({'display':'table-row'});
-                $('#gnav a#notice, #gnav a#error, #gnav a#warning').addClass('toggle');
-                $('#gnav a#exception').removeClass('toggle');
-                break;
-            case "showAll":
-                $('tr').css({'display':'table-row'});
-                $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');
-                break;
-            default:
-                break;
+    // The gpanel buttons only keep their .toggle state (a type toggle carries it while its rows are hidden, Group
+    // Repeats while grouping is off); jitaApplyLogFilter then recomputes the parsed table's rows from it. There used
+    // to be a second handler that hid rows by class across the whole PAGE: Only Exceptions hid the table header (the
+    // ':not(#fixedHead)' matched nothing - it is a class) and any Jira table behind the viewer, Show All forced every
+    // <tr> on the page visible, and the filter pass after it only ever recomputed the table body.
+    $("#gpanel a").click(function (ev) {
+        if (ev && ev.preventDefault) { ev.preventDefault(); }
+        var id = $(this).attr('id');
+        if (id === 'onlyexception') {
+            $('#gnav a#notice, #gnav a#error, #gnav a#warning').addClass('toggle');
+            $('#gnav a#exception').removeClass('toggle');
+        } else if (id === 'showAll') {
+            $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');
+        } else {
+            $(this).toggleClass('toggle');
         }
+        jitaApplyLogFilter();
     });
 
-    // Live search box (Feature D): filter rows by text, composing with the type toggles above. A row is
-    // shown iff it matches the (case-insensitive) query AND its message-type isn't currently toggled off.
-    // jitaApplyLogFilter recomputes visibility from the toggle state (including the "Only Exceptions" combo,
-    // which also hides info rows) so search and the toggle buttons never fight. Wired only on the main log
-    // parser, the one layout that has the search input.
+    // Live search box (Feature D): filter rows by text, composing with the type toggles above.
     if ($('#jita-log-search').length) {
-        var jitaApplyLogFilter = function () {
-            // Drop the previous Nx badges before measuring row text, so a stale "52×" can't pollute the search
-            // match; jitaRegroupLog() re-adds them from the new visibility at the end of this pass.
-            var pb = document.querySelectorAll('#tableContent .jita-rep-badge');
-            for (var pi = 0; pi < pb.length; pi++) { if (pb[pi].parentNode) { pb[pi].parentNode.removeChild(pb[pi]); } }
-            var q = ($('#jita-log-search').val() || '').toLowerCase();
-            var off = {};
-            $('#gnav a.toggle').each(function () { off[$(this).attr('id')] = true; });
-            var onlyExc = off.notice && off.warning && off.error && !off.exception;   // the "Only Exceptions" state
-            $('#tableContent tbody tr').each(function () {
-                var cls = this.className || '';
-                var hiddenByToggle = onlyExc
-                    ? !/\bexception\b/.test(cls)
-                    : ((off.notice && /\bnotice\b/.test(cls)) ||
-                       (off.warning && /\bwarning\b/.test(cls)) ||
-                       (off.error && /\berror\b/.test(cls)) ||
-                       (off.exception && /\bexception\b/.test(cls)));
-                var matches = !q || (this.textContent || '').toLowerCase().indexOf(q) >= 0;
-                this.style.display = (!hiddenByToggle && matches) ? 'table-row' : 'none';
-            });
-            // Re-collapse identical runs against the visibility we just computed (hiding a type can make
-            // previously-separated duplicates adjacent, so the "Nx" grouping must be recalculated here).
-            jitaRegroupLog();
-        };
         var jitaSearchTimer = null;
         $('#jita-log-search').on('input', function () {
             if (jitaSearchTimer) { clearTimeout(jitaSearchTimer); }
             jitaSearchTimer = setTimeout(jitaApplyLogFilter, 120);   // debounce for large logs
         });
-        // Re-apply the text filter after any toggle / Only-Exceptions / Show-All click so the two compose.
-        $('#gpanel a').on('click', function () { setTimeout(jitaApplyLogFilter, 0); });
     }
+}
+
+// Recompute the parsed table's rows from the toggle state and the search box. A row is shown iff it matches the
+// (case-insensitive) query AND its message type is not toggled off; the "Only Exceptions" combination hides info
+// rows too. Only #tableContent's body is touched.
+function jitaApplyLogFilter() {
+    if (!document.getElementById('tableContent')) { return; }
+    // Drop the previous Nx badges before measuring row text, so a stale "52×" can't pollute the search
+    // match; jitaRegroupLog() re-adds them from the new visibility at the end of this pass.
+    var pb = document.querySelectorAll('#tableContent .jita-rep-badge');
+    for (var pi = 0; pi < pb.length; pi++) { if (pb[pi].parentNode) { pb[pi].parentNode.removeChild(pb[pi]); } }
+    var q = ($('#jita-log-search').val() || '').toLowerCase();
+    var off = {};
+    $('#gnav a.toggle').each(function () { off[$(this).attr('id')] = true; });
+    var onlyExc = off.notice && off.warning && off.error && !off.exception;   // the "Only Exceptions" state
+    $('#tableContent tbody tr').each(function () {
+        var cls = this.className || '';
+        var hiddenByToggle = onlyExc
+            ? !/\bexception\b/.test(cls)
+            : ((off.notice && /\bnotice\b/.test(cls)) ||
+               (off.warning && /\bwarning\b/.test(cls)) ||
+               (off.error && /\berror\b/.test(cls)) ||
+               (off.exception && /\bexception\b/.test(cls)));
+        var matches = !q || (this.textContent || '').toLowerCase().indexOf(q) >= 0;
+        this.style.display = (!hiddenByToggle && matches) ? 'table-row' : 'none';
+    });
+    // Re-collapse identical runs against the visibility we just computed (hiding a type can make
+    // previously-separated duplicates adjacent, so the "Nx" grouping must be recalculated here).
+    jitaRegroupLog();
 }
 
 
@@ -1517,22 +1546,23 @@ function ParseMcLogs() {
  * Fill the table with the log data
  */
     for (var i = 1; i < rows.length; ++i) {
+        if (!rows[i].trim()) { continue; }   // a blank line is not a call
         var cols = rows[i].split("\t");
 
         if (cols[1] == "machoNet::GetTime (RemoteServiceCall)") {
             averageDuration = averageDuration + Number(cols[2]);
             count++;
             if (Number(peak) < Number(cols[2])) {
-                peak = cols[2];
+                peak = Number(cols[2]);   // the last column still carries the line's \r
             }
         }
 
         logs.tableInfo.push([cols[0], cols[1], cols[2]]);
     }
-    $('#averageMacho').html('Average machoNet::GetTime duration: ' + Math.round(averageDuration / count) + 'ms <i class="fa-regular fa-circle-question" title="machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue."></i>');
-    $('#peakMacho').html('Peak machoNet::GetTime duration: ' + peak + 'ms <i class="fa-regular fa-circle-question" title="Clicking this row scrolls to the highest GetTime value withing this log file."></i>');
-    $('#peakMacho').on('click', function(){$(".peakMachoCell")[0].scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" })})
-    logs.showRow((rows.length - 2));
+    $('#averageMacho').html('Average machoNet::GetTime duration: ' + (count ? Math.round(averageDuration / count) + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue."></i>');
+    $('#peakMacho').html('Peak machoNet::GetTime duration: ' + (count ? peak + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="Clicking this row scrolls to the highest GetTime value withing this log file."></i>');
+    $('#peakMacho').on('click', function () { var p = $('.peakMachoCell')[0]; if (p) { p.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } });
+    logs.showRow(logs.tableInfo.length);   // every call read; rows.length - 2 dropped the last one
 
 
 
@@ -1664,20 +1694,20 @@ function ParsePhLogs() {
             packetsSent.innerHTML = table[i][15];
             sessionCount = row.insertCell(++cellIndex);
 
-            if (table[i][16] >= "2") {
+            if (Number(table[i][16]) >= 2) {   // as numbers: '10' >= '2' is false as text
                 sessionCount.className += 'red';
             }
 
             sessionCount.innerHTML = table[i][16];
             tidiFactor = row.insertCell(++cellIndex);
 
-            if (table[i][17] <= "0.2") {
+            if (Number(table[i][17]) <= 0.2) {
                 tidiFactor.className += 'red';
             }
-            else if (table[i][17] <= "0.8") {
+            else if (Number(table[i][17]) <= 0.8) {
                 tidiFactor.className += 'yellow';
             }
-            else if (table[i][17] >= "1.05") {
+            else if (Number(table[i][17]) >= 1.05) {
                 tidiFactor.className += 'red';
             }
 
@@ -1691,10 +1721,11 @@ function ParsePhLogs() {
  * Fill the table with the log data
  */
     for (var i = 1; i < rows.length; ++i) {
+        if (!rows[i].trim()) { continue; }   // a blank line is not a sample
         var cols = rows[i].split("\t");
         logs.tableInfo.push([cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6], cols[7], cols[8], cols[9], cols[10], cols[11], cols[12], cols[13], cols[14], cols[15], cols[16], cols[17]]);
     }
-    logs.showRow((rows.length - 2));
+    logs.showRow(logs.tableInfo.length);   // every sample read; rows.length - 2 dropped the last one
 
  /**
  * Clickhandler for when the user clicks on the FPS /spf row. We toggle between spf and FPS on click
@@ -1735,7 +1766,7 @@ function ParseLogs() {
  * rowQuantity: Quantity of rows which will be loaded
  */
     logs.showRow = function(rowQuantity) {
-        var excTime, sttTime = "";
+        var excTime = "", sttTime = "";   // both start empty: an undefined excTime gave the first row a top border
         var table = logs.tableInfo;
         var tableContent = document.getElementById('tableContent');
         var tableContentRowsLength = 0;
@@ -1794,7 +1825,7 @@ function ParseLogs() {
  * If the time of the current message is the same time as it was when the exception started
  * then add the 'exception' class to the row
  */
-            if (table[i][0] == excTime) {
+            if (excTime && table[i][0] == excTime) {   // outside a block excTime is '', and so is a logging-error row's time
                 row.className += ' exception';
             }
 
@@ -1856,9 +1887,13 @@ function ParseLogs() {
  */
     for (var i = 1; i < rows.length; ++i) {
         var cols = rows[i].split("\t");
-        logs.tableInfo.push([cols[0], cols[1], cols[2], cols[3]]);
+        // Fewer than four columns (an empty Facility or Type collapses with its tab, or a line has no tabs at all) used
+        // to throw on the missing message and leave the spinner going: keep the time, if there is one, and the rest
+        // of the line as the message. A message with a tab of its own keeps its tail.
+        if (cols.length < 4) { cols = cols.length > 1 ? [cols[0], '', '', cols.slice(1).join(' ')] : ['', '', '', rows[i]]; }
+        logs.tableInfo.push([cols[0], cols[1], cols[2], cols.slice(3).join('\t')]);
     }
-    logs.showRow((rows.length - 1));
+    logs.showRow(logs.tableInfo.length);
 
 
  /**
@@ -2750,11 +2785,11 @@ function convertTextToObject(text) {
             stack.push(currentObject);
         } else if (line.startsWith("}")) {
             stack.pop();
-            currentObject = stack[stack.length - 1];
+            currentObject = stack.length ? stack[stack.length - 1] : result;   // a stray '}' at the root is not a crash
         } else if (line.includes(":")) {
-            var keyValue = line.split(":");
-            var key = keyValue[0].trim();
-            var value = keyValue[1].trim();
+            var at = line.indexOf(":");   // the first colon: 'TIME: 12:34:56' keeps its whole value
+            var key = line.slice(0, at).trim();
+            var value = line.slice(at + 1).trim();
 
             if (value === "{EMPTY}") {
                 value = "";
@@ -19979,6 +20014,13 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.17', date: '2026-10-03', items: [
+            'Parsed logs: Only Exceptions no longer hides the table header or parts of Jira behind the log, and Show All no longer forces Jira\'s own tables open.',
+            'Parsed logs: a line with a missing column no longer leaves the spinner going forever, logging errors are no longer marked as exceptions, and the first row lost its stray border.',
+            'A log header pasted into a comment no longer turns the comment box into the log parser, and a log the viewer could not hand over is left readable instead of emptied.',
+            'Process Health colours 10 or more sessions red again and compares time dilation as numbers; Method Calls no longer shows NaN or drops its last row.',
+            'PDM data: a value containing a colon is read whole, and an oddly formed file no longer stops the summary from showing.'
+        ] },
         { v: '3.38.15', date: '2026-10-03', items: [
             'Lead duties: when the quality control ledger or the page tree cannot be read, the ledger page is left as it was instead of being rewritten with parts missing.',
             'Lead duties: the Leads\' browsers no longer keep rewriting the ledger page just because each scanned the page tree at a different time.',
