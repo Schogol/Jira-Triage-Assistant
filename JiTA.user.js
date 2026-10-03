@@ -5182,7 +5182,13 @@ JiTA.sync = {
                 });
             });
         }
-        return nextPage();
+        // What this run wrote, or pruned, stays invisible to the shared ranking worker until it rebuilds its indexes:
+        // it keeps them in memory for as long as it lives, across reloads. So once the run ends - done, or failed part
+        // way - drop them if it stored anything. Once per run, not per page: a query in between rebuilds them, and a
+        // full crawl is hundreds of pages. (embedPass drops them as well, but a sync that only changed statuses, or
+        // pruned closed reports, gave it nothing to embed, and it used to return before dropping anything.)
+        function settled() { if (stored > 0) { JiTA.sync._invalidateWorker(); } }
+        return nextPage().then(function (res) { settled(); return res; }, function (e) { settled(); throw e; });
     },
 
     fullSync: function () {
@@ -5402,6 +5408,11 @@ JiTA.sync = {
         });
     },
 
+    // Make the shared ranking worker drop its in-memory indexes; it rebuilds them from the DB on its next query.
+    _invalidateWorker: function () {
+        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+    },
+
     // An EBR just left the OPEN set locally (attached / closed) and was deleted from the DB. Make every open
     // tab drop it from the defect "matching reports" view WITHOUT a manual refresh. Removing the DB row is not
     // enough: the shared ranking worker keeps the report in its in-memory kwCache/vecCache (its vector still
@@ -5414,7 +5425,7 @@ JiTA.sync = {
     _ebrRemoved: function (keys, fromRemote) {
         JiTA.rank._dirtyEbr = true;
         JiTA.rank._dirtyEbrVec = true;
-        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+        JiTA.sync._invalidateWorker();
         if (!fromRemote) { gmSet('sdEbrRemoved', { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId }); }
     },
 
@@ -9878,9 +9889,14 @@ function jitaWorkerBody(cfg) {
                     await new Promise(function (r) { setTimeout(r, 1500); });
                 }
             }
-            vecCache = null; kwCache = null; logsigCache = null;   // new vectors/text -> rebuild all indexes on the next query
             return { embedded: todo.length };
-        } finally { embedding = false; }
+        } finally {
+            embedding = false;
+            // Rebuild every index on the next query, however the pass ended: new vectors, or none at all - it runs after
+            // every sync, so even with nothing to embed the records under the indexes may have changed. A pass that
+            // failed part way has still written the batches before the failure.
+            dropIndexes();
+        }
     }
     function openDb() {
         if (db) { return Promise.resolve(db); }
@@ -9930,9 +9946,25 @@ function jitaWorkerBody(cfg) {
     }
     // Build BOTH in-worker indexes in a single DB read (held ONCE for all tabs): the vector index (records
     // embedded at the current model version) and the BM25 keyword index, each split defects vs open non-GM EBRs.
-    async function ensureIndexes() {
-        if (vecCache && kwCache && logsigCache) { return; }
-        var recs = await allRecords();
+    //
+    // One build at a time, and never a stale one. Queries arriving together after a drop share one read and one
+    // build (self.onmessage is async, so a hybrid render's keyword and semantic calls used to build twice), and a
+    // build whose read began before a drop is thrown away and redone: kept, it would put back the very records the
+    // drop was for - a report just attached, a status just changed.
+    var idxGen = 0, idxP = null;
+    function dropIndexes() { idxGen++; vecCache = null; kwCache = null; logsigCache = null; }
+    function ensureIndexes() {
+        if (vecCache && kwCache && logsigCache) { return Promise.resolve(); }
+        if (idxP) { return idxP; }
+        var gen = idxGen;
+        idxP = allRecords().then(function (recs) {
+            idxP = null;
+            if (gen !== idxGen) { return ensureIndexes(); }
+            buildIndexes(recs);
+        }, function (e) { idxP = null; throw e; });
+        return idxP;
+    }
+    function buildIndexes(recs) {
         var vD = [], vE = [], kD = [], kE = [], dfD = {}, dfE = {}, lenD = 0, lenE = 0;
         var sigMap = {}, keyToSigs = {}, crashMap = {}, keyToCrash = {};   // logsig
         for (var i = 0; i < recs.length; i++) {
@@ -10602,7 +10634,7 @@ function jitaWorkerBody(cfg) {
                 // Runs directly; shares the crGate rate buckets. Streams no progress (self never drove a pill).
                 result = await crComputeSelf(payload);
             }
-            else if (type === 'invalidate') { vecCache = null; kwCache = null; logsigCache = null; result = { ok: true }; }   // drop all indexes after a sync writes the DB
+            else if (type === 'invalidate') { dropIndexes(); result = { ok: true }; }   // drop all indexes after a sync writes the DB
             else { throw new Error('unknown worker request: ' + type); }
             self.postMessage({ id: id, ok: true, result: result });
         } catch (err) { self.postMessage({ id: id, ok: false, error: String((err && err.message) || err), stack: String((err && err.stack) || '') }); }
@@ -18564,7 +18596,28 @@ JiTA.worker = {
         JiTA.worker._standAsides = 0;
         JiTA.worker._isLeader = true;
         JiTA.worker._respawns = 0;   // fresh leadership session -> fresh respawn budget
+        // The calls this tab sent over the channel were for another leader, and a tab never hears its own channel
+        // messages, so nobody will answer them now. And every follower may be waiting on a call the old leader took:
+        // say so, before this tab takes any call itself (the channel keeps one sender's messages in order).
+        JiTA.worker._failTabPending('the ranking leader moved to this tab');
+        try { if (JiTA.worker._bc) { JiTA.worker._bc.postMessage({ kind: 'leader', version: JiTA.SCRIPT_VERSION }); } } catch (e) { /* ignore */ }
         JiTA.worker._spawnWorker();
+    },
+
+    // Reject this tab's channel calls now instead of at their op timeout. A leader that took a call (ACKed it) and then
+    // went away - its tab reloaded or closed, the usual way to pick up an update - never answers, and an ACKed call has
+    // only its op timer left: 15 minutes for a credits crawl, with the pill frozen and every Refresh told a run is
+    // already going. ackedOnly spares the calls no leader has taken yet: their own LEADER_ACK_MS timer covers them,
+    // and the new leader may be about to take them.
+    _failTabPending: function (why, ackedOnly) {
+        var pend = JiTA.worker._tabPending;
+        Object.keys(pend).forEach(function (id) {
+            var p = pend[id];
+            if (ackedOnly && p.ackTimer) { return; }
+            clearTimeout(p.timer); if (p.ackTimer) { clearTimeout(p.ackTimer); }
+            delete pend[id];
+            try { p.reject(new Error(why)); } catch (e) { /* ignore */ }
+        });
     },
 
     // (Re)spawn the dedicated worker. Called when we become leader and on every self-heal respawn. A spawn throw,
@@ -18801,6 +18854,8 @@ JiTA.worker = {
             JiTA.worker._applyEvent(m.data);   // a worker event the leader relayed (e.g. embed pass finished)
         } else if (m.kind === 'reelect') {
             JiTA.worker._applyReelect(m.want);   // a tab saw a stale worker -> remember the newer version / step down if we're the stale leader
+        } else if (m.kind === 'leader') {
+            JiTA.worker._failTabPending('the ranking leader changed - try again', true);   // a call the old leader took will never be answered
         }
     },
 
@@ -19776,6 +19831,10 @@ JiTA.changelog = {
     ENTRIES: [
         { v: '3.38.7', date: '2026-10-03', items: [
             'If Jira stops answering, or your session expires, while the issue list beside an issue is looking for the open issue, it no longer repeats the same request in an endless loop.'
+        ] },
+        { v: '3.38.6', date: '2026-10-03', items: [
+            'Each sync now refreshes the similar defects and matching reports, so reports closed in the meantime drop out and statuses stay current.',
+            'The credits pill no longer hangs for up to 15 minutes when the Jira tab doing the background work is reloaded or closed.'
         ] },
         { v: '3.38.5', date: '2026-10-03', items: [
             "After an update the What's new pill now comes up reliably: if the page takes it away while still loading, it comes back by itself."
