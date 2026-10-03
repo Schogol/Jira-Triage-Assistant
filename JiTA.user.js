@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.18
+// @version     3.38.19
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -3381,7 +3381,7 @@ JiTA.logsig = {
     // Every OTHER defect that shares a signature with `key` (deduped across all of the key's signatures),
     // each with its status/resolution. Drives the inline "Same exception" section on a defect. [] when none.
     siblingsForKey: function (key) {
-        if (JiTA.worker && JiTA.worker._started) { return JiTA.worker.call('logsig', { op: 'siblings', key: key }).catch(function () { return JiTA.logsig._siblingsLocal(key); }); }
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'siblings', key: key }).catch(function () { return JiTA.logsig._siblingsLocal(key); }); }
         return JiTA.logsig._siblingsLocal(key);
     },
     _siblingsLocal: function (key) {
@@ -3407,7 +3407,7 @@ JiTA.logsig = {
     // sibling - i.e. the SAME bug reached via a DIFFERENT call path. Looser than siblingsForKey; drives the
     // "Possibly related" hint. [] when none.
     relatedForKey: function (key) {
-        if (JiTA.worker && JiTA.worker._started) { return JiTA.worker.call('logsig', { op: 'related', key: key }).catch(function () { return JiTA.logsig._relatedLocal(key); }); }
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'related', key: key }).catch(function () { return JiTA.logsig._relatedLocal(key); }); }
         return JiTA.logsig._relatedLocal(key);
     },
     _relatedLocal: function (key) {
@@ -3440,7 +3440,7 @@ JiTA.logsig = {
     // first (the freshly-recurring exceptions a triager most wants to see), with cluster size as the
     // tiebreaker. Drives the "Exception clusters" overview.
     clusters: function () {
-        if (JiTA.worker && JiTA.worker._started) { return JiTA.worker.call('logsig', { op: 'clusters' }).catch(function () { return JiTA.logsig._clustersLocal(); }); }
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'clusters' }).catch(function () { return JiTA.logsig._clustersLocal(); }); }
         return JiTA.logsig._clustersLocal();
     },
     _clustersLocal: function () {
@@ -3674,7 +3674,7 @@ JiTA.logsig = {
     // swallow the whole rest of the log (hundreds of unrelated `file.py(NN) func` lines) and the stack
     // signature would never match the clean one in the index. Resolves to { defect -> { defect, count, msg } }.
     matchText: function (text) {
-        if (JiTA.worker && JiTA.worker._started) { return JiTA.worker.call('logsig', { op: 'match', text: text }).catch(function () { return JiTA.logsig._matchTextLocal(text); }); }
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'match', text: text }).catch(function () { return JiTA.logsig._matchTextLocal(text); }); }
         return JiTA.logsig._matchTextLocal(text);
     },
     _matchTextLocal: function (text) {
@@ -5581,8 +5581,10 @@ JiTA.sync = {
     },
 
     // Make the shared ranking worker drop its in-memory indexes; it rebuilds them from the DB on its next query.
+    // Resolves once the worker has them dropped (or could not be reached); never rejects.
     _invalidateWorker: function () {
-        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }
+        return JiTA.worker.call('invalidate').then(function () {}, function () { /* ignore */ });
     },
 
     // An EBR just left the OPEN set locally (attached / closed) and was deleted from the DB. Make every open
@@ -5591,14 +5593,17 @@ JiTA.sync = {
     // ranks in on the semantic channel), and a plain reload won't fix it - the worker survives the reload and
     // the 30-min sync throttle (recentlySynced) skips the catch-up that would re-prune + re-index. So we (a)
     // mark THIS tab's EBR keyword/vector indexes dirty, (b) drop the shared worker's indexes via 'invalidate'
-    // (it rebuilds from the current DB, minus the removed report, on the next query), and (c) unless this is a
-    // cross-tab echo, tell the other tabs (the listener near startup re-renders them). The acting tab handles
-    // its own row UI (softRefreshStatus / _fadeOutAndReplace), so we deliberately don't re-render it here.
+    // (it rebuilds from the current DB, minus the removed report, on the next query), and (c) tell the other tabs
+    // (the listener near startup re-renders them) once that has landed, so none of them ranks against the old
+    // indexes. The other tabs only mark their own indexes: one removal used to drop the shared worker's indexes
+    // once per open tab, and it could rebuild them as often. The acting tab handles its own row UI
+    // (softRefreshStatus / _fadeOutAndReplace), so we deliberately don't re-render it here.
     _ebrRemoved: function (keys, fromRemote) {
         JiTA.rank._dirtyEbr = true;
         JiTA.rank._dirtyEbrVec = true;
-        JiTA.sync._invalidateWorker();
-        if (!fromRemote) { gmSet('sdEbrRemoved', { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId }); }
+        if (fromRemote) { return; }
+        var note = { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId };
+        JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });
     },
 
     // Menu entry point for the single "Sync now" button: sync the defect dataset, then the bug-report
@@ -5612,8 +5617,9 @@ JiTA.sync = {
     // Quiet background catch-up used by the auto-sync scheduler. BOTH datasets AUTO-INITIALIZE on the first
     // run (full build when the DB is empty) and then run incremental catch-ups: DEFECTS (EDR/EO) and OPEN
     // BUG REPORTS (EBRs). No start/finish toasts; re-embeds / refreshes the open panel only on actual changes.
+    // Resolves true when it completed, false when it failed, and null when another sync was already running.
     autoSync: function () {
-        if (JiTA.sync.running) { return Promise.resolve(); }
+        if (JiTA.sync.running) { return Promise.resolve(null); }
         JiTA.sync.running = true;
         var defectStored = 0, ebrChanged = false;
         return JiTA.db.countDefectsOnly().then(function (n) {
@@ -5635,11 +5641,13 @@ JiTA.sync = {
                 if (ebrChanged) { JiTA.translate.prepare(); }                        // translate any new foreign reports
                 if (defectStored > 0 && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
                 if (ebrChanged && JiTA.ui.currentKey && JiTA.ui._isReportsKey(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
+                return true;
             });
         }).catch(function (e) {
             JiTA.sync.running = false;
             JiTA.db.setMeta('lastError', String(e && e.message || e));
             console.log('[JiTA] auto-sync error:', e && e.message || e);
+            return false;
         });
     }
 };
@@ -5706,7 +5714,7 @@ JiTA.rank = {
     // Keyword (BM25) defect candidates. Routes to the shared worker's index (so tabs don't build one), gating
     // tab-side; on worker failure, falls back to a locally-built BM25 index (the ONLY time _index is built here).
     suggest: function (text, excludeKey, limit, filterTerms) {
-        if (JiTA.worker && JiTA.worker._started) {
+        if (JiTA.worker && JiTA.worker.usable()) {
             return JiTA.rank._workerKeyword(text, 'defects', excludeKey, filterTerms, limit)
                 .then(function (cands) { return JiTA.rank._gateScored(cands, 'defects').slice(0, limit || JiTA.TOP_N); })
                 .catch(function () { return JiTA.rank._suggestLocal(text, excludeKey, limit, filterTerms); });
@@ -5744,7 +5752,7 @@ JiTA.rank = {
             for (var p = 0; p < scored.length; p++) { scored[p].pct = top > 0 ? Math.round(scored[p].score / top * 100) : 0; }
             return scored;
         }
-        if (JiTA.worker && JiTA.worker._started) {
+        if (JiTA.worker && JiTA.worker.usable()) {
             return JiTA.rank._workerKeyword(text, 'ebr', excludeKey, filterTerms, limit)
                 .then(function (cands) { return withPct(JiTA.rank._gateScored(cands, 'ebr').slice(0, limit || JiTA.TOP_N)); })
                 .catch(function () { return JiTA.rank._suggestEbrLocal(text, excludeKey, limit, filterTerms); });
@@ -6048,7 +6056,7 @@ JiTA.embed = {
     prepare: function (force) {
         // With the shared worker, embedding runs THERE (one model for all tabs) - no main-thread model load.
         // Any tab can trigger it; the request routes to the single leader worker, which is single-flight.
-        if (JiTA.worker && JiTA.worker._started) {
+        if (JiTA.worker && JiTA.worker.usable()) {
             if (JiTA.embed._preparing) { return JiTA.embed._preparing; }
             JiTA.embed._preparing = JiTA.worker.call('embedPass').then(function (r) {
                 JiTA.embed._preparing = null;
@@ -6240,7 +6248,7 @@ JiTA.rank._fuse = function (sem, bm, demote) {
 // Returns the worker's top-K score-sorted candidate list, or rejects if the worker is unavailable (caller then
 // keyword-falls-back). filterTerms is applied in the worker; the remaining session/UI gates run tab-side below.
 JiTA.rank._workerSemantic = function (text, scope, excludeKey, filterTerms) {
-    if (!JiTA.worker || !JiTA.worker._started) { return Promise.reject(new Error('worker off')); }
+    if (!JiTA.worker || !JiTA.worker.usable()) { return Promise.reject(new Error('worker off')); }
     return JiTA.worker.call('rankSemantic', {
         text: text, scope: scope, excludeKey: excludeKey,
         filterTerms: (filterTerms && filterTerms.length ? filterTerms : null),
@@ -6283,7 +6291,7 @@ JiTA.rank._hybridResults = function (text, key, filterTerms, scope, bmFn, keywor
 // keyword() now (prepare()'s later re-render upgrades it once the model is ready).
 JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid) {
     if (forceMode === 'Keyword') { return keywordOnly(); }
-    if (!JiTA.worker || !JiTA.worker._started) { return keywordOnly(); }   // no shared worker -> keyword only
+    if (!JiTA.worker || !JiTA.worker.usable()) { return keywordOnly(); }   // no shared worker -> keyword only
     // Keyword-first: race the worker-backed hybrid against a short window. If the worker answers in time we show
     // Hybrid straight away; otherwise show Keyword now and, once the (cold-starting) worker finally responds,
     // re-render to upgrade to Hybrid. hybrid() itself keyword-falls-back if the worker errors.
@@ -9238,6 +9246,7 @@ JiTA.menu = {
         $('<h3>Debug</h3>').appendTo($dbg);
         var w = JiTA.worker;
         var wstat = !w._started ? 'not started'
+                  : !w.usable() ? 'gave up (the worker could not run in this browser)'
                   : (w._isLeader ? 'this tab is the worker LEADER' : 'follower (leader is another tab)');
         $('<div class="jita-menu-status"></div>')
             .text('Worker: ' + wstat + ' · this tab v' + (JiTA.SCRIPT_VERSION || '?')).appendTo($dbg);
@@ -9316,9 +9325,17 @@ JiTA.menu = {
 // empty DBs need nothing: their first full build stamps the current version.
 JiTA.migrate = {
     _done: false,
+    RETRY_MS: 30 * 1000,
+    // A sync holds the single-flight `running` flag, and the refetches would then do nothing, for the rest of the
+    // session. Look again once it is over.
+    _later: function () {
+        JiTA.migrate._done = false;
+        setTimeout(function () { try { JiTA.migrate.run(); } catch (e) { /* swallow */ } }, JiTA.migrate.RETRY_MS);
+    },
     run: function () {
         if (JiTA.migrate._done) { return; }            // once per session
         JiTA.migrate._done = true;
+        if (JiTA.sync.running) { JiTA.migrate._later(); return; }
         if (!flagOn('similarDefects')) { return; }            // Triage Assistant off -> nothing to migrate
         JiTA.db.countDefectsOnly().then(function (nDef) {
             return JiTA.db.getMeta('dataVersionDefects').then(function (dv) {
@@ -9327,6 +9344,7 @@ JiTA.migrate = {
                     return JiTA.db.getMeta('dataVersionEbr').then(function (ev) {
                         var ebrStale = nEbr > 0 && (Number(ev) || 0) < JiTA.DATA_VERSION;
                         if (!defStale && !ebrStale) { return; }
+                        if (JiTA.sync.running) { JiTA.migrate._later(); return; }   // one started while we read
                         console.log('[JiTA] local DB schema out of date (defects v' + (Number(dv) || 0) +
                             ', reports v' + (Number(ev) || 0) + ' < v' + JiTA.DATA_VERSION +
                             ') - auto re-fetching to backfill new fields');
@@ -9356,6 +9374,9 @@ JiTA.sched = {
     STARTUP_DELAY_MS: 20 * 1000,   // wait a bit after load so we don't compete with first paint / initial render
     LEASE_TTL_MS: 5 * 60 * 1000,   // a lease older than this is treated as abandoned (tab closed mid-sync)
     LEASE_KEY: 'sdSyncLease',
+    HEARTBEAT_MS: 60 * 1000,       // a running sync re-stamps its lease this often, so a long first crawl keeps it
+    FAIL_MS: 5 * 60 * 1000,        // after a failed auto-sync (expired session, Jira down), wait this long before the next
+    FAIL_KEY: 'sdSyncFailTs',      // when the last auto-sync failed, shared across tabs; 0 once one completes
     LAST_SYNC_KEY: 'sdLastSyncTs',  // epoch ms of the last completed sync (any kind), persisted + shared across tabs
     tabId: 'tab-' + Math.floor(Math.random() * 1e9) + '-' + Date.now(),
     _timer: null,
@@ -9388,16 +9409,35 @@ JiTA.sched = {
         }
         return false;
     },
+    _releaseLease: function () {
+        var l = gmGet(JiTA.sched.LEASE_KEY, null);
+        if (l && l.tabId === JiTA.sched.tabId) { gmSet(JiTA.sched.LEASE_KEY, null); }
+    },
 
     tick: function () {
+        var S = JiTA.sched;
         if (!flagOn('similarDefects')) { return; }            // feature disabled
-        if (JiTA.sched.recentlySynced()) { return; }    // a sync ran < INTERVAL_MS ago (persisted) - don't re-fetch on reload
-        if (!JiTA.sched._acquireLease()) { return; }    // another tab is the syncer right now
-        JiTA.sync.autoSync();
+        if (S.recentlySynced()) { return; }    // a sync ran < INTERVAL_MS ago (persisted) - don't re-fetch on reload
+        // A failed run (an expired session, Jira down) used to be retried on every 30 s poll, in every tab.
+        var failed = gmGet(S.FAIL_KEY, 0) || 0;
+        if (failed && (Date.now() - failed) < S.FAIL_MS) { return; }
+        if (JiTA.sync.running) { return; }               // a sync of this tab's own is going
+        if (!S._acquireLease()) { return; }    // another tab is the syncer right now
+        // The lease was stamped once, so a first full crawl that ran past LEASE_TTL_MS let a second tab start its own
+        // sync, writing its paging token over this one's. Keep it fresh while the sync runs, and free it after.
+        var hb = setInterval(function () { gmSet(S.LEASE_KEY, { tabId: S.tabId, ts: Date.now() }); }, S.HEARTBEAT_MS);
+        return JiTA.sync.autoSync().then(function (done) {
+            clearInterval(hb);
+            S._releaseLease();
+            if (done === true) { gmSet(S.FAIL_KEY, 0); }
+            else if (done === false) { gmSet(S.FAIL_KEY, Date.now()); }
+        });
     },
 
     start: function () {
         if (JiTA.sched._timer) { return; }
+        // Free the lease when the tab goes away, so another tab can take the sync up at once (the TTL is the backstop).
+        try { window.addEventListener('pagehide', function () { JiTA.sched._releaseLease(); }); } catch (e) { /* ignore */ }
         setTimeout(function () {
             try { JiTA.sched.tick(); } catch (e) { /* swallow */ }
             // Poll every POLL_MS (≪ INTERVAL_MS). tick() itself only acts once recentlySynced() reports that
@@ -9511,7 +9551,7 @@ JiTA.credits = {
     // the pill. No in-tab fallback - if the worker is unavailable we reject so callers surface an error/retry.
     computeMonth: function (y, m, mentor) {
         var C = JiTA.credits;
-        if (!(JiTA.worker && JiTA.worker._started)) { return Promise.reject(new Error('credits: worker unavailable')); }
+        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.reject(new Error('credits: worker unavailable')); }
         var tag = (JiTA.sched.tabId) + ':' + (++C._tagSeq);
         C._workerTag = tag;
         return JiTA.worker.call('creditsMonth', { y: y, m: m, mentor: mentor || null, tag: tag }, { timeoutMs: C.WORKER_TIMEOUT_MS })
@@ -9564,7 +9604,7 @@ JiTA.credits = {
     // crawl. Resolves the self record (also written to creditsSelf:<ym>); rejects if the worker is unavailable.
     computeSelf: function (y, m) {
         var C = JiTA.credits, ym = y + '-' + (m < 10 ? '0' : '') + m;   // ym inline (was C._monthBounds, now worker-side)
-        if (!(JiTA.worker && JiTA.worker._started)) { return Promise.reject(new Error('credits: worker unavailable')); }
+        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.reject(new Error('credits: worker unavailable')); }
         return JiTA.link.currentUser().then(function (me) {
             if (!me) { return null; }
             return C.getCached(ym).then(function (full) {
@@ -12548,7 +12588,7 @@ JiTA.dupfind = {
     compute: function () {
         var D = JiTA.dupfind;
         if (D._running) { return; }
-        if (!(JiTA.worker && JiTA.worker._started)) { D._status('Ranking worker unavailable - reload the tab and retry.'); return; }
+        if (!(JiTA.worker && JiTA.worker.usable())) { D._status('Ranking worker unavailable - reload the tab and retry.'); return; }
         D._running = true;
         $('#jd-recompute').prop('disabled', true);
         $('#jd-body').empty().append($('<div class="jd-empty"></div>').text('Scanning all open defects pairwise - this can take a little while on the first run…'));
@@ -12700,7 +12740,7 @@ JiTA.dupfind = {
                 if (ghostKeys.length) {
                     JiTA.db.deleteDefects(ghostKeys).then(function () {
                         JiTA.rank._dirty = true; JiTA.rank._dirtyVec = true;   // defect keyword + vector indexes
-                        if (JiTA.worker && JiTA.worker._started) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+                        if (JiTA.worker && JiTA.worker.usable()) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
                         if (window.console) { console.log('[JiTA] dupfind: deleted ' + ghostKeys.length + ' moved-key ghost record(s): ' + ghostKeys.join(', ')); }
                     }).catch(function () { /* best effort - the next full rebuild drops them anyway */ });
                 }
@@ -18809,6 +18849,8 @@ JiTA.worker = {
     _failStreak: 0,      // consecutive worker failures with no successful RPC in between (reset on any success)
     _recovering: false,  // re-entry guard: a death is already being handled
     _gaveUp: false,      // hit GIVEUP_AFTER -> stop trying to be leader
+    _otherLeader: false, // another tab announced itself leader after this one gave up: calls can go to it
+    _spawnedGpu: null,   // the backend the running worker was built for (true = WebGPU), to notice a switch
     _maxSeenVersion: JiTA.SCRIPT_VERSION,  // highest userscript version known to exist across tabs; we never take/keep leadership with a worker OLDER than this
     _standAsides: 0,     // times we've ceded the lock to let a newer tab lead (bounded by MAX_STANDASIDE)
 
@@ -18828,6 +18870,22 @@ JiTA.worker = {
         // Two spaced attempts cover a leader whose worker isn't up yet on the first try.
         setTimeout(JiTA.worker._checkWorkerVersion, 12000);
         setTimeout(JiTA.worker._checkWorkerVersion, 30000);
+        // The GPU / CPU switch in Settings reloads the tab it was clicked in, which rebuilds the worker only when that
+        // tab leads. From a follower the leader went on embedding on the old backend, so the leader listens too.
+        if (typeof GM_addValueChangeListener === 'function') {
+            ['sdTryWebgpu', 'sdForceCpu'].forEach(function (k) {
+                try { GM_addValueChangeListener(k, function (n, o, v, remote) { if (remote) { JiTA.worker._backendChanged(); } }); } catch (e) { /* ignore */ }
+            });
+        }
+    },
+
+    // The embedding backend setting changed in another tab: a leader whose worker was built for the other backend
+    // rebuilds it. In-flight calls fail, as on any respawn; their callers fall back or retry.
+    _backendChanged: function () {
+        var gpu = !!(gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false));
+        if (!JiTA.worker._isLeader || !JiTA.worker._worker || JiTA.worker._spawnedGpu === gpu) { return; }
+        if (window.console) { console.log('[JiTA worker] embedding backend switched to ' + (gpu ? 'GPU' : 'CPU') + ' in another tab - rebuilding the worker'); }
+        JiTA.worker._spawnWorker();
     },
 
     // Queue for the leader lock; on winning it, become leader and hold the lock (via an unresolved promise) until
@@ -18892,6 +18950,7 @@ JiTA.worker = {
         if (!JiTA.worker._isLeader || JiTA.worker._gaveUp) { return; }
         JiTA.worker._killWorker();   // tear down any previous handle first (defensive)
         try {
+            JiTA.worker._spawnedGpu = !!(gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false));   // what _src() builds it for
             var url = URL.createObjectURL(new Blob([JiTA.worker._src()], { type: 'text/javascript' }));
             var w = new Worker(url, { type: 'module' });
             JiTA.worker._worker = w;
@@ -19013,10 +19072,18 @@ JiTA.worker = {
         }
     },
 
+    // Whether to send work to the ranking worker at all. A tab that gave up leading (the worker cannot run here) has
+    // no worker unless another tab has taken the lead since; without this, every call waited out the 6 s ACK and
+    // the callers' own fallbacks never ran, because they only checked that the worker had been started.
+    usable: function () {
+        return JiTA.worker._started && (!JiTA.worker._gaveUp || JiTA.worker._otherLeader);
+    },
+
     // Public: call the ranking worker from ANY tab. Resolves with the worker's result (or rejects on timeout /
     // no leader). Leader shortcuts straight to its worker; followers route over the channel.
     call: function (type, payload, opts) {
         opts = opts || {};
+        if (!JiTA.worker.usable()) { return Promise.reject(new Error('the ranking worker is not available in this tab')); }
         var timeoutMs = opts.timeoutMs || JiTA.worker.RPC_TIMEOUT_MS;   // long crawls (credits) pass a bigger cap
         if (JiTA.worker._isLeader && JiTA.worker._worker) { return JiTA.worker._workerCall(type, payload, timeoutMs); }
         // Leader but its worker is momentarily down (respawn / self-heal): fail fast. Routing our own req over the
@@ -19072,6 +19139,12 @@ JiTA.worker = {
             try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // re-rank the open view now the new vectors exist
             return;
         }
+        // A failed pass used to be dropped here, so nothing was logged and its last "Embedding N / M" stayed on screen.
+        if (d.event === 'embedPassError') {
+            if (window.console) { console.log('[JiTA worker] embed pass failed:', d.error); }
+            try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // the view's own status replaces the progress line
+            return;
+        }
         // Live re-embed progress (worker embedPass posts this ~every 50 records). Show it in the panel status so a
         // long pass is visible; embedPassDone's re-render replaces it with real results when the pass finishes.
         if (d.event === 'embedPassProgress') {
@@ -19121,6 +19194,7 @@ JiTA.worker = {
         } else if (m.kind === 'reelect') {
             JiTA.worker._applyReelect(m.want);   // a tab saw a stale worker -> remember the newer version / step down if we're the stale leader
         } else if (m.kind === 'leader') {
+            JiTA.worker._otherLeader = true;   // somebody leads again, even if this tab gave up
             JiTA.worker._failTabPending('the ranking leader changed - try again', true);   // a call the old leader took will never be answered
         }
     },
@@ -20095,6 +20169,13 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.19', date: '2026-10-03', items: [
+            'Background sync: a long first sync keeps its claim, so a second tab no longer starts its own beside it, and a tab that closes frees the claim at once.',
+            'Background sync: after a failed run (an expired session, Jira down) it waits five minutes before trying again, instead of retrying every 30 seconds.',
+            'Attaching or closing a report no longer makes every open tab rebuild the shared ranking indexes once each.',
+            'Switching between GPU and CPU embedding now takes effect even when the tab you switch in is not the one running the shared worker.',
+            'A failed embedding pass no longer leaves its progress text standing, and a database upgrade check no longer gives up when a sync happens to be running.'
+        ] },
         { v: '3.38.18', date: '2026-10-03', items: [
             'dxdiag Quick Info: memory-leak reports and hangs of the EVE client are no longer counted as client crashes; a hang gets its own amber line.',
             'dxdiag Quick Info: a file without crash history says "crash history unknown" instead of a green all-clear, and BEX crashes show their real exception code.',
