@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.7
+// @version     3.38.8
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6831,11 +6831,7 @@ JiTA.ui = {
         menu.style.top = Math.max(6, top) + 'px';
         // Dismiss on outside click / Esc (registered next tick so the opening click doesn't self-close; the
         // funnel itself is excluded so its click handler can toggle the menu shut).
-        JiTA.ui._filterMenuDismiss = function (e) {
-            if (e.type === 'keydown') { if (e.key === 'Escape') { JiTA.ui._closeFilterMenu(); } return; }
-            if (menu.contains(e.target) || (anchor && anchor.contains && anchor.contains(e.target))) { return; }
-            JiTA.ui._closeFilterMenu();
-        };
+        JiTA.ui._filterMenuDismiss = function (e) { JiTA.ui._popDismiss(e, menu, anchor, JiTA.ui._closeFilterMenu); };
         setTimeout(function () {
             document.addEventListener('mousedown', JiTA.ui._filterMenuDismiss, true);
             document.addEventListener('keydown', JiTA.ui._filterMenuDismiss, true);
@@ -6850,6 +6846,19 @@ JiTA.ui = {
             document.removeEventListener('keydown', JiTA.ui._filterMenuDismiss, true);
             JiTA.ui._filterMenuDismiss = null;
         }
+    },
+
+    // The popovers' dismiss rule (the funnel's filter menu, the hide menu), run in the capture phase on document. Esc
+    // closes the popover and only the popover: the key is stopped there, before it reaches menu._esc, which would
+    // close the whole overlay under it - Triage mode included, which then has to fetch its queue all over again.
+    // A mousedown outside the popover (and outside its anchor, which toggles it itself) closes it too.
+    _popDismiss: function (e, menu, anchor, close) {
+        if (e.type === 'keydown') {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+            return;
+        }
+        if (menu.contains(e.target) || (anchor && anchor.contains && anchor.contains(e.target))) { return; }
+        close();
     },
 
     // Soft-refresh the open issue after a "Mark dup": patch the status lozenge text in place instead of a
@@ -7556,11 +7565,7 @@ JiTA.ui = {
         menu.style.left = Math.max(6, left) + 'px';
         menu.style.top = Math.max(6, top) + 'px';
         // Dismiss on outside click or Esc (capture phase, registered next tick so the opening click is ignored).
-        JiTA.ui._hideMenuDismiss = function (e) {
-            if (e.type === 'keydown') { if (e.key === 'Escape') { JiTA.ui._closeHideMenu(); } return; }
-            if (menu.contains(e.target)) { return; }
-            JiTA.ui._closeHideMenu();
-        };
+        JiTA.ui._hideMenuDismiss = function (e) { JiTA.ui._popDismiss(e, menu, null, JiTA.ui._closeHideMenu); };
         setTimeout(function () {
             document.addEventListener('mousedown', JiTA.ui._hideMenuDismiss, true);
             document.addEventListener('keydown', JiTA.ui._hideMenuDismiss, true);
@@ -8594,7 +8599,12 @@ JiTA.menu = {
         JiTA.menu.close();
         JiTA.menu._injectCss();
         var $overlay = $('<div id="jita-menu-overlay"></div>');
-        $overlay.on('click', function (e) { if (e.target === this) { JiTA.menu.close(); } });   // backdrop click
+        // A backdrop click closes the overlay, but only one that began on the backdrop. A drag that starts in the box
+        // (selecting text in a canned response, say) and is let go outside it ends in a click on the backdrop too, and
+        // closing then threw the edit away.
+        var downOnBackdrop = false;
+        $overlay.on('mousedown', function (e) { downOnBackdrop = (e.target === this); });
+        $overlay.on('click', function (e) { if (e.target === this && downOnBackdrop) { JiTA.menu.close(); } });
         var $menu = $('<div id="jita-menu"' + (opts.wide ? ' class="jita-menu-wide"' : '') + '></div>').appendTo($overlay);
         if (opts.title) {
             var $head = $('<div class="jita-menu-head"><h2></h2></div>');
@@ -8603,9 +8613,24 @@ JiTA.menu = {
             $menu.append($head);
         }
         $overlay.appendTo(document.body);
-        JiTA.menu._esc = function (e) { if (e.key === 'Escape') { JiTA.menu.close(); } };
+        // Esc closes the overlay, unless something under it has already taken the key (a popover, an editor, Triage's
+        // own key layer), or it was pressed in a text field: there it only leaves the field, so a half-typed note or
+        // reply is not one keystroke from gone. A second Esc then closes the overlay.
+        JiTA.menu._esc = function (e) {
+            if (e.key !== 'Escape' || e.defaultPrevented) { return; }
+            if (JiTA.menu._isTextField(e.target)) { try { e.target.blur(); } catch (x) { /* ignore */ } return; }
+            JiTA.menu.close();
+        };
         document.addEventListener('keydown', JiTA.menu._esc);
         return { $overlay: $overlay, $menu: $menu, close: JiTA.menu.close };
+    },
+
+    // A field that takes typing: a textarea, an editable element, or an input that holds text (not a checkbox or a
+    // button, where Esc has nothing to leave).
+    _isTextField: function (el) {
+        if (!el) { return false; }
+        if (el.tagName === 'TEXTAREA' || el.isContentEditable) { return true; }
+        return el.tagName === 'INPUT' && /^(text|search|email|url|tel|password|number)?$/i.test(el.type || '');
     },
 
     // Open (toggle): a second click of the menu command closes it again.
@@ -19829,6 +19854,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.8', date: '2026-10-03', items: [
+            'Selecting text in a window and letting go outside it no longer closes the window, so a half-edited canned response is not lost.',
+            'Esc in a text box now just leaves the box, and Esc on a small menu such as the filters closes only that menu, not the window or Triage mode under it.'
+        ] },
         { v: '3.38.7', date: '2026-10-03', items: [
             'If Jira stops answering, or your session expires, while the issue list beside an issue is looking for the open issue, it no longer repeats the same request in an endless loop.'
         ] },
