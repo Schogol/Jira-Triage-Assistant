@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.5
+// @version     3.38.14
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -15271,6 +15271,11 @@ JiTA.leadduty = {
                 v.prevReviewed = v.prevReviewed || {};
                 v.reviewedBy = v.reviewedBy || {};
                 v.done = v.done || {};
+                // Already marked by this Lead this month (a stale second tab, or a replay of a write that did land):
+                // leave the first mark as it is. Writing again rebuilt `was` from the ledger as it then stood - the
+                // Lead's own stamp - so an Undo put that stamp back and the page stayed counted as read.
+                var mine = v.done[ym] && v.done[ym][pageId];
+                if (mine && mine.by === handle) { return null; }
                 // What this review replaces, so an Undo can put the page's history back exactly (see unreview).
                 var was = { last: v.lastReviewed[pageId] || '', prev: v.prevReviewed[pageId] || '', by: v.reviewedBy[pageId] || '' };
                 // Keep the previous review's date so eyesIn() can see TWO readings. A repeat by the SAME Lead
@@ -15298,6 +15303,7 @@ JiTA.leadduty = {
                 v = v || { v: 1, lastReviewed: {}, prevReviewed: {}, reviewedBy: {}, months: {}, done: {} };
                 v.done = v.done || {};
                 v.done[ym] = v.done[ym] || {};
+                if (v.done[ym][pageId] && v.done[ym][pageId].by === handle) { return null; }   // already marked (see markReviewed)
                 v.done[ym][pageId] = { by: handle, at: nowIso, skipped: true };
                 return v;
             }).then(L.report.tap);
@@ -15734,6 +15740,9 @@ JiTA.leadduty = {
                 v = v || { v: 1, months: {}, done: {}, flags: {} };
                 v.done = v.done || {};
                 v.done[ym] = v.done[ym] || {};
+                // A verdict this Lead has already given stands until it is undone: a replayed Checked from a browser that
+                // was offline must not overwrite the Flag given meanwhile in another, and withdraw its follow-up with it.
+                if (v.done[ym][key] && v.done[ym][key].by === handle) { return null; }
                 v.done[ym][key] = { by: handle, at: nowIso, verdict: verdict || 'ok' };
                 if (actor) { v.done[ym][key].actor = actor; }
                 // The reason is kept WITH the verdict as well as on the follow-up, so the month's table can show
@@ -16014,6 +16023,15 @@ JiTA.leadduty = {
             });
         },
 
+        // Carry the marks the ledger has not taken yet into a freshly built mirror record: the pending ones, and only
+        // those. A local mark the ledger lacks that is not pending was taken back since (an Undo in another browser)
+        // and copying every local mark over the ledger's, as each refresh did, brought it back: counted as done for
+        // the rest of the month, while the ledger page listed it as outstanding and nothing ever replayed it.
+        carry: function (prev, done) {
+            ((prev && prev.pending) || []).forEach(function (k) { if (!done[k] && prev.done && prev.done[k]) { done[k] = prev.done[k]; } });
+            return done;
+        },
+
         // The inverse of mark, for an Undo. Both halves matter: every reload MERGES the mirror's marks back over
         // the ledger's (that is how an offline mark survives), and flushPending() replays whatever is pending -
         // so a verdict left in either would quietly come back after being taken back.
@@ -16028,29 +16046,31 @@ JiTA.leadduty = {
         }
     },
 
-    // Drain marks that were made while Confluence was unreachable.
+    // Drain marks that were made while Confluence was unreachable: this month's queue of each kind, and the month
+    // before's. A wiki review queued on the 30th, or a check of the QC sample queued late in the month after it, sits
+    // under its own month's key, and nothing read that key once the month had turned - it was dropped silently. Only
+    // a plain review and a plain Checked are ever queued (_act), so replaying them as those is faithful.
     flushPending: function () {
         var L = JiTA.leadduty;
         var wym = L._ym(), qym = L._prevYm();
-        return L.local.get(L.wiki.localKey(wym)).then(function (w) {
-            var ids = (w && w.pending) || [];
-            return ids.reduce(function (p, id) {
-                return p.then(function () {
-                    return L.wiki.markReviewed(id, wym).then(function () { return L.local.mark(L.wiki.localKey(wym), id, true); },
-                        function () { /* still down; keep it queued */ });
-                });
-            }, Promise.resolve());
-        }).then(function () {
-            return L.local.get(L.qc.localKey(qym));
-        }).then(function (q) {
-            var ids = (q && q.pending) || [];
-            return ids.reduce(function (p, id) {
-                return p.then(function () {
-                    return L.qc.markChecked(id, 'ok', qym).then(function () { return L.local.mark(L.qc.localKey(qym), id, true); },
-                        function () { /* still down */ });
-                });
-            }, Promise.resolve());
-        }).catch(function () { /* best effort */ });
+        function review(id, ym) { return L.wiki.markReviewed(id, ym); }
+        function check(id, ym) { return L.qc.markChecked(id, 'ok', ym); }
+        var queues = [
+            { key: L.wiki.localKey(wym), ym: wym, send: review },
+            { key: L.wiki.localKey(L._prevYm(wym)), ym: L._prevYm(wym), send: review },
+            { key: L.qc.localKey(qym), ym: qym, send: check },
+            { key: L.qc.localKey(L._prevYm(qym)), ym: L._prevYm(qym), send: check }
+        ];
+        return queues.reduce(function (p, q) {
+            return p.then(function () { return L.local.get(q.key); }).then(function (rec) {
+                return ((rec && rec.pending) || []).slice().reduce(function (p2, id) {
+                    return p2.then(function () {
+                        return q.send(id, q.ym).then(function () { return L.local.mark(q.key, id, true); },
+                            function () { /* still down; keep it queued */ });
+                    });
+                }, Promise.resolve());
+            });
+        }, Promise.resolve()).catch(function () { /* best effort */ });
     },
 
     // Outstanding counts for the chip, entirely from local state (no network). `apps` is the VMS cache the
@@ -16609,7 +16629,7 @@ JiTA.leadduty.ui = {
             ids.forEach(function (id) { if (ledgerDone[id]) { rec.done[id] = ledgerDone[id].at; } });
             return L.local.get(L.wiki.localKey(ym)).then(function (prev) {
                 if (prev && prev.pending) { rec.pending = prev.pending; }
-                if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!rec.done[k]) { rec.done[k] = prev.done[k]; } }); }
+                L.local.carry(prev, rec.done);
                 // A mark made while Confluence was unreachable lives only in the local mirror; surface it as
                 // done so the row doesn't look unactioned until flushPending() gets through.
                 U._wikiLocalDone = rec.done;
@@ -16805,7 +16825,7 @@ JiTA.leadduty.ui = {
             Object.keys(res.done || {}).forEach(function (k) { rec.done[k] = res.done[k].at; });
             return L.local.get(L.qc.localKey(ym)).then(function (prev) {
                 if (prev && prev.pending) { rec.pending = prev.pending; }
-                if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!rec.done[k]) { rec.done[k] = prev.done[k]; } }); }
+                L.local.carry(prev, rec.done);
                 U._qcLocalDone = rec.done;   // see the note in _loadWiki: shows marks the ledger hasn't taken yet
                 return L.local.put(L.qc.localKey(ym), rec);
             }).then(function () { if (U._tab === 'qc') { U._renderQc(); } try { L.reminder.mount(); } catch (e2) { /* ignore */ } });
@@ -18417,9 +18437,9 @@ JiTA.leadduty.sched = {
             var done = {};
             ids.forEach(function (id) { if (ledgerDone[id]) { done[id] = ledgerDone[id].at; } });
             return L.local.get(L.wiki.localKey(ym)).then(function (prev) {
-                // Carry any local-only marks across: a mark made while Confluence was unreachable is not in
-                // the ledger yet, and dropping it here would make the chip count work that is already done.
-                if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!done[k]) { done[k] = prev.done[k]; } }); }
+                // Carry the marks still waiting for the ledger across: a mark made while Confluence was unreachable is
+                // not in it yet, and dropping it here would make the chip count work that is already done.
+                L.local.carry(prev, done);
                 return L.local.put(L.wiki.localKey(ym), { ym: ym, perLead: res.record.perLead, pageIds: ids, done: done, pending: (prev && prev.pending) || [] });
             });
         }).then(function () {
@@ -18432,7 +18452,7 @@ JiTA.leadduty.sched = {
                 var qdone = {};
                 Object.keys(q.done || {}).forEach(function (k) { qdone[k] = q.done[k].at; });
                 return L.local.get(L.qc.localKey(q.ym)).then(function (prev) {
-                    if (prev && prev.done) { Object.keys(prev.done).forEach(function (k) { if (!qdone[k]) { qdone[k] = prev.done[k]; } }); }
+                    L.local.carry(prev, qdone);
                     return L.local.put(L.qc.localKey(q.ym), {
                         ym: q.ym, quota: q.record.quota,
                         items: q.items.map(function (i) { return i.key; }),
@@ -19770,6 +19790,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.14', date: '2026-10-03', items: [
+            'Lead duties: a review or check saved while Confluence was unreachable just before the month changed is no longer lost.',
+            'Lead duties: something you took back in another browser no longer comes back as done, and marking an item twice no longer stops Undo from restoring it.'
+        ] },
         { v: '3.38.5', date: '2026-10-03', items: [
             "After an update the What's new pill now comes up reliably: if the page takes it away while still loading, it comes back by itself."
         ] },
