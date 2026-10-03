@@ -22,6 +22,7 @@ global.JiTA = {
     sync: eval('({' + S1 + S2 + '})')
 };
 Object.assign(JiTA.sync, {
+    _resumable: () => false,
     _run: (jql, opts) => { runs.push({ jql: jql, opts: opts }); return Promise.resolve({ stored: 0 }); },
     fullSync: () => { full.push('defects'); return Promise.resolve({ stored: 0 }); },
     fullSyncEbr: () => { full.push('ebr'); return Promise.resolve({ stored: 0 }); }

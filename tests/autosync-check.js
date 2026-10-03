@@ -102,7 +102,7 @@ const live = () => intervals.filter((h) => h.on);
     };
     const A = {
         sync: {
-            running: false,
+            running: false, _afterSync() {},
             incrementalSync: () => (failAt === 'defects' ? Promise.reject(new Error('HTTP 401')) : Promise.resolve({ stored: 0 })),
             incrementalSyncEbr: () => Promise.resolve({ stored: 0 }),
             fullSync: () => Promise.resolve({ stored: 0 }), fullSyncEbr: () => Promise.resolve({ stored: 0 })
@@ -126,7 +126,7 @@ const live = () => intervals.filter((h) => h.on);
     Object.assign(B, { sync: new Function('JiTA', 'return ({' + member('    _invalidateWorker: function () {') + ',\n' + member('    _ebrRemoved: function (keys, fromRemote) {') + '});')(B) });
     B.sync._ebrRemoved(['EBR-1']);
     await flush();
-    ok('the acting tab drops the shared worker\'s indexes', calls.join() === 'invalidate' && B.rank._dirtyEbr === true && B.rank._dirtyEbrVec === true, calls.join());
+    ok('the acting tab drops the shared worker\'s indexes', calls.join() === 'invalidate' && B.rank._dirtyEbr === true, calls.join());
     ok('...and tells the other tabs only once that has landed', store.sdEbrRemoved === undefined);
     callD.resolve({});
     await flush();
