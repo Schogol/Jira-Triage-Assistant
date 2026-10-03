@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.39.0
+// @version     3.40.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -31,7 +31,7 @@
 
 // waitForKeyElements(): utility that polls the (AJAXed) DOM for elements matching a jQuery selector and runs a
 // callback once per new element (marked via jQuery .data('alreadyFound') so each node fires only once). Vendored
-// INLINE (verbatim, by Brock Adams - gist BrockA/2625891) instead of the old `@require .../waitForKeyElements.js`:
+// INLINE (by Brock Adams - gist BrockA/2625891; verbatim but for the try around the callback) instead of the old `@require .../waitForKeyElements.js`:
 // that gist used GitHub's deprecated raw-URL scheme and was unpinned, so it was a fragile, mutable third-party
 // dependency that gated this script's ENTIRE init. Inlining it makes the script self-contained. Requires jQuery.
 function waitForKeyElements(selectorTxt, actionFunction, bWaitOnce, iframeSelector) {
@@ -54,7 +54,11 @@ function waitForKeyElements(selectorTxt, actionFunction, bWaitOnce, iframeSelect
             var alreadyFound = jThis.data('alreadyFound') || false;
 
             if (!alreadyFound) {
-                var cancelFound = actionFunction(jThis);
+                // The first calls run inside this script's own top-level code, so a callback that threw there stopped
+                // everything after it from loading. A failed callback is logged and its element counted as handled.
+                var cancelFound;
+                try { cancelFound = actionFunction(jThis); }
+                catch (e) { try { console.error('[JiTA] could not handle ' + selectorTxt + ':', e); } catch (e2) { /* ignore */ } }
                 if (cancelFound)
                     btargetsFound = false;
                 else
@@ -322,6 +326,15 @@ function removeFeedbackButton() {
     $(SELECTORS.FEEDBACK_BTN).parent().remove()
 };
 
+
+// Bug reports whose Convert to Defect is under way (EBR key -> true). Kept apart from the button: Jira's own
+// re-render replaces it with a fresh, enabled one about two seconds after a click, while the conversion goes on for
+// up to 30 seconds (jitaGoToNewDefect polls for the new defect), and a second click on that one created a second
+// defect. Success always leaves the page (to the defect, or a reload), which clears this; a failure clears its key.
+// Set up HERE, before the waitForKeyElements call below: when the breadcrumb is already on the page that call adds
+// the buttons on the spot, and adding them reads this. Declared further down, it was still undefined then, and the
+// error stopped the whole script from loading on a bug report opened from a link or a reload.
+var jitaConvertBusy = {};
 
 // waitForKeyElements waits until the page is loaded and then runs the checkIssueType function.
 var issueItem = 'a[data-testid="issue.views.issue-base.foundation.breadcrumbs.current-issue.item"]';
@@ -996,13 +1009,8 @@ function jitaOpenGmModal(key) {
 }
 
 
-// Bug reports whose Convert to Defect is under way (EBR key -> true). Kept apart from the button: Jira's own
-// re-render replaces it with a fresh, enabled one about two seconds after a click, while the conversion goes on for
-// up to 30 seconds (jitaGoToNewDefect polls for the new defect), and a second click on that one created a second
-// defect. Success always leaves the page (to the defect, or a reload), which clears this; a failure clears its key.
-var jitaConvertBusy = {};
-
-// The Convert to Defect button reflects whether the report on screen is being converted.
+// The Convert to Defect button reflects whether the report on screen is being converted (jitaConvertBusy, set up
+// near the top of the file, before the first call that can add the buttons).
 function jitaConvertButtonState() {
     var key = jitaCurrentKey();
     $('#convertToDefectButton').prop('disabled', !!(key && jitaConvertBusy[key]));
@@ -20471,6 +20479,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.40.1', date: '2026-10-03', fixes: [
+            'Opening a bug report from a link or a reload no longer sometimes stops JiTA from loading at all, leaving no panel, buttons or pills. This came in with v3.38.16.',
+            'If one part of JiTA fails while a page loads, the rest now loads anyway.'
+        ] },
         { v: '3.39.0', date: '2026-10-03', features: [
             'What\'s new has two tabs now, New features and Fixed issues, and the pill only comes up for an update that brings something new to use. Fixes are listed without one.'
         ] },

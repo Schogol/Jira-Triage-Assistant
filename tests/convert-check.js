@@ -5,8 +5,10 @@
 // against jQuery-style stubs.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
-const s = src.indexOf('var jitaConvertBusy = {};'), e = src.indexOf('// Adds the different buttons to the "command-bar"', s);
-if (s < 0 || e < 0) { throw new Error('could not slice the Convert to Defect guard'); }
+// The busy map is declared near the top of the file (boot-check.js says why); the functions further down.
+const d = src.indexOf('\nvar jitaConvertBusy = {};\n');
+const s = src.indexOf('// The Convert to Defect button reflects'), e = src.indexOf('// Adds the different buttons to the "command-bar"', s);
+if (d < 0 || s < 0 || e < 0) { throw new Error('could not slice the Convert to Defect guard'); }
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
@@ -30,7 +32,7 @@ global.jitaInvokeAutomationRule = (id, rule) => { const d = Deferred(); rules.pu
 global.jitaGoToNewDefect = (key, before) => { goes.push(key + ' ' + before.join(',')); };
 global.jitaAjaxError = (msg) => () => { errors++; lastErr = msg; };
 global.JITA_CONVERT_DEFECT_RULE = 'rule-9';
-(0, eval)(src.slice(s, e) + '\nglobal.jitaConvertClick = jitaConvertClick; global.jitaConvertButtonState = jitaConvertButtonState; global.jitaConvertBusy = jitaConvertBusy;');
+(0, eval)('var jitaConvertBusy = {};\n' + src.slice(s, e) + '\nglobal.jitaConvertClick = jitaConvertClick; global.jitaConvertButtonState = jitaConvertButtonState; global.jitaConvertBusy = jitaConvertBusy;');
 
 // ---- one conversion, with Jira swapping the button mid-way ----
 jitaConvertClick();
