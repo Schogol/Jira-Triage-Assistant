@@ -11,7 +11,7 @@ const muts = [
     // ---- what counts as new ----
     [H, 'first sight shows the whole history as new', 'if (!seen) { return C.ENTRIES.slice(0, 1); }', 'if (!seen) { return C.ENTRIES.slice(); }'],
     [H, 'the seen version still counts as new', 'return C.ENTRIES.filter(function (e) { return JiTA.worker._verCmp(e.v, seen) > 0; });', 'return C.ENTRIES.filter(function (e) { return JiTA.worker._verCmp(e.v, seen) >= 0; });'],
-    [H, 'seeing it is never remembered', 'gmSet(C.SEEN_KEY, C.latest().v);\n        C.remove();', 'C.remove();'],
+    [H, 'seeing it is never remembered', 'if (!seen || JiTA.worker._verCmp(C.latest().v, seen) > 0) { gmSet(C.SEEN_KEY, C.latest().v); }\n        C.remove();', 'C.remove();'],
     [H, 'the oldest version is remembered as seen', 'gmSet(C.SEEN_KEY, C.latest().v);', 'gmSet(C.SEEN_KEY, C.ENTRIES[C.ENTRIES.length - 1].v);'],
     [H, 'the pill never counts', 'if (fresh.length === 1) {', 'if (fresh.length >= 1) {'],
     [H, 'shows inside the Zendesk frame', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return JiTA.changelog.unseenFeatures().length > 0;'],

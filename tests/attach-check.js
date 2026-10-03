@@ -79,7 +79,7 @@ Object.assign(JiTA.ui, {
     setStatus: (m) => { statuses.push(m); }, setStatusAction: (m) => { statuses.push(m); }, toast: (m) => { toasts.push(m); },
     _item: (r) => ({ row: 'defect', key: r.key, onScreen: JiTA.ui.currentKey }),
     _reportItem: (r) => ({ row: 'report', key: r.key, defect: JiTA.ui.currentKey }),
-    _getAssignee: () => Promise.resolve(null), _rerenderCurrent() {}
+    _getAssignee: () => Promise.resolve(null), _assigneeCache: {}, _rerenderCurrent() {}
 });
 eval('JiTA.triage = ' + src.slice(ts, te - 1) + ';');
 const T = JiTA.triage;
@@ -127,6 +127,7 @@ const T = JiTA.triage;
     T._switchMode('ebr');
 
     T._open = true; T._queue = [{ key: 'EBR-100' }]; T._idx = 0;
+    T._shownKey = 'EBR-100';   // its list is on screen, as _render leaves it (v3.38.27)
     T._cache = { 'EBR-100': Promise.resolve({ view: 'reporter', results: [{ key: 'EBR-200' }] }) };
     msgs = []; armed = [];
     T._armAttach(1, '1');
