@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.17
+// @version     3.38.18
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -2767,8 +2767,12 @@ function evalRequirements(pdm) {
         var mv = gpu ? Number(gpu.VIDEO_MEMORY) : NaN;
         if (!isNaN(mv) && mv > 0) { rows.push({ label: 'GPU', tier: reqTier(mv, M.vram, 0.03), detail: reqGpuDetail(gpu, M.vram) }); }
         else { rows.push({ label: 'GPU', tier: 'na', detail: pdmGpuName(gpu) || 'integrated' }); }
+    } else if (type) {
+        rows.push({ label: 'OS', tier: 'fail', detail: 'Unsupported OS (' + type + ')' });
     } else {
-        rows.push({ label: 'OS', tier: 'fail', detail: 'Unsupported / unknown OS' + (type ? ' (' + type + ')' : '') });
+        // No OS block (or CCP renamed OS.TYPE): nothing was judged, so the verdict is "could not be evaluated", not
+        // the red "does not meet the minimum" every such file used to get.
+        rows.push({ label: 'OS', tier: 'na', detail: 'OS not found in PDM data' });
     }
 
     return { overall: worstTier(rows.map(function (r) { return r.tier; })), rows: rows, driver: reqDriverInfo(gpu) };
@@ -2899,7 +2903,7 @@ var DX_BUGCHECK = {
     0x124: 'WHEA_UNCORRECTABLE_ERROR', 0x133: 'DPC_WATCHDOG_VIOLATION', 0x139: 'KERNEL_SECURITY_CHECK_FAILURE',
     0x1000007E: 'SYSTEM_THREAD_EXCEPTION_NOT_HANDLED_M', 0x1000008E: 'KERNEL_MODE_EXCEPTION_NOT_HANDLED_M'
 };
-// Common NT exception codes (BSOD P2 on some bugchecks; APPCRASH P7).
+// Common NT exception codes (BSOD P2 on some bugchecks; APPCRASH P7, BEX P8).
 var DX_EXCEPTION = {
     'c0000005': 'ACCESS_VIOLATION', '80000003': 'BREAKPOINT', 'c000001d': 'ILLEGAL_INSTRUCTION',
     'c0000094': 'INTEGER_DIVIDE_BY_ZERO', 'c00000fd': 'STACK_OVERFLOW', 'c0000374': 'HEAP_CORRUPTION',
@@ -2915,10 +2919,11 @@ function dxExceptionName(hex) {
     return DX_EXCEPTION[key] || null;
 }
 
-// Parse the "Windows Error Reporting" section into [{ name, p:{P1..P10} }, ...] (dxdiag lists newest first).
+// Parse the "Windows Error Reporting" section into [{ name, p:{P1..P10} }, ...] (dxdiag lists newest first), or
+// null when the file has no such section (truncated, or a dxdiag we cannot read): that is not an empty history.
 function parseWER(text) {
     var out = [], idx = text.indexOf('Windows Error Reporting');
-    if (idx < 0) { return out; }
+    if (idx < 0) { return null; }
     var blocks = text.substring(idx).split(/\+\+\+\s*WER\d+\s*\+\+\+/);
     for (var i = 1; i < blocks.length; i++) {
         var b = blocks[i];
@@ -2930,13 +2935,22 @@ function parseWER(text) {
     return out;
 }
 
-// Classify a WER entry: 'eve' (exefile.exe crash), 'app' (other app crash), or 'kernel' (BSOD / live dump).
-// App crashes put the faulting app's filename in P1; kernel dumps put a hex bugcheck code there instead.
+// Classify a WER entry by its event name: 'eve' (an exefile.exe crash), 'evehang' (exefile.exe stopped
+// responding), 'kernel' (BSOD / live dump), 'app' (another program's crash), or null for anything that is not a
+// crash (RADAR_PRE_LEAK memory diagnostics, other programs' hangs, update failures...). Going by P1 alone counted
+// a leak report or a hang of exefile.exe as an EVE client crash. App crashes put the program's file name in P1.
+var DX_APP_CRASH = /^(APPCRASH|BEX|BEX64|MoAppCrash|MoBEX|CLR20r3)$/i;
 function dxWerKind(e) {
-    var p1 = e.p.P1 || '';
-    if (/\.exe/i.test(p1)) { return /exefile\.exe/i.test(p1) ? 'eve' : 'app'; }
-    if (/bluescreen|livekernel|kernel/i.test(e.name)) { return 'kernel'; }
-    return 'app';
+    var name = e.name || '', eve = /exefile\.exe/i.test(e.p.P1 || '');
+    if (/bluescreen|livekernel/i.test(name)) { return 'kernel'; }
+    if (DX_APP_CRASH.test(name)) { return eve ? 'eve' : 'app'; }
+    if (/^AppHang/i.test(name)) { return eve ? 'evehang' : null; }
+    return null;
+}
+
+// The exception code of an app crash: P7 for APPCRASH, but P8 for BEX / BEX64, where P7 is the offset.
+function dxCrashCode(e) {
+    return /^(BEX|BEX64|MoBEX)$/i.test(e.name || '') ? e.p.P8 : e.p.P7;
 }
 
 // First "Label: value" line in the dxdiag text (labels are right-aligned, so allow leading whitespace).
@@ -2946,15 +2960,32 @@ function dxFirst(text, label) {
     return m ? m[1].trim() : '';
 }
 
-// dxdiag dates use the reporter's locale (US default M/D/YYYY). Parse leniently; if the "month" is > 12 the
-// locale must be D/M, so swap. Returns a Date or null.
-function dxParseDate(s) {
-    var m = String(s == null ? '' : s).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (!m) { return null; }
-    var mm = +m[1], dd = +m[2], yy = +m[3];
-    if (mm > 12 && dd <= 12) { var t = mm; mm = dd; dd = t; }
+// dxdiag dates use the reporter's locale: US M/D/YYYY by default, D.M.YYYY in much of Europe, YYYY-MM-DD in
+// others. Only '/' used to be read, so a German driver date gave no date, no age and no over-a-year warning.
+// `order` ('dm' or 'md', from dxDateOrder) settles a slash or dash date whose day is 12 or less; without it
+// a "month" over 12 still means D/M. Returns a Date or null.
+function dxParseDate(s, order) {
+    s = String(s == null ? '' : s);
+    var m, yy, mm, dd;
+    if ((m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/))) { yy = +m[1]; mm = +m[2]; dd = +m[3]; }
+    else if ((m = s.match(/(\d{1,2})\.(\d{1,2})\.(\d{4})/))) { dd = +m[1]; mm = +m[2]; yy = +m[3]; }   // dotted dates are D.M.Y
+    else if ((m = s.match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/))) {
+        mm = +m[1]; dd = +m[2]; yy = +m[3];
+        if ((order === 'dm' && dd <= 12) || (mm > 12 && dd <= 12)) { var t = mm; mm = dd; dd = t; }
+    }
+    else { return null; }
     var d = new Date(yy, mm - 1, dd);
-    return isNaN(d.getTime()) ? null : d;
+    return (isNaN(d.getTime()) || d.getMonth() !== mm - 1 || d.getDate() !== dd) ? null : d;   // no 31.02 rolled into March
+}
+// The order of the slash / dash dates in this dxdiag: 'dm' once any of them has a first part over 12, 'md' once
+// any has a second part over 12, else null (every date in the file is ambiguous).
+function dxDateOrder(text) {
+    var re = /(?:^|[^\d.\/-])(\d{1,2})[\/-](\d{1,2})[\/-]\d{4}/g, m;
+    while ((m = re.exec(text))) {
+        if (+m[1] > 12) { return 'dm'; }
+        if (+m[2] > 12) { return 'md'; }
+    }
+    return null;
 }
 function dxFmtDate(d) {
     var MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -2986,7 +3017,7 @@ function dxNvidiaDriver(ver) {
     return t.slice(0, 3) + '.' + t.slice(3);
 }
 // Display devices -> [{ name, version, driverDate }]. dxdiag repeats a card once per attached monitor, so dedupe.
-function dxGpus(text) {
+function dxGpus(text, order) {
     var out = [], seen = {}, start = text.indexOf('Display Devices');
     if (start < 0) { return out; }
     var blocks = text.substring(start).split(/Card name:[ \t]*/).slice(1);
@@ -3001,7 +3032,7 @@ function dxGpus(text) {
         var key = name + '|' + ver;
         if (seen[key]) { return; }
         seen[key] = 1;
-        out.push({ name: name, version: ver, driverDate: dm ? dxParseDate(dm[1]) : null, role: role });
+        out.push({ name: name, version: ver, driverDate: dm ? dxParseDate(dm[1], order) : null, role: role });
     });
     return out;
 }
@@ -3009,27 +3040,33 @@ function dxGpus(text) {
 // Build the dxdiag Quick-Info summary and drop it into #dxdiag.
 function renderDxdiag(text) {
     var COL = { crit: '#ff8f8f', warn: '#ffd479', ok: '#7fdca4' };
-    var reportDate = dxParseDate(dxFirst(text, 'Time of this report'));
+    var order = dxDateOrder(text);
+    var reportDate = dxParseDate(dxFirst(text, 'Time of this report'), order);
     var html = '';
 
-    var eve = [], kernel = [], app = [];
-    parseWER(text).forEach(function (e) {
+    var wer = parseWER(text), eve = [], hangs = [], kernel = [], app = [];
+    (wer || []).forEach(function (e) {
         var k = dxWerKind(e);
-        (k === 'eve' ? eve : k === 'kernel' ? kernel : app).push(e);
+        if (k) { (k === 'eve' ? eve : k === 'evehang' ? hangs : k === 'kernel' ? kernel : app).push(e); }
     });
 
-    // EVE client crashes - the headline. APPCRASH P4 = faulting module, P7 = exception code.
+    // EVE client crashes - the headline. P4 = faulting module; the exception code is P7 (P8 for BEX).
     if (eve.length) {
         html += '<div style="font-weight:700; color:' + COL.crit + '; margin:2px 0 4px;">&#9888; ' + eve.length +
             ' EVE client crash' + (eve.length === 1 ? '' : 'es') + ' (exefile.exe)</div>' +
             '<table style="border-collapse:collapse; font-size:12px; line-height:1.5; margin-bottom:8px;">';
         eve.forEach(function (e) {
-            var mod = e.p.P4 || '', exc = dxExceptionName(e.p.P7) || e.p.P7 || '';
+            var code = dxCrashCode(e), mod = e.p.P4 || '', exc = dxExceptionName(code) || code || '';
             var detail = [exc, mod].filter(Boolean).map(reqEscape).join(' in ');
             html += '<tr><td style="padding:0 8px 0 0; color:#9aa6b2; vertical-align:top; white-space:nowrap;">' +
                 reqEscape(e.name) + '</td><td style="padding:0; color:#e6e6e6;">' + (detail || '&ndash;') + '</td></tr>';
         });
         html += '</table>';
+    }
+    // The client hanging is worth knowing, but it is not a crash.
+    if (hangs.length) {
+        html += '<div style="font-size:12px; color:' + COL.warn + '; margin-bottom:8px;">&#9888; ' + hangs.length +
+            ' EVE client hang' + (hangs.length === 1 ? '' : 's') + ' (exefile.exe stopped responding)</div>';
     }
 
     // Kernel crashes (BSOD / live dumps), grouped by decoded bugcheck name.
@@ -3053,12 +3090,14 @@ function renderDxdiag(text) {
         }
     }
 
+    if (!wer) {
+        html += '<div style="font-size:12px; color:' + COL.warn + '; margin-bottom:8px;">WER section not found - crash history unknown.</div>';
+    } else if (!eve.length && !kernel.length) {
+        html += '<div style="font-size:12px; color:' + COL.ok + '; margin-bottom:8px;">&#10003; No EVE or system crashes in WER history.</div>';
+    }
     if (app.length) {
         html += '<div style="font-size:11px; color:#9aa6b2; margin-bottom:8px;">+ ' + app.length +
             ' other app crash' + (app.length === 1 ? '' : 'es') + ' in history</div>';
-    }
-    if (!eve.length && !kernel.length) {
-        html += '<div style="font-size:12px; color:' + COL.ok + '; margin-bottom:8px;">&#10003; No crashes in WER history.</div>';
     }
 
     // dxdiag's own Direct3D probe crash.
@@ -3068,7 +3107,7 @@ function renderDxdiag(text) {
     }
 
     // GPU(s): driver DATE + age (recency), version as fallback. Warn (amber) when the driver is over a year old.
-    var gpus = dxGpus(text);
+    var gpus = dxGpus(text, order);
     if (gpus.length) {
         html += '<div style="font-size:12px; line-height:1.6;">';
         gpus.forEach(function (g) {
@@ -3105,7 +3144,9 @@ function renderDxdiag(text) {
         .filter(Boolean).map(reqEscape).join(' · ');
     if (sys) { html += '<div style="font-size:11px; color:#9aa6b2; margin-top:8px;">' + sys + '</div>'; }
 
-    $('#dxdiag').html(html || 'Could not read dxdiag.');
+    // Nothing recognised at all: say so rather than show a lone "WER section not found".
+    if (!wer && !gpus.length && !sys) { html = 'Could not read dxdiag: no crash history, display devices or system details found.'; }
+    $('#dxdiag').html(html);
 }
 
 // Floating Div for the dxdiag.txt file: the triage summary overlay (crash history / GPU driver recency / system).
@@ -20054,6 +20095,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.18', date: '2026-10-03', items: [
+            'dxdiag Quick Info: memory-leak reports and hangs of the EVE client are no longer counted as client crashes; a hang gets its own amber line.',
+            'dxdiag Quick Info: a file without crash history says "crash history unknown" instead of a green all-clear, and BEX crashes show their real exception code.',
+            'dxdiag Quick Info: driver dates written as 15.08.2023 or 2023-08-15 are read, so the driver age and the over-a-year warning show for them too.',
+            'PDM Quick Info: a file without an OS block says it could not be evaluated, instead of "does not meet the minimum requirements".'
+        ] },
         { v: '3.38.17', date: '2026-10-03', items: [
             'Parsed logs: Only Exceptions no longer hides the table header or parts of Jira behind the log, and Show All no longer forces Jira\'s own tables open.',
             'Parsed logs: a line with a missing column no longer leaves the spinner going forever, logging errors are no longer marked as exceptions, and the first row lost its stray border.',
