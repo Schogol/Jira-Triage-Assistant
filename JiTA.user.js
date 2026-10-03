@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.10
+// @version     3.38.11
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5089,7 +5089,9 @@ JiTA.sync = {
                                                       : (JiTA.MAX_RETRIES - retries + 1) * 1000;   // 1s,2s,3s...
                         setTimeout(function () { attempt(retries - 1); }, wait);
                     } else {
-                        reject(new Error('Jira API ' + path + ' failed: HTTP ' + xhr.status));
+                        var err = new Error('Jira API ' + path + ' failed: HTTP ' + xhr.status);
+                        err.status = xhr.status;   // for callers that treat one status differently (the QC month's 400)
+                        reject(err);
                     }
                 });
             })(JiTA.MAX_RETRIES);
@@ -14908,7 +14910,7 @@ JiTA.leadduty = {
         return new Promise(function (resolve, reject) {
             $.ajax({ url: JiTA.HOST + path, dataType: 'json', headers: { 'Accept': 'application/json' } })
                 .done(function (d) { resolve(d); })
-                .fail(function (xhr) { reject(new Error('Jira GET ' + path + ' failed: HTTP ' + xhr.status)); });
+                .fail(function (xhr) { var err = new Error('Jira GET ' + path + ' failed: HTTP ' + xhr.status); err.status = xhr.status; reject(err); });
         });
     },
     // Page through /search/jql, collecting issues. Mirrors the worker's crFetchIssues.
@@ -15768,8 +15770,23 @@ JiTA.leadduty = {
             var have = (pool && pool.byKey) || null;
             var need = [];
             for (var k = 0; k < keys.length; k++) { if (!have || !have[keys[k]]) { need.push(keys[k]); } }
+            var FIELDS = ['summary', 'status', 'created', 'reporter'];
             var fetch = need.length
-                ? L._search('key in (' + need.join(', ') + ')', ['summary', 'status', 'created', 'reporter'])
+                ? L._search('key in (' + need.join(', ') + ')', FIELDS).catch(function (e) {
+                    // Jira refuses the whole search (400) when one key in it no longer exists - deleted, or out of this
+                    // Lead's reach - so a single such issue in a frozen sample failed the month's QC tab outright,
+                    // before the "(not found)" row below, which is there for exactly this, was ever reached. Ask for
+                    // each key on its own instead: one that is gone (404) or hidden (403) is simply left out.
+                    if (!e || e.status !== 400) { throw e; }
+                    return Promise.all(need.map(function (key) {
+                        return L._get('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=' + FIELDS.join(',')).then(function (d) {
+                            return (d && d.key) ? [d] : [];
+                        }, function (e2) {
+                            if (e2 && (e2.status === 404 || e2.status === 403)) { return []; }
+                            throw e2;
+                        });
+                    })).then(function (lists) { return [].concat.apply([], lists); });
+                })
                 : Promise.resolve([]);
             return fetch.then(function (rows) {
                 var extra = {};
@@ -17880,7 +17897,8 @@ JiTA.leadduty.apps = {
         var body = r.body || '', items = [], chunks = body.split(/<tr\b/i);
         for (var i = 1; i < chunks.length; i++) {
             var row = chunks[i];
-            var idm = /href\s*=\s*["']\/Admin\/Application\/([0-9a-f-]{36})["']/i.exec(row);
+            // The review link, relative or absolute, with or without a query string or fragment after the id.
+            var idm = /href\s*=\s*["'](?:https?:\/\/[^"'\/]*)?\/Admin\/Application\/([0-9a-f-]{36})(?:[?#][^"']*)?["']/i.exec(row);
             if (!idm) { continue; }
             var cells = [], cm, cre = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
             while ((cm = cre.exec(row))) { cells.push(A._text(cm[1])); }
@@ -17899,9 +17917,12 @@ JiTA.leadduty.apps = {
                 url: A.DETAIL_URL + idm[1]
             });
         }
-        // An applications page with no rows is a real answer (nobody waiting); a page that is not the
-        // applications page at all is not, and must not read as an empty queue.
-        if (!items.length && !/\/Admin\/Application|applications/i.test(body)) { return { ok: false, reason: 'unreadable' }; }
+        // An applications page with no rows is a real answer (nobody waiting), and it looks like one: the queue's table,
+        // with no link to any application in it. Anything else must not read as an empty queue, or the tab, its footer
+        // and the chip would all say nobody is waiting: a page without the table is not the queue, and application
+        // links that no row was read from mean the rows are there but in a shape this parser does not know. (It used
+        // to accept any page with the word "applications" on it, and every VMS page has that in its menu.)
+        if (!items.length && (!/<table\b/i.test(body) || /\/Admin\/Application\/[0-9a-f-]{36}/i.test(body))) { return { ok: false, reason: 'unreadable' }; }
         return { ok: true, items: items };
     },
 
@@ -19873,6 +19894,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.11', date: '2026-10-03', items: [
+            'Lead duties: one deleted or hidden issue in a month\'s quality control sample no longer stops the whole Quality control tab from loading; it shows as not found.',
+            'Lead duties: when the volunteer site shows a page JiTA cannot read, Applications now says so instead of claiming nobody is waiting.'
+        ] },
         { v: '3.38.10', date: '2026-10-03', items: [
             'Convert to Defect can no longer create a second defect when you click it again while the first conversion is still running.'
         ] },

@@ -157,6 +157,20 @@ ${name}
         (() => { const r = A._parseList({ body: listPage(''), finalUrl: '', status: 200 }, A.STAGES[0]); return r.ok && r.items.length === 0; })());
     ok('a page that is not the applications page is unreadable, not empty',
         A._parseList({ body: '<html><body>Hello</body></html>', finalUrl: '', status: 200 }, A.STAGES[0]).reason === 'unreadable');
+    // v3.38.11: a row behind any form of the review link, and no false "nobody waiting" from a page that is not the
+    // queue, or from rows in a shape the parser does not know.
+    const linkOf = (g) => 'href="/Admin/Application/' + g + '"';
+    const abs = row('Testchar Gamma', G1, 'New', '2026-09-05 10:19', '2026-09-06 11:20').replace(linkOf(G1), 'href="https://volunteers.eveonline.com/Admin/Application/' + G1 + '"');
+    const qs = row('Testchar Delta', G2, 'New', '2026-09-05 10:19', '2026-09-06 11:20').replace(linkOf(G2), 'href="/Admin/Application/' + G2 + '?tab=answers"');
+    const L2 = A._parseList({ body: listPage(abs + qs), finalUrl: '', status: 200 }, A.STAGES[0]);
+    ok('a review link written as a full address, or with a query after the id, is still a row',
+        L2.ok && L2.items.map((i) => i.id).join() === G1 + ',' + G2, JSON.stringify(L2).slice(0, 200));
+    const formRow = row('Testchar Eps', G1, 'New', '2026-09-05 10:19', '2026-09-06 11:20')
+        .replace('<a class="btn btn-default table-embed" ' + linkOf(G1) + '>Review</a>', '<form action="/Admin/Application/' + G1 + '"><button>Review</button></form>');
+    ok('a queue whose application links no row was read from is unreadable, not empty',
+        A._parseList({ body: listPage(formRow), finalUrl: '', status: 200 }, A.STAGES[0]).reason === 'unreadable');
+    ok('a VMS page without the queue table is unreadable, not empty, though its menu says applications',
+        A._parseList({ body: '<html><body><nav><a href="/admin/applications/">Applications</a></nav><p>Welcome back</p></body></html>', finalUrl: '', status: 200 }, A.STAGES[0]).reason === 'unreadable');
     ok('an SSO redirect on the list is a login prompt',
         A._parseList({ body: '', finalUrl: 'https://login.eveonline.com/oauth/authorize', status: 200 }, A.STAGES[0]).reason === 'login');
 
