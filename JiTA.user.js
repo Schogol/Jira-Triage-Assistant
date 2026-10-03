@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.38.21
+// @version     3.38.22
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -4214,6 +4214,27 @@ JiTA.util = {
         if (isNaN(t)) { return null; }
         var mins = Math.ceil(((now == null ? Date.now() : now) - t) / 60000) + 5;
         return '-' + Math.max(mins, 5) + 'm';
+    },
+
+    // Copy to the clipboard, falling back to the old selection + execCommand path where the async API is
+    // unavailable or refused (it needs a secure context and a user gesture; a button click is one, but a
+    // browser policy can still say no). Rejects when nothing was copied, so the caller can say so.
+    copy: function (text) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); }
+        } catch (e) { /* fall through */ }
+        return new Promise(function (resolve, reject) {
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                var ok = document.execCommand('copy');
+                document.body.removeChild(ta);
+                if (ok) { resolve(); } else { reject(new Error('copy refused')); }
+            } catch (e2) { reject(e2); }
+        });
     },
 
     delay: function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); },
@@ -17405,7 +17426,7 @@ JiTA.leadduty.ui = {
             $('<button class="jita-btn ld-mini" title="Copy a message listing every open follow-up for this person">Copy message</button>')
                 .on('click', function () {
                     var $btn = $(this);
-                    U._copy($msg.val()).then(function () { U._flashBtn($btn, 'Copied'); },
+                    JiTA.util.copy($msg.val()).then(function () { U._flashBtn($btn, 'Copied'); },
                         function () { $msg.show(); $toggle.text('Hide text'); $msg.trigger('select'); U._status('Could not reach the clipboard - the text is selected, copy it with Ctrl+C.'); });
                 }).appendTo($gact);
 
@@ -17822,26 +17843,6 @@ JiTA.leadduty.ui = {
         }, true);
     },
 
-    // Copy to the clipboard, falling back to the old selection + execCommand path where the async API is
-    // unavailable or refused (it needs a secure context and a user gesture; a button click is one, but a
-    // browser policy can still say no). Rejects so the caller can show the text and let Ctrl+C finish it.
-    _copy: function (text) {
-        try {
-            if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); }
-        } catch (e) { /* fall through */ }
-        return new Promise(function (resolve, reject) {
-            try {
-                var ta = document.createElement('textarea');
-                ta.value = text;
-                ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
-                document.body.appendChild(ta);
-                ta.select();
-                var ok = document.execCommand('copy');
-                document.body.removeChild(ta);
-                if (ok) { resolve(); } else { reject(new Error('copy refused')); }
-            } catch (e2) { reject(e2); }
-        });
-    },
 
     // Brief "it worked" on a button, then back to its own label. Cheaper to read than a status line that
     // the eye is nowhere near when the button is clicked.
@@ -19502,7 +19503,8 @@ JiTA.ocr = {
 
     _libP: null, _worker: null, _workerKey: '', _q: null, _idleT: 0,
     _tgt: null, _btn: null, _layer: null, _box: null, _sel: null, _card: null, _drag: null,
-    _job: null, _runId: 0, _pix: null, _lang: null, _progress: null,
+    _job: null, _runId: 0, _pix: null, _pixP: null, _lang: null, _progress: null, _txSeq: 0, _engineBeat: 0,
+    ENGINE_STALL_MS: 120 * 1000,   // give up on an engine start nothing has been heard from for this long
     _labelCache: {}, _langOverride: {}, _cssDone: false,
 
     // ---- language -------------------------------------------------------------------------------------------
@@ -19585,11 +19587,26 @@ JiTA.ocr = {
                 O._workerKey = '';   // mid-switch: never reuse a half-initialised worker
                 return w0.reinitialize(langs, 1).then(function () { return w0; });
             }
-            var opts = $.extend({ logger: function (m) { if (O._progress) { try { O._progress(m); } catch (e) { /* ignore */ } } } }, O._workerOpts());
+            var opts = $.extend({ logger: function (m) { O._engineBeat = Date.now(); if (O._progress) { try { O._progress(m); } catch (e) { /* ignore */ } } } }, O._workerOpts());
             return T.createWorker(langs, 1, opts);   // 1 = OEM.LSTM_ONLY
         }).then(function (w) {
             O._worker = w;
             return w.setParameters({ tessedit_pageseg_mode: '6' }).then(function () { O._workerKey = key; return w; });   // 6 = one uniform block
+        });
+    },
+    // _engine, given up once it has gone ENGINE_STALL_MS without a word. The engine and its language model download
+    // inside Tesseract's own worker, and one that stalled (a connection dropped mid-download) never settled: every
+    // later read queued behind it until reload. Its progress messages keep a slow download going.
+    _engineTimed: function (code) {
+        var O = JiTA.ocr;
+        O._engineBeat = Date.now();
+        return new Promise(function (resolve, reject) {
+            var iv = setInterval(function () {
+                if (Date.now() - O._engineBeat < O.ENGINE_STALL_MS) { return; }
+                clearInterval(iv);
+                reject(new Error('the text reader stopped responding while it was starting - try again'));
+            }, 5000);
+            O._engine(code).then(function (w) { clearInterval(iv); resolve(w); }, function (e) { clearInterval(iv); reject(e); });
         });
     },
     _resetEngine: function () {
@@ -19617,6 +19634,7 @@ JiTA.ocr = {
     _pixels: function (img) {
         var O = JiTA.ocr, src = img.currentSrc || img.src;
         if (O._pix && O._pix.src === src) { return Promise.resolve(O._pix); }
+        if (O._pixP && O._pixP.src === src) { return O._pixP.p; }   // being fetched for an earlier box: one download per image
         try {
             var c = document.createElement('canvas'); c.width = 1; c.height = 1;
             var g = c.getContext('2d');
@@ -19625,10 +19643,14 @@ JiTA.ocr = {
             O._pix = { src: src, img: img, w: img.naturalWidth, h: img.naturalHeight };
             return Promise.resolve(O._pix);
         } catch (e) { /* cross-origin -> fetch the bytes below */ }
-        return O._fetchBlob(src).then(function (blob) { return createImageBitmap(blob); }).then(function (bmp) {
+        var p = O._fetchBlob(src).then(function (blob) { return createImageBitmap(blob); }).then(function (bmp) {
             O._pix = { src: src, img: bmp, w: bmp.width, h: bmp.height };
             return O._pix;
         });
+        var done = function () { if (O._pixP && O._pixP.p === p) { O._pixP = null; } };
+        O._pixP = { src: src, p: p };
+        p.then(done, done);   // a failed fetch is not kept: the next box tries again
+        return p;
     },
     _fetchBlob: function (url) {
         return new Promise(function (resolve, reject) {
@@ -19729,7 +19751,7 @@ JiTA.ocr = {
         return O._enqueue(function () {
             if (runId !== O._runId) { return null; }   // superseded before it started
             var t0 = Date.now();
-            return O._engine(code).then(function (w) {
+            return O._engineTimed(code).then(function (w) {
                 var best = null, i = 0;
                 function next() {
                     if (runId !== O._runId) { return null; }
@@ -19809,7 +19831,7 @@ JiTA.ocr = {
         }
         O._teardown();
         O._tgt = t;
-        O._pix = null;
+        O._pix = null; O._pixP = null;
         O._lang = null;
         O._css();
         O._mountButton();
@@ -19823,7 +19845,7 @@ JiTA.ocr = {
         var O = JiTA.ocr;
         O._exit();
         if (O._btn && O._btn.parentNode) { O._btn.parentNode.removeChild(O._btn); }
-        O._btn = null; O._tgt = null; O._pix = null; O._lang = null;
+        O._btn = null; O._tgt = null; O._pix = null; O._pixP = null; O._lang = null;
     },
 
     // ---- selection mode -------------------------------------------------------------------------------------
@@ -19875,7 +19897,9 @@ JiTA.ocr = {
         O._resolveLang().then(function (lang) {
             if (O._tgt !== cur) { return; }
             if (!O._lang) { O._lang = lang; }
-            O._enqueue(function () { return O._engine(O._lang.code).then(function () { O._armIdle(); }); }).then(null, function () { /* surfaced on the real run */ });
+            O._enqueue(function () {
+                return O._engineTimed(O._lang.code).then(function () { O._armIdle(); }, function (e) { O._resetEngine(); throw e; });
+            }).then(null, function () { /* surfaced on the real run */ });
         });
     },
     _exit: function () {
@@ -19980,9 +20004,10 @@ JiTA.ocr = {
     _start: function (r, cb) {
         var O = JiTA.ocr, tgt = O._tgt;
         O._showCard(r);
+        var card = O._card;   // this box's card: a box drawn before the pixels arrive replaces it
         O._status('Reading text…', 'busy');
         O._pixels(tgt.img).then(function (pix) {
-            if (O._tgt !== tgt || !O._card) { return; }
+            if (O._tgt !== tgt || O._card !== card) { return; }
             // No extra margin around the box: tested, even 2 px pulls the edge of the neighbouring line in as junk.
             var x0 = Math.floor((r.x - cb.x) / cb.w * pix.w), y0 = Math.floor((r.y - cb.y) / cb.h * pix.h);
             var x1 = Math.ceil((r.x + r.w - cb.x) / cb.w * pix.w), y1 = Math.ceil((r.y + r.h - cb.y) / cb.h * pix.h);
@@ -19990,6 +20015,7 @@ JiTA.ocr = {
             O._job = { pix: pix, rect: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, screen: r };
             O._run();
         }, function (e) {
+            if (O._card !== card) { return; }
             O._status('Could not read the image (' + (e && e.message || e) + ').', 'err');
         });
     },
@@ -19999,7 +20025,10 @@ JiTA.ocr = {
         var runId = ++O._runId;
         O._status('Reading text…', 'busy');
         O._setText('', '');
-        var langP = O._lang ? Promise.resolve(O._lang) : O._resolveLang().then(function (L) { O._lang = L; return L; });
+        var langP = O._lang ? Promise.resolve(O._lang) : O._resolveLang().then(function (L) {
+            if (!O._lang) { O._lang = L; }   // picked from the dropdown meanwhile: that wins
+            return O._lang;
+        });
         langP.then(function (lang) {
             if (runId !== O._runId) { return null; }
             O._cardLang(lang);
@@ -20040,8 +20069,9 @@ JiTA.ocr = {
         if (c.querySelector('.jo-join').checked) { src = O._join(src, code); }
         if (!src.replace(/\s+/g, '')) { return Promise.resolve(); }
         O._status('Translating…', 'busy');
+        var seq = ++O._txSeq;   // Translate again, Join lines and a new run can overlap: only the newest lands
         return jitaTranslateFree(src).then(function (en) {
-            if (runId !== O._runId || O._card !== c) { return; }
+            if (runId !== O._runId || O._card !== c || seq !== O._txSeq) { return; }
             if (en === null) { O._status('Translation failed - Google is rate-limiting. Try again in a moment.', 'err'); return; }
             c.querySelector('.jo-tx').textContent = en;
             O._status('', '');
@@ -20086,10 +20116,17 @@ JiTA.ocr = {
             copies[k].addEventListener('click', function () {
                 var btn = this, what = btn.getAttribute('data-what');
                 var txt = what === 'tx' ? c.querySelector('.jo-tx').textContent : c.querySelector('.jo-src').value;
-                O._copy(txt).then(function () {
-                    var was = btn.textContent;
-                    btn.textContent = 'Copied';
+                // It used to say "Copied" whatever happened: the fallback ignored execCommand's answer, and a refused
+                // clipboard write was an unhandled rejection.
+                var flash = function (label) {
+                    var was = btn.getAttribute('data-label') || btn.textContent;
+                    btn.setAttribute('data-label', was);
+                    btn.textContent = label;
                     setTimeout(function () { btn.textContent = was; }, 1200);
+                };
+                JiTA.util.copy(txt).then(function () { flash('Copied'); }, function () {
+                    flash('Copy failed');
+                    O._status('Could not reach the clipboard - select the text and press Ctrl+C.', 'err');
                 });
             });
         }
@@ -20146,17 +20183,6 @@ JiTA.ocr = {
         JiTA.ocr._placeCard();
     },
     _meta: function (t) { var c = JiTA.ocr._card; if (c) { c.querySelector('.jo-meta').textContent = t; } },
-    _copy: function (text) {
-        try { if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); } } catch (e) { /* fall through */ }
-        return new Promise(function (resolve) {
-            var ta = document.createElement('textarea');
-            ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-            document.body.appendChild(ta); ta.select();
-            try { document.execCommand('copy'); } catch (e) { /* ignore */ }
-            document.body.removeChild(ta);
-            resolve();
-        });
-    },
 
     _css: function () {
         var O = JiTA.ocr;
@@ -20217,6 +20243,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.38.22', date: '2026-10-03', items: [
+            'Screenshot translation: a box drawn while the image was still loading no longer gets the earlier box\'s text or error, and the image is downloaded once.',
+            'Screenshot translation: a language you pick is no longer replaced by the one from the labels, and an older translation never lands over a newer one.',
+            'Screenshot translation: a text reader that stops responding while it starts is given up after two minutes instead of blocking until reload.',
+            'Copy buttons say "Copy failed" when the clipboard refuses, instead of "Copied".'
+        ] },
         { v: '3.38.21', date: '2026-10-03', items: [
             'Lead duties: Clear ledger no longer hangs on "Clearing the ledgers…" when Confluence refuses a delete; it says which one failed and finishes the rest.',
             'Lead duties: the chip goes away as soon as JiTA finds the account is not a Lead, instead of staying until reload.',
