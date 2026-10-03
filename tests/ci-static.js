@@ -1,7 +1,7 @@
 // ci-static.js - the checks that need no harness: every script parses, git stores every text file with LF
-// endings, nothing contains an em dash, a pull request that changes JiTA.user.js raises its @version, and the
-// changelog keeps every release: each version main has carried has an entry, and no entry already out is
-// dropped or re-dated.
+// endings, nothing contains an em dash, the page code declares nothing with let / const, a pull request that
+// changes JiTA.user.js raises its @version, and the changelog keeps every release: each version main has carried
+// has an entry, and no entry already out is dropped or re-dated.
 //
 //   node tests/ci-static.js                      everything except the checks against a base
 //   node tests/ci-static.js --base origin/main   plus the version check and the changelog against that ref
@@ -52,6 +52,28 @@ eol.filter((e) => e.index !== '-text').forEach((e) => {
 });
 ok('no em dashes in any tracked file', dashed.length === 0, dashed.slice(0, 20).join('\n          ') +
     (dashed.length > 20 ? '\n          ...and ' + (dashed.length - 20) + ' more' : ''));
+
+// ---- the page code is ES5 ----
+// JiTA.user.js is written as plain ES5 (var + function) throughout. The one exception is jitaWorkerBody: it is
+// serialized into a module worker and may use what the worker supports (async, let, const). A declaration with
+// let / const at the start of a statement, or in a for head, anywhere else fails. JITA_SRC names another copy to
+// check, as the harnesses take it (mutate-es5.js).
+function es5Breaks(text) {
+    const lines = String(text || '').replace(/\r\n/g, '\n').split('\n'), out = [];
+    const ws = lines.findIndex((l) => /^function jitaWorkerBody\(/.test(l));
+    let we = ws;
+    while (ws >= 0 && we < lines.length && lines[we] !== '}') { we++; }
+    lines.forEach((l, i) => {
+        if (ws >= 0 && i >= ws && i <= we) { return; }
+        if (/^\s*(let|const)\s+[A-Za-z_$]/.test(l) || /\bfor\s*\(\s*(let|const)\s/.test(l)) {
+            out.push('JiTA.user.js:' + (i + 1) + '  ' + l.trim().slice(0, 100));
+        }
+    });
+    return out;
+}
+const es5 = es5Breaks(fs.readFileSync(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'), 'utf8'));
+ok('the page code declares with var, not let / const (jitaWorkerBody excepted)', es5.length === 0,
+    es5.slice(0, 20).join('\n          '));
 
 // ---- the version moves forward ----
 // Tampermonkey only offers an update when @version is higher than the installed one, so a change that ships
