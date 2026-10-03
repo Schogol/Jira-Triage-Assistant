@@ -67,6 +67,7 @@ JiTA.sync._apiPost = () => {
 };
 eval(cut('JiTA.worker = {', '\n};\n') + '\n};');
 const W = JiTA.worker;
+const realSpawn = W._spawnWorker;
 
 (async () => {
     // ================= index builds =================
@@ -128,6 +129,7 @@ const W = JiTA.worker;
     ok('a run that fails part way still drops them, and still fails', !!runErr && /502/.test(runErr.message) && invalidates === 1, String(invalidates));
 
     // ================= the leader changes =================
+    W._started = true;
     const posts = [];
     W._bc = { postMessage: (m) => { posts.push(m); } };
     W._isLeader = false; W._worker = null;
@@ -161,6 +163,72 @@ const W = JiTA.worker;
     await flush();
     ok('a tab that becomes leader fails its own channel calls: nobody else will answer them now', /^err:.*moved to this tab/.test(outcome || ''), String(outcome));
     ok('...and announces itself before it can take any call', order.join(',') === 'leader,spawn', order.join(','));
+
+    // ================= a tab that gave up leading (v3.38.19) =================
+    posts.length = 0;
+    W._isLeader = false; W._worker = null; W._gaveUp = true; W._otherLeader = false;
+    W._bc = { postMessage: (m) => { posts.push(m); } };
+    outcome = null;
+    W.call('rankKeyword', {}, {}).then((v) => { outcome = 'ok:' + v; }, (e) => { outcome = 'err:' + e.message; });
+    await flush();
+    ok('a tab that gave up leading fails its calls at once, without waiting for an ACK', /^err:.*not available/.test(outcome || '') && posts.length === 0 && W.usable() === false,
+        String(outcome) + ' / ' + posts.length + ' posted');
+    W._onBc({ data: { kind: 'leader', version: '3.38.19' } });
+    outcome = null;
+    W.call('rankKeyword', {}, {}).then((v) => { outcome = 'ok:' + v; }, (e) => { outcome = 'err:' + e.message; });
+    const req3 = posts.filter((m) => m.kind === 'req').pop();
+    ok('...until another tab announces itself leader: its calls then go there', W.usable() === true && !!req3, String(W.usable()));
+    W._onBc({ data: { kind: 'ack', id: req3.id } });
+    W._onBc({ data: { kind: 'res', id: req3.id, ok: true, result: 'ranked' } });
+    await flush();
+    ok('...and are answered', outcome === 'ok:ranked', String(outcome));
+    W._gaveUp = false; W._otherLeader = false;
+
+    // ================= the embedding backend switched in another tab =================
+    let gpuFlag = true, spawns = 0;
+    global.gmGet = (k, d) => (k === 'sdTryWebgpu' ? gpuFlag : k === 'sdForceCpu' ? false : d);
+    global.URL = { createObjectURL: () => 'blob:w', revokeObjectURL() {} };
+    global.Blob = function () {};
+    global.Worker = function () { this.postMessage = () => {}; };
+    W._src = () => '';
+    W._isLeader = true; W._gaveUp = false;
+    realSpawn();
+    ok('a spawned worker records the backend it was built for', W._spawnedGpu === true, String(W._spawnedGpu));
+    W._spawnWorker = () => { spawns++; };
+    gpuFlag = false;
+    W._backendChanged();
+    ok('a leader embedding on the GPU rebuilds its worker when another tab switches to CPU', spawns === 1, String(spawns));
+    W._spawnedGpu = false;
+    W._backendChanged();
+    ok('...not when the switch matches what it already runs', spawns === 1, String(spawns));
+    W._isLeader = false; W._spawnedGpu = true;
+    W._backendChanged();
+    ok('...and a follower never rebuilds one', spawns === 1, String(spawns));
+    const listeners = {};
+    global.GM_addValueChangeListener = (k, fn) => { listeners[k] = fn; };
+    global.BroadcastChannel = function () {};
+    let changed = 0;
+    W._backendChanged = () => { changed++; };
+    W._becomeLeader = () => {};
+    W._started = false;
+    W.start();
+    listeners.sdTryWebgpu && listeners.sdTryWebgpu('sdTryWebgpu', true, false, true);
+    listeners.sdForceCpu && listeners.sdForceCpu('sdForceCpu', false, true, true);
+    listeners.sdTryWebgpu && listeners.sdTryWebgpu('sdTryWebgpu', false, true, false);
+    ok('the worker listens to both backend settings, from other tabs only', changed === 2, changed + ' of 2');
+
+    // ================= a failed embed pass =================
+    const logs = [];
+    let renders = 0;
+    const log0 = console.log;
+    window.console = console;
+    console.log = (...a) => { logs.push(a.join(' ')); };
+    JiTA.ui.scheduleRender = () => { renders++; };
+    W._applyEvent({ event: 'embedPassError', error: 'GPU device lost' });
+    console.log = log0;
+    delete window.console;
+    ok('a failed embed pass is logged and the view redrawn over its progress line', logs.some((l) => /embed pass failed/.test(l) && /GPU device lost/.test(l)) && renders === 1,
+        logs.join(' | ') + ' / ' + renders);
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'worker checks passed.'));
     process.exit(fail ? 1 : 0);
