@@ -7479,9 +7479,9 @@ JiTA.ui = {
         var group = JiTA.ui._buildSideGroup({ id: 'jita-side-group', title: 'Triage Assistant', body: JiTA.ui._sidebarBodyHtml(), collapseKey: JiTA.ui.SIDE_COLLAPSE_KEY });
         if (anchor.nextSibling) { anchor.parentNode.insertBefore(group, anchor.nextSibling); }
         else { anchor.parentNode.appendChild(group); }
-        // The Defect Profile card sits right below this one: one Jira left behind goes back under it.
+        // The Defect Profile card sits right above this one: one Jira left behind goes back on top of it.
         var pg = document.getElementById('jita-profile-group');
-        if (pg) { group.parentNode.insertBefore(pg, group.nextSibling); }
+        if (pg) { group.parentNode.insertBefore(pg, group); }
         // We just (re)built an EMPTY group. If this is a re-mount of the issue still on screen (Jira wiped us),
         // paint the last results straight back so the panel reappears populated instead of blank. No-op on a
         // fresh navigation (snapshot key won't match the new issue) - that path renders clean from scratch.
@@ -13651,6 +13651,7 @@ JiTA.profile = {
     MARK: /Trinity platform:|Video Card:/i,
     _builds: {},                   // defect key -> the build in flight
     _last: {},                     // defect key -> the latest state, painted at once on a redraw
+    KEEP: 20,                      // defects whose latest state stays in memory; a tab stays open for days
 
     zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, true); },
 
@@ -13818,8 +13819,9 @@ JiTA.profile = {
     // ---- the igbr.zip -------------------------------------------------------------------------------------------
     // The named entries of a zip (an ArrayBuffer), found by file name without folder, case-insensitive: resolves
     // { name: text }. A small reader on the browser's own DecompressionStream, so no library is loaded: stored and
-    // deflated entries only (what zip tools write); zip64 and encrypted entries are skipped.
-    unzip: function (buf, wanted) {
+    // deflated entries only (what zip tools write); zip64 and encrypted entries are skipped, and so is an entry that
+    // unpacks to more than `maxBytes` (when given), as the zip says before anything is unpacked.
+    unzip: function (buf, wanted, maxBytes) {
         var P = JiTA.profile, u8 = new Uint8Array(buf), dv = new DataView(buf), want = {}, taken = {}, jobs = [], eocd = -1, i;
         (wanted || []).forEach(function (w) { want[String(w).toLowerCase()] = true; });
         for (i = u8.length - 22; i >= 0 && i >= u8.length - 65557; i--) { if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; } }
@@ -13831,11 +13833,12 @@ JiTA.profile = {
         }
         for (var n = 0; n < count && p + 46 <= u8.length; n++) {
             if (dv.getUint32(p, true) !== 0x02014b50) { break; }
-            var flags = dv.getUint16(p + 8, true), method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true);
+            var flags = dv.getUint16(p + 8, true), method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true), usize = dv.getUint32(p + 24, true);
             var nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true), lho = dv.getUint32(p + 42, true);
             var base = new TextDecoder('utf-8').decode(u8.subarray(p + 46, p + 46 + nlen)).replace(/^.*[\/\\]/, '').toLowerCase();
             p += 46 + nlen + xlen + clen;
             if (!want[base] || taken[base] || (flags & 1) || csize === 0xFFFFFFFF || (method !== 0 && method !== 8) || lho + 30 > u8.length) { continue; }
+            if (maxBytes && usize > maxBytes) { continue; }
             if (dv.getUint32(lho, true) !== 0x04034b50) { continue; }
             var start = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
             if (start + csize > u8.length) { continue; }
@@ -13882,28 +13885,31 @@ JiTA.profile = {
     _readFiles: function (issue, rec, zip) {
         var P = JiTA.profile, att = ((issue.fields || {}).attachment) || [], jobs = Promise.resolve();
         rec = rec ? JSON.parse(JSON.stringify(rec)) : { v: P.V, key: issue.key, logs: false, zip: false };
-        function useLog(texts) {
-            var seen = {};
-            rec.exc = rec.exc || [];
-            rec.exc.forEach(function (e) { seen[e.sig] = true; });
-            texts.forEach(function (t) {
-                var b = P.parseBuild(t);
-                if (b && !rec.build) { rec.build = b.build; rec.version = b.version; }
-                P.logExceptions(t).forEach(function (e) { if (!seen[e.sig] && rec.exc.length < P.MAX_EXC) { seen[e.sig] = true; rec.exc.push(e); } });
-            });
-            if (texts.length) { rec.hasLog = true; }
+        // What one log says, added to `into`: the build, if none is known yet, and the exceptions it does not have yet.
+        function useLog(into, t) {
+            var seen = {}, b = P.parseBuild(t);
+            into.exc = into.exc || [];
+            into.exc.forEach(function (e) { seen[e.sig] = true; });
+            if (b && !into.build) { into.build = b.build; into.version = b.version; }
+            P.logExceptions(t).forEach(function (e) { if (!seen[e.sig] && into.exc.length < P.MAX_EXC) { seen[e.sig] = true; into.exc.push(e); } });
+            into.hasLog = true;
         }
         if (!rec.logs) {
             var logs = att.filter(function (a) { return /\.txt$/i.test(a.filename || '') && /log/i.test(a.filename || '') && a.content; });
             logs.sort(function (a, b) { return ((/^logs\.txt$/i.test(b.filename) ? 1 : 0) - (/^logs\.txt$/i.test(a.filename) ? 1 : 0)) || ((a.size || 0) - (b.size || 0)); });
-            var small = logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); }).slice(0, P.MAX_LOGS);
-            jobs = Promise.all(small.map(function (a) { return P._fetchText(a.content).then(function (t) { return { t: t }; }, function () { return { failed: true }; }); }))
-                .then(function (got) {
-                    if (got.some(function (g) { return g.failed; })) { return; }   // read again next time
+            var small = logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); }).slice(0, P.MAX_LOGS), got = {}, li = 0;
+            // One log at a time, each read as it arrives and then let go: a report can carry three logs of 15 MB, and
+            // three reports are read at once. What they say is kept only once every one of them was read.
+            jobs = (function nextLog() {
+                if (li >= small.length) {
                     rec.logs = true;
                     rec.skippedLogs = logs.length > small.length;
-                    useLog(got.map(function (g) { return String(g.t || ''); }));
-                });
+                    if (got.hasLog) { rec.exc = got.exc; rec.build = got.build; rec.version = got.version; rec.hasLog = true; }
+                    return Promise.resolve();
+                }
+                return P._fetchText(small[li++].content).then(function (t) { useLog(got, String(t || '')); return nextLog(); },
+                    function () { /* a log failed: all of them are read again next time */ });
+            })();
         }
         if (zip && !rec.zip) {
             jobs = jobs.then(function () {
@@ -13911,8 +13917,11 @@ JiTA.profile = {
                 var z = att.filter(function (a) { return /^igbr\.zip$/i.test(a.filename || '') && a.content; })[0];
                 if (!z) { rec.zip = true; rec.hasZip = false; return; }
                 if (z.size > P.MAX_ZIP_BYTES) { rec.zip = true; rec.hasZip = false; rec.skippedZip = true; return; }
+                // The zip's logs.txt only stands in for a report without a log of its own, so only then is it unpacked.
+                var want = ['dxdiag.txt', 'pdmdata.txt'];
+                if (rec.logs && !rec.hasLog) { want.push('logs.txt'); }
                 return P._fetchBytes(z.content).then(function (buf) {
-                    return P.unzip(buf, ['dxdiag.txt', 'pdmdata.txt', 'logs.txt']);
+                    return P.unzip(buf, want, P.MAX_LOG_BYTES);
                 }).then(function (files) {
                     rec.zip = true; rec.hasZip = true;
                     if (files['dxdiag.txt']) {
@@ -13920,7 +13929,7 @@ JiTA.profile = {
                         rec.wer = dx.wer; rec.crashes = dx.crashes; rec.kernel = dx.kernel; rec.dxHw = dx.hw;
                     }
                     if (files['pdmdata.txt']) { rec.pdmHw = P.readPdm(files['pdmdata.txt']); }
-                    if (!rec.hasLog && files['logs.txt'] && rec.logs) { useLog([files['logs.txt']]); }
+                    if (!rec.hasLog && files['logs.txt'] && rec.logs) { useLog(rec, files['logs.txt']); }
                 }, function () { /* the download failed: read it again next time */ });
             });
         }
@@ -14023,6 +14032,15 @@ JiTA.profile = {
     },
     _usable: function (rec) { return (rec && rec.v === JiTA.profile.V) ? rec : null; },
     _needs: function (rec, zip) { return !rec || !rec.logs || (zip && !rec.zip); },
+    // Remember a defect's latest state, dropping the defect looked at longest ago once KEEP are remembered. Defect keys
+    // are not array indices, so the object keeps them in the order they were (re)inserted.
+    _keep: function (key, s) {
+        var P = JiTA.profile;
+        delete P._last[key];
+        P._last[key] = s;
+        var keys = Object.keys(P._last);
+        if (keys.length > P.KEEP) { delete P._last[keys[0]]; }
+    },
 
     // Build a defect's profile: what every report says at once (description, cached readings), then each report's
     // files read CONCURRENCY at a time. `onState` hears every step: { key, total, views, summary, pending, done }.
@@ -14042,7 +14060,7 @@ JiTA.profile = {
                 var next = 0, left = todo.length;
                 function publish(done) {
                     var s = { key: key, total: got.total, views: views.slice(), summary: P.summarise(views, defect), pending: left, done: done, zip: zip };
-                    P._last[key] = s;
+                    P._keep(key, s);
                     emit(s);
                     return s;
                 }
@@ -14064,7 +14082,7 @@ JiTA.profile = {
     },
 
     // ---- the Defect Profile card (on a defect) -----------------------------------------------------------------
-    // In the sidebar the profile has a card of its own, right below the Triage Assistant's, built like it (it collapses
+    // In the sidebar the profile has a card of its own, right above the Triage Assistant's, built like it (it collapses
     // on its own, remembered in COLLAPSE_KEY) and shown only while the defect has reports attached. In the floating
     // panel it is a section of that panel. Either way its content lives in #jita-sd-profile.
     GROUP_ID: 'jita-profile-group',
@@ -14072,13 +14090,13 @@ JiTA.profile = {
     SHOW_OUTLIERS: 5,              // outliers listed in the card; Open full profile lists them all
 
     // #jita-sd-profile, creating the card first when `create` asks for it and the sidebar has a Triage Assistant card
-    // to sit under (there is none in the floating panel).
+    // to sit above (there is none in the floating panel).
     _box: function (create) {
         var P = JiTA.profile, side = document.getElementById('jita-side-group');
         if (create && side && side.parentNode && !document.getElementById(P.GROUP_ID)) {
             var g = JiTA.ui._buildSideGroup({ id: P.GROUP_ID, title: 'Defect Profile', body: '<div id="jita-sd-profile"></div>', collapseKey: P.COLLAPSE_KEY });
             g.style.display = 'none';   // until there is something to show
-            side.parentNode.insertBefore(g, side.nextSibling);
+            side.parentNode.insertBefore(g, side);
         }
         return $('#jita-sd-profile');
     },

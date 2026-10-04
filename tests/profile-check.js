@@ -133,6 +133,8 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('UTF-16 without a byte-order mark is still recognised', files['dxdiag.txt'] === DXDIAG);
     files = await P.unzip(Uint8Array.from(Buffer.from('not a zip at all, just bytes')).buffer, ['dxdiag.txt']);
     ok('something that is not a zip gives nothing', Object.keys(files).length === 0);
+    files = await P.unzip(zbuf, ['dxdiag.txt', 'pdmdata.txt'], 1000);
+    ok('an entry that unpacks to more than the cap is left packed; a smaller one is read', !('dxdiag.txt' in files) && files['pdmdata.txt'] === PDM, Object.keys(files).join());
 
     // ================= dxdiag and PDMData =================
     const dx = P.readDxdiag(DXDIAG);
@@ -176,6 +178,13 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     textAnswer = (u) => (/other_log/.test(u) ? Promise.reject(new Error('timeout')) : Promise.resolve(LOG_A));
     rec = await P._readFiles(issue, null, true);
     ok('a log download that fails leaves the logs unread, to be read again next time', rec.logs === false && rec.zip === true, JSON.stringify({ logs: rec.logs, zip: rec.zip }));
+    ok('...and nothing the logs read before it said is kept', !rec.exc && !rec.build && !rec.hasLog, JSON.stringify(rec).slice(0, 150));
+    let inFlight = 0, maxInFlight = 0;
+    textAnswer = () => { inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); return new Promise((r) => setImmediate(() => { inFlight--; r(LOG_A); })); };
+    texts = []; bytes = [];
+    rec = await P._readFiles({ key: 'EBR-6', fields: { attachment: [att('logs.txt'), att('a_log.txt'), att('b_log.txt')] } }, null, false);
+    ok('a report\'s logs are downloaded one at a time, each read before the next comes', texts.length === 3 && maxInFlight === 1 && rec.logs && rec.hasLog && rec.exc.length === 2,
+        texts.length + ' fetched, ' + maxInFlight + ' at once');
     textAnswer = () => Promise.resolve(LOG_A);
     texts = []; bytes = [];
     byteAnswer = () => Promise.reject(new Error('HTTP 503'));
@@ -191,8 +200,15 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('a report without igbr.zip downloads no other zip', bytes.length === 0 && rec.zip === true && rec.hasZip === false, bytes.join());
     const zLog = zip([{ name: 'logs.txt', data: Buffer.from(LOG_A), method: 8 }]);
     byteAnswer = () => Promise.resolve(zLog);
+    const realUnzip = P.unzip;
+    let unzipped = [];
+    P.unzip = (b, w, m) => { unzipped.push(w.join() + ' max ' + m); return realUnzip.call(P, b, w, m); };
     rec = await P._readFiles({ key: 'EBR-3', fields: { attachment: [att('igbr.zip')] } }, null, true);
     ok('a report with no log attached uses the log inside its zip', rec.hasLog === true && rec.build === 3569502 && rec.exc.length === 2, JSON.stringify(rec).slice(0, 150));
+    rec = await P._readFiles({ key: 'EBR-7', fields: { attachment: [att('logs.txt'), att('igbr.zip')] } }, null, true);
+    ok('...while one with its own log leaves the zip\'s packed; every entry is capped at ' + (P.MAX_LOG_BYTES / 1048576) + ' MB unpacked',
+        unzipped.join(' / ') === 'dxdiag.txt,pdmdata.txt,logs.txt max ' + P.MAX_LOG_BYTES + ' / dxdiag.txt,pdmdata.txt max ' + P.MAX_LOG_BYTES, unzipped.join(' / '));
+    P.unzip = realUnzip;
     byteAnswer = () => Promise.resolve(zip([{ name: 'logs.txt', data: Buffer.from(LOG_A), method: 8 }, { name: 'PDMData.txt', data: Buffer.from(MAC_PDM), method: 8 },
         { name: 'prefs.ini', data: Buffer.from('a=b'), method: 8 }]));
     rec = await P._readFiles({ key: 'EBR-4', fields: { attachment: [att('igbr.zip')] } }, null, true);
@@ -294,6 +310,15 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     states = [];
     await P.build('EDR-9', (s) => { states.push(s); }, () => true);
     ok('a defect with no reports is announced once, empty', states.length === 1 && states[0].total === 0 && states[0].done, states.length);
+    const lastBefore = P._last;
+    P._last = {};
+    for (let i = 1; i <= P.KEEP + 1; i++) { P._keep('EDR-' + i, { i: i }); }
+    ok('only the ' + P.KEEP + ' defects looked at last stay in memory', Object.keys(P._last).length === P.KEEP && !('EDR-1' in P._last) &&
+        P._last['EDR-' + (P.KEEP + 1)].i === P.KEEP + 1, Object.keys(P._last).join());
+    P._keep('EDR-2', { i: 'again' });
+    P._keep('EDR-99', {});
+    ok('...a defect looked at again counts as recent', P._last['EDR-2'] && P._last['EDR-2'].i === 'again' && !('EDR-3' in P._last), Object.keys(P._last).join());
+    P._last = lastBefore;
 
     // ================= the panel section =================
     let made = [];
@@ -319,7 +344,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     }
     // The page: the floating panel first; the sidebar's own card further down.
     let sideMode = false, groupEl = null, inserted = [], built = [];
-    const sideEl = { parentNode: { insertBefore: (n, ref) => { inserted.push(ref); groupEl = n; } }, nextSibling: 'BELOW-TRIAGE' };
+    const sideEl = { parentNode: { insertBefore: (n, ref) => { inserted.push(ref); groupEl = n; } }, nextSibling: 'BELOW-TRIAGE' };   // the Triage Assistant card
     global.document = { getElementById: (id) => (id === 'jita-side-group' ? (sideMode ? sideEl : null) : (id === P.GROUP_ID ? groupEl : null)) };
     JiTA.ui.mode = () => (sideMode ? 'sidebar' : 'floating');
     JiTA.ui._buildSideGroup = (o) => { built.push(o); return { id: o.id, style: {}, parentNode: { removeChild: () => { groupEl = null; } } }; };
@@ -362,9 +387,9 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     P._paint('EDR-7', { key: 'EDR-7', total: 0, views: [], summary: P.summarise([], null), pending: 0, done: true });
     ok('in the sidebar a defect without reports gets no card', built.length === 0 && groupEl === null);
     P._paint('EDR-7', st);
-    ok('in the sidebar the profile gets a card of its own, Defect Profile, right below the Triage Assistant', built.length === 1 && built[0].id === 'jita-profile-group' &&
+    ok('in the sidebar the profile gets a card of its own, Defect Profile, right above the Triage Assistant', built.length === 1 && built[0].id === 'jita-profile-group' &&
         built[0].title === 'Defect Profile' && built[0].body === '<div id="jita-sd-profile"></div>' && built[0].collapseKey === P.COLLAPSE_KEY &&
-        inserted.join() === 'BELOW-TRIAGE' && groupEl.style.display === '' && /^Attached reports: 30/.test(box.text()), JSON.stringify(built) + ' ' + inserted.join());
+        inserted.length === 1 && inserted[0] === sideEl && groupEl.style.display === '' && /^Attached reports: 30/.test(box.text()), JSON.stringify(built) + ' ' + inserted.map((r) => (r === sideEl ? 'TRIAGE' : r)).join());
     P._paint('EDR-7', st);
     ok('...built once, however often it is painted', built.length === 1 && inserted.length === 1);
     P._paint('EDR-7', { key: 'EDR-7', total: 0, views: [], summary: P.summarise([], null), pending: 0, done: true });
@@ -408,7 +433,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         sbg.indexOf('titleEl.textContent = o.title;') >= 0 && sbg.indexOf('.textContent = o.title;') !== sbg.lastIndexOf('.textContent = o.title;') &&
         sbg.indexOf('freshBody.innerHTML = o.body;') >= 0 && sbg.indexOf('gmSet(o.collapseKey, isColl);') >= 0 && sbg.indexOf('gmGet(o.collapseKey, false)') >= 0 &&
         member('    _ensureSidebar: function () {').indexOf("_buildSideGroup({ id: 'jita-side-group', title: 'Triage Assistant'") >= 0);
-    ok('the Triage Assistant card, rebuilt, keeps the profile card right below it', member('    _ensureSidebar: function () {').indexOf("group.parentNode.insertBefore(pg, group.nextSibling);") >= 0);
+    ok('the Triage Assistant card, rebuilt, keeps the profile card right above it', member('    _ensureSidebar: function () {').indexOf("group.parentNode.insertBefore(pg, group);") >= 0);
     ok('the page observer puts a wiped card back', member('    _reensureFast: function () {').indexOf('JiTA.profile.reensure();') >= 0);
     ok('switching to the floating panel, or turning the Triage Assistant off, takes the card too', member('    toggleStyle: function () {').indexOf('#jita-profile-group') >= 0 &&
         member('    _ensurePanel: function () {').indexOf('#jita-profile-group') >= 0 && block('JiTA.menu = {', '\n};\n').indexOf("$('#jita-side-group, #jita-profile-group').remove();") >= 0);
