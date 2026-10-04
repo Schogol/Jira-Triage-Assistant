@@ -81,7 +81,7 @@ const muts = [
     // the panel and Settings
     [H, 'a value no pattern holds is shown as one', "            if (!d.dominant || d.id === 'lang') { return; }", "            if (d.id === 'lang') { return; }"],
     [H, 'a shared exception below the pattern is highlighted', "sm.domExc ? 'strong' : ''", "'strong'"],
-    [H, 'a profile is painted under another issue', '        if (JiTA.ui.currentKey !== key) { return; }\n        var $b = P._box(!!s.total);', '        var $b = P._box(!!s.total);'],
+    [H, 'a profile is painted under another issue', "        if (JiTA.ui.currentKey !== key || !flagOn('defectProfile')) { return; }\n        var $b = P._box(!!s.total);", "        if (!flagOn('defectProfile')) { return; }\n        var $b = P._box(!!s.total);"],
     [H, 'the outliers are not listed in the card', '            sm.outliers.slice(0, P.SHOW_OUTLIERS).forEach(function (o) {', '            [].forEach(function (o) {'],
     // the Defect Profile card
     [H, 'the profile gets no card of its own', "        if (create && side && side.parentNode && !document.getElementById(P.GROUP_ID)) {", '        if (false) {'],
@@ -91,13 +91,21 @@ const muts = [
     [H, 'the card is built for a defect without reports', '        var $b = P._box(!!s.total);', '        var $b = P._box(true);'],
     [H, 'the card stays up when the reports are gone', "        if (!s.total) { $b.removeClass('has-hits'); P._show(false); return; }", "        if (!s.total) { $b.removeClass('has-hits'); return; }"],
     [H, 'leaving the defect leaves the card', '        if (g && g.parentNode) { g.parentNode.removeChild(g); }\n        $(\'#jita-sd-profile\')', "        $('#jita-sd-profile')"],
-    [H, 'a card Jira wiped stays away', '        P._paint(key, s);\n    },\n\n    renderSection', '    },\n\n    renderSection'],
-    [H, 'the card comes back for a defect without reports', "        if (!s || !s.total || document.getElementById(P.GROUP_ID)", "        if (!s || document.getElementById(P.GROUP_ID)"],
+    [H, 'a card Jira wiped stays away', '        P._paint(key, s);\n    },\n\n    // The profile on a defect', '    },\n\n    // The profile on a defect'],
+    [H, 'the card comes back for a defect without reports', "        if (!s || !s.total || !flagOn('defectProfile') || document.getElementById(P.GROUP_ID)", "        if (!s || !flagOn('defectProfile') || document.getElementById(P.GROUP_ID)"],
     [H, 'the observer never puts the card back', '            JiTA.profile.reensure();   // the Defect Profile card, which Jira can wipe on its own\n', ''],
     [H, 'the profile stays in the Triage Assistant card', "               '<div id=\"jita-sd-exccluster\"></div>' +\n               '<ul id=\"jita-sd-list\"></ul>';", "               '<div id=\"jita-sd-exccluster\"></div>' +\n               '<div id=\"jita-sd-profile\"></div>' +\n               '<ul id=\"jita-sd-list\"></ul>';"],
     [H, 'the cards share their collapse state', '                gmSet(o.collapseKey, isColl);', '                gmSet(JiTA.ui.SIDE_COLLAPSE_KEY, isColl);'],
     [H, 'the defect page never draws the section', '        JiTA.profile.renderSection(key, background);        // what the bug reports attached to this defect have in common\n', ''],
-    [H, 'the zip is off by default', 'zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, true); },', 'zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, false); },']
+    [H, 'the zip is off by default', 'zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, true); },', 'zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, false); },'],
+    // the switch in Settings > Features
+    [H, 'the profile has no feature switch', ', ["defectProfile", ""]];', '];'],
+    [H, 'switched off, a defect page still builds the profile', "        if (!flagOn('defectProfile')) { P.clear(); return; }\n", ''],
+    [H, 'switched off, new reads still start', "        var still = function () { return JiTA.ui.currentKey === key && flagOn('defectProfile'); };", '        var still = function () { return JiTA.ui.currentKey === key; };'],
+    [H, 'switched off, a card is still painted', "        if (JiTA.ui.currentKey !== key || !flagOn('defectProfile')) { return; }", '        if (JiTA.ui.currentKey !== key) { return; }'],
+    [H, 'switched off, a wiped card comes back', "if (!s || !s.total || !flagOn('defectProfile') || document.getElementById(P.GROUP_ID)", 'if (!s || !s.total || document.getElementById(P.GROUP_ID)'],
+    [H, 'Read igbr.zip shows with the profile off', "        if (flagOn('defectProfile')) {\n            var $zipRow", "        if (true) {\n            var $zipRow"],
+    [H, 'switching it off in Settings leaves the card', "            if (!flagOn('defectProfile')) { JiTA.profile.clear(); return; }", "            if (!flagOn('defectProfile')) { return; }"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

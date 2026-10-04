@@ -152,13 +152,13 @@ function gmSet(key, val) {
 // so an existing install's orphaned "dropdowns" value is ignored and credits simply defaults on. The index of
 // each feature is now recorded ONCE in the FLAG map below and read via flagOn(name) - so if a slot ever moves,
 // only FLAG needs updating (not scattered numeric reads); the persisted gm key per slot must still stay stable.
-var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""], ["screenOcr", ""]];
+var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""], ["screenOcr", ""], ["defectProfile", ""]];
 
 // Named accessors over savedVariables (the [gmKey, enabled] pairs above): map a stable feature name to its
 // fixed index so a wrong index breaks loudly at one named site instead of silently misreading a slot. flagOn
 // reads, setFlag writes - both go through the SAME savedVariables + GM persistence, so behavior is unchanged.
 // Index 0 ("key") is a reserved legacy slot with no boolean feature and is deliberately omitted.
-var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7 };
+var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7, defectProfile: 8 };
 function flagOn(name) { var i = FLAG[name]; return i != null && !!savedVariables[i][1]; }
 function setFlag(name, val) {
     var i = FLAG[name];
@@ -8953,6 +8953,28 @@ JiTA.menu = {
                 JiTA.ui.ensure();
             }
         }));
+        // Defect profile: on a defect, what its attached bug reports have in common. It lives beside the Triage
+        // Assistant's matching reports, so it shows only while that is on too. Switched off, its card goes at once.
+        var $prof = JiTA.menu._toggleRow('Defect profile', 8, function () {
+            if (!flagOn('defectProfile')) { JiTA.profile.clear(); return; }
+            var k = JiTA.ui.currentKey;
+            if (!JITA_NO_JIRA_UI && k && JiTA.ui._isReportsKey(k)) { JiTA.profile.renderSection(k, true); }
+        });
+        $prof.find('.lbl').append($('<span class="sub"></span>').text('On a defect: what its attached bug reports have in common, and the ones that do not fit. Shown with the Triage Assistant.'));
+        $feat.append($prof);
+        // Its sub-option, shown only while the profile is on: each report's igbr.zip gives its crash history and full
+        // hardware, and the downloads are the cost. A GM flag of its own, on by default.
+        if (flagOn('defectProfile')) {
+            var $zipRow = $('<div class="jita-menu-row" style="padding-left:18px;"></div>');
+            $('<span class="lbl">Read igbr.zip</span>')
+                .append($('<span class="sub"></span>').text('Downloads each attached report\'s zip for its crash history and full hardware. Off: smaller downloads, weaker profiles.'))
+                .appendTo($zipRow);
+            var $zipSw = $('<div class="jita-sw"><span class="knob"></span></div>');
+            if (JiTA.profile.zipOn()) { $zipSw.addClass('on'); }
+            $zipSw.on('click', function () { gmSet(JiTA.profile.ZIP_KEY, !JiTA.profile.zipOn()); refreshMenu(); });
+            $zipRow.append($zipSw);
+            $feat.append($zipRow);
+        }
         // ISD Credits: mount / tear down the corner badge (and start the scheduler) on toggle. The badge and
         // its crawl belong to Jira tabs only - toggling from Confluence still persists the flag for them.
         $feat.append(JiTA.menu._toggleRow('ISD Credits', 3, function () {
@@ -9045,18 +9067,6 @@ JiTA.menu = {
             $cnt.on('keydown', function (e) { if (e.key === 'Enter') { commitTopN(); } });
             $cntRow.append($cnt);
             $ta.append($cntRow);
-
-            // Defect profiles read each attached report's igbr.zip (crash history, full hardware). The downloads are the
-            // cost, so they can be switched off, for weaker profiles. A GM flag of its own, on by default.
-            var $zipRow = $('<div class="jita-menu-row"></div>');
-            $('<span class="lbl">Read igbr.zip for defect profiles</span>')
-                .append($('<span class="sub"></span>').text('Downloads each attached report\'s zip for its crash history and full hardware. Off: smaller downloads, weaker profiles.'))
-                .appendTo($zipRow);
-            var $zipSw = $('<div class="jita-sw"><span class="knob"></span></div>');
-            if (JiTA.profile.zipOn()) { $zipSw.addClass('on'); }
-            $zipSw.on('click', function () { gmSet(JiTA.profile.ZIP_KEY, !JiTA.profile.zipOn()); refreshMenu(); });
-            $zipRow.append($zipSw);
-            $ta.append($zipRow);
 
             // Embedding backend (GPU vs CPU). Same flags toggleEmbedBackend() reads/writes; it reloads.
             var gpuOn = gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false);
@@ -14198,13 +14208,16 @@ JiTA.profile = {
     // the page observer on every change, so it does nothing unless the card is missing and has something to show.
     reensure: function () {
         var P = JiTA.profile, key = JiTA.ui.currentKey, s = key && P._last[key];
-        if (!s || !s.total || document.getElementById(P.GROUP_ID) || !document.getElementById('jita-side-group')) { return; }
+        if (!s || !s.total || !flagOn('defectProfile') || document.getElementById(P.GROUP_ID) || !document.getElementById('jita-side-group')) { return; }
         P._paint(key, s);
     },
 
+    // The profile on a defect, unless switched off in Settings > Features. Switched off while its reports are read, the
+    // reads under way finish and are cached, and no new one starts - as when the defect is left.
     renderSection: function (key, background) {
         var P = JiTA.profile;
-        var still = function () { return JiTA.ui.currentKey === key; };
+        if (!flagOn('defectProfile')) { P.clear(); return; }
+        var still = function () { return JiTA.ui.currentKey === key && flagOn('defectProfile'); };
         if (P._last[key]) { P._paint(key, P._last[key]); } else if (!background) { P.clear(); }
         P.build(key, function (s) { if (still()) { P._paint(key, s); } }, still).then(null, function (e) {
             if (!still() || P._last[key]) { return; }
@@ -14219,7 +14232,7 @@ JiTA.profile = {
 
     _paint: function (key, s) {
         var P = JiTA.profile;
-        if (JiTA.ui.currentKey !== key) { return; }
+        if (JiTA.ui.currentKey !== key || !flagOn('defectProfile')) { return; }
         var $b = P._box(!!s.total);
         if (!$b.length) { return; }
         $b.empty();
@@ -21321,7 +21334,7 @@ JiTA.changelog = {
         { v: '3.41.0', date: '2026-10-04', features: [
             'On a defect, a new Defect Profile card shows what its bug reports have in common: GPU, OS, renderer, CPU, client builds, shared exceptions and the module their crashes happened in. A shared pattern is highlighted.',
             'Reports that do not fit the pattern are listed with the reason, which often means a report attached to the wrong defect. Open full profile shows the breakdown, report by report.',
-            'For crash histories JiTA reads each report\'s igbr.zip. Settings > Triage Assistant can switch that off, for smaller downloads and weaker profiles.'
+            'Settings > Features > Defect profile switches it off. Under it, Read igbr.zip switches off just the zip downloads that give the crash histories, for smaller downloads and weaker profiles.'
         ] },
         { v: '3.40.2', date: '2026-10-04', fixes: [
             'A bug report attached or closed directly in Jira now leaves a defect\'s Matching bug reports, and a report\'s Similar open reports, as soon as the list is shown, instead of up to 30 minutes later. The next match takes its place.',

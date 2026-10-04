@@ -21,6 +21,8 @@ const flush = async () => { for (let i = 0; i < 20; i++) { await new Promise((r)
 let store = {}, meta = {}, metaSets = [];
 global.gmGet = (k, d) => (k in store ? store[k] : d);
 global.gmSet = (k, v) => { store[k] = v; };
+const flags = {};
+global.flagOn = (n) => flags[n] !== false;
 (0, eval)([fn('function pdmGpus(machine) {'), fn('function pdmGpuName(gpu) {'), fn('function pdmBestGpu(machine) {'), fn('function convertTextToObject(text) {'),
     block('var DX_BUGCHECK = {', '\n};\n'), block('var DX_EXCEPTION = {', '\n};\n'), fn('function dxBugcheckName(hex) {'), fn('function dxExceptionName(hex) {'),
     fn('function parseWER(text) {'), line('var DX_APP_CRASH = '), fn('function dxWerKind(e) {'), fn('function dxCrashCode(e) {'), fn('function dxFirst(text, label) {'),
@@ -451,6 +453,29 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     P.reensure();
     P._paint = realPaint;
     ok('...a defect without reports gets none back, and is not even repainted', built.length === 2 && groupEl === null && painted === 0, painted);
+
+    // ================= switched off in Settings > Features =================
+    P._last['EDR-7'] = st;
+    flags.defectProfile = false;
+    P._paint('EDR-7', st);
+    painted = 0;
+    P._paint = function () { painted++; return realPaint.apply(P, arguments); };
+    P.reensure();
+    P._paint = realPaint;
+    ok('switched off, the profile paints no card and puts none back, not even trying', built.length === 2 && groupEl === null && painted === 0, painted);
+    const realBuild = P.build;
+    let builds = 0, stillFn = null;
+    P.build = (k, on, still) => { builds++; stillFn = still; return new Promise(() => {}); };
+    P.renderSection('EDR-7', true);
+    ok('...and a defect page neither builds nor reads anything for it', builds === 0 && groupEl === null);
+    flags.defectProfile = true;
+    P.renderSection('EDR-7', true);
+    flags.defectProfile = false;
+    ok('switched off while its reports are read, no new read starts', builds === 1 && stillFn() === false);
+    flags.defectProfile = true;
+    ok('...switched on again, they carry on', stillFn() === true);
+    P.build = realBuild;
+    P.clear();
     sideMode = false;
 
     // ================= the full profile =================
@@ -486,6 +511,16 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         member('    _ensurePanel: function () {').indexOf('#jita-profile-group') >= 0 && block('JiTA.menu = {', '\n};\n').indexOf("$('#jita-side-group, #jita-profile-group').remove();") >= 0);
     const menuSrc = block('JiTA.menu = {', '\n};\n');
     ok('Settings has the igbr.zip switch, on by default', menuSrc.indexOf('gmSet(JiTA.profile.ZIP_KEY, !JiTA.profile.zipOn());') >= 0 && P.zipOn() === true);
+    const flagSrc = eval('(function () { ' + line('var savedVariables = ') + line('var FLAG = ') + ' return { savedVariables: savedVariables, FLAG: FLAG }; })()');
+    ok('the defect profile is a feature of its own, on by default like every feature', flagSrc.FLAG.defectProfile === 8 && flagSrc.savedVariables[8][0] === 'defectProfile' &&
+        flagSrc.savedVariables[8][1] === '', JSON.stringify(flagSrc.savedVariables[8]));
+    const featStart = menuSrc.indexOf("JiTA.menu._toggleRow('Defect profile', 8,"), subStart = menuSrc.indexOf("if (flagOn('defectProfile')) {", featStart);
+    const zipAt = menuSrc.indexOf('gmSet(JiTA.profile.ZIP_KEY, !JiTA.profile.zipOn());');
+    ok('Settings > Features has it, with Read igbr.zip under it, shown only while it is on', featStart > 0 && subStart > featStart && zipAt > subStart &&
+        menuSrc.indexOf('padding-left:18px', subStart) < zipAt && menuSrc.indexOf('gmSet(JiTA.profile.ZIP_KEY', zipAt + 1) < 0 &&
+        menuSrc.slice(featStart, zipAt).indexOf("$feat.append($zipRow);") < 0 && menuSrc.indexOf("$feat.append($zipRow);", zipAt) > 0);
+    ok('...and switching it off takes the card away, on draws it for the defect on screen', menuSrc.indexOf("if (!flagOn('defectProfile')) { JiTA.profile.clear(); return; }") > featStart &&
+        menuSrc.indexOf('JiTA.profile.renderSection(k, true);') > featStart);
 
     console.log('\n' + (fail ? 'FAILURE: ' + fail + ' check(s) failed' : 'profile checks passed.'));
     process.exit(fail ? 1 : 0);
