@@ -8809,12 +8809,14 @@ JiTA.menu = {
   border: 1px solid #3a434d; border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.55); font-size: 13px; }\
 #jita-menu .jita-menu-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #282d33; border-radius: 8px 8px 0 0; position: sticky; top: 0; z-index: 2; }\
 #jita-menu .jita-menu-head h2 { margin: 0; font-size: 14px; font-weight: 700; flex: 1; color: #f2f2f4; }\
-#jita-menu.jita-settings-view { width: 420px; }\
+#jita-menu.jita-settings-view { width: 460px; max-width: 94vw; }\
 #jita-menu .jita-menu-top { position: sticky; top: 0; z-index: 2; background: #282d33; border-radius: 8px 8px 0 0; }\
 #jita-menu .jita-menu-tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid #3a434d; }\
 #jita-menu .jita-menu-tab { background: transparent; color: #9aa6b2; border: none; border-bottom: 2px solid transparent; padding: 6px 9px 7px; cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }\
 #jita-menu .jita-menu-tab:hover { color: #e6e6e6; }\
 #jita-menu .jita-menu-tab.on { color: #e6e6e6; border-bottom-color: #4c9aff; font-weight: 700; }\
+#jita-menu .jita-menu-tab:focus { outline: none !important; box-shadow: none !important; }\
+#jita-menu .jita-menu-tab:focus-visible { color: #e6e6e6; background: #343c44; border-radius: 4px 4px 0 0; }\
 #jita-menu .jita-menu-pane > .jita-menu-sect:first-child { padding-top: 6px; }\
 #jita-menu .jita-menu-pane > .jita-menu-sect:first-child > h3:first-child { display: none; }\
 #jita-menu .jita-menu-x { cursor: pointer; font-weight: 700; font-size: 18px; line-height: 1; padding: 0 4px; color: #9aa6b2; }\
@@ -8947,14 +8949,11 @@ JiTA.menu = {
         $('<span class="jita-menu-x" title="Close (Esc)">×</span>').on('click', JiTA.menu.close).appendTo($head);
         $top.append($head);
         var $tabs = $('<div class="jita-menu-tabs" role="tablist"></div>').appendTo($top);
-        // Each section goes into its tab's pane; a tab exists only where one of its sections does (the Triage Assistant
+        // Each section goes into its tab's pane, and a tab exists only where one of its sections does (the Triage Assistant
         // while it is on and off Confluence, Lead duties for a Lead). Every pane is built, so switching tabs needs no redraw.
         var panes = {};
         function pane(id) {
-            if (!panes[id]) {
-                panes[id] = $('<div class="jita-menu-pane" role="tabpanel"></div>').attr('data-tab', id).appendTo($p);
-                $('<button type="button" class="jita-menu-tab" role="tab"></button>').attr('data-tab', id).text(JiTA.menu.TABS[id]).appendTo($tabs);
-            }
+            if (!panes[id]) { panes[id] = $('<div class="jita-menu-pane" role="tabpanel"></div>').attr('data-tab', id).appendTo($p); }
             return panes[id];
         }
 
@@ -9038,7 +9037,7 @@ JiTA.menu = {
         var $respActions = $('<div class="jita-menu-actions"></div>').appendTo($resp);
         $('<button class="jita-btn">Customize responses</button>')
             .on('click', function () { JiTA.responses.openEditor(); }).appendTo($respActions);
-        pane('features').append($resp);
+        pane('responses').append($resp);
 
         // ---- Triage Assistant (only when enabled, and only on Jira - its actions are all Jira-tab machinery) ----
         if (flagOn('similarDefects') && !JITA_IS_WIKI) {
@@ -9417,6 +9416,13 @@ JiTA.menu = {
         }
         pane('about').append($dbg);
 
+        // The tabs, in TABS order, for the panes there are.
+        Object.keys(JiTA.menu.TABS).forEach(function (id) {
+            if (panes[id]) { $('<button type="button" class="jita-menu-tab" role="tab"></button>').attr('data-tab', id).text(JiTA.menu.TABS[id]).appendTo($tabs); }
+        });
+        // A click must not leave the tab focused: the browser, and Jira's own styles, ring a focused button. The keyboard
+        // still reaches the tabs, and :focus-visible marks them then.
+        $tabs.on('mousedown', '.jita-menu-tab', function (e) { e.preventDefault(); });
         $tabs.on('click', '.jita-menu-tab', function () {
             JiTA.menu._tab = this.getAttribute('data-tab');
             JiTA.menu._showTab($p[0], JiTA.menu._tab);
@@ -9426,7 +9432,7 @@ JiTA.menu = {
     },
 
     // Settings' tabs, in this order: the switches, then each area with settings of its own.
-    TABS: { features: 'Features', triage: 'Triage Assistant', lead: 'Lead duties', about: 'About' },
+    TABS: { features: 'Features', triage: 'Triage Assistant', responses: 'Canned responses', lead: 'Lead duties', about: 'About' },
     _tab: 'features',   // the tab last opened: a redraw (a switch flipped) and the next opening stay on it
 
     // Show tab `id` in the menu element: its pane and nothing else, its tab marked. A tab that is not there now (the
@@ -21393,7 +21399,7 @@ JiTA.changelog = {
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
         { v: '3.42.0', date: '2026-10-05', features: [
-            'Settings is split into tabs: Features, Triage Assistant, Lead duties (for Leads) and About, so each fits on a screen. It opens on the tab you last used.'
+            'Settings is split into tabs: Features, Triage Assistant, Canned responses, Lead duties (for Leads) and About, so each fits on a screen. It opens on the tab you last used.'
         ] },
         { v: '3.41.0', date: '2026-10-04', features: [
             'On a defect, a new Defect Profile card shows what its bug reports have in common: GPU, OS, renderer, CPU, client builds, shared exceptions and the module their crashes happened in. A shared pattern is highlighted.',

@@ -1,9 +1,11 @@
 // menutabs-check.js - Settings in tabs (v3.42.0). Runs the real JiTA.menu.render against a fake DOM and jQuery:
-//  - one tab per area, in order (Features, Triage Assistant, Lead duties, About), each section in its tab's pane
+//  - one tab per area, in order (Features, Triage Assistant, Canned responses, Lead duties, About), each section in its
+//    tab's pane, whatever order render builds them in
 //  - a tab exists only where its sections do: the Triage Assistant while it is on and off Confluence, Lead duties
 //    for a Lead
 //  - only the open tab's pane shows; a click switches without a redraw, and a redraw stays on the tab
 //  - a remembered tab that is not there now shows the first one, and comes back when it is there again
+//  - a click leaves no focus ring on the tab
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const block = (head, end) => {
@@ -90,12 +92,14 @@ const click = (id) => {
 (async () => {
     // ================= every area =================
     M.render();
-    ok('one tab per area, in order', tabs().map((t) => t.txt).join(' | ') === 'Features | Triage Assistant | Lead duties | About', tabs().map((t) => t.txt).join(' | '));
+    ok('one tab per area, in order, though Canned responses is built before the Triage Assistant', tabs().map((t) => t.txt).join(' | ') ===
+        'Features | Triage Assistant | Canned responses | Lead duties | About', tabs().map((t) => t.txt).join(' | '));
     ok('...the title and the tab bar sit together at the top', menu.n.kids[0].cls.indexOf('jita-menu-top') >= 0 &&
         menu.n.kids[0].kids.map((k) => k.cls[0]).join() === 'jita-menu-head,jita-menu-tabs', JSON.stringify(menu.n.kids[0].kids.map((k) => k.cls)));
     const text = (id) => (paneOf(id) ? paneOf(id).all() : '');
-    ok('Features has the switches, the Defect profile with its zip setting, and the canned responses', /Log Parser/.test(text('features')) && /Defect profile/.test(text('features')) &&
-        /Read igbr\.zip/.test(text('features')) && /Screenshot translation/.test(text('features')) && /Customize responses/.test(text('features')) && !/Sync now/.test(text('features')));
+    ok('Features has the switches, the Defect profile with its zip setting', /Log Parser/.test(text('features')) && /Defect profile/.test(text('features')) &&
+        /Read igbr\.zip/.test(text('features')) && /Screenshot translation/.test(text('features')) && !/Customize responses/.test(text('features')) && !/Sync now/.test(text('features')));
+    ok('Canned responses has a tab of its own', /Customize responses/.test(text('responses')) && !/Log Parser/.test(text('responses')));
     ok('the Triage Assistant tab has its actions and settings', /Sync now/.test(text('triage')) && /Panel style/.test(text('triage')) && /Results shown/.test(text('triage')) &&
         /Embedding backend/.test(text('triage')) && /Hidden suggestions/.test(text('triage')) && !/Log Parser/.test(text('triage')));
     ok('Lead duties has the Lead duties', /Open lead duties/.test(text('lead')) && /Test Confluence access/.test(text('lead')));
@@ -108,6 +112,10 @@ const click = (id) => {
     click('lead');
     ok('a click opens its tab, without a redraw, at the top', shown() === 'lead' && marked() === 'lead' && M._tab === 'lead' && menu.n.kids.length === before && menu.n.scrollTop === 0,
         shown() + ' / ' + M._tab + ' / ' + menu.n.scrollTop);
+    const bar = menu.n.querySelectorAll('.jita-menu-tabs')[0];
+    let prevented = 0;
+    (bar.handlers.mousedown || []).forEach((h) => { if (h.sel === '.jita-menu-tab') { h.fn.call(tabs()[0], { preventDefault: () => { prevented++; } }); } });
+    ok('pressing the mouse on a tab does not focus it, so a click leaves no focus ring', prevented === 1, String(prevented));
     M.render();
     ok('a redraw (a switch flipped) stays on it', shown() === 'lead' && marked() === 'lead');
 
@@ -115,7 +123,7 @@ const click = (id) => {
     click('triage');
     savedVariables[5][1] = false;
     M.render();
-    ok('with the Triage Assistant off there is no tab for it, and the first tab shows', tabs().map((t) => t.getAttribute('data-tab')).join() === 'features,lead,about' && shown() === 'features' &&
+    ok('with the Triage Assistant off there is no tab for it, and the first tab shows', tabs().map((t) => t.getAttribute('data-tab')).join() === 'features,responses,lead,about' && shown() === 'features' &&
         marked() === 'features', tabs().map((t) => t.getAttribute('data-tab')).join() + ' / ' + shown());
     ok('...its tab is still the one remembered', M._tab === 'triage');
     savedVariables[5][1] = true;
@@ -123,10 +131,10 @@ const click = (id) => {
     ok('...and back on, Settings is on it again', shown() === 'triage' && marked() === 'triage');
     lead = false;
     M.render();
-    ok('someone who is not a Lead gets no Lead duties tab', tabs().map((t) => t.getAttribute('data-tab')).join() === 'features,triage,about');
+    ok('someone who is not a Lead gets no Lead duties tab', tabs().map((t) => t.getAttribute('data-tab')).join() === 'features,triage,responses,about');
     global.JITA_IS_WIKI = true;
     M.render();
-    ok('on Confluence there is no Triage Assistant tab', tabs().map((t) => t.getAttribute('data-tab')).join() === 'features,about' && shown() === 'features');
+    ok('on Confluence there is no Triage Assistant tab', tabs().map((t) => t.getAttribute('data-tab')).join() === 'features,responses,about' && shown() === 'features');
     global.JITA_IS_WIKI = false;
     ok('every pane has exactly one tab', panes().length === tabs().length);
 
@@ -134,7 +142,9 @@ const click = (id) => {
     const css = M.css;
     ok('the first heading of a tab, which repeats its name, is hidden; the others stay', css.indexOf('#jita-menu .jita-menu-pane > .jita-menu-sect:first-child > h3:first-child { display: none; }') >= 0);
     ok('the tab bar stays at the top while a tab scrolls', /#jita-menu \.jita-menu-top \{ position: sticky; top: 0;/.test(css));
-    ok('Settings is a little wider, for its tab bar; the other overlays keep their width', css.indexOf('#jita-menu.jita-settings-view { width: 420px; }') >= 0 && css.indexOf('#jita-menu { width: 360px;') >= 0);
+    ok('Settings is wider, for its five tabs; the other overlays keep their width', css.indexOf('#jita-menu.jita-settings-view { width: 460px; max-width: 94vw; }') >= 0 && css.indexOf('#jita-menu { width: 360px;') >= 0);
+    ok('a focused tab gets no ring; one reached by the keyboard is marked', css.indexOf('#jita-menu .jita-menu-tab:focus { outline: none !important; box-shadow: none !important; }') >= 0 &&
+        /#jita-menu \.jita-menu-tab:focus-visible \{ color: #e6e6e6; background: #343c44;/.test(css));
 
     console.log('\n' + (fail ? 'FAILURE: ' + fail + ' check(s) failed' : 'settings tab checks passed.'));
     process.exit(fail ? 1 : 0);
