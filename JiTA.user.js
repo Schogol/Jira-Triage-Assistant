@@ -6560,6 +6560,12 @@ JiTA.ui = {
 #jita-sd-profile .jp-warn { color: #ffb547; }\
 #jita-sd-profile .jp-open { color: #4c9aff; cursor: pointer; text-decoration: none; }\
 #jita-sd-profile .jp-open:hover { text-decoration: underline; }\
+#jita-sd-profile .jp-outs { margin-top: 6px; }\
+#jita-sd-profile .jp-sub { font-weight: 700; color: #ffb547; margin-bottom: 2px; }\
+#jita-sd-profile .jp-out { display: flex; gap: 8px; padding: 2px 0; }\
+#jita-sd-profile .jp-out a { flex: 0 0 auto; color: #4c9aff; font-weight: 700; text-decoration: none; }\
+#jita-sd-profile .jp-out a:hover { text-decoration: underline; }\
+#jita-sd-profile .jp-why { color: #9aa6b2; overflow-wrap: anywhere; }\
 #jita-sd-panel.collapsed #jita-sd-status, #jita-sd-panel.collapsed #jita-sd-loglink, #jita-sd-panel.collapsed #jita-sd-exccluster, #jita-sd-panel.collapsed #jita-sd-profile, #jita-sd-panel.collapsed #jita-sd-list { display: none; }\
 #jita-sd-panel.jita-sd-up { flex-direction: column-reverse; }\
 #jita-sd-toast { position: fixed; right: 18px; bottom: 18px; z-index: 9001; background: #333; color: #eee; padding: 8px 14px;\
@@ -6583,31 +6589,31 @@ JiTA.ui = {
 #jita-sd-tip .jita-sd-tip-html a { color: #4c9aff; }\
 #jita-sd-tip .jita-sd-tip-html table { border-collapse: collapse; margin: 6px 0; }\
 #jita-sd-tip .jita-sd-tip-html th, #jita-sd-tip .jita-sd-tip-html td { border: 1px solid #2c333a; padding: 2px 6px; }\
-/* ---- integrated "Triage Assistant" context group (sidebar mode) ---- */\
+/* ---- integrated context groups (sidebar mode): "Triage Assistant" and "Defect Profile" (.jita-side-card) ---- */\
 /* Styled with Atlassian design tokens so it blends into the native panel in both light + dark themes. */\
 /* Native-clone path (default): the cloned Details group already supplies the card / header / title font, so\
    we only need to hide its body and rotate its chevron on collapse. */\
-#jita-side-group.collapsed [data-jita-body] { display: none !important; }\
+.jita-side-card.collapsed [data-jita-body] { display: none !important; }\
 /* We clone a real context group (Development / More fields) for exact chrome, then swap the chevron path in\
    JS - down caret when open, right caret when collapsed - matching how Jira itself toggles it (no CSS rotate).\
    The cloned group ships without a full card border, so we draw our own complete bordered card and drop the\
    inner wrapper partial border so we do not double up. */\
-#jita-side-group.jita-ta-native { margin: 8px 0; border: 1px solid var(--ds-border, #091e4224); border-radius: 8px; box-sizing: border-box; overflow: hidden; }\
-#jita-side-group.jita-ta-native > div { border: none; }\
+.jita-side-card.jita-ta-native { margin: 8px 0; border: 1px solid var(--ds-border, #091e4224); border-radius: 8px; box-sizing: border-box; overflow: hidden; }\
+.jita-side-card.jita-ta-native > div { border: none; }\
 /* Kill the lingering focus ring on the (cloned) header button after a collapse-toggle click - the cloned\
    role=button keeps focus and Jira draws a blue outline/box-shadow around the whole card, which we do not\
    want on this static toggle. */\
-#jita-side-group:focus, #jita-side-group:focus-within, #jita-side-group:focus-visible,\
-#jita-side-group *:focus, #jita-side-group *:focus-visible,\
-#jita-side-header:focus, #jita-side-header:focus-visible { outline: none !important; box-shadow: none !important; }\
+.jita-side-card:focus, .jita-side-card:focus-within, .jita-side-card:focus-visible,\
+.jita-side-card *:focus, .jita-side-card *:focus-visible,\
+.jita-side-header:focus, .jita-side-header:focus-visible { outline: none !important; box-shadow: none !important; }\
 /* Manual fallback path: drawn by hand to mimic the native group when the clone template is unavailable. */\
-#jita-side-group.jita-ta-manual { margin: 8px 0; padding: 0 16px 4px; border: 1px solid var(--ds-border, #091e4224); border-radius: 8px; }\
-#jita-side-group.jita-ta-manual.collapsed { padding-bottom: 0; }\
-#jita-side-header { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; padding: 14px 0; }\
-#jita-side-header .jita-side-chevron { display: inline-flex; color: var(--ds-icon-subtle, #626f86); }\
-#jita-side-header .jita-side-chevron svg { width: 16px; height: 16px; }\
-#jita-side-header .jita-side-htitle { flex: 1; font-weight: 600; font-size: 16px; line-height: 1; color: var(--ds-text, #172b4d); }\
-#jita-side-group .jita-side-body { padding-bottom: 8px; padding-right: 14px; }\
+.jita-side-card.jita-ta-manual { margin: 8px 0; padding: 0 16px 4px; border: 1px solid var(--ds-border, #091e4224); border-radius: 8px; }\
+.jita-side-card.jita-ta-manual.collapsed { padding-bottom: 0; }\
+.jita-side-header { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; padding: 14px 0; }\
+.jita-side-header .jita-side-chevron { display: inline-flex; color: var(--ds-icon-subtle, #626f86); }\
+.jita-side-header .jita-side-chevron svg { width: 16px; height: 16px; }\
+.jita-side-header .jita-side-htitle { flex: 1; font-weight: 600; font-size: 16px; line-height: 1; color: var(--ds-text, #172b4d); }\
+.jita-side-card .jita-side-body { padding-bottom: 8px; padding-right: 14px; }\
 .jita-side-subhead { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; }\
 .jita-side-subhead #jita-sd-title { flex: 1; font-weight: 600; font-size: 12px; color: var(--ds-text-subtle, #44546f); }\
 #jita-side-group #jita-sd-mode { font-size: 10px; background: var(--ds-background-neutral, #091e420f); color: var(--ds-text-subtle, #44546f); padding: 1px 6px; border-radius: 8px; }\
@@ -6625,13 +6631,14 @@ JiTA.ui = {
 #jita-side-group #jita-sd-exccluster.has-hits { display: block; }\
 #jita-side-group #jita-sd-exccluster .jita-sd-exccluster-head { color: var(--ds-text, #172b4d); }\
 #jita-side-group #jita-sd-exccluster .jita-exc-member a { color: var(--ds-link, #0c66e4); }\
-#jita-side-group #jita-sd-profile { padding: 6px 0; border-bottom: 1px solid var(--ds-border, #091e4224); background: transparent; }\
-#jita-side-group #jita-sd-profile .jp-head { color: var(--ds-text, #172b4d); }\
-#jita-side-group #jita-sd-profile .jp-chip { background: var(--ds-background-neutral, #091e420f); color: var(--ds-text-subtle, #44546f); }\
-#jita-side-group #jita-sd-profile .jp-chip.strong { background: var(--ds-background-success, #dcfff1); color: var(--ds-text-success, #216e4e); }\
-#jita-side-group #jita-sd-profile .jp-line, #jita-side-group #jita-sd-profile .jp-state, #jita-side-group #jita-sd-profile .jp-none { color: var(--ds-text-subtlest, #626f86); }\
-#jita-side-group #jita-sd-profile .jp-warn { color: var(--ds-text-warning, #974f0c); }\
-#jita-side-group #jita-sd-profile .jp-open { color: var(--ds-link, #0c66e4); }\
+#jita-profile-group #jita-sd-profile { padding: 0 0 2px; border-bottom: none; background: transparent; font-size: 12px; }\
+#jita-profile-group #jita-sd-profile .jp-head { color: var(--ds-text, #172b4d); }\
+#jita-profile-group #jita-sd-profile .jp-chip { background: var(--ds-background-neutral, #091e420f); color: var(--ds-text-subtle, #44546f); }\
+#jita-profile-group #jita-sd-profile .jp-chip.strong { background: var(--ds-background-success, #dcfff1); color: var(--ds-text-success, #216e4e); }\
+#jita-profile-group #jita-sd-profile .jp-line, #jita-profile-group #jita-sd-profile .jp-state, #jita-profile-group #jita-sd-profile .jp-none, #jita-profile-group #jita-sd-profile .jp-why { color: var(--ds-text-subtlest, #626f86); }\
+#jita-profile-group #jita-sd-profile .jp-sub { color: var(--ds-text-warning, #974f0c); }\
+#jita-profile-group #jita-sd-profile .jp-warn { color: var(--ds-text-warning, #974f0c); }\
+#jita-profile-group #jita-sd-profile .jp-open, #jita-profile-group #jita-sd-profile .jp-out a { color: var(--ds-link, #0c66e4); }\
 /* Responsive 2-up grid: two columns once the context column is wide enough (each cell >= 180px),\
    automatically collapsing to one column when narrow. The min track is 180px (not 280px) because the Jira\
    context column on a 1920-wide screen is only ~400px, so a 280px min never left room for a second column\
@@ -7350,7 +7357,7 @@ JiTA.ui = {
         var next = (JiTA.ui.mode() === 'sidebar') ? 'floating' : 'sidebar';
         gmSet('sdPanelStyle', next);
         $('#jita-sd-panel').remove();
-        $('#jita-side-group').remove();
+        $('#jita-side-group, #jita-profile-group').remove();
         JiTA.ui._rerenderCurrent();
         refreshMenu();
     },
@@ -7386,7 +7393,7 @@ JiTA.ui = {
             if ($('#jita-sd-panel').length) { $('#jita-sd-panel').remove(); }   // drop a lingering floating box
             return;
         }
-        if ($('#jita-side-group').length) { $('#jita-side-group').remove(); }   // floating mode / no sidebar anchor
+        $('#jita-side-group, #jita-profile-group').remove();   // floating mode / no sidebar anchor
         JiTA.ui._ensureFloating();
     },
 
@@ -7439,7 +7446,6 @@ JiTA.ui = {
                '<div id="jita-sd-status"></div>' +
                '<div id="jita-sd-loglink"></div>' +
                '<div id="jita-sd-exccluster"></div>' +
-               '<div id="jita-sd-profile"></div>' +
                '<ul id="jita-sd-list"></ul>';
     },
 
@@ -7470,7 +7476,24 @@ JiTA.ui = {
         var old = document.getElementById('jita-side-group');
         if (old && old.parentNode) { old.parentNode.removeChild(old); }
 
-        var collapsed = !!gmGet(JiTA.ui.SIDE_COLLAPSE_KEY, false);
+        var group = JiTA.ui._buildSideGroup({ id: 'jita-side-group', title: 'Triage Assistant', body: JiTA.ui._sidebarBodyHtml(), collapseKey: JiTA.ui.SIDE_COLLAPSE_KEY });
+        if (anchor.nextSibling) { anchor.parentNode.insertBefore(group, anchor.nextSibling); }
+        else { anchor.parentNode.appendChild(group); }
+        // The Defect Profile card sits right below this one: one Jira left behind goes back under it.
+        var pg = document.getElementById('jita-profile-group');
+        if (pg) { group.parentNode.insertBefore(pg, group.nextSibling); }
+        // We just (re)built an EMPTY group. If this is a re-mount of the issue still on screen (Jira wiped us),
+        // paint the last results straight back so the panel reappears populated instead of blank. No-op on a
+        // fresh navigation (snapshot key won't match the new issue) - that path renders clean from scratch.
+        JiTA.ui._restoreSnapshot();
+        return true;
+    },
+
+    // A card in Jira's context column, built to look like Jira's own groups (Details, Development): o.id, o.title, o.body
+    // (the inner HTML) and o.collapseKey (the GM flag that remembers it collapsed). Not inserted - the caller places it.
+    // Shared by the Triage Assistant and the Defect Profile cards.
+    _buildSideGroup: function (o) {
+        var collapsed = !!gmGet(o.collapseKey, false);
 
         var group = null, headerClickTarget = null;
 
@@ -7501,7 +7524,7 @@ JiTA.ui = {
                 if (titleEl && bodyEl && bodyEl.parentNode) {
                     JiTA.ui._stripAttrs(clone);                 // (keeps element refs above valid)
                     if (chevronEl) { chevronEl.setAttribute('data-jita-chevron', '1'); }
-                    titleEl.textContent = 'Triage Assistant';
+                    titleEl.textContent = o.title;
                     // We cloned a COLLAPSED group, whose body wrapper carries Jira's collapse machinery (a
                     // `hidden` attribute, a nested `<div hidden>`, and/or inline height:0 / overflow on
                     // wrappers) that survives the clone and keeps content invisible even when expanded.
@@ -7511,7 +7534,7 @@ JiTA.ui = {
                     var freshBody = document.createElement('div');
                     freshBody.setAttribute('data-jita-body', '1');
                     freshBody.className = 'jita-side-body';
-                    freshBody.innerHTML = JiTA.ui._sidebarBodyHtml();
+                    freshBody.innerHTML = o.body;
                     var bodyParent = bodyEl.parentNode;
                     bodyParent.replaceChild(freshBody, bodyEl);
                     // The cloned group was COLLAPSED, so its body is suppressed by the wrapper's collapse
@@ -7594,7 +7617,8 @@ JiTA.ui = {
                             sec.style.setProperty('top', 'auto', 'important');
                         }
                     }
-                    clone.id = 'jita-side-group';
+                    clone.id = o.id;
+                    clone.classList.add('jita-side-card');
                     clone.classList.add('jita-ta-native');
                     headerClickTarget = btnEl || clone;
                     group = clone;
@@ -7605,16 +7629,18 @@ JiTA.ui = {
         // Fallback: hand-built group (used only if the native template wasn't found / clone failed).
         if (!group) {
             var $g = $(
-                '<div id="jita-side-group" class="jita-ta-manual">' +
-                '  <div id="jita-side-header" role="button" tabindex="0" aria-expanded="true">' +
+                '<div class="jita-side-card jita-ta-manual">' +
+                '  <div class="jita-side-header" role="button" tabindex="0" aria-expanded="true">' +
                 '    <span class="jita-side-chevron" data-jita-chevron="1">' + JiTA.ui._chevronSvg + '</span>' +
-                '    <span class="jita-side-htitle">Triage Assistant</span>' +
+                '    <span class="jita-side-htitle"></span>' +
                 '  </div>' +
-                '  <div class="jita-side-body" data-jita-body="1">' + JiTA.ui._sidebarBodyHtml() + '</div>' +
+                '  <div class="jita-side-body" data-jita-body="1">' + o.body + '</div>' +
                 '</div>'
             );
             group = $g[0];
-            headerClickTarget = group.querySelector('#jita-side-header');
+            group.id = o.id;
+            group.querySelector('.jita-side-htitle').textContent = o.title;
+            headerClickTarget = group.querySelector('.jita-side-header');
         }
 
         if (collapsed) { group.classList.add('collapsed'); }
@@ -7628,7 +7654,7 @@ JiTA.ui = {
                 var isColl = group.classList.toggle('collapsed');
                 JiTA.ui._setChevron(group, isColl);
                 try { headerClickTarget.setAttribute('aria-expanded', isColl ? 'false' : 'true'); } catch (e) { /* ignore */ }
-                gmSet(JiTA.ui.SIDE_COLLAPSE_KEY, isColl);
+                gmSet(o.collapseKey, isColl);
                 // Drop focus so the cloned button doesn't keep Jira's blue focus ring after the toggle click.
                 try { headerClickTarget.blur(); } catch (e3) { /* ignore */ }
             });
@@ -7637,14 +7663,7 @@ JiTA.ui = {
             // focus via Tab still works for accessibility); a plain click then toggles without a lingering ring.
             headerClickTarget.addEventListener('mousedown', function (e) { e.preventDefault(); });
         }
-
-        if (anchor.nextSibling) { anchor.parentNode.insertBefore(group, anchor.nextSibling); }
-        else { anchor.parentNode.appendChild(group); }
-        // We just (re)built an EMPTY group. If this is a re-mount of the issue still on screen (Jira wiped us),
-        // paint the last results straight back so the panel reappears populated instead of blank. No-op on a
-        // fresh navigation (snapshot key won't match the new issue) - that path renders clean from scratch.
-        JiTA.ui._restoreSnapshot();
-        return true;
+        return group;
     },
 
     // Feature B: build a "Mark dup" control that links the open EBR as a duplicate of `defectKey` and moves
@@ -8374,10 +8393,10 @@ JiTA.ui = {
     // "vanishes for a fraction of a second" flicker. Only fires in sidebar mode when our group is actually gone;
     // the follow-up scheduleRender() then swaps the placeholder rows for live, interactive ones.
     _reensureFast: function () {
-        if (!flagOn('similarDefects') || !JiTA.ui.currentKey) { return; }
-        if (JiTA.ui.mode() !== 'sidebar' || JiTA.ui._chromePresent()) { return; }
+        if (!flagOn('similarDefects') || !JiTA.ui.currentKey || JiTA.ui.mode() !== 'sidebar') { return; }
         try {
-            if (JiTA.ui._ensureSidebar()) { JiTA.ui.scheduleRender(); }
+            if (!JiTA.ui._chromePresent() && JiTA.ui._ensureSidebar()) { JiTA.ui.scheduleRender(); }
+            JiTA.profile.reensure();   // the Defect Profile card, which Jira can wipe on its own
         } catch (e) { /* ignore */ }
     },
 
@@ -8398,7 +8417,7 @@ JiTA.ui = {
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Similar defects');   // reset title (the panel is shared with the EDR reports view)
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section; clear it on the EBR view
-        $('#jita-sd-profile').removeClass('has-hits').empty();      // so is the profile of a defect's reports
+        JiTA.profile.clear();                                         // so is the profile of a defect's reports
         JiTA.ui.renderLogLink(key, background);   // scan the attached log for known defects (no need to open it); background = don't blank it first
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar defects…'); }
         // Everything below is asynchronous, and reading the text can mean an on-demand translation: by the time an
@@ -8504,7 +8523,7 @@ JiTA.ui = {
         $('#jita-sd-title').text('Reports by this reporter');
         $('#jita-sd-mode').text('');                                  // no ranking mode in this view
         $('#jita-sd-exccluster').removeClass('has-hits').empty();     // defect-only section
-        $('#jita-sd-profile').removeClass('has-hits').empty();        // defect-only section
+        JiTA.profile.clear();                                         // defect-only section
         $('#jita-sd-loglink').removeClass('has-hits').empty();        // similar-defects-only section
         $('#jita-sd-list').empty();
         JiTA.ui.setStatus('Finding this reporter’s other reports…');
@@ -8555,7 +8574,7 @@ JiTA.ui = {
         $('#jita-sd-title').text('Similar open reports');
         $('#jita-sd-loglink').removeClass('has-hits').empty();      // similar-defects-only section, unused here
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section, unused here
-        $('#jita-sd-profile').removeClass('has-hits').empty();      // defect-only section, unused here
+        JiTA.profile.clear();                                         // defect-only section, unused here
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar open reports…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             if (JiTA.ui.currentKey !== key || !JiTA.ui.simReportsMode) { return; }   // navigated / toggled off meanwhile
@@ -8604,7 +8623,7 @@ JiTA.ui = {
         $('#jita-sd-mode').text('');                                  // no ranking mode in this view
         $('#jita-sd-loglink').removeClass('has-hits').empty();        // similar-defects-only section
         $('#jita-sd-exccluster').removeClass('has-hits').empty();     // defect-only section
-        $('#jita-sd-profile').removeClass('has-hits').empty();        // defect-only section
+        JiTA.profile.clear();                                         // defect-only section
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Counting recently attached reports…'); }
         T._injectCss();
         T.rows(false).then(function (res) {
@@ -8747,7 +8766,7 @@ JiTA.ui = {
         if (!isEbr && !isReports) {
             // neither a bug report nor a defect/EO/PLAT issue - remove any stale panel (either style)
             if ($('#jita-sd-panel').length) { $('#jita-sd-panel').remove(); }
-            if ($('#jita-side-group').length) { $('#jita-side-group').remove(); }
+            $('#jita-side-group, #jita-profile-group').remove();
             JiTA.ui.currentKey = null;
             return;
         }
@@ -8928,7 +8947,7 @@ JiTA.menu = {
         $feat.append(JiTA.menu._toggleRow('Triage Assistant', 5, function () {
             if (!flagOn('similarDefects')) {
                 $('#jita-sd-panel').remove();
-                $('#jita-side-group').remove();
+                $('#jita-side-group, #jita-profile-group').remove();
                 JiTA.ui.currentKey = null;
             } else {
                 JiTA.ui.ensure();
@@ -13611,14 +13630,14 @@ JiTA.trend = {
  *      known-defect matching does (JiTA.logsig), so the same exception in two reports is the same signature;
  *   3. the report's igbr.zip (unless switched off in Settings): dxdiag.txt's Windows crash history, i.e. which
  *      module the EVE client crashed in, and the hardware from dxdiag.txt or PDMData.txt when the description has
- *      no Computer Info.
+ *      no Computer Info. A Mac's zip has no dxdiag.txt, so a Mac report has no crash history to count.
  * Downloads are the cost, so only the latest MAX_REPORTS reports are read, CONCURRENCY at a time, files over the
  * size caps are skipped, and what a report's files said is cached for good (an attached report does not change).
  * A value is the defect's pattern once DOMINANT of at least MIN_N reports share it; a report that differs from a
  * pattern is listed as an outlier, with why - often a report attached to the wrong defect.
  */
 JiTA.profile = {
-    V: 1,                          // shape of a cached report reading: bump to read every report's files again
+    V: 2,                          // shape of a cached report reading: bump to read every report's files again
     CACHE_PREFIX: 'rp:',           // meta store key per report
     ZIP_KEY: 'jitaProfileZip',     // Settings: read each report's igbr.zip (on by default)
     MAX_REPORTS: 25,               // the latest this many reports are read
@@ -13649,8 +13668,10 @@ JiTA.profile = {
 
     // ---- reading a report ---------------------------------------------------------------------------------------
     _p2: function (n) { n = +n; return (n < 10 ? '0' : '') + n; },
-    _osName: function (ver, build) {
-        if (/mac/i.test(ver || '')) { return 'macOS'; }
+    // "Windows 11", "Windows 10", or "macOS 26" (a Mac by `mac`, or a version that says so; the major version only, as
+    // Windows is told apart by 10 and 11).
+    _osName: function (ver, build, mac) {
+        if (mac || /mac/i.test(ver || '')) { var mv = /(\d+)/.exec(ver || ''); return mv ? 'macOS ' + mv[1] : 'macOS'; }
         if (build >= 22000) { return 'Windows 11'; }
         if (build >= 10240 || /^10(\.|$)/.test(ver || '')) { return 'Windows 10'; }
         return ver ? String(ver) : null;
@@ -13681,22 +13702,41 @@ JiTA.profile = {
         }
         return null;
     },
+    // An Apple chip's generation from its name ("Apple M5 Pro" -> "Apple M5"): a Mac's Computer Info names no CPU model,
+    // and its GPU is the chip.
+    _appleChip: function (name) {
+        var m = /\bM(\d+)\b/i.exec(name || '');
+        return m ? 'Apple M' + m[1] : 'Apple (other)';
+    },
 
     // The Computer Info block of a report -> { platform, os, osBuild, gpu, gpuVendor, driver, driverDate, hybrid, cpu,
     // cpuVendor, cpuGen, threads, ghz, ramGB, freeGB }, or null when there is none. The stored text is flattened to
-    // one line, so each field is read up to the next label, not to a line end. A real one (2026-10):
+    // one line, so each field is read up to the next label, not to a line end. Real ones (2026-10), a PC and a Mac:
     //   Trinity platform: dx11  Process: x64  OS: 10.0, build: 26100,  Video Card: NVIDIA GeForce RTX 3060 Ti
     //   (Driver: 32.0.16.1714, Released: 9-17-2026)  Is Optimus: No  Is AMD Dynamic Switchable: No
     //   CPU: AMD64 Family 25 Model 33 Stepping 2, AuthenticAMD @ 3.40 GHz (16 CPUs)  Memory: 32681 MB (5359 MB available)
+    //
+    //   Trinity platform: metal  Process: x64  OS: 26.6, build: 2,  Video Card: Apple M5 Pro (Driver: 0.0.0.0,
+    //   Released: -)  Is Optimus: -  Is AMD Dynamic Switchable: -  CPU: Apple Family 0 Model 0 Stepping 0, Apple
+    //   Family 0 Model 0 Stepping 0 @ 2.40 GHz (18 CPUs)  Memory: 49152 MB (24576 MB available)
+    // A Mac renders with Metal, and on Apple Silicon its CPU says Apple; its "build" is not a Windows build.
     parseComputerInfo: function (text) {
         var P = JiTA.profile, t = String(text || '').replace(/\s+/g, ' '), at = t.search(P.MARK), hw = {}, m;
         if (at < 0) { return null; }
         t = t.slice(at);
+        var mac = /Trinity platform:\s*metal\b/i.test(t) || /\bCPU:\s*Apple\b/i.test(t);
         if ((m = /Trinity platform:\s*([A-Za-z0-9]+)/i.exec(t))) { hw.platform = m[1].toLowerCase(); }
-        if ((m = /\bOS:\s*([\d.]+),\s*build:\s*(\d+)/i.exec(t))) { hw.osBuild = +m[2]; hw.os = P._osName(m[1], +m[2]); }
-        else if ((m = /\bOS:\s*(.+?)(?=\s+(?:Video Card|Is Optimus|Is AMD|CPU|Memory|Process):|$)/i.exec(t))) { hw.os = P._osName(m[1].replace(/[,\s]+$/, ''), null); }
-        if ((m = /Video Card:\s*(.+?)\s*\(Driver:\s*([^,()]+?),\s*Released:\s*(\d{1,2})-(\d{1,2})-(\d{4})\)/i.exec(t))) {
-            hw.gpu = m[1]; hw.driver = m[2]; hw.driverDate = m[5] + '-' + P._p2(m[3]) + '-' + P._p2(m[4]);
+        if ((m = /\bOS:\s*([\d.]+),\s*build:\s*(\d+)/i.exec(t))) {
+            hw.os = P._osName(m[1], +m[2], mac);
+            if (!mac) { hw.osBuild = +m[2]; }
+        }
+        else if ((m = /\bOS:\s*(.+?)(?=\s+(?:Video Card|Is Optimus|Is AMD|CPU|Memory|Process):|$)/i.exec(t))) { hw.os = P._osName(m[1].replace(/[,\s]+$/, ''), null, mac); }
+        // The driver part as the client writes it; a Mac's says "Driver: 0.0.0.0, Released: -", which is no driver.
+        if ((m = /Video Card:\s*(.+?)\s*\(Driver:\s*([^,()]*?),\s*Released:\s*([^()]*?)\s*\)/i.exec(t))) {
+            hw.gpu = m[1];
+            if (/[1-9]/.test(m[2])) { hw.driver = m[2]; }
+            var rd = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(m[3]);
+            if (rd) { hw.driverDate = rd[3] + '-' + P._p2(rd[1]) + '-' + P._p2(rd[2]); }
         } else if ((m = /Video Card:\s*(.+?)(?=\s+(?:Is Optimus|Is AMD|CPU|Memory):|$)/i.exec(t))) { hw.gpu = m[1]; }
         if (hw.gpu) { hw.gpuVendor = P._gpuVendor(hw.gpu); }
         var opt = /Is Optimus:\s*(Yes|No)/i.exec(t), sw = /Is AMD Dynamic Switchable:\s*(Yes|No)/i.exec(t);
@@ -13704,7 +13744,7 @@ JiTA.profile = {
         if ((m = /CPU:\s*(.+?)\s*@\s*([\d.]+)\s*GHz\s*\((\d+)\s*CPUs?\)/i.exec(t))) {
             hw.cpu = m[1]; hw.ghz = +m[2]; hw.threads = +m[3];
             hw.cpuVendor = /AuthenticAMD/i.test(m[1]) ? 'AMD' : (/GenuineIntel/i.test(m[1]) ? 'Intel' : (/apple/i.test(m[1]) ? 'Apple' : null));
-            hw.cpuGen = P._cpuGen(m[1]);
+            hw.cpuGen = (hw.cpuVendor === 'Apple') ? P._appleChip(hw.gpu) : P._cpuGen(m[1]);
         }
         if ((m = /Memory:\s*(\d+)\s*MB\s*\((\d+)\s*MB available\)/i.exec(t))) { hw.ramGB = Math.round(+m[1] / 1024); hw.freeGB = Math.round(+m[2] / 102.4) / 10; }
         return hw;
@@ -13767,8 +13807,9 @@ JiTA.profile = {
         var gpu = pdmBestGpu(mc), name = pdmGpuName(gpu), build = Number(os.BUILD_NUMBER), th = Number(cpu.LOGICAL_CORE_COUNT), mem = Number(mc.TOTAL_MEMORY);
         if (name) { hw.gpu = name; hw.gpuVendor = P._gpuVendor(name); }
         if (/win/i.test(os.TYPE || '')) { hw.os = P._osName('10.0', isNaN(build) ? null : build); if (!isNaN(build)) { hw.osBuild = build; } }
-        else if (/mac/i.test(os.TYPE || '')) { hw.os = 'macOS'; }
+        else if (/mac/i.test(os.TYPE || '')) { hw.os = P._osName(String(os.MAJOR_VERSION || ''), null, true); }
         if (cpu.VENDOR) { hw.cpuVendor = /amd/i.test(cpu.VENDOR) ? 'AMD' : (/intel/i.test(cpu.VENDOR) ? 'Intel' : (/apple/i.test(cpu.VENDOR) ? 'Apple' : null)); }
+        if (hw.cpuVendor === 'Apple') { hw.cpuGen = P._appleChip(cpu.BRAND || name); }
         if (!isNaN(th) && th > 0) { hw.threads = th; }
         if (!isNaN(mem) && mem > 0) { hw.ramGB = Math.round(mem / 1073741824); }
         return Object.keys(hw).length ? hw : null;
@@ -13866,9 +13907,8 @@ JiTA.profile = {
         }
         if (zip && !rec.zip) {
             jobs = jobs.then(function () {
-                var zs = att.filter(function (a) { return /\.zip$/i.test(a.filename || '') && a.content; });
-                zs.sort(function (a, b) { return (/igbr/i.test(b.filename) ? 1 : 0) - (/igbr/i.test(a.filename) ? 1 : 0); });
-                var z = zs[0];
+                // The client always names it igbr.zip; any other zip is something a player added.
+                var z = att.filter(function (a) { return /^igbr\.zip$/i.test(a.filename || '') && a.content; })[0];
                 if (!z) { rec.zip = true; rec.hasZip = false; return; }
                 if (z.size > P.MAX_ZIP_BYTES) { rec.zip = true; rec.hasZip = false; rec.skippedZip = true; return; }
                 return P._fetchBytes(z.content).then(function (buf) {
@@ -14023,15 +14063,52 @@ JiTA.profile = {
         return job.promise;
     },
 
-    // ---- the panel section (on a defect) -----------------------------------------------------------------------
+    // ---- the Defect Profile card (on a defect) -----------------------------------------------------------------
+    // In the sidebar the profile has a card of its own, right below the Triage Assistant's, built like it (it collapses
+    // on its own, remembered in COLLAPSE_KEY) and shown only while the defect has reports attached. In the floating
+    // panel it is a section of that panel. Either way its content lives in #jita-sd-profile.
+    GROUP_ID: 'jita-profile-group',
+    COLLAPSE_KEY: 'jitaProfileCollapsed',
+    SHOW_OUTLIERS: 5,              // outliers listed in the card; Open full profile lists them all
+
+    // #jita-sd-profile, creating the card first when `create` asks for it and the sidebar has a Triage Assistant card
+    // to sit under (there is none in the floating panel).
+    _box: function (create) {
+        var P = JiTA.profile, side = document.getElementById('jita-side-group');
+        if (create && side && side.parentNode && !document.getElementById(P.GROUP_ID)) {
+            var g = JiTA.ui._buildSideGroup({ id: P.GROUP_ID, title: 'Defect Profile', body: '<div id="jita-sd-profile"></div>', collapseKey: P.COLLAPSE_KEY });
+            g.style.display = 'none';   // until there is something to show
+            side.parentNode.insertBefore(g, side.nextSibling);
+        }
+        return $('#jita-sd-profile');
+    },
+    _show: function (on) {
+        var g = document.getElementById(JiTA.profile.GROUP_ID);
+        if (g) { g.style.display = on ? '' : 'none'; }
+    },
+    // Off a defect, or before a new defect's profile: no card, and an empty section in the floating panel.
+    clear: function () {
+        var g = document.getElementById(JiTA.profile.GROUP_ID);
+        if (g && g.parentNode) { g.parentNode.removeChild(g); }
+        $('#jita-sd-profile').removeClass('has-hits').empty();
+    },
+    // Put the card straight back when Jira wipes it, painted from the last state, without searching again. Called from
+    // the page observer on every change, so it does nothing unless the card is missing and has something to show.
+    reensure: function () {
+        var P = JiTA.profile, key = JiTA.ui.currentKey, s = key && P._last[key];
+        if (!s || !s.total || document.getElementById(P.GROUP_ID) || !document.getElementById('jita-side-group')) { return; }
+        P._paint(key, s);
+    },
+
     renderSection: function (key, background) {
-        var P = JiTA.profile, $box = $('#jita-sd-profile');
-        if (!$box.length) { return; }
+        var P = JiTA.profile;
         var still = function () { return JiTA.ui.currentKey === key; };
-        if (P._last[key]) { P._paint(key, P._last[key]); } else if (!background) { $box.removeClass('has-hits').empty(); }
+        if (P._last[key]) { P._paint(key, P._last[key]); } else if (!background) { P.clear(); }
         P.build(key, function (s) { if (still()) { P._paint(key, s); } }, still).then(null, function (e) {
             if (!still() || P._last[key]) { return; }
-            $('#jita-sd-profile').addClass('has-hits').empty().append($('<div class="jp-line"></div>').text('Could not read the attached reports: ' + (e && e.message || e)));
+            var $b = P._box(true);
+            P._show(true);
+            $b.addClass('has-hits').empty().append($('<div class="jp-line"></div>').text('Could not read the attached reports: ' + (e && e.message || e)));
         });
     },
 
@@ -14039,12 +14116,15 @@ JiTA.profile = {
     _chip: function (text, cls, title) { return $('<span class="jp-chip"></span>').addClass(cls || '').text(text).attr('title', title || text); },
 
     _paint: function (key, s) {
-        var P = JiTA.profile, $b = $('#jita-sd-profile');
-        if (!$b.length || JiTA.ui.currentKey !== key) { return; }
+        var P = JiTA.profile;
+        if (JiTA.ui.currentKey !== key) { return; }
+        var $b = P._box(!!s.total);
+        if (!$b.length) { return; }
         $b.empty();
-        if (!s.total) { $b.removeClass('has-hits'); return; }
+        if (!s.total) { $b.removeClass('has-hits'); P._show(false); return; }
         var sm = s.summary;
         $b.addClass('has-hits');
+        P._show(true);
         var $h = $('<div class="jp-head"></div>').text('Attached reports: ' + s.total + (s.views.length < s.total ? ' (latest ' + s.views.length + ')' : '')).appendTo($b);
         if (s.pending) { $('<span class="jp-state"></span>').text('reading files, ' + s.pending + ' left…').appendTo($h); }
         var $c = $('<div class="jp-chips"></div>').appendTo($b), any = false;
@@ -14061,9 +14141,21 @@ JiTA.profile = {
         if (sm.first) { bits.push(sm.first === sm.last ? P._date(sm.first) : (P._date(sm.first) + ' to ' + P._date(sm.last))); }
         var $l = $('<div class="jp-line"></div>').text(bits.join(' · ')).appendTo($b);
         if (sm.afterFix) { $('<span class="jp-warn"></span>').text(' · ⚠ ' + sm.afterFix + ' after the fix').appendTo($l); }
+        // The reports that do not fit, each with why: often a report attached to the wrong defect.
+        if (sm.outliers.length) {
+            var $os = $('<div class="jp-outs"></div>').appendTo($b);
+            $('<div class="jp-sub"></div>').text(sm.outliers.length + ' outlier' + (sm.outliers.length === 1 ? '' : 's') + ': reports that do not fit the pattern').appendTo($os);
+            sm.outliers.slice(0, P.SHOW_OUTLIERS).forEach(function (o) {
+                var $r = $('<div class="jp-out"></div>').appendTo($os);
+                $('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + o.key).text(o.key).appendTo($r);
+                $('<span class="jp-why"></span>').text(o.why.join('; ')).appendTo($r);
+            });
+            if (sm.outliers.length > P.SHOW_OUTLIERS) {
+                $('<div class="jp-line"></div>').text('and ' + (sm.outliers.length - P.SHOW_OUTLIERS) + ' more in the full profile').appendTo($os);
+            }
+        }
         var $o = $('<div class="jp-line"></div>').appendTo($b);
-        if (sm.outliers.length) { $('<span class="jp-warn"></span>').text(sm.outliers.length + ' outlier' + (sm.outliers.length === 1 ? '' : 's') + ' · ').appendTo($o); }
-        $('<a class="jp-open" href="#"></a>').text('Open profile').on('click', function (e) { e.preventDefault(); P.openView(key); }).appendTo($o);
+        $('<a class="jp-open" href="#"></a>').text('Open full profile').on('click', function (e) { e.preventDefault(); P.openView(key); }).appendTo($o);
         try { JiTA.ui._fitVertical(); } catch (e) { /* ignore */ }
     },
 
@@ -21112,8 +21204,8 @@ JiTA.changelog = {
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
         { v: '3.41.0', date: '2026-10-04', features: [
-            'On a defect, a new Attached reports section shows what its bug reports have in common: GPU, OS, renderer, CPU, client builds, shared exceptions and the module their crashes happened in. A shared pattern is highlighted.',
-            'Reports that do not fit the pattern are listed with the reason, which often means a report attached to the wrong defect. Open profile shows the full breakdown, report by report.',
+            'On a defect, a new Defect Profile card shows what its bug reports have in common: GPU, OS, renderer, CPU, client builds, shared exceptions and the module their crashes happened in. A shared pattern is highlighted.',
+            'Reports that do not fit the pattern are listed with the reason, which often means a report attached to the wrong defect. Open full profile shows the breakdown, report by report.',
             'For crash histories JiTA reads each report\'s igbr.zip. Settings > Triage Assistant can switch that off, for smaller downloads and weaker profiles.'
         ] },
         { v: '3.40.2', date: '2026-10-04', fixes: [

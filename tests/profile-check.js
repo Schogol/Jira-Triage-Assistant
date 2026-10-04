@@ -1,5 +1,5 @@
 // profile-check.js - the defect profile (v3.41.0): what the bug reports attached to a defect have in common, and the
-// reports that do not fit. Evals the real JiTA.profile, the dxdiag / PDMData parsers, JiTA.logsig._logBlocks /
+// reports that do not fit, in a Defect Profile card of its own. Evals the real JiTA.profile, the dxdiag / PDMData parsers, JiTA.logsig._logBlocks /
 // _fingerprint and JiTA.ocr's language labels against stubs, with real zips built here (node zlib).
 const fs = require('fs'), zlib = require('zlib');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
@@ -76,6 +76,13 @@ const DXDIAG = '------------------\nSystem Information\n------------------\n    
     'Windows Error Reporting:\n+++ WER0 +++:\nFault bucket 123, type 5\nEvent Name: APPCRASH\nResponse: Not available\nCab Id: 0\n\nProblem signature:\n' +
     'P1: exefile.exe\nP2: 24.1.0.3569502\nP3: 00000000\nP4: nvwgf2umx.dll\nP5: 32.0.15.6094\nP6: 00000000\nP7: c0000005\nP8: 0000000000abcdef\n' +
     '+++ WER1 +++:\nFault bucket 0, type 0\nEvent Name: BlueScreen\nResponse: Not available\nCab Id: 0\n\nProblem signature:\nP1: 124\nP2: 0\n';
+// A Mac, as the client writes it (the PDMData trimmed to the fields read, with the client's tabs and no closing braces).
+const MAC_CI = 'Trinity platform: metal\nProcess: x64\nOS: 26.6, build: 2, \nVideo Card: Apple M5 Pro (Driver: 0.0.0.0, Released: -)\nIs Optimus: -\n' +
+    'Is AMD Dynamic Switchable: -\nCPU: Apple Family 0 Model 0 Stepping 0, Apple Family 0 Model 0 Stepping 0 @ 2.40 GHz (18 CPUs)\nMemory: 49152 MB (24576 MB available)';
+const MAC_PDM = '{DATA}\n\t{PROCESS}\n\t\tTIMESTAMP : 2026-09-19 13:05:02\n\n\t{OS}\n\t\tTYPE             : macOS\n\t\tNAME             : Version 26.6.2 (Build 25G83)\n' +
+    '\t\tMAJOR_VERSION    : 26\n\t\tBUILD_NUMBER     : 2\n\n\t\t{GRAPHICS_APIS}\n\t\t\tMETAL_SUPPORTED       : YES\n\n\t{MACHINE}\n\t\tTOTAL_MEMORY : 51539607552\n\n' +
+    '\t\t{CPU}\n\t\t\tLOGICAL_CORE_COUNT: 18\n\t\t\tBRAND             : Apple M5 Pro\n\t\t\tVENDOR            : Apple\n\n\t\t{MONITORS}\n\t\t\t{MONITOR}\n' +
+    '\t\t\t\tREFRESH_RATE       : 120\n\n\t\t{GPUS}\n\t\t\t{GPU}\n\t\t\t\tDESCRIPTION : Apple M5 Pro\n\t\t\t\tVIDEO_MEMORY: 0\n\n\t\t\t\t{DRIVER}\n\t\t\t\t\tDATE   : {EMPTY}\n';
 const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t{MACHINE}\n\t\tTOTAL_MEMORY: 17179869184\n\t\t{CPU}\n\t\t\tVENDOR: GenuineIntel\n' +
     '\t\t\tLOGICAL_CORE_COUNT: 12\n\t\t}\n\t\t{GPUS}\n\t\t\t{GPU}\n\t\t\t\tNAME: AMD Radeon RX 6700 XT\n\t\t\t\tVIDEO_MEMORY: 12884901888\n\t\t\t}\n\t\t}\n\t}\n}\n';
 
@@ -95,6 +102,13 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('AMD families: Zen 4 from model 96, Zen 5, Zen / Zen 2', P._cpuGen('AMD64 Family 25 Model 97, AuthenticAMD') === 'AMD Zen 4' &&
         P._cpuGen('AMD64 Family 26 Model 68, AuthenticAMD') === 'AMD Zen 5' && P._cpuGen('AMD64 Family 23 Model 113, AuthenticAMD') === 'AMD Zen / Zen 2');
     ok('a GPU without a driver part is read up to the next label', P.parseComputerInfo('Video Card: AMD Radeon RX 580 Is Optimus: No CPU: x').gpu === 'AMD Radeon RX 580');
+    hw = P.parseComputerInfo(MAC_CI.replace(/\n/g, ' '));
+    ok('a Mac: Metal, macOS by its major version, and its build is no Windows build', hw.platform === 'metal' && hw.os === 'macOS 26' && hw.osBuild === undefined, JSON.stringify(hw));
+    ok('...the Apple GPU without the driver part, which names no driver', hw.gpu === 'Apple M5 Pro' && hw.gpuVendor === 'Apple' && hw.driver === undefined &&
+        hw.driverDate === undefined, JSON.stringify(hw));
+    ok('...no switchable graphics either way; an Apple CPU of the GPU\'s generation; memory', hw.hybrid === undefined && hw.cpuVendor === 'Apple' && hw.cpuGen === 'Apple M5' &&
+        hw.threads === 18 && hw.ghz === 2.4 && hw.ramGB === 48 && hw.freeGB === 24, JSON.stringify(hw));
+    ok('a PC whose driver part has no date keeps its driver', P.parseComputerInfo('Video Card: AMD Radeon RX 580 (Driver: 31.0.1, Released: -) Is Optimus: No').driver === '31.0.1');
     ok('no Computer Info, no hardware', P.parseComputerInfo('The undock button does nothing.') === null);
     ok('a description without the block lets another field that has it speak', P.parseComputerInfo(P._issueText({ description: 'plain', customfield_1: CI })).gpu === 'NVIDIA GeForce RTX 3060 Ti');
 
@@ -132,16 +146,21 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('PDMData: GPU, OS, CPU vendor, threads and memory', pdm && pdm.gpu === 'AMD Radeon RX 6700 XT' && pdm.gpuVendor === 'AMD' && pdm.os === 'Windows 10' && pdm.osBuild === 19045 &&
         pdm.cpuVendor === 'Intel' && pdm.threads === 12 && pdm.ramGB === 16, JSON.stringify(pdm));
 
+    const macPdm = P.readPdm(MAC_PDM);
+    ok('PDMData of a Mac: macOS by its major version, the Apple chip as GPU and CPU generation', macPdm && macPdm.os === 'macOS 26' && macPdm.osBuild === undefined &&
+        macPdm.gpu === 'Apple M5 Pro' && macPdm.gpuVendor === 'Apple' && macPdm.cpuVendor === 'Apple' && macPdm.cpuGen === 'Apple M5' && macPdm.threads === 18 && macPdm.ramGB === 48,
+        JSON.stringify(macPdm));
+
     // ================= reading a report's files =================
     let texts = [], bytes = [];
     let textAnswer = () => Promise.resolve(LOG_A), byteAnswer = () => Promise.resolve(zbuf);
     P._fetchText = (u) => { texts.push(u); return textAnswer(u); };
     P._fetchBytes = (u) => { bytes.push(u); return byteAnswer(u); };
     const att = (name, size) => ({ filename: name, size: size || 1000, content: 'https://jira/att/' + name });
-    let issue = { key: 'EBR-1', fields: { attachment: [att('other_log.txt', 3000), att('logs.txt', 2000), att('screenshot.png'), att('mods.zip', 100), att('igbr_123.zip', 5000)] } };
+    let issue = { key: 'EBR-1', fields: { attachment: [att('other_log.txt', 3000), att('logs.txt', 2000), att('screenshot.png'), att('mods.zip', 100), att('igbr.zip', 5000)] } };
     let rec = await P._readFiles(issue, null, true);
     ok('logs.txt is read first, the other log too', texts.join() === 'https://jira/att/logs.txt,https://jira/att/other_log.txt', texts.join());
-    ok('...the igbr zip is preferred over another zip', bytes.join() === 'https://jira/att/igbr_123.zip', bytes.join());
+    ok('...igbr.zip is read, the zip a player added is not', bytes.join() === 'https://jira/att/igbr.zip', bytes.join());
     ok('...the reading has the build, the exceptions, the crash history and the hardware', rec.logs && rec.hasLog && rec.build === 3569502 && rec.exc.length === 2 &&
         rec.zip && rec.wer && rec.crashes[0].module === 'nvwgf2umx.dll' && rec.dxHw && rec.pdmHw && rec.pdmHw.gpuVendor === 'AMD', JSON.stringify(rec).slice(0, 200));
     ok('...and it is cached for the report', metaSets.indexOf('rp:EBR-1') >= 0 && meta['rp:EBR-1'] && meta['rp:EBR-1'].v === P.V);
@@ -167,10 +186,19 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     rec = await P._readFiles({ key: 'EBR-2', fields: { attachment: [att('logs.txt', 99 * 1024 * 1024), att('igbr.zip', 99 * 1024 * 1024)] } }, null, true);
     ok('files over the size caps are skipped for good, not downloaded', texts.length === 0 && bytes.length === 0 && rec.logs === true && rec.zip === true && rec.skippedLogs && rec.skippedZip,
         JSON.stringify(rec));
+    texts = []; bytes = [];
+    rec = await P._readFiles({ key: 'EBR-5', fields: { attachment: [att('logs.txt'), att('mods.zip'), att('igbr_old.zip')] } }, null, true);
+    ok('a report without igbr.zip downloads no other zip', bytes.length === 0 && rec.zip === true && rec.hasZip === false, bytes.join());
     const zLog = zip([{ name: 'logs.txt', data: Buffer.from(LOG_A), method: 8 }]);
     byteAnswer = () => Promise.resolve(zLog);
     rec = await P._readFiles({ key: 'EBR-3', fields: { attachment: [att('igbr.zip')] } }, null, true);
     ok('a report with no log attached uses the log inside its zip', rec.hasLog === true && rec.build === 3569502 && rec.exc.length === 2, JSON.stringify(rec).slice(0, 150));
+    byteAnswer = () => Promise.resolve(zip([{ name: 'logs.txt', data: Buffer.from(LOG_A), method: 8 }, { name: 'PDMData.txt', data: Buffer.from(MAC_PDM), method: 8 },
+        { name: 'prefs.ini', data: Buffer.from('a=b'), method: 8 }]));
+    rec = await P._readFiles({ key: 'EBR-4', fields: { attachment: [att('igbr.zip')] } }, null, true);
+    const macView = P.view({ key: 'EBR-4', fields: { description: 'plain' } }, rec);
+    ok('a Mac\'s zip: its hardware from PDMData, its log, and no crash history to count', macView.hw && macView.hw.os === 'macOS 26' && macView.hwFrom === 'PDMData.txt' &&
+        macView.logRead === true && macView.build === 3569502 && macView.crashRead === false, JSON.stringify(macView));
     byteAnswer = () => Promise.resolve(zbuf);
 
     // ================= one report as the profile sees it =================
@@ -289,6 +317,12 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         made.push(j);
         return j;
     }
+    // The page: the floating panel first; the sidebar's own card further down.
+    let sideMode = false, groupEl = null, inserted = [], built = [];
+    const sideEl = { parentNode: { insertBefore: (n, ref) => { inserted.push(ref); groupEl = n; } }, nextSibling: 'BELOW-TRIAGE' };
+    global.document = { getElementById: (id) => (id === 'jita-side-group' ? (sideMode ? sideEl : null) : (id === P.GROUP_ID ? groupEl : null)) };
+    JiTA.ui.mode = () => (sideMode ? 'sidebar' : 'floating');
+    JiTA.ui._buildSideGroup = (o) => { built.push(o); return { id: o.id, style: {}, parentNode: { removeChild: () => { groupEl = null; } } }; };
     const box = El('<div id="jita-sd-profile"></div>');
     global.$ = (x) => (x === '#jita-sd-profile' ? box : El(x));
     JiTA.ui.currentKey = 'EDR-7';
@@ -301,6 +335,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('the section opens with how many reports there are and how many are read', box.hasClass('has-hits') && /^Attached reports: 30 \(latest 6\)/.test(txt) && /reading files, 2 left/.test(txt), txt.slice(0, 80));
     ok('...a pattern is a highlighted chip', made.some((m) => m.hasClass('strong') && /^GPU vendor: AMD 5\/6$/.test(m.e.txt)), made.filter((m) => m.hasClass('jp-chip')).map((m) => m.e.txt).join(' | '));
     ok('...so are the shared exception and the crash module', /Exception in 5\/6 logs: KeyError: 2/.test(txt) && /Crash in nvwgf2umx\.dll 5\/6/.test(txt), txt);
+    ok('...the outlier is listed in it, with why', /1 outlier: reports that do not fit the pattern/.test(txt) && /EBR-6GPU vendor NVIDIA, while 5 of 6 have AMD/.test(txt), txt);
     ok('...then builds, dates, reports after the fix, outliers and the way in', /builds 3560001 to 3560005/.test(txt) && /6 after the fix/.test(txt) && /1 outlier/.test(txt) &&
         made.some((m) => m.hasClass('jp-open') && typeof m.e.on.click === 'function'), txt);
     const two = [mk('EBR-1', { exc: [X] }), mk('EBR-2', { exc: [Y] })];
@@ -314,6 +349,42 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     JiTA.ui.currentKey = 'EDR-1';
     P._paint('EDR-7', st);
     ok('a profile for an issue no longer on screen is not painted', box.text() === '');
+    JiTA.ui.currentKey = 'EDR-7';
+    const many = [];
+    for (let i = 1; i <= 30; i++) { many.push(mk('EBR-' + i, { vendor: i > 24 ? 'NVIDIA' : 'AMD' })); }
+    P._paint('EDR-7', { key: 'EDR-7', total: 30, views: many, summary: P.summarise(many, null), pending: 0, done: true, zip: true });
+    ok('more outliers than the card lists are left to the full profile', made.filter((m) => m.hasClass('jp-out')).length >= P.SHOW_OUTLIERS &&
+        /and 1 more in the full profile/.test(box.text()), box.text().slice(-120));
+    ok('in the floating panel the profile stays a section of it: no card', built.length === 0 && groupEl === null);
+
+    // ================= the Defect Profile card =================
+    sideMode = true;
+    P._paint('EDR-7', { key: 'EDR-7', total: 0, views: [], summary: P.summarise([], null), pending: 0, done: true });
+    ok('in the sidebar a defect without reports gets no card', built.length === 0 && groupEl === null);
+    P._paint('EDR-7', st);
+    ok('in the sidebar the profile gets a card of its own, Defect Profile, right below the Triage Assistant', built.length === 1 && built[0].id === 'jita-profile-group' &&
+        built[0].title === 'Defect Profile' && built[0].body === '<div id="jita-sd-profile"></div>' && built[0].collapseKey === P.COLLAPSE_KEY &&
+        inserted.join() === 'BELOW-TRIAGE' && groupEl.style.display === '' && /^Attached reports: 30/.test(box.text()), JSON.stringify(built) + ' ' + inserted.join());
+    P._paint('EDR-7', st);
+    ok('...built once, however often it is painted', built.length === 1 && inserted.length === 1);
+    P._paint('EDR-7', { key: 'EDR-7', total: 0, views: [], summary: P.summarise([], null), pending: 0, done: true });
+    ok('...hidden while the defect has no reports', groupEl.style.display === 'none');
+    P.clear();
+    ok('leaving the defect takes the card away', groupEl === null && !box.hasClass('has-hits'));
+    P._last['EDR-7'] = st;
+    P.reensure();
+    ok('a card Jira wiped comes back at once, painted from the last state', built.length === 2 && groupEl && groupEl.style.display === '' && /^Attached reports: 30/.test(box.text()));
+    P.reensure();
+    ok('...and only while it is missing', built.length === 2);
+    groupEl = null;
+    P._last['EDR-7'] = { key: 'EDR-7', total: 0, views: [], summary: P.summarise([], null), pending: 0, done: true };
+    const realPaint = P._paint;
+    let painted = 0;
+    P._paint = function () { painted++; return realPaint.apply(P, arguments); };
+    P.reensure();
+    P._paint = realPaint;
+    ok('...a defect without reports gets none back, and is not even repainted', built.length === 2 && groupEl === null && painted === 0, painted);
+    sideMode = false;
 
     // ================= the full profile =================
     let overlay = null;
@@ -329,9 +400,18 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     // ================= wiring =================
     ok('renderReports draws the section on a defect', member('    renderReports: function (key, background) {').indexOf('JiTA.profile.renderSection(key, background);') >= 0);
     ok('the views that are not a defect\'s clear it', ['    render: function (key, background) {', '    renderReporterReports: function (key) {', '    renderSimilarReports: function (key, background) {', '    renderTrending: function (key, background) {']
-        .every((h) => member(h).indexOf("$('#jita-sd-profile').removeClass('has-hits').empty();") >= 0));
-    ok('both panel layouts have the section', member('    _sidebarBodyHtml: function () {').indexOf('<div id="jita-sd-profile"></div>') >= 0 &&
+        .every((h) => member(h).indexOf('JiTA.profile.clear();') >= 0));
+    ok('the profile left the Triage Assistant card; the floating panel keeps it as a section', member('    _sidebarBodyHtml: function () {').indexOf('jita-sd-profile') < 0 &&
         member('    _ensureFloating: function () {').indexOf('<div id="jita-sd-profile"></div>') >= 0);
+    const sbg = member('    _buildSideGroup: function (o) {');
+    ok('both cards come from one builder, which names, fills and remembers each by what it is given', sbg.indexOf('Triage Assistant') < 0 &&
+        sbg.indexOf('titleEl.textContent = o.title;') >= 0 && sbg.indexOf('.textContent = o.title;') !== sbg.lastIndexOf('.textContent = o.title;') &&
+        sbg.indexOf('freshBody.innerHTML = o.body;') >= 0 && sbg.indexOf('gmSet(o.collapseKey, isColl);') >= 0 && sbg.indexOf('gmGet(o.collapseKey, false)') >= 0 &&
+        member('    _ensureSidebar: function () {').indexOf("_buildSideGroup({ id: 'jita-side-group', title: 'Triage Assistant'") >= 0);
+    ok('the Triage Assistant card, rebuilt, keeps the profile card right below it', member('    _ensureSidebar: function () {').indexOf("group.parentNode.insertBefore(pg, group.nextSibling);") >= 0);
+    ok('the page observer puts a wiped card back', member('    _reensureFast: function () {').indexOf('JiTA.profile.reensure();') >= 0);
+    ok('switching to the floating panel, or turning the Triage Assistant off, takes the card too', member('    toggleStyle: function () {').indexOf('#jita-profile-group') >= 0 &&
+        member('    _ensurePanel: function () {').indexOf('#jita-profile-group') >= 0 && block('JiTA.menu = {', '\n};\n').indexOf("$('#jita-side-group, #jita-profile-group').remove();") >= 0);
     const menuSrc = block('JiTA.menu = {', '\n};\n');
     ok('Settings has the igbr.zip switch, on by default', menuSrc.indexOf('gmSet(JiTA.profile.ZIP_KEY, !JiTA.profile.zipOn());') >= 0 && P.zipOn() === true);
 

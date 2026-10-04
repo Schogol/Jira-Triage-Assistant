@@ -7,7 +7,15 @@ const H = 'profile-check.js';
 const muts = [
     // Computer Info
     [H, 'Windows 11 is not told from Windows 10', "        if (build >= 22000) { return 'Windows 11'; }\n", ''],
-    [H, 'the driver date mixes up month and day', "hw.driverDate = m[5] + '-' + P._p2(m[3]) + '-' + P._p2(m[4]);", "hw.driverDate = m[5] + '-' + P._p2(m[4]) + '-' + P._p2(m[3]);"],
+    [H, 'the driver date mixes up month and day', "hw.driverDate = rd[3] + '-' + P._p2(rd[1]) + '-' + P._p2(rd[2]);", "hw.driverDate = rd[3] + '-' + P._p2(rd[2]) + '-' + P._p2(rd[1]);"],
+    // a Mac
+    [H, 'a Mac is read as a Windows PC', "        var mac = /Trinity platform:\\s*metal\\b/i.test(t) || /\\bCPU:\\s*Apple\\b/i.test(t);", '        var mac = false;'],
+    [H, 'macOS loses its version', "return mv ? 'macOS ' + mv[1] : 'macOS';", "return 'macOS';"],
+    [H, 'a Mac\'s build counts as a Windows build', '            if (!mac) { hw.osBuild = +m[2]; }', '            hw.osBuild = +m[2];'],
+    [H, 'a driver part without a date loses the GPU name', String.raw`\(Driver:\s*([^,()]*?),\s*Released:\s*([^()]*?)\s*\)/i`, String.raw`\(Driver:\s*([^,()]*?),\s*Released:\s*(\d[^()]*?)\s*\)/i`],
+    [H, 'a Mac\'s 0.0.0.0 counts as a driver', '            if (/[1-9]/.test(m[2])) { hw.driver = m[2]; }', '            hw.driver = m[2];'],
+    [H, 'an Apple CPU gets no generation', "hw.cpuGen = (hw.cpuVendor === 'Apple') ? P._appleChip(hw.gpu) : P._cpuGen(m[1]);", 'hw.cpuGen = P._cpuGen(m[1]);'],
+    [H, 'a Mac\'s PDMData gives no macOS version', "hw.os = P._osName(String(os.MAJOR_VERSION || ''), null, true);", "hw.os = 'macOS';"],
     [H, 'Optimus is not switchable graphics', "hw.hybrid = !!((opt && /yes/i.test(opt[1])) || (sw && /yes/i.test(sw[1])));", "hw.hybrid = !!(sw && /yes/i.test(sw[1]));"],
     [H, 'Raptor Lake desktop parts are missed', '(mod === 183 || mod === 186 || mod === 191)', '(mod === 186 || mod === 191)'],
     [H, 'an Intel CPU the table does not name is not counted', "            return 'Intel (other)';", '            return null;'],
@@ -27,7 +35,7 @@ const muts = [
     [H, 'PDMData memory is read in the wrong unit', 'hw.ramGB = Math.round(mem / 1073741824);', 'hw.ramGB = Math.round(mem / 1048576);'],
     // reading a report's files
     [H, 'logs.txt is not read first', "            logs.sort(function (a, b) { return ((/^logs\\.txt$/i.test(b.filename) ? 1 : 0) - (/^logs\\.txt$/i.test(a.filename) ? 1 : 0)) || ((a.size || 0) - (b.size || 0)); });\n", ''],
-    [H, 'any zip is taken, not the igbr one', "                zs.sort(function (a, b) { return (/igbr/i.test(b.filename) ? 1 : 0) - (/igbr/i.test(a.filename) ? 1 : 0); });\n", ''],
+    [H, 'a zip a player added is read as the igbr.zip', "return /^igbr\\.zip$/i.test(a.filename || '') && a.content;", "return /\\.zip$/i.test(a.filename || '') && a.content;"],
     [H, 'a failed log download is never read again', '                    if (got.some(function (g) { return g.failed; })) { return; }   // read again next time\n', ''],
     [H, 'a failed zip download is never read again', '}, function () { /* the download failed: read it again next time */ });', '}, function () { rec.zip = true; });'],
     [H, 'a huge zip is downloaded', 'if (z.size > P.MAX_ZIP_BYTES) {', 'if (false) {'],
@@ -50,7 +58,19 @@ const muts = [
     // the panel and Settings
     [H, 'a value no pattern holds is shown as one', "            if (!d.dominant || d.id === 'lang') { return; }", "            if (d.id === 'lang') { return; }"],
     [H, 'a shared exception below the pattern is highlighted', "sm.domExc ? 'strong' : ''", "'strong'"],
-    [H, 'a profile is painted under another issue', '        if (!$b.length || JiTA.ui.currentKey !== key) { return; }', '        if (!$b.length) { return; }'],
+    [H, 'a profile is painted under another issue', '        if (JiTA.ui.currentKey !== key) { return; }\n        var $b = P._box(!!s.total);', '        var $b = P._box(!!s.total);'],
+    [H, 'the outliers are not listed in the card', '            sm.outliers.slice(0, P.SHOW_OUTLIERS).forEach(function (o) {', '            [].forEach(function (o) {'],
+    // the Defect Profile card
+    [H, 'the profile gets no card of its own', "        if (create && side && side.parentNode && !document.getElementById(P.GROUP_ID)) {", '        if (false) {'],
+    [H, 'a second card is built on every paint', "        if (create && side && side.parentNode && !document.getElementById(P.GROUP_ID)) {", "        if (create && side && side.parentNode) {"],
+    [H, 'the card is built for a defect without reports', '        var $b = P._box(!!s.total);', '        var $b = P._box(true);'],
+    [H, 'the card stays up when the reports are gone', "        if (!s.total) { $b.removeClass('has-hits'); P._show(false); return; }", "        if (!s.total) { $b.removeClass('has-hits'); return; }"],
+    [H, 'leaving the defect leaves the card', '        if (g && g.parentNode) { g.parentNode.removeChild(g); }\n        $(\'#jita-sd-profile\')', "        $('#jita-sd-profile')"],
+    [H, 'a card Jira wiped stays away', '        P._paint(key, s);\n    },\n\n    renderSection', '    },\n\n    renderSection'],
+    [H, 'the card comes back for a defect without reports', "        if (!s || !s.total || document.getElementById(P.GROUP_ID)", "        if (!s || document.getElementById(P.GROUP_ID)"],
+    [H, 'the observer never puts the card back', '            JiTA.profile.reensure();   // the Defect Profile card, which Jira can wipe on its own\n', ''],
+    [H, 'the profile stays in the Triage Assistant card', "               '<div id=\"jita-sd-exccluster\"></div>' +\n               '<ul id=\"jita-sd-list\"></ul>';", "               '<div id=\"jita-sd-exccluster\"></div>' +\n               '<div id=\"jita-sd-profile\"></div>' +\n               '<ul id=\"jita-sd-list\"></ul>';"],
+    [H, 'the cards share their collapse state', '                gmSet(o.collapseKey, isColl);', '                gmSet(JiTA.ui.SIDE_COLLAPSE_KEY, isColl);'],
     [H, 'the defect page never draws the section', '        JiTA.profile.renderSection(key, background);        // what the bug reports attached to this defect have in common\n', ''],
     [H, 'the zip is off by default', 'zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, true); },', 'zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, false); },']
 ];
