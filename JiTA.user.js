@@ -13637,7 +13637,7 @@ JiTA.trend = {
  * pattern is listed as an outlier, with why - often a report attached to the wrong defect.
  */
 JiTA.profile = {
-    V: 2,                          // shape of a cached report reading: bump to read every report's files again
+    V: 3,                          // shape of a cached report reading: bump to read every report's files again
     CACHE_PREFIX: 'rp:',           // meta store key per report
     ZIP_KEY: 'jitaProfileZip',     // Settings: read each report's igbr.zip (on by default)
     MAX_REPORTS: 25,               // the latest this many reports are read
@@ -13781,6 +13781,26 @@ JiTA.profile = {
         });
         return out;
     },
+    // A signature ("<message>|file.py:func>file.py:func") as its message and its frames, innermost last. Frames hold no
+    // "|", so the message ends at the last one; a function named "<module>" holds a ">", so a piece without ":" belongs
+    // to the frame before it.
+    _sigParts: function (sig) {
+        var at = String(sig).lastIndexOf('|'), frames = [];
+        String(sig).slice(at + 1).split('>').forEach(function (p) {
+            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }
+        });
+        return { msg: at < 0 ? String(sig) : String(sig).slice(0, at), frames: frames };
+    },
+    // Short labels for call stacks that end alike: where each one differs, up to the frames they all share.
+    _pathLabels: function (chains) {
+        var cs = 0, min = Math.min.apply(null, chains.map(function (c) { return c.length; }));
+        while (cs < min && chains.every(function (c) { return c[c.length - 1 - cs] === chains[0][chains[0].length - 1 - cs]; })) { cs++; }
+        return chains.map(function (c) {
+            var own = c.slice(0, c.length - cs);
+            if (!own.length) { return c.slice(0, 1).join('') + (c.length > 1 ? ' > …' : ''); }   // the shortest: it starts at the shared frames
+            return (own.length > 3 ? '… > ' : '') + own.slice(-3).join(' > ') + (cs ? ' > …' : '');
+        });
+    },
 
     // What a report's dxdiag.txt adds: the EVE client's crashes in the Windows crash history ([{ module, code }]), how
     // many system crashes it lists, and the hardware, for a report without Computer Info. `wer` is false when the file
@@ -13820,8 +13840,9 @@ JiTA.profile = {
     // The named entries of a zip (an ArrayBuffer), found by file name without folder, case-insensitive: resolves
     // { name: text }. A small reader on the browser's own DecompressionStream, so no library is loaded: stored and
     // deflated entries only (what zip tools write); zip64 and encrypted entries are skipped, and so is an entry that
-    // unpacks to more than `maxBytes` (when given), as the zip says before anything is unpacked.
-    unzip: function (buf, wanted, maxBytes) {
+    // unpacks to more than `maxBytes` (when given), as the zip says before anything is unpacked. `hint` is the report's
+    // client language (an OCR code), for text in Windows' own code page (see _decodeLog).
+    unzip: function (buf, wanted, maxBytes, hint) {
         var P = JiTA.profile, u8 = new Uint8Array(buf), dv = new DataView(buf), want = {}, taken = {}, jobs = [], eocd = -1, i;
         (wanted || []).forEach(function (w) { want[String(w).toLowerCase()] = true; });
         for (i = u8.length - 22; i >= 0 && i >= u8.length - 65557; i--) { if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; } }
@@ -13829,7 +13850,7 @@ JiTA.profile = {
         var count = dv.getUint16(eocd + 10, true), p = dv.getUint32(eocd + 16, true);
         function take(base, method, data) {
             var bytes = (method === 0) ? Promise.resolve(data) : P._inflate(data);
-            jobs.push(bytes.then(function (b) { return [base, P._decode(b)]; }, function () { return null; }));
+            jobs.push(bytes.then(function (b) { return [base, P._decode(b, hint)]; }, function () { return null; }));
         }
         for (var n = 0; n < count && p + 46 <= u8.length; n++) {
             if (dv.getUint32(p, true) !== 0x02014b50) { break; }
@@ -13857,14 +13878,56 @@ JiTA.profile = {
         return new Response(stream).arrayBuffer().then(function (b) { return new Uint8Array(b); });
     },
     // Text in UTF-16 when it says so (a byte-order mark, or every other byte zero, which is how dxdiag can write it),
-    // else UTF-8.
-    _decode: function (b) {
+    // else UTF-8 with lines in Windows' own code page read as such (_decodeLog).
+    _decode: function (b, hint) {
         if (b.length >= 2 && b[0] === 0xFF && b[1] === 0xFE) { return new TextDecoder('utf-16le').decode(b.subarray(2)); }
         if (b.length >= 2 && b[0] === 0xFE && b[1] === 0xFF) { return new TextDecoder('utf-16be').decode(b.subarray(2)); }
         var zeros = 0, n = Math.min(b.length, 400);
         for (var i = 1; i < n; i += 2) { if (b[i] === 0) { zeros++; } }
         if (n > 20 && zeros > n / 4) { return new TextDecoder('utf-16le').decode(b); }
-        return new TextDecoder('utf-8').decode(b);
+        return JiTA.profile._decodeLog(b, hint);
+    },
+    // A log as text. The client writes UTF-8, but Windows hands it some messages in the PC's own code page - the
+    // socket errors, "[Errno 10060] Попытка установить соединение…" on a Russian Windows - and the client logs those
+    // bytes as they are. Read as UTF-8 they come out as �, and the same error on two PCs reads differently. So a line
+    // that is not valid UTF-8 is read in that code page, and every other line stays UTF-8.
+    _decodeLog: function (b, hint) {
+        var P = JiTA.profile, strict = new TextDecoder('utf-8', { fatal: true });
+        try { return strict.decode(b); } catch (e) { /* some lines are in another code page: found below */ }
+        var bad = [], i = 0, n = b.length;
+        while (i < n) {
+            var j = b.indexOf(10, i), end = j < 0 ? n : j + 1, k = i;
+            while (k < end && b[k] < 0x80) { k++; }
+            if (k < end) { try { strict.decode(b.subarray(i, end)); } catch (e2) { bad.push(i, end); } }
+            i = end;
+        }
+        var lax = new TextDecoder('utf-8'), legacy, out = [], at = 0;
+        try { legacy = new TextDecoder(P._codepage(b, bad, hint)); } catch (e3) { legacy = lax; }
+        for (var x = 0; x < bad.length; x += 2) {
+            if (bad[x] > at) { out.push(lax.decode(b.subarray(at, bad[x]))); }
+            out.push(legacy.decode(b.subarray(bad[x], bad[x + 1])));
+            at = bad[x + 1];
+        }
+        if (at < n) { out.push(lax.decode(b.subarray(at))); }
+        return out.join('');
+    },
+    // The code page of the lines `bad` ([start, end, start, end...] in `b`): the report's client language says it for
+    // the scripts that need one of their own; otherwise the bytes do. Cyrillic fills whole words with non-ASCII bytes,
+    // the Western languages an accented letter here and there.
+    CODEPAGES: { rus: 'windows-1251', chi_sim: 'gbk', jpn: 'shift_jis', kor: 'euc-kr' },
+    _codepage: function (b, bad, hint) {
+        var P = JiTA.profile;
+        if (P.CODEPAGES[hint]) { return P.CODEPAGES[hint]; }
+        var hi = 0, runs = 0;
+        for (var x = 0; x < bad.length && x < 2000; x += 2) {
+            var prev = false;
+            for (var k = bad[x]; k < bad[x + 1]; k++) {
+                var h = b[k] >= 0x80;
+                if (h) { hi++; if (!prev) { runs++; } }
+                prev = h;
+            }
+        }
+        return (runs && hi / runs >= 3) ? 'windows-1251' : 'windows-1252';
     },
     _fetchBytes: function (url) {
         return new Promise(function (resolve, reject) {
@@ -13877,13 +13940,17 @@ JiTA.profile = {
             });
         });
     },
-    _fetchText: function (url) { return JiTA.triage._fetchText(url); },
+    // A log, fetched as bytes so _decodeLog can read lines in Windows' own code page.
+    _fetchLog: function (url, hint) {
+        return JiTA.profile._fetchBytes(url).then(function (buf) { return JiTA.profile._decodeLog(new Uint8Array(buf), hint); });
+    },
 
     // Read a report's files and cache what they said. `rec` is its cached reading, if any: a part it already has is
     // not read again. A download that fails leaves its part unread, so the next visit tries again; a file over its
     // size cap is skipped for good.
     _readFiles: function (issue, rec, zip) {
-        var P = JiTA.profile, att = ((issue.fields || {}).attachment) || [], jobs = Promise.resolve();
+        var P = JiTA.profile, f = issue.fields || {}, att = f.attachment || [], jobs = Promise.resolve();
+        var hint = (JiTA.ocr._langFromLabels(f.labels || []) || {}).code;   // the client language, for Windows' own code page
         rec = rec ? JSON.parse(JSON.stringify(rec)) : { v: P.V, key: issue.key, logs: false, zip: false };
         // What one log says, added to `into`: the build, if none is known yet, and the exceptions it does not have yet.
         function useLog(into, t) {
@@ -13907,7 +13974,7 @@ JiTA.profile = {
                     if (got.hasLog) { rec.exc = got.exc; rec.build = got.build; rec.version = got.version; rec.hasLog = true; }
                     return Promise.resolve();
                 }
-                return P._fetchText(small[li++].content).then(function (t) { useLog(got, String(t || '')); return nextLog(); },
+                return P._fetchLog(small[li++].content, hint).then(function (t) { useLog(got, String(t || '')); return nextLog(); },
                     function () { /* a log failed: all of them are read again next time */ });
             })();
         }
@@ -13921,7 +13988,7 @@ JiTA.profile = {
                 var want = ['dxdiag.txt', 'pdmdata.txt'];
                 if (rec.logs && !rec.hasLog) { want.push('logs.txt'); }
                 return P._fetchBytes(z.content).then(function (buf) {
-                    return P.unzip(buf, want, P.MAX_LOG_BYTES);
+                    return P.unzip(buf, want, P.MAX_LOG_BYTES, hint);
                 }).then(function (files) {
                     rec.zip = true; rec.hasZip = true;
                     if (files['dxdiag.txt']) {
@@ -13989,6 +14056,22 @@ JiTA.profile = {
         out.exc = Object.keys(sigs).map(function (k) { return sigs[k]; }).filter(function (s) { return s.count >= 2; })
             .sort(function (a, b) { return b.count - a.count || (a.msg < b.msg ? -1 : 1); });
         out.domExc = (out.exc[0] && withLog.length >= P.MIN_N && out.exc[0].count / withLog.length >= P.DOMINANT) ? out.exc[0] : null;
+        // The same message reached through different call stacks is one row of the full profile, counted by the reports
+        // that have it either way, with its stacks below it. Shown side by side they read as the same row twice.
+        var msgs = {};
+        withLog.forEach(function (v) {
+            var mine = {};
+            v.exc.forEach(function (e) {
+                var k = P._sigParts(e.sig).msg, g = msgs[k] || (msgs[k] = { key: k, msg: e.msg, count: 0, paths: {} });
+                if (!mine[k]) { mine[k] = true; g.count++; }
+                (g.paths[e.sig] = g.paths[e.sig] || { sig: e.sig, count: 0 }).count++;
+            });
+        });
+        out.excGroups = Object.keys(msgs).map(function (k) {
+            var g = msgs[k];
+            g.paths = Object.keys(g.paths).map(function (s) { return g.paths[s]; }).sort(function (a, b) { return b.count - a.count || (a.sig < b.sig ? -1 : 1); });
+            return g;
+        }).filter(function (g) { return g.count >= 2; }).sort(function (a, b) { return b.count - a.count || (a.msg < b.msg ? -1 : 1); });
         var withWer = views.filter(function (v) { return v.crashRead === true; }), mods = {};
         withWer.forEach(function (v) {
             var own = {};
@@ -14005,7 +14088,8 @@ JiTA.profile = {
                 if (!d.dominant || !d.outlier || x == null || x === '' || x === d.dominant) { return; }
                 why.push(d.label + ' ' + x + ', while ' + d.domCount + ' of ' + d.known + ' have ' + d.dominant);
             });
-            if (out.domExc && v.logRead === true && !v.exc.some(function (e) { return e.sig === out.domExc.sig; })) {
+            // The same message through another call stack is the same error here, not an outlier.
+            if (out.domExc && v.logRead === true && !v.exc.some(function (e) { return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })) {
                 why.push('its log lacks the exception ' + out.domExc.count + ' of ' + out.withLog + ' logs share');
             }
             if (out.domCrash && v.crashRead === true && !v.crashes.some(function (c) { return c.module === out.domCrash.module; })) {
@@ -14206,12 +14290,22 @@ JiTA.profile = {
         if (!sm.dims.length) { $('<div class="jpv-none"></div>').text('No report has Computer Info, dxdiag.txt or PDMData.txt to read.').appendTo($b); }
 
         sect('Exceptions shared by 2 or more logs (' + sm.withLog + ' logs read)');
-        sm.exc.slice(0, 15).forEach(function (x) {
+        var domSig = sm.domExc && sm.domExc.sig;
+        sm.excGroups.slice(0, 15).forEach(function (g) {
             var $r = $('<div class="jpv-row"></div>').appendTo($b);
-            $('<span class="jpv-count"></span>').toggleClass('dom', sm.domExc === x).text(x.count + '/' + sm.withLog).appendTo($r);
-            $('<span class="jpv-msg"></span>').text(x.msg || x.sig).attr('title', x.sig).appendTo($r);
+            $('<span class="jpv-count"></span>').toggleClass('dom', g.paths.some(function (p) { return p.sig === domSig; })).text(g.count + '/' + sm.withLog).appendTo($r);
+            $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', g.paths.map(function (p) { return p.sig; }).join('\n')).appendTo($r);
+            if (g.paths.length < 2) { return; }
+            // Its call stacks, each by where it differs from the others.
+            var labels = P._pathLabels(g.paths.map(function (p) { return P._sigParts(p.sig).frames; }));
+            g.paths.slice(0, 5).forEach(function (p, i) {
+                var $s = $('<div class="jpv-row jpv-path"></div>').appendTo($b);
+                $('<span class="jpv-count"></span>').toggleClass('dom', p.sig === domSig).text(p.count + '/' + sm.withLog).appendTo($s);
+                $('<span class="jpv-msg"></span>').text('via ' + labels[i]).attr('title', p.sig).appendTo($s);
+            });
+            if (g.paths.length > 5) { $('<div class="jpv-row jpv-path"></div>').text('and ' + (g.paths.length - 5) + ' more call stacks').appendTo($b); }
         });
-        if (!sm.exc.length) { $('<div class="jpv-none"></div>').text('No exception appears in more than one log.').appendTo($b); }
+        if (!sm.excGroups.length) { $('<div class="jpv-none"></div>').text('No exception appears in more than one log.').appendTo($b); }
 
         sect('EVE client crashes in the crash histories (' + sm.withWer + ' read)');
         sm.crashes.slice(0, 15).forEach(function (x) {
@@ -14262,6 +14356,9 @@ JiTA.profile = {
                 '.jita-profile-view .jpv-count { flex: 0 0 auto; background: #2c333a; color: #cfd6dd; border-radius: 8px; padding: 0 7px; }' +
                 '.jita-profile-view .jpv-msg { color: #e6e6e6; overflow-wrap: anywhere; }' +
                 '.jita-profile-view .jpv-key { flex: 0 0 90px; color: #4c9aff; font-weight: 700; text-decoration: none; }' +
+                '.jita-profile-view .jpv-path { padding: 2px 0 2px 28px; border-bottom: none; font-size: 11px; color: #7a8694; }' +
+                '.jita-profile-view .jpv-path .jpv-count { font-size: 10px; }' +
+                '.jita-profile-view .jpv-path .jpv-msg { color: #9aa6b2; font-family: Consolas, "Courier New", monospace; }' +
                 '.jita-profile-view .jpv-none { color: #7a8694; font-size: 12px; padding: 4px 0; }' +
                 '.jita-profile-view .jpv-table { border-collapse: collapse; width: 100%; font-size: 11px; }' +
                 '.jita-profile-view .jpv-table th { text-align: left; color: #7a8694; font-weight: 600; padding: 4px 6px; border-bottom: 1px solid #3a434d; }' +

@@ -154,9 +154,32 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         JSON.stringify(macPdm));
 
     // ================= reading a report's files =================
-    let texts = [], bytes = [];
+    // ================= logs in Windows' own code page =================
+    // cp1251 by hand: А..я are 0xC0..0xFF. A Russian Windows writes its socket errors so, inside a UTF-8 log.
+    const cp1251 = (s) => Buffer.from(Array.from(s).map((ch) => { const c = ch.charCodeAt(0); return c >= 0x410 && c <= 0x44F ? c - 0x410 + 0xC0 : c; }));
+    const RU = 'Попытка установить соединение была безуспешной';
+    const mixed = Buffer.concat([Buffer.from('05:05:04\t::General\tnotice\tEVE Client version 24.01 build 3503375 started\n'),
+        Buffer.from('05:05:05\tchat\terror\terror: [Errno 10060] '), cp1251(RU), Buffer.from(": 'connect operation system fail'\n"),
+        Buffer.from('05:05:06\tchat\tnotice\tПилот Иванов вошёл в канал\n', 'utf8')]);
+    let dec = P._decodeLog(Uint8Array.from(mixed));
+    ok('a line in Windows\' Cyrillic code page reads as Cyrillic, with no hint', dec.indexOf('[Errno 10060] ' + RU + ": 'connect") >= 0 && dec.indexOf('�') < 0, dec.split('\n')[1]);
+    ok('...while the UTF-8 lines around it stay UTF-8, Cyrillic included', dec.indexOf('EVE Client version 24.01 build 3503375') >= 0 && dec.indexOf('Пилот Иванов вошёл в канал') >= 0, dec);
+    const fr = Buffer.concat([Buffer.from('a\tb\terror\terror: [Errno 10061] Aucune connexion n\'a pu '), Buffer.from([0xEA]), Buffer.from('tre '), Buffer.from([0xE9]), Buffer.from('tablie\n')]);
+    ok('...a Western one reads as Western', P._decodeLog(Uint8Array.from(fr)).indexOf('Aucune connexion n\'a pu être établie') >= 0, P._decodeLog(Uint8Array.from(fr)));
+    const zh = Buffer.concat([Buffer.from('x\ty\terror\terror: [Errno 10060] '), Buffer.from([0xC1, 0xAC, 0xBD, 0xD3]), Buffer.from('\n')]);
+    ok('...and one in a Chinese client\'s code page by its language label', P._decodeLog(Uint8Array.from(zh), 'chi_sim').indexOf('[Errno 10060] 连接') >= 0, P._decodeLog(Uint8Array.from(zh), 'chi_sim'));
+    ok('a Russian client\'s label settles the code page; no label, the bytes do', P._codepage(Uint8Array.from(fr), [0, fr.length], 'rus') === 'windows-1251' &&
+        P._codepage(Uint8Array.from(fr), [0, fr.length]) === 'windows-1252' && P._codepage(Uint8Array.from(mixed), [0, mixed.length]) === 'windows-1251');
+    ok('a log that is UTF-8 throughout is read as it is', P._decodeLog(Uint8Array.from(Buffer.from(LOG_A + '\nПилот', 'utf8'))) === LOG_A + '\nПилот');
+    P._fetchBytes = () => Promise.resolve(Uint8Array.from(mixed).buffer);
+    dec = await P._fetchLog('https://jira/att/logs.txt');
+    ok('a log is fetched as bytes and read so', dec.indexOf(RU) >= 0, dec);
+    files = await P.unzip(zip([{ name: 'logs.txt', data: zh, method: 8 }]), ['logs.txt'], 0, 'chi_sim');
+    ok('...so is the log inside the zip, by the same language label', files['logs.txt'].indexOf('连接') >= 0, files['logs.txt']);
+
+    let texts = [], bytes = [], hints = [];
     let textAnswer = () => Promise.resolve(LOG_A), byteAnswer = () => Promise.resolve(zbuf);
-    P._fetchText = (u) => { texts.push(u); return textAnswer(u); };
+    P._fetchLog = (u, h) => { texts.push(u); hints.push(h); return textAnswer(u); };
     P._fetchBytes = (u) => { bytes.push(u); return byteAnswer(u); };
     const att = (name, size) => ({ filename: name, size: size || 1000, content: 'https://jira/att/' + name });
     let issue = { key: 'EBR-1', fields: { attachment: [att('other_log.txt', 3000), att('logs.txt', 2000), att('screenshot.png'), att('mods.zip', 100), att('igbr.zip', 5000)] } };
@@ -166,6 +189,9 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('...the reading has the build, the exceptions, the crash history and the hardware', rec.logs && rec.hasLog && rec.build === 3569502 && rec.exc.length === 2 &&
         rec.zip && rec.wer && rec.crashes[0].module === 'nvwgf2umx.dll' && rec.dxHw && rec.pdmHw && rec.pdmHw.gpuVendor === 'AMD', JSON.stringify(rec).slice(0, 200));
     ok('...and it is cached for the report', metaSets.indexOf('rp:EBR-1') >= 0 && meta['rp:EBR-1'] && meta['rp:EBR-1'].v === P.V);
+    hints = [];
+    await P._readFiles({ key: 'EBR-11', fields: { labels: ['Russian'], attachment: [att('logs.txt')] } }, null, false);
+    ok('the report\'s client language goes with its logs, for their code page', hints.join() === 'rus', hints.join());
 
     texts = []; bytes = [];
     rec = await P._readFiles(issue, null, false);
@@ -209,6 +235,10 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('...while one with its own log leaves the zip\'s packed; every entry is capped at ' + (P.MAX_LOG_BYTES / 1048576) + ' MB unpacked',
         unzipped.join(' / ') === 'dxdiag.txt,pdmdata.txt,logs.txt max ' + P.MAX_LOG_BYTES + ' / dxdiag.txt,pdmdata.txt max ' + P.MAX_LOG_BYTES, unzipped.join(' / '));
     P.unzip = realUnzip;
+    const gbkParts = exBlock('KeyError: @@', ['ui/foo.py(1) OnClick', 'ui/bar.py(2) Load']).split('@@');
+    byteAnswer = () => Promise.resolve(zip([{ name: 'logs.txt', data: Buffer.concat([Buffer.from(gbkParts[0]), Buffer.from([0xC1, 0xAC, 0xBD, 0xD3]), Buffer.from(gbkParts[1])]), method: 8 }]));
+    rec = await P._readFiles({ key: 'EBR-12', fields: { labels: ['Chinese'], attachment: [att('igbr.zip')] } }, null, true);
+    ok('the log inside the zip is read in the code page of the report\'s client language', rec.exc && rec.exc[0] && rec.exc[0].msg === 'KeyError: 连接', JSON.stringify(rec.exc));
     byteAnswer = () => Promise.resolve(zip([{ name: 'logs.txt', data: Buffer.from(LOG_A), method: 8 }, { name: 'PDMData.txt', data: Buffer.from(MAC_PDM), method: 8 },
         { name: 'prefs.ini', data: Buffer.from('a=b'), method: 8 }]));
     rec = await P._readFiles({ key: 'EBR-4', fields: { attachment: [att('igbr.zip')] } }, null, true);
@@ -248,6 +278,18 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     sm = P.summarise(views.slice(0, 4).concat([views[4]]).filter((x, i) => i !== 0), null);
     gv = sm.dims.filter((d) => d.id === 'gpuVendor')[0];
     ok('fewer than ' + P.MIN_N + ' reports make no pattern and no outlier', gv.known === 4 && !gv.dominant && !sm.domExc && sm.outliers.length === 0 && sm.afterFix === 0, JSON.stringify(gv));
+    // the same message through two call stacks
+    const A1 = { sig: 'runtimeerror: failed|a.py:run>b.py:<module>>c.py:find', msg: 'RuntimeError: failed' }, A2 = { sig: 'runtimeerror: failed|z.py:other>c.py:find', msg: 'RuntimeError: failed' };
+    ok('a signature parts into its message and its frames, "<module>" included', JSON.stringify(P._sigParts(A1.sig)) ===
+        JSON.stringify({ msg: 'runtimeerror: failed', frames: ['a.py:run', 'b.py:<module>', 'c.py:find'] }), JSON.stringify(P._sigParts(A1.sig)));
+    ok('call stacks are labelled by where they differ, up to the frames they share', P._pathLabels([P._sigParts(A1.sig).frames, P._sigParts(A2.sig).frames]).join(' | ') ===
+        'a.py:run > b.py:<module> > … | z.py:other > …', P._pathLabels([P._sigParts(A1.sig).frames, P._sigParts(A2.sig).frames]).join(' | '));
+    const grouped = [1, 2, 3, 4].map((i) => mk('EBR-' + i, { exc: [A1] })).concat([mk('EBR-5', { exc: [A2] })]);
+    sm = P.summarise(grouped, null);
+    ok('the same message by two call stacks is one row, each report counted once, its stacks below it', sm.excGroups.length === 1 && sm.excGroups[0].count === 5 &&
+        sm.excGroups[0].msg === 'RuntimeError: failed' && sm.excGroups[0].paths.map((p) => p.count).join() === '4,1', JSON.stringify(sm.excGroups));
+    ok('...and the report that reaches it the other way is no outlier', sm.domExc && sm.domExc.sig === A1.sig && sm.outliers.length === 0, JSON.stringify(sm.outliers));
+    const groupedState = { key: 'EDR-8', total: 5, views: grouped, summary: sm, pending: 0, done: true, zip: true };
     views = [1, 2, 3, 4, 5].map((i) => mk('EBR-' + i, { crashRead: true, crashes: i === 5 ? [{ module: 'd3d11.dll', code: 'X' }] : [{ module: 'nvwgf2umx.dll', code: 'ACCESS_VIOLATION' }, { module: 'nvwgf2umx.dll', code: 'ACCESS_VIOLATION' }] }))
         .concat([mk('EBR-6', { crashRead: true, crashes: [] }), mk('EBR-7', { crashRead: null }), mk('EBR-8', { crashRead: false })]);
     sm = P.summarise(views, null);
@@ -421,6 +463,11 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('the full profile opens', !threw && overlay && overlay.hasClass('jita-profile-view'), String(threw && threw.stack));
     ok('...with every section, the outlier and its reason, and a row per report', /Hardware and language/.test(otxt) && /Exceptions shared by 2 or more logs/.test(otxt) &&
         /EVE client crashes/.test(otxt) && /EBR-6/.test(otxt) && /GPU vendor NVIDIA, while 5 of 6 have AMD/.test(otxt) && /no crash in nvwgf2umx\.dll/.test(otxt), otxt.slice(0, 300));
+    P._last['EDR-8'] = groupedState;
+    P.openView('EDR-8');
+    const gtxt = overlay.text();
+    ok('...a message reached two ways is one row, with its call stacks below it', (gtxt.match(/RuntimeError: failed/g) || []).length === 1 && /5\/5RuntimeError: failed/.test(gtxt) &&
+        /4\/5via a\.py:run > b\.py:<module> > …/.test(gtxt) && /1\/5via z\.py:other > …/.test(gtxt), gtxt.slice(0, 400));
 
     // ================= wiring =================
     ok('renderReports draws the section on a defect', member('    renderReports: function (key, background) {').indexOf('JiTA.profile.renderSection(key, background);') >= 0);
