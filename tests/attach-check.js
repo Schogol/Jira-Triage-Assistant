@@ -62,7 +62,8 @@ global.JiTA = {
     HOST: 'https://x.atlassian.net',
     link: { dupInfo: () => { dupInfos++; return Promise.resolve({}); }, currentUser: () => Promise.resolve('me-id') },
     ui: {},
-    db: {}, rank: {}, trend: { warm() {} }, sync: { _ebrRemoved() {} }, util: { fmtDate: (s) => s }
+    db: {}, rank: {}, trend: { warm() {} }, sync: { _ebrRemoved() {} }, util: { fmtDate: (s) => s },
+    profile: { renderSection() {} }   // profile-check.js covers the defect profile
 };
 JiTA.link.attachDuplicate = eval('({' + slice('    attachDuplicate: function (ebrKey, otherKey, statusName, preferredResolution, assigneeAccountId) {') + '})').attachDuplicate;
 const realAttach = JiTA.link.attachDuplicate;
