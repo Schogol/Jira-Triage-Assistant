@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.41.0
+// @version     3.42.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -8809,6 +8809,14 @@ JiTA.menu = {
   border: 1px solid #3a434d; border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.55); font-size: 13px; }\
 #jita-menu .jita-menu-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #282d33; border-radius: 8px 8px 0 0; position: sticky; top: 0; z-index: 2; }\
 #jita-menu .jita-menu-head h2 { margin: 0; font-size: 14px; font-weight: 700; flex: 1; color: #f2f2f4; }\
+#jita-menu.jita-settings-view { width: 420px; }\
+#jita-menu .jita-menu-top { position: sticky; top: 0; z-index: 2; background: #282d33; border-radius: 8px 8px 0 0; }\
+#jita-menu .jita-menu-tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid #3a434d; }\
+#jita-menu .jita-menu-tab { background: transparent; color: #9aa6b2; border: none; border-bottom: 2px solid transparent; padding: 6px 9px 7px; cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }\
+#jita-menu .jita-menu-tab:hover { color: #e6e6e6; }\
+#jita-menu .jita-menu-tab.on { color: #e6e6e6; border-bottom-color: #4c9aff; font-weight: 700; }\
+#jita-menu .jita-menu-pane > .jita-menu-sect:first-child { padding-top: 6px; }\
+#jita-menu .jita-menu-pane > .jita-menu-sect:first-child > h3:first-child { display: none; }\
 #jita-menu .jita-menu-x { cursor: pointer; font-weight: 700; font-size: 18px; line-height: 1; padding: 0 4px; color: #9aa6b2; }\
 #jita-menu .jita-menu-x:hover { color: #fff; }\
 #jita-menu .jita-menu-sect { padding: 4px 14px 12px; }\
@@ -8933,9 +8941,22 @@ JiTA.menu = {
         if (!$p.length) { return; }
         $p.empty();
 
+        // The title and the tab bar stay at the top while a long tab scrolls under them.
+        var $top = $('<div class="jita-menu-top"></div>').appendTo($p);
         var $head = $('<div class="jita-menu-head"><h2>Jira Triage Assistant</h2></div>');
         $('<span class="jita-menu-x" title="Close (Esc)">×</span>').on('click', JiTA.menu.close).appendTo($head);
-        $p.append($head);
+        $top.append($head);
+        var $tabs = $('<div class="jita-menu-tabs" role="tablist"></div>').appendTo($top);
+        // Each section goes into its tab's pane; a tab exists only where one of its sections does (the Triage Assistant
+        // while it is on and off Confluence, Lead duties for a Lead). Every pane is built, so switching tabs needs no redraw.
+        var panes = {};
+        function pane(id) {
+            if (!panes[id]) {
+                panes[id] = $('<div class="jita-menu-pane" role="tabpanel"></div>').attr('data-tab', id).appendTo($p);
+                $('<button type="button" class="jita-menu-tab" role="tab"></button>').attr('data-tab', id).text(JiTA.menu.TABS[id]).appendTo($tabs);
+            }
+            return panes[id];
+        }
 
         // ---- Features ----
         var $feat = $('<div class="jita-menu-sect"></div>');
@@ -9003,7 +9024,7 @@ JiTA.menu = {
         $feat.append(JiTA.menu._toggleRow('Screenshot translation', 7, function () {
             if (!JITA_NO_JIRA_UI) { JiTA.ocr.ensure(); }
         }));
-        $p.append($feat);
+        pane('features').append($feat);
 
 
         // ---- Canned responses (Zendesk Support panel) ----
@@ -9017,7 +9038,7 @@ JiTA.menu = {
         var $respActions = $('<div class="jita-menu-actions"></div>').appendTo($resp);
         $('<button class="jita-btn">Customize responses</button>')
             .on('click', function () { JiTA.responses.openEditor(); }).appendTo($respActions);
-        $p.append($resp);
+        pane('features').append($resp);
 
         // ---- Triage Assistant (only when enabled, and only on Jira - its actions are all Jira-tab machinery) ----
         if (flagOn('similarDefects') && !JITA_IS_WIKI) {
@@ -9114,7 +9135,7 @@ JiTA.menu = {
                 });
             }, function () { $status.text(''); });
 
-            $p.append($ta);
+            pane('triage').append($ta);
         }
 
         // ---- Lead duties (Leads only; roster membership IS the gate, so a non-Lead never sees this) ----
@@ -9329,7 +9350,7 @@ JiTA.menu = {
                 }).catch(function () { $ldStatus.text(who); });
             })();
 
-            $p.append($ld);
+            pane('lead').append($ld);
         }
 
         // ---- About: the running version, and the changelog (the "What's new" pill's permanent home) ----
@@ -9339,7 +9360,7 @@ JiTA.menu = {
         var $aboutAct = $('<div class="jita-menu-actions"></div>').appendTo($about);
         $('<button class="jita-btn">What\'s new</button>')
             .on('click', function () { JiTA.changelog.openView(); }).appendTo($aboutAct);
-        $p.append($about);
+        pane('about').append($about);
 
         // ---- Debug (worker diagnostics + self-heal test) ----
         var $dbg = $('<div class="jita-menu-sect"></div>');
@@ -9394,7 +9415,33 @@ JiTA.menu = {
                                    : 'Open this on the LEADER tab to test worker recovery.';
             $('<div class="jita-menu-status" style="color:#7a8694;"></div>').text(hint).appendTo($dbg);
         }
-        $p.append($dbg);
+        pane('about').append($dbg);
+
+        $tabs.on('click', '.jita-menu-tab', function () {
+            JiTA.menu._tab = this.getAttribute('data-tab');
+            JiTA.menu._showTab($p[0], JiTA.menu._tab);
+            $p[0].scrollTop = 0;
+        });
+        JiTA.menu._showTab($p[0], JiTA.menu._tab);
+    },
+
+    // Settings' tabs, in this order: the switches, then each area with settings of its own.
+    TABS: { features: 'Features', triage: 'Triage Assistant', lead: 'Lead duties', about: 'About' },
+    _tab: 'features',   // the tab last opened: a redraw (a switch flipped) and the next opening stay on it
+
+    // Show tab `id` in the menu element: its pane and nothing else, its tab marked. A tab that is not there now (the
+    // Triage Assistant switched off, Settings opened on Confluence) shows the first one instead, and is still the one
+    // remembered, for when it is back.
+    _showTab: function (menu, id) {
+        var panes = menu.querySelectorAll('.jita-menu-pane'), tabs = menu.querySelectorAll('.jita-menu-tab'), i, has = false;
+        for (i = 0; i < panes.length; i++) { if (panes[i].getAttribute('data-tab') === id) { has = true; } }
+        if (!has && panes.length) { id = panes[0].getAttribute('data-tab'); }
+        for (i = 0; i < panes.length; i++) { panes[i].style.display = (panes[i].getAttribute('data-tab') === id) ? '' : 'none'; }
+        for (i = 0; i < tabs.length; i++) {
+            var on = tabs[i].getAttribute('data-tab') === id;
+            tabs[i].classList.toggle('on', on);
+            tabs[i].setAttribute('aria-selected', on ? 'true' : 'false');
+        }
     }
 };
 
@@ -21345,6 +21392,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.42.0', date: '2026-10-05', features: [
+            'Settings is split into tabs: Features, Triage Assistant, Lead duties (for Leads) and About, so each fits on a screen. It opens on the tab you last used.'
+        ] },
         { v: '3.41.0', date: '2026-10-04', features: [
             'On a defect, a new Defect Profile card shows what its bug reports have in common: GPU, OS, renderer, CPU, client builds, shared exceptions and the module their crashes happened in. A shared pattern is highlighted.',
             'Reports that do not fit the pattern are listed with the reason, which often means a report attached to the wrong defect. Open full profile shows the breakdown, report by report.',
