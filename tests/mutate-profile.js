@@ -98,6 +98,11 @@ const muts = [
     [H, 'the cards share their collapse state', '                gmSet(o.collapseKey, isColl);', '                gmSet(JiTA.ui.SIDE_COLLAPSE_KEY, isColl);'],
     [H, 'the defect page never draws the section', '        JiTA.profile.renderSection(key, background);        // what the bug reports attached to this defect have in common\n', ''],
     [H, 'the zip is off by default', 'zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, true); },', 'zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, false); },'],
+    // a count's hover: the reports behind it
+    [H, 'a count\'s hover names nobody', "        return keys.length ? (keys.length === 1 ? '1 report: ' : keys.length + ' reports: ') + keys.join(', ') : '';", "        return '';"],
+    [H, 'a call stack\'s hover lists every report with the message', ".text(p.count + '/' + sm.withLog).attr('title', P._who(p.keys))", ".text(p.count + '/' + sm.withLog).attr('title', P._who(g.keys))"],
+    [H, 'a hardware value names nobody', 'return { value: x, count: counts[x], keys: keys[x] };', 'return { value: x, count: counts[x], keys: [] };'],
+    [H, 'a crash module names nobody', ' s.count++; s.keys.push(v.key); });', ' s.count++; });'],
     // the switch in Settings > Features
     [H, 'the profile has no feature switch', ', ["defectProfile", ""]];', '];'],
     [H, 'switched off, a defect page still builds the profile', "        if (!flagOn('defectProfile')) { P.clear(); return; }\n", ''],

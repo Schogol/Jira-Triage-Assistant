@@ -14047,13 +14047,19 @@ JiTA.profile = {
         var bs = views.filter(function (v) { return v.build; }).sort(function (a, b) { return a.build - b.build; });
         if (bs.length) { out.builds = { n: bs.length, min: bs[0].build, minVersion: bs[0].version, max: bs[bs.length - 1].build, maxVersion: bs[bs.length - 1].version }; }
         P.DIMS.forEach(function (d) {
-            var counts = {}, known = 0;
-            views.forEach(function (v) { var x = d.get(v); if (x == null || x === '') { return; } counts[x] = (counts[x] || 0) + 1; known++; });
+            var counts = {}, keys = {}, known = 0;
+            views.forEach(function (v) {
+                var x = d.get(v);
+                if (x == null || x === '') { return; }
+                counts[x] = (counts[x] || 0) + 1;
+                (keys[x] = keys[x] || []).push(v.key);
+                known++;
+            });
             if (!known) { return; }
             var vals = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a] || (a < b ? -1 : 1); });
             var top = vals[0], dom = (known >= P.MIN_N && counts[top] / known >= P.DOMINANT) ? top : null;
             out.dims.push({ id: d.id, label: d.label, outlier: d.outlier, get: d.get, known: known, dominant: dom, domCount: dom ? counts[top] : 0,
-                values: vals.map(function (x) { return { value: x, count: counts[x] }; }) });
+                values: vals.map(function (x) { return { value: x, count: counts[x], keys: keys[x] }; }) });
         });
         var withLog = views.filter(function (v) { return v.logRead === true; }), sigs = {};
         withLog.forEach(function (v) {
@@ -14072,9 +14078,11 @@ JiTA.profile = {
         withLog.forEach(function (v) {
             var mine = {};
             v.exc.forEach(function (e) {
-                var k = P._sigParts(e.sig).msg, g = msgs[k] || (msgs[k] = { key: k, msg: e.msg, count: 0, paths: {} });
-                if (!mine[k]) { mine[k] = true; g.count++; }
-                (g.paths[e.sig] = g.paths[e.sig] || { sig: e.sig, count: 0 }).count++;
+                var k = P._sigParts(e.sig).msg, g = msgs[k] || (msgs[k] = { key: k, msg: e.msg, count: 0, keys: [], paths: {} });
+                if (!mine[k]) { mine[k] = true; g.count++; g.keys.push(v.key); }
+                var pth = g.paths[e.sig] || (g.paths[e.sig] = { sig: e.sig, count: 0, keys: [] });
+                pth.count++;
+                pth.keys.push(v.key);
             });
         });
         out.excGroups = Object.keys(msgs).map(function (k) {
@@ -14086,7 +14094,7 @@ JiTA.profile = {
         withWer.forEach(function (v) {
             var own = {};
             v.crashes.forEach(function (c) { own[c.module] = c.code; });
-            Object.keys(own).forEach(function (m) { var s = mods[m] || (mods[m] = { module: m, code: own[m], count: 0 }); s.count++; });
+            Object.keys(own).forEach(function (m) { var s = mods[m] || (mods[m] = { module: m, code: own[m], count: 0, keys: [] }); s.count++; s.keys.push(v.key); });
         });
         out.withWer = withWer.length;
         out.crashes = Object.keys(mods).map(function (k) { return mods[k]; }).sort(function (a, b) { return b.count - a.count || (a.module < b.module ? -1 : 1); });
@@ -14275,6 +14283,11 @@ JiTA.profile = {
     },
 
     // ---- the full profile (overlay) -----------------------------------------------------------------------------
+    // What a count's hover says: the reports behind it.
+    _who: function (keys) {
+        keys = keys || [];
+        return keys.length ? (keys.length === 1 ? '1 report: ' : keys.length + ' reports: ') + keys.join(', ') : '';
+    },
     openView: function (key) {
         var P = JiTA.profile, s = P._last[key];
         if (!s) { return; }
@@ -14297,7 +14310,7 @@ JiTA.profile = {
             $('<span class="jpv-label"></span>').text(d.label).appendTo($r);
             var $v = $('<span class="jpv-vals"></span>').appendTo($r);
             d.values.forEach(function (x) {
-                $('<span class="jpv-val"></span>').toggleClass('dom', x.value === d.dominant).text(x.value + ' ' + x.count + '/' + d.known).appendTo($v);
+                $('<span class="jpv-val"></span>').toggleClass('dom', x.value === d.dominant).text(x.value + ' ' + x.count + '/' + d.known).attr('title', P._who(x.keys)).appendTo($v);
             });
         });
         if (!sm.dims.length) { $('<div class="jpv-none"></div>').text('No report has Computer Info, dxdiag.txt or PDMData.txt to read.').appendTo($b); }
@@ -14306,14 +14319,14 @@ JiTA.profile = {
         var domSig = sm.domExc && sm.domExc.sig;
         sm.excGroups.slice(0, 15).forEach(function (g) {
             var $r = $('<div class="jpv-row"></div>').appendTo($b);
-            $('<span class="jpv-count"></span>').toggleClass('dom', g.paths.some(function (p) { return p.sig === domSig; })).text(g.count + '/' + sm.withLog).appendTo($r);
+            $('<span class="jpv-count"></span>').toggleClass('dom', g.paths.some(function (p) { return p.sig === domSig; })).text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
             $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', g.paths.map(function (p) { return p.sig; }).join('\n')).appendTo($r);
             if (g.paths.length < 2) { return; }
             // Its call stacks, each by where it differs from the others.
             var labels = P._pathLabels(g.paths.map(function (p) { return P._sigParts(p.sig).frames; }));
             g.paths.slice(0, 5).forEach(function (p, i) {
                 var $s = $('<div class="jpv-row jpv-path"></div>').appendTo($b);
-                $('<span class="jpv-count"></span>').toggleClass('dom', p.sig === domSig).text(p.count + '/' + sm.withLog).appendTo($s);
+                $('<span class="jpv-count"></span>').toggleClass('dom', p.sig === domSig).text(p.count + '/' + sm.withLog).attr('title', P._who(p.keys)).appendTo($s);
                 $('<span class="jpv-msg"></span>').text('via ' + labels[i]).attr('title', p.sig).appendTo($s);
             });
             if (g.paths.length > 5) { $('<div class="jpv-row jpv-path"></div>').text('and ' + (g.paths.length - 5) + ' more call stacks').appendTo($b); }
@@ -14323,7 +14336,7 @@ JiTA.profile = {
         sect('EVE client crashes in the crash histories (' + sm.withWer + ' read)');
         sm.crashes.slice(0, 15).forEach(function (x) {
             var $r = $('<div class="jpv-row"></div>').appendTo($b);
-            $('<span class="jpv-count"></span>').toggleClass('dom', sm.domCrash === x).text(x.count + '/' + sm.withWer).appendTo($r);
+            $('<span class="jpv-count"></span>').toggleClass('dom', sm.domCrash === x).text(x.count + '/' + sm.withWer).attr('title', P._who(x.keys)).appendTo($r);
             $('<span class="jpv-msg"></span>').text(x.module + (x.code ? ' (' + x.code + ')' : '')).appendTo($r);
         });
         if (!sm.crashes.length) { $('<div class="jpv-none"></div>').text('No EVE client crash in the crash histories read.').appendTo($b); }
@@ -14366,7 +14379,8 @@ JiTA.profile = {
                 '.jita-profile-view .jpv-vals { display: flex; flex-wrap: wrap; gap: 4px 8px; }' +
                 '.jita-profile-view .jpv-val { background: #2c333a; color: #cfd6dd; border-radius: 8px; padding: 0 7px; }' +
                 '.jita-profile-view .jpv-val.dom, .jita-profile-view .jpv-count.dom { background: #1f3d2e; color: #7fdca4; font-weight: 700; }' +
-                '.jita-profile-view .jpv-count { flex: 0 0 auto; background: #2c333a; color: #cfd6dd; border-radius: 8px; padding: 0 7px; }' +
+                '.jita-profile-view .jpv-count { flex: 0 0 auto; background: #2c333a; color: #cfd6dd; border-radius: 8px; padding: 0 7px; cursor: help; }' +
+                '.jita-profile-view .jpv-val { cursor: help; }' +
                 '.jita-profile-view .jpv-msg { color: #e6e6e6; overflow-wrap: anywhere; }' +
                 '.jita-profile-view .jpv-key { flex: 0 0 90px; color: #4c9aff; font-weight: 700; text-decoration: none; }' +
                 '.jita-profile-view .jpv-path { padding: 2px 0 2px 28px; border-bottom: none; font-size: 11px; color: #7a8694; }' +

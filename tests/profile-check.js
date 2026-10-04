@@ -493,6 +493,15 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const gtxt = overlay.text();
     ok('...a message reached two ways is one row, with its call stacks below it', (gtxt.match(/RuntimeError: failed/g) || []).length === 1 && /5\/5RuntimeError: failed/.test(gtxt) &&
         /4\/5via a\.py:run > b\.py:<module> > …/.test(gtxt) && /1\/5via z\.py:other > …/.test(gtxt), gtxt.slice(0, 400));
+    const hover = (txt) => made.filter((m) => m.hasClass('jpv-count') && m.e.txt === txt).map((m) => m.e.attrs.title).join(' | ');
+    ok('hovering a count lists the reports behind it: the message, and each call stack', hover('5/5') === '5 reports: EBR-1, EBR-2, EBR-3, EBR-4, EBR-5' &&
+        hover('4/5') === '4 reports: EBR-1, EBR-2, EBR-3, EBR-4' && hover('1/5') === '1 report: EBR-5', hover('5/5') + ' || ' + hover('4/5') + ' || ' + hover('1/5'));
+    made = [];
+    P.openView('EDR-7');
+    const vhover = made.filter((m) => m.hasClass('jpv-val') && /^NVIDIA 1\/6$/.test(m.e.txt)).map((m) => m.e.attrs.title).join();
+    const crow = made.filter((m) => m.hasClass('jpv-row') && m.e.kids.length === 2 && /^nvwgf2umx\.dll/.test(m.e.kids[1].e.txt))[0];
+    const chover = crow ? crow.e.kids[0].e.attrs.title : '';
+    ok('...so does a hardware value, and a crash module', vhover === '1 report: EBR-6' && chover === '5 reports: EBR-1, EBR-2, EBR-3, EBR-4, EBR-5', vhover + ' || ' + chover);
 
     // ================= wiring =================
     ok('renderReports draws the section on a defect', member('    renderReports: function (key, background) {').indexOf('JiTA.profile.renderSection(key, background);') >= 0);
