@@ -79,7 +79,9 @@ Object.assign(JiTA.ui, {
     setStatus: (m) => { statuses.push(m); }, setStatusAction: (m) => { statuses.push(m); }, toast: (m) => { toasts.push(m); },
     _item: (r) => ({ row: 'defect', key: r.key, onScreen: JiTA.ui.currentKey }),
     _reportItem: (r) => ({ row: 'report', key: r.key, defect: JiTA.ui.currentKey }),
-    _getAssignee: () => Promise.resolve(null), _assigneeCache: {}, _rerenderCurrent() {}
+    _getAssignee: () => Promise.resolve(null), _assigneeCache: {}, _rerenderCurrent() {},
+    _liveStatus: (keys) => Promise.resolve(keys.reduce((o, k) => { o[k] = 'Open'; return o; }, {})),   // livestatus-check.js covers the real one
+    _isOpenStatus: (s) => !!s && !/closed|attached/i.test(s), _checkReportRows: () => Promise.resolve([])
 });
 eval('JiTA.triage = ' + src.slice(ts, te - 1) + ';');
 const T = JiTA.triage;

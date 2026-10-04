@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.40.1
+// @version     3.40.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -5721,12 +5721,13 @@ JiTA.sync = {
     // (the listener near startup re-renders them) once that has landed, so none of them ranks against the old
     // indexes. The other tabs only mark their own indexes: one removal used to drop the shared worker's indexes
     // once per open tab, and it could rebuild them as often. The acting tab handles its own row UI
-    // (softRefreshStatus / _fadeOutAndReplace), so we deliberately don't re-render it here.
+    // (softRefreshStatus / _fadeOutAndReplace), so we deliberately don't re-render it here. Resolves once the worker
+    // has dropped its indexes, so a caller that ranks again right after gets the list without the removed report.
     _ebrRemoved: function (keys, fromRemote) {
         JiTA.rank._dirtyEbr = true;
-        if (fromRemote) { return; }
+        if (fromRemote) { return Promise.resolve(); }
         var note = { keys: keys || [], ts: Date.now(), tabId: JiTA.sched.tabId };
-        JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });
+        return JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });
     },
 
     // Menu entry point for the single "Sync now" button: sync the defect dataset, then the bug-report
@@ -7790,8 +7791,17 @@ JiTA.ui = {
                 // that lives as long as the tab: someone may have taken the report since, and attaching would have
                 // reassigned it to this user. Ask Jira again now, and refuse if it is someone else's.
                 delete JiTA.ui._assigneeCache[reportKey];
-                Promise.all([JiTA.link.currentUser(), JiTA.ui._getAssignee(reportKey)]).then(function (r0) {
-                    var me = r0[0], now = r0[1];
+                Promise.all([JiTA.link.currentUser(), JiTA.ui._getAssignee(reportKey), JiTA.ui._liveStatus([reportKey])]).then(function (r0) {
+                    var me = r0[0], now = r0[1], st = r0[2];
+                    // Attached or closed in Jira itself since the list was drawn: attaching would add a second link to it.
+                    if (Object.prototype.hasOwnProperty.call(st, reportKey) && !JiTA.ui._isOpenStatus(st[reportKey])) {
+                        $b.off('click').removeClass('jita-sd-linking').addClass('jita-sd-noattach').text(st[reportKey] || 'gone')
+                            .attr('title', 'No longer an open bug report in Jira');
+                        JiTA.ui.toast(st[reportKey] ? (reportKey + ' is already ' + st[reportKey] + ' in Jira - not attached.')
+                            : (reportKey + ' is no longer an open bug report in Jira - not attached.'));
+                        JiTA.ui._takeOffList([reportKey], function () { return JiTA.ui.currentKey === defectKey; });
+                        return;
+                    }
                     if (now && (!me || now.accountId !== me)) {
                         $b.off('click').removeClass('jita-sd-linking').addClass('jita-sd-noattach').text('assigned')
                             .attr('title', 'Assigned to ' + (now.name || 'someone else') + ' - only unassigned reports or ones assigned to you can be attached');
@@ -7860,10 +7870,91 @@ JiTA.ui = {
             var k = this.getAttribute('data-jita-key');
             if (k && this !== el) { shown[k] = true; }
         });
-        function appendFresh() {
+        JiTA.ui._collapseRow(el, function () {
             if (JiTA.ui.currentKey === defectKey) { JiTA.ui._appendNextReport(defectKey, shown); }
+        });
+    },
+
+    // ---- open reports attached or closed in Jira itself --------------------------------------------------------
+    // The open reports listed on a defect ("Matching bug reports") and on a report ("Similar open reports") come from
+    // the local copy, which hears of a report attached or closed directly in Jira only at the next sync, up to 30
+    // minutes later. Until then it was listed, and attaching it again added a second link. So once a list is drawn,
+    // Jira is asked for the status of its reports: one no longer open leaves the list and the local copy (every tab
+    // drops it, as after an attach here), and the list is drawn again so the next match takes its place. A report
+    // seen open in the last minute is not asked about again: typing in the filter box redraws the list on every pause.
+    OPEN_OK_MS: 60 * 1000,
+    _openSeen: {},   // report key -> when Jira last said it is open
+    _liveGone: {},   // report keys taken off this session; one that comes back (its delete failed) is only hidden again
+
+    _isOpenStatus: function (s) { return !!s && !JiTA.util.isClosedStatus(s); },
+
+    // The live status of a few bug reports: { key: status name }, with '' for a report Jira no longer has under that
+    // key (deleted, moved, or out of this user's reach). A key that could not be checked is left out, so it counts as
+    // unknown, never as closed. One search for all of them; Jira refuses a whole key search (400) when one key in it
+    // no longer exists, and then each key is asked on its own.
+    _liveStatus: function (keys) {
+        var out = {};
+        if (!keys || !keys.length) { return Promise.resolve(out); }
+        return JiTA.sync._apiPost('/rest/api/3/search/jql', { jql: 'key in (' + keys.join(', ') + ')', fields: ['status'], maxResults: keys.length }).then(function (r) {
+            keys.forEach(function (k) { out[k] = ''; });
+            ((r.data && r.data.issues) || []).forEach(function (iss) {
+                if (Object.prototype.hasOwnProperty.call(out, iss.key)) { out[iss.key] = (iss.fields && iss.fields.status && iss.fields.status.name) || ''; }
+            });
+            return out;
+        }, function (e) {
+            if (!e || e.status !== 400) { return out; }   // could not check: every row stays
+            return Promise.all(keys.map(function (k) {
+                return new Promise(function (resolve) {
+                    $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + k + '?fields=status', dataType: 'json' })
+                        .done(function (d) { out[k] = (d && d.key === k && d.fields && d.fields.status && d.fields.status.name) || ''; resolve(); })
+                        .fail(function (xhr) { if (xhr && xhr.status === 404) { out[k] = ''; } resolve(); });
+                });
+            })).then(function () { return out; });
+        });
+    },
+
+    // Ask Jira about the reports on screen and take off the ones no longer open. `still()` says whether the list on
+    // screen is still the one the rows were drawn for. Resolves the keys taken off.
+    _checkReportRows: function (still) {
+        var U = JiTA.ui, now = Date.now(), keys = [];
+        $('#jita-sd-list').children('li').each(function () {
+            var k = this.getAttribute('data-jita-key');
+            if (k && /^EBR-\d+$/.test(k) && keys.indexOf(k) < 0 && !(now - (U._openSeen[k] || 0) < U.OPEN_OK_MS)) { keys.push(k); }
+        });
+        if (!keys.length) { return Promise.resolve([]); }
+        return U._liveStatus(keys).then(function (st) {
+            var gone = [], t = Date.now();
+            keys.forEach(function (k) {
+                if (!Object.prototype.hasOwnProperty.call(st, k)) { return; }   // not checked: left as it is
+                if (U._isOpenStatus(st[k])) { U._openSeen[k] = t; } else { gone.push(k); }
+            });
+            if (!gone.length) { return gone; }
+            return U._takeOffList(gone, still).then(function () { return gone; });
+        });
+    },
+
+    // Take reports that are no longer open out of the local copy and, while the list on screen is still the one they
+    // were drawn in, off it; the list is then drawn again so the next match fills the slot.
+    _takeOffList: function (keys, still) {
+        var U = JiTA.ui, fresh = keys.filter(function (k) { return !U._liveGone[k]; });
+        fresh.forEach(function (k) { U._liveGone[k] = true; });
+        if (still()) {
+            $('#jita-sd-list').children('li').each(function () {
+                if (keys.indexOf(this.getAttribute('data-jita-key')) >= 0) { U._collapseRow(this); }
+            });
         }
-        if (!el) { appendFresh(); return; }
+        if (!fresh.length) { return Promise.resolve(); }
+        return JiTA.db.deleteDefects(fresh).then(function () {
+            return JiTA.sync._ebrRemoved(fresh);
+        }, function (e) { console.log('[JiTA] could not drop ' + fresh.join(', ') + ' from the local DB:', e && e.message || e); }).then(function () {
+            if (still()) { U.scheduleRender(); }
+        });
+    },
+
+    // Collapse a list row out: it fades and shrinks to nothing so the rows below slide up, then leaves the page and
+    // `done` runs. Shared by the attach (which then slides the next match in) and the live status check.
+    _collapseRow: function (el, done) {
+        if (!el) { if (done) { done(); } return; }
         var h = el.offsetHeight;
         el.style.overflow = 'hidden';
         el.style.maxHeight = h + 'px';
@@ -7879,7 +7970,7 @@ JiTA.ui = {
         el.style.marginBottom = '0px';
         setTimeout(function () {
             if (el.parentNode) { el.parentNode.removeChild(el); }   // drop the collapsed row (rows below have slid up)
-            appendFresh();
+            if (done) { done(); }
         }, 320);
     },
 
@@ -7915,6 +8006,7 @@ JiTA.ui = {
                     if (JiTA.ui.currentKey !== defectKey) { return; }
                     JiTA.ui._slideInRow(JiTA.ui._reportItem(pick), $('#jita-sd-list'));
                     refreshCount();
+                    JiTA.ui._checkReportRows(function () { return JiTA.ui.currentKey === defectKey; });
                 });
             });
         }).catch(function (e) { console.log('[JiTA] append-next-report skipped:', e && e.message || e); });
@@ -8368,6 +8460,7 @@ JiTA.ui = {
                         for (var i = 0; i < results.length; i++) { $list.append(JiTA.ui._reportItem(results[i])); }
                         JiTA.ui._fitVertical();   // list height changed - re-check it still fits / drops up
                         JiTA.ui._snap(key);   // cache for a seamless re-paint if Jira wipes the sidebar group
+                        JiTA.ui._checkReportRows(function () { return !stale(); });   // one attached or closed in Jira itself leaves now, not at the next sync
                     });
                 });
             });
@@ -8461,6 +8554,7 @@ JiTA.ui = {
                         $list.empty();   // clear atomically right before filling (see render() - avoids doubled rows from a concurrent re-render)
                         for (var i = 0; i < results.length; i++) { $list.append(JiTA.ui._simReportItem(results[i])); }
                         JiTA.ui._fitVertical();
+                        JiTA.ui._checkReportRows(function () { return JiTA.ui.currentKey === key && JiTA.ui.simReportsMode; });
                     });
                 });
             });
@@ -12082,10 +12176,25 @@ JiTA.triage = {
         }).then(function (x) {
             var f = (x.d && x.d.fields) || {};
             var status = (f.status && f.status.name) || '';
-            if (JiTA.util.isClosedStatus(status)) { return { ok: false, reason: 'already ' + (status || 'closed') }; }
+            if (JiTA.util.isClosedStatus(status)) { return { ok: false, closed: true, reason: 'already ' + (status || 'closed') }; }
             var as = f.assignee || null;
             if (as && (!x.me || as.accountId !== x.me)) { return { ok: false, reason: 'now assigned to ' + (as.displayName || 'someone else') }; }
             return { ok: true };
+        });
+    },
+
+    // The re-verify found a report attached or closed in Jira itself. It leaves the local copy (every tab drops it),
+    // and in the defect queue, where it was one of this defect's matches, the matches are ranked again without it.
+    _dropClosed: function (ebrKey, key, reason) {
+        var T = JiTA.triage;
+        return JiTA.db.deleteDefects([ebrKey]).then(function () { return JiTA.sync._ebrRemoved([ebrKey]); },
+            function () { /* the next sync prunes it */ }).then(function () {
+            if (T._mode !== 'defect' || ebrKey === key) { return; }
+            T._cache = {};   // any defect's cached ranking may list it
+            if (!T._open || T._busy || !T._queue[T._idx] || T._queue[T._idx].key !== key) { return; }
+            T._render();
+            T._prefetch();
+            T._setMsg(ebrKey + ' is ' + reason + ' in Jira - taken off the list.', true);
         });
     },
 
@@ -12121,6 +12230,7 @@ JiTA.triage = {
             if (!v.ok) {
                 T._busy = false;
                 T._setMsg(ebrKey + ' changed server-side (' + v.reason + ')' + (ebrKey === key ? ' - ↓ skips it.' : ' - pick another match.'), true);
+                if (v.closed) { T._dropClosed(ebrKey, key, v.reason); }
                 return null;
             }
             if (type === 'attach') {
@@ -20395,6 +20505,11 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.40.2', date: '2026-10-04', fixes: [
+            'A bug report attached or closed directly in Jira now leaves a defect\'s Matching bug reports, and a report\'s Similar open reports, as soon as the list is shown, instead of up to 30 minutes later. The next match takes its place.',
+            'Attach refuses a report that Jira already shows as attached or closed, instead of adding a second link to it.',
+            'Triage mode: a match found already attached in Jira is taken off the list, and the next one moves up.'
+        ] },
         { v: '3.40.1', date: '2026-10-03', fixes: [
             'Opening a bug report from a link or a reload no longer sometimes stops JiTA from loading at all, leaving no panel, buttons or pills. This came in with v3.38.16.',
             'If one part of JiTA fails while a page loads, the rest now loads anyway.'
