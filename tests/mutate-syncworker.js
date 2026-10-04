@@ -21,8 +21,8 @@ const muts = [
     [A, 'an auto-sync that did not run is not told apart', 'if (JiTA.sync.running) { return Promise.resolve(null); }', 'if (JiTA.sync.running) { return Promise.resolve(); }'],
     // ---- a removed report ----
     [A, 'the other tabs hear before the worker has dropped its indexes', "JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });", "JiTA.sync._invalidateWorker(); gmSet('sdEbrRemoved', note);"],
-    [A, 'every other tab drops the indexes again', '        if (fromRemote) { return; }\n        var note', '        if (fromRemote) { JiTA.sync._invalidateWorker(); return; }\n        var note'],
-    [A, 'a heard removal is echoed', '        if (fromRemote) { return; }\n        var note', '        var note'],
+    [A, 'every other tab drops the indexes again', '        if (fromRemote) { return Promise.resolve(); }\n        var note', '        if (fromRemote) { JiTA.sync._invalidateWorker(); return Promise.resolve(); }\n        var note'],
+    [A, 'a heard removal is echoed', '        if (fromRemote) { return Promise.resolve(); }\n        var note', '        var note'],
     [A, 'an unreachable worker keeps the news', "return JiTA.worker.call('invalidate').then(function () {}, function () { /* ignore */ });", "return JiTA.worker.call('invalidate').then(function () {});"],
     [A, 'no worker at all keeps the news', '_invalidateWorker: function () {\n        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }',
         '_invalidateWorker: function () {\n        if (!(JiTA.worker && JiTA.worker.usable())) { return new Promise(function () {}); }'],
