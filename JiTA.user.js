@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.41.0
+// @version     3.42.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -4510,17 +4510,14 @@ JiTA.responses = {
         return parts.join('\n');
     },
 
-    // Standalone, roomier editor for the canned responses, opened by the settings menu's "Customize
-    // responses" button (the menu itself shows only that button, so it stays compact).
-    // Reuses the settings-menu overlay chrome (#jita-menu-overlay / #jita-menu) widened via .jita-menu-wide, and
-    // the same .jita-resp-* row styling. Edits persist to GM (shared across frames, survive script updates).
+    // The editor for the canned responses: the whole of Settings' Canned responses tab. It reuses the settings
+    // menu's .jita-resp-* row styling. Edits persist to GM (shared across frames, survive script updates) on Save.
     _editorCssInjected: false,
     _injectEditorCss: function () {
         if (JiTA.responses._editorCssInjected) { return; }
-        // Flex column layout so the header + the action footer stay pinned while only the middle scrolls,
-        // plus collapsible section groups and collapsible response rows (body hidden until the row is opened).
-        try { GM_addStyle('#jita-menu.jita-menu-wide { width: 560px; max-width: 92vw; display: flex; flex-direction: column; overflow: hidden; }\
-#jita-menu.jita-menu-wide .jita-menu-head { flex: 0 0 auto; }\
+        // Flex column layout so the action footer stays pinned while only the list scrolls, plus collapsible
+        // section groups and collapsible response rows (body hidden until the row is opened).
+        try { GM_addStyle('#jita-menu .jita-resp-editor { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }\
 #jita-menu .jita-resp-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 4px 14px 10px; }\
 #jita-menu .jita-resp-foot { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; border-top: 1px solid #3a434d; background: #282d33; }\
 #jita-menu .jita-resp-subhead { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #7a8694; margin: 12px 0 4px; }\
@@ -4561,12 +4558,13 @@ JiTA.responses = {
         return idx > 0 ? t.slice(idx + 3).trim() : t;
     },
 
-    openEditor: function () {
+    // Build the editor and return it, for Settings to put in its tab. Settings keeps this one element across its redraws
+    // (a switch flipped in another tab), so what is typed here stays until Save, or until Settings closes.
+    buildEditor: function () {
         JiTA.responses._injectEditorCss();
-        var ov = JiTA.menu._openOverlay({ title: 'Customize responses', wide: true });
-        var $menu = ov.$menu, closeEditor = ov.close;
-        // Scrollable middle region (header + footer stay pinned via the flex layout in _injectEditorCss).
-        var $scroll = $('<div class="jita-resp-scroll"></div>').appendTo($menu);
+        var $ed = $('<div class="jita-resp-editor"></div>');
+        // Scrollable list (the footer stays pinned via the flex layout in _injectEditorCss).
+        var $scroll = $('<div class="jita-resp-scroll"></div>').appendTo($ed);
         $('<div class="jita-menu-status">These appear in the dropdown in the Zendesk Support panel; picking one replaces the comment editor.</div>').appendTo($scroll);
         // Opening / closing lines wrapped around EVERY inserted response (left blank = skipped).
         $('<div class="jita-resp-subhead">Opening &amp; closing</div>').appendTo($scroll);
@@ -4665,7 +4663,7 @@ JiTA.responses = {
         fillRows(JiTA.responses.load());
 
         // Pinned action footer (always visible regardless of scroll position).
-        var $foot = $('<div class="jita-resp-foot"></div>').appendTo($menu);
+        var $foot = $('<div class="jita-resp-foot"></div>').appendTo($ed);
         $('<button class="jita-btn">Add section</button>')
             .on('click', function () {
                 var name = (prompt('New section name (e.g. "Support Ticket", "Defect"):', '') || '').trim();
@@ -4689,8 +4687,9 @@ JiTA.responses = {
                 });
                 JiTA.responses.save(list);
                 JiTA.responses.saveAffixes(($openerIn.val() || '').trim(), ($closingIn.val() || '').trim());
+                // Settings stays open on the tab, so more edits can follow. save() works out the stored list from the rows
+                // alone, so saving again from the same rows stores the same thing.
                 JiTA.ui.toast('Saved ' + list.length + ' canned response' + (list.length === 1 ? '' : 's') + '.');
-                closeEditor();
             }).appendTo($foot);
         $('<button class="jita-btn">Restore defaults</button>')
             .on('click', function () {
@@ -4698,6 +4697,7 @@ JiTA.responses = {
                 JiTA.responses.reset();
                 fillRows(JiTA.responses.load());
             }).appendTo($foot);
+        return $ed;
     },
 
     // The Zendesk panel's ACTIVE compose editor: the editor nearest the composer's Add button, looked for no further
@@ -8809,6 +8809,19 @@ JiTA.menu = {
   border: 1px solid #3a434d; border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.55); font-size: 13px; }\
 #jita-menu .jita-menu-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: #282d33; border-radius: 8px 8px 0 0; position: sticky; top: 0; z-index: 2; }\
 #jita-menu .jita-menu-head h2 { margin: 0; font-size: 14px; font-weight: 700; flex: 1; color: #f2f2f4; }\
+#jita-menu.jita-settings-view { width: 460px; max-width: 94vw; height: 620px; max-height: 82vh; display: flex; flex-direction: column; overflow: hidden; }\
+#jita-menu .jita-menu-top { flex: 0 0 auto; background: #282d33; border-radius: 8px 8px 0 0; }\
+#jita-menu .jita-menu-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; }\
+#jita-menu .jita-menu-pane[data-tab="responses"] { display: flex; flex-direction: column; overflow: hidden; }\
+#jita-menu .jita-menu-tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid #3a434d; }\
+#jita-menu .jita-menu-tab { background: transparent; color: #9aa6b2; border: none; border-bottom: 2px solid transparent; padding: 6px 9px 7px; cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }\
+#jita-menu .jita-menu-tab:hover { color: #e6e6e6; }\
+#jita-menu .jita-menu-tab.on { color: #e6e6e6; border-bottom-color: #4c9aff; font-weight: 700; }\
+#jita-menu .jita-menu-tab::after { content: attr(data-label); display: block; height: 0; overflow: hidden; visibility: hidden; font-weight: 700; }\
+#jita-menu .jita-menu-tab:focus { outline: none !important; box-shadow: none !important; }\
+#jita-menu .jita-menu-tab:focus-visible { color: #e6e6e6; background: #343c44; border-radius: 4px 4px 0 0; }\
+#jita-menu .jita-menu-pane > .jita-menu-sect:first-child { padding-top: 6px; }\
+#jita-menu .jita-menu-pane > .jita-menu-sect:first-child > h3:first-child { display: none; }\
 #jita-menu .jita-menu-x { cursor: pointer; font-weight: 700; font-size: 18px; line-height: 1; padding: 0 4px; color: #9aa6b2; }\
 #jita-menu .jita-menu-x:hover { color: #fff; }\
 #jita-menu .jita-menu-sect { padding: 4px 14px 12px; }\
@@ -8850,11 +8863,11 @@ JiTA.menu = {
     },
 
     // Build the shared modal overlay chrome (#jita-menu-overlay backdrop + #jita-menu box) used by the settings
-    // menu, the Exception-clusters view, and the responses editor. Closes any existing overlay first - tearing
+    // menu, the Exception-clusters view, and the other overlays. Closes any existing overlay first - tearing
     // down its Esc listener, which fixes a leak: the settings command's close() only removed _esc, so the
     // clusters/editor Esc handlers (their own closures) previously lingered until the next Escape. Injects the
     // menu CSS, wires backdrop + Esc to menu.close (the single close path, always tracked via _esc), and, when
-    // opts.title is given, builds .jita-menu-head with an <h2> + × button. opts.wide adds .jita-menu-wide (editor).
+    // opts.title is given, builds .jita-menu-head with an <h2> + × button.
     // Returns { $overlay, $menu, close }. The settings menu passes NO title - render() rebuilds its head on
     // every refresh (it $p.empty()s first).
     _openOverlay: function (opts) {
@@ -8868,7 +8881,7 @@ JiTA.menu = {
         var downOnBackdrop = false;
         $overlay.on('mousedown', function (e) { downOnBackdrop = (e.target === this); });
         $overlay.on('click', function (e) { if (e.target === this && downOnBackdrop) { JiTA.menu.close(); } });
-        var $menu = $('<div id="jita-menu"' + (opts.wide ? ' class="jita-menu-wide"' : '') + '></div>').appendTo($overlay);
+        var $menu = $('<div id="jita-menu"></div>').appendTo($overlay);
         if (opts.title) {
             var $head = $('<div class="jita-menu-head"><h2></h2></div>');
             $head.children('h2').text(opts.title);
@@ -8931,11 +8944,25 @@ JiTA.menu = {
     render: function () {
         var $p = $('#jita-menu');
         if (!$p.length) { return; }
+        // The canned responses editor outlives a redraw (a switch flipped in another tab), with what is typed in it. Taken
+        // out before empty(), which would also strip its handlers.
+        var $respEd = $p.find('.jita-resp-editor').detach();
         $p.empty();
 
+        // The title and the tab bar sit at the top, and each tab scrolls under them. Settings keeps one height, whichever
+        // tab is open.
+        var $top = $('<div class="jita-menu-top"></div>').appendTo($p);
         var $head = $('<div class="jita-menu-head"><h2>Jira Triage Assistant</h2></div>');
         $('<span class="jita-menu-x" title="Close (Esc)">×</span>').on('click', JiTA.menu.close).appendTo($head);
-        $p.append($head);
+        $top.append($head);
+        var $tabs = $('<div class="jita-menu-tabs" role="tablist"></div>').appendTo($top);
+        // Each section goes into its tab's pane, and a tab exists only where one of its sections does (the Triage Assistant
+        // while it is on and off Confluence, Lead duties for a Lead). Every pane is built, so switching tabs needs no redraw.
+        var panes = {};
+        function pane(id) {
+            if (!panes[id]) { panes[id] = $('<div class="jita-menu-pane" role="tabpanel"></div>').attr('data-tab', id).appendTo($p); }
+            return panes[id];
+        }
 
         // ---- Features ----
         var $feat = $('<div class="jita-menu-sect"></div>');
@@ -9003,21 +9030,15 @@ JiTA.menu = {
         $feat.append(JiTA.menu._toggleRow('Screenshot translation', 7, function () {
             if (!JITA_NO_JIRA_UI) { JiTA.ocr.ensure(); }
         }));
-        $p.append($feat);
+        pane('features').append($feat);
 
 
         // ---- Canned responses (Zendesk Support panel) ----
         // A repository of reusable replies, shown as a dropdown in the Zendesk Support activity panel (picking
-        // one replaces the editor). The actual editing happens in a roomier standalone window
-        // (JiTA.responses.openEditor, which also holds Restore defaults); here we just expose the entry point.
-        // Edits persist in GM storage and reach the Forge-iframe dropdown live.
-        var $resp = $('<div class="jita-menu-sect"></div>');
-        $('<h3>Canned responses</h3>').appendTo($resp);
-        $('<div class="jita-menu-status">Shown as a dropdown in the Zendesk Support panel; picking one replaces the comment editor.</div>').appendTo($resp);
-        var $respActions = $('<div class="jita-menu-actions"></div>').appendTo($resp);
-        $('<button class="jita-btn">Customize responses</button>')
-            .on('click', function () { JiTA.responses.openEditor(); }).appendTo($respActions);
-        $p.append($resp);
+        // one replaces the editor). The tab is the editor itself (JiTA.responses.buildEditor, which also holds
+        // Restore defaults); after a redraw, the one already open goes back in. Edits persist in GM storage and
+        // reach the Forge-iframe dropdown live.
+        pane('responses').append($respEd.length ? $respEd : JiTA.responses.buildEditor());
 
         // ---- Triage Assistant (only when enabled, and only on Jira - its actions are all Jira-tab machinery) ----
         if (flagOn('similarDefects') && !JITA_IS_WIKI) {
@@ -9114,7 +9135,7 @@ JiTA.menu = {
                 });
             }, function () { $status.text(''); });
 
-            $p.append($ta);
+            pane('triage').append($ta);
         }
 
         // ---- Lead duties (Leads only; roster membership IS the gate, so a non-Lead never sees this) ----
@@ -9329,7 +9350,7 @@ JiTA.menu = {
                 }).catch(function () { $ldStatus.text(who); });
             })();
 
-            $p.append($ld);
+            pane('lead').append($ld);
         }
 
         // ---- About: the running version, and the changelog (the "What's new" pill's permanent home) ----
@@ -9339,7 +9360,7 @@ JiTA.menu = {
         var $aboutAct = $('<div class="jita-menu-actions"></div>').appendTo($about);
         $('<button class="jita-btn">What\'s new</button>')
             .on('click', function () { JiTA.changelog.openView(); }).appendTo($aboutAct);
-        $p.append($about);
+        pane('about').append($about);
 
         // ---- Debug (worker diagnostics + self-heal test) ----
         var $dbg = $('<div class="jita-menu-sect"></div>');
@@ -9394,7 +9415,41 @@ JiTA.menu = {
                                    : 'Open this on the LEADER tab to test worker recovery.';
             $('<div class="jita-menu-status" style="color:#7a8694;"></div>').text(hint).appendTo($dbg);
         }
-        $p.append($dbg);
+        pane('about').append($dbg);
+
+        // The tabs, in TABS order, for the panes there are. Each is as wide as its name in bold (the CSS ::after reads
+        // data-label), so the open tab turning bold does not push the others along.
+        Object.keys(JiTA.menu.TABS).forEach(function (id) {
+            if (panes[id]) { $('<button type="button" class="jita-menu-tab" role="tab"></button>').attr('data-tab', id).attr('data-label', JiTA.menu.TABS[id]).text(JiTA.menu.TABS[id]).appendTo($tabs); }
+        });
+        // A click must not leave the tab focused: the browser, and Jira's own styles, ring a focused button. The keyboard
+        // still reaches the tabs, and :focus-visible marks them then.
+        $tabs.on('mousedown', '.jita-menu-tab', function (e) { e.preventDefault(); });
+        // Each tab scrolls on its own, so one keeps its place while another is open.
+        $tabs.on('click', '.jita-menu-tab', function () {
+            JiTA.menu._tab = this.getAttribute('data-tab');
+            JiTA.menu._showTab($p[0], JiTA.menu._tab);
+        });
+        JiTA.menu._showTab($p[0], JiTA.menu._tab);
+    },
+
+    // Settings' tabs, in this order: the switches, then each area with settings of its own.
+    TABS: { features: 'Features', triage: 'Triage Assistant', responses: 'Canned responses', lead: 'Lead duties', about: 'About' },
+    _tab: 'features',   // the tab last opened: a redraw (a switch flipped) and the next opening stay on it
+
+    // Show tab `id` in the menu element: its pane and nothing else, its tab marked. A tab that is not there now (the
+    // Triage Assistant switched off, Settings opened on Confluence) shows the first one instead, and is still the one
+    // remembered, for when it is back.
+    _showTab: function (menu, id) {
+        var panes = menu.querySelectorAll('.jita-menu-pane'), tabs = menu.querySelectorAll('.jita-menu-tab'), i, has = false;
+        for (i = 0; i < panes.length; i++) { if (panes[i].getAttribute('data-tab') === id) { has = true; } }
+        if (!has && panes.length) { id = panes[0].getAttribute('data-tab'); }
+        for (i = 0; i < panes.length; i++) { panes[i].style.display = (panes[i].getAttribute('data-tab') === id) ? '' : 'none'; }
+        for (i = 0; i < tabs.length; i++) {
+            var on = tabs[i].getAttribute('data-tab') === id;
+            tabs[i].classList.toggle('on', on);
+            tabs[i].setAttribute('aria-selected', on ? 'true' : 'false');
+        }
     }
 };
 
@@ -21345,6 +21400,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.42.0', date: '2026-10-05', features: [
+            'Settings is split into tabs: Features, Triage Assistant, Canned responses, Lead duties (for Leads) and About. It keeps one size whichever tab is open, and opens on the tab you last used.',
+            'Canned responses are edited right in their tab instead of a separate window. Save keeps Settings open, and unsaved edits stay while you look at another tab.'
+        ] },
         { v: '3.41.0', date: '2026-10-04', features: [
             'On a defect, a new Defect Profile card shows what its bug reports have in common: GPU, OS, renderer, CPU, client builds, shared exceptions and the module their crashes happened in. A shared pattern is highlighted.',
             'Reports that do not fit the pattern are listed with the reason, which often means a report attached to the wrong defect. Open full profile shows the breakdown, report by report.',
