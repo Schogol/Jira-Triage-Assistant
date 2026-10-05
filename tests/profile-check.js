@@ -303,12 +303,27 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         /no crash in nvwgf2umx\.dll, which 5 of 6 crash histories show/.test(sm.outliers[0].why[0]), JSON.stringify(sm.outliers));
 
     // ================= the reports of a defect =================
+    // A search page of reports, as Jira sends them: every navigable field, attachments with all their metadata.
+    const pageOf = (keys, token) => ({ data: { issues: keys.map((k) => ({ key: k, fields: {
+        description: ciWith({}), created: '2026-09-01T00:00:00.000+0000', status: { name: 'Attached' }, labels: ['Russian'], customfield_1: 'x'.repeat(5000),
+        attachment: [{ filename: 'logs.txt', size: 9, content: 'https://jira/att/' + k, mimeType: 'text/plain', author: { displayName: 'someone' } }]
+    } })), nextPageToken: token || undefined, isLast: !token } });
     let posts = [];
-    JiTA.sync._apiPost = (path, body) => { posts.push([path, body]); return Promise.resolve(/approximate/.test(path) ? { data: { count: 40 } } : { data: { issues: [{ key: 'EBR-1' }] } }); };
+    JiTA.sync._apiPost = (path, body) => { posts.push([path, body]); return Promise.resolve(body.nextPageToken ? pageOf(['EBR-1']) : pageOf(['EBR-3', 'EBR-2'], 'p2')); };
     let rp = await P._reports('EDR-7');
-    ok('one search for the latest reports linked to the defect, newest first', posts[0][1].jql === 'issue in linkedIssues("EDR-7") AND project = EBR ORDER BY created DESC' &&
-        posts[0][1].maxResults === P.MAX_REPORTS && posts[0][1].fields.indexOf('attachment') >= 0 && posts[0][1].fields.indexOf('*navigable') >= 0, JSON.stringify(posts[0][1]));
-    ok('...and a count of all of them', posts[1][0] === '/rest/api/3/search/approximate-count' && rp.total === 40 && rp.issues.length === 1, JSON.stringify(rp));
+    ok('every report linked to the defect, newest first, a page at a time', posts.length === 2 && posts.every((p) => p[0] === '/rest/api/3/search/jql' &&
+        p[1].jql === 'issue in linkedIssues("EDR-7") AND project = EBR ORDER BY created DESC' && p[1].maxResults === P.PAGE_SIZE &&
+        p[1].fields.indexOf('attachment') >= 0 && p[1].fields.indexOf('*navigable') >= 0) && !posts[0][1].nextPageToken && posts[1][1].nextPageToken === 'p2' &&
+        rp.total === 3 && rp.issues.map((i) => i.key).join() === 'EBR-3,EBR-2,EBR-1', JSON.stringify(posts.map((p) => p[1].nextPageToken || '')) + ' ' + JSON.stringify(rp));
+    const slim = rp.issues[0].fields;
+    ok('...each cut down to what the profile reads', Object.keys(slim).sort().join() === 'attachment,created,description,labels,status' &&
+        Object.keys(slim.attachment[0]).sort().join() === 'content,filename,size' && slim.attachment[0].content === 'https://jira/att/EBR-3' &&
+        /Trinity platform: dx12/.test(slim.description) && slim.labels[0] === 'Russian' && slim.status.name === 'Attached', JSON.stringify(slim).slice(0, 300));
+    ok('...keeping Computer Info that sits in another field than the description', /Trinity platform/.test(P._slim({ key: 'EBR-9', fields: { description: 'Steps only', customfield_7: ciWith({}) } }).fields.description));
+    posts = [];
+    JiTA.sync._apiPost = (path, body) => { posts.push([path, body]); return Promise.resolve(posts.length < 5 ? pageOf(['EBR-' + posts.length], 'stuck') : pageOf([])); };
+    rp = await P._reports('EDR-7');
+    ok('...and a page token that does not move on ends the search', posts.length === 2 && rp.total === 2, String(posts.length));
 
     // ================= building =================
     const issues = [1, 2, 3, 4, 5, 6].map((i) => ({ key: 'EBR-' + i, fields: { description: ciWith({}), created: '2026-09-2' + i + 'T00:00:00.000+0000', attachment: [] } }));
@@ -398,10 +413,11 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     JiTA.ui._fitVertical = () => {};
     const full = [1, 2, 3, 4, 5].map((i) => mk('EBR-' + i, { exc: [X], build: 3560000 + i, crashRead: true, crashes: [{ module: 'nvwgf2umx.dll', code: 'ACCESS_VIOLATION' }] }))
         .concat([mk('EBR-6', { vendor: 'NVIDIA', exc: [Y], crashRead: true, crashes: [] })]);
-    const st = { key: 'EDR-7', total: 30, views: full, summary: P.summarise(full, { status: 'Closed', resolution: 'Fixed', resolutiondate: '2026-09-10T00:00:00.000+0000' }), pending: 2, done: false, zip: true };
+    const st = { key: 'EDR-7', total: 6, views: full, summary: P.summarise(full, { status: 'Closed', resolution: 'Fixed', resolutiondate: '2026-09-10T00:00:00.000+0000' }), pending: 2, done: false, zip: true };
     P._paint('EDR-7', st);
     const txt = box.text();
-    ok('the section opens with how many reports there are and how many are read', box.hasClass('has-hits') && /^Attached reports: 30 \(latest 6\)/.test(txt) && /reading files, 2 left/.test(txt), txt.slice(0, 80));
+    ok('the section opens with how many reports there are, and how many still have files to read', box.hasClass('has-hits') && /^Attached reports: 6reading files, 2 left/.test(txt) &&
+        !/latest/.test(txt), txt.slice(0, 80));
     ok('...a pattern is a highlighted chip', made.some((m) => m.hasClass('strong') && /^GPU vendor: AMD 5\/6$/.test(m.e.txt)), made.filter((m) => m.hasClass('jp-chip')).map((m) => m.e.txt).join(' | '));
     ok('...so are the shared exception and the crash module', /Exception in 5\/6 logs: KeyError: 2/.test(txt) && /Crash in nvwgf2umx\.dll 5\/6/.test(txt), txt);
     ok('...the outlier is listed in it, with why', /1 outlier: reports that do not fit the pattern/.test(txt) && /EBR-6GPU vendor NVIDIA, while 5 of 6 have AMD/.test(txt), txt);
@@ -433,7 +449,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     P._paint('EDR-7', st);
     ok('in the sidebar the profile gets a card of its own, Defect Profile, right above the Triage Assistant', built.length === 1 && built[0].id === 'jita-profile-group' &&
         built[0].title === 'Defect Profile' && built[0].body === '<div id="jita-sd-profile"></div>' && built[0].collapseKey === P.COLLAPSE_KEY &&
-        inserted.length === 1 && inserted[0] === sideEl && groupEl.style.display === '' && /^Attached reports: 30/.test(box.text()), JSON.stringify(built) + ' ' + inserted.map((r) => (r === sideEl ? 'TRIAGE' : r)).join());
+        inserted.length === 1 && inserted[0] === sideEl && groupEl.style.display === '' && /^Attached reports: 6/.test(box.text()), JSON.stringify(built) + ' ' + inserted.map((r) => (r === sideEl ? 'TRIAGE' : r)).join());
     P._paint('EDR-7', st);
     ok('...built once, however often it is painted', built.length === 1 && inserted.length === 1);
     P._paint('EDR-7', { key: 'EDR-7', total: 0, views: [], summary: P.summarise([], null), pending: 0, done: true });
@@ -442,7 +458,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('leaving the defect takes the card away', groupEl === null && !box.hasClass('has-hits'));
     P._last['EDR-7'] = st;
     P.reensure();
-    ok('a card Jira wiped comes back at once, painted from the last state', built.length === 2 && groupEl && groupEl.style.display === '' && /^Attached reports: 30/.test(box.text()));
+    ok('a card Jira wiped comes back at once, painted from the last state', built.length === 2 && groupEl && groupEl.style.display === '' && /^Attached reports: 6/.test(box.text()));
     P.reensure();
     ok('...and only while it is missing', built.length === 2);
     groupEl = null;
