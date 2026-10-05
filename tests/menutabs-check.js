@@ -5,7 +5,9 @@
 //    for a Lead
 //  - only the open tab's pane shows; a click switches without a redraw, and a redraw stays on the tab
 //  - a remembered tab that is not there now shows the first one, and comes back when it is there again
-//  - a click leaves no focus ring on the tab
+//  - a click leaves no focus ring on the tab, and the open tab turning bold does not move the others
+//  - Canned responses is the editor itself, and a redraw keeps that editor (typed edits, handlers and all)
+//  - Settings keeps one height whichever tab is open, each tab scrolling under the title and the tab bar
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const block = (head, end) => {
@@ -47,8 +49,11 @@ function N(html) {
         toggleClass: (c, on) => { n.classList.toggle(c, on); return j; },
         hasClass: (c) => n.cls.indexOf(c) >= 0,
         attr: (k, v) => { if (v === undefined) { return n.getAttribute(k); } n.attrs[k] = String(v); return j; },
-        find: (sel) => { const f = n.querySelectorAll(sel)[0]; return f ? f.j : N(''); },
-        empty: () => { n.kids = []; return j; },
+        // Nothing found is an empty set, as in jQuery: length 0, and anything done to it does nothing.
+        find: (sel) => { const f = n.querySelectorAll(sel)[0]; return f ? f.j : Object.assign(N(''), { length: 0 }); },
+        // Out of the tree, handlers kept. empty() below strips the handlers of everything it removes, as jQuery's does.
+        detach: () => { (function walk(x) { const i = x.kids.indexOf(n); if (i >= 0) { x.kids.splice(i, 1); } x.kids.forEach(walk); })(menu.n); return j; },
+        empty: () => { (function strip(x) { x.kids.forEach((k) => { k.handlers = {}; strip(k); }); })(n); n.kids = []; return j; },
         prop: () => j, css: () => j, val: (v) => (v === undefined ? '' : j)
     };
     n.j = j;
@@ -59,7 +64,7 @@ global.$ = (x) => (x === '#jita-menu' ? menu : N(typeof x === 'string' ? x : '')
 global.document = { body: { contains: () => false } };   // async status lines find themselves gone and write nothing
 
 // ---- what render reads while it builds ----
-let lead = true;
+let lead = true, built = 0;
 global.JITA_IS_WIKI = false;
 global.JITA_NO_JIRA_UI = false;
 global.savedVariables = [['key', ''], ['parser', true], ['scrollbar', true], ['credits', true], ['buttons', true], ['similarDefects', true], ['detailView', true], ['screenOcr', true], ['defectProfile', true]];
@@ -74,7 +79,9 @@ global.JiTA = {
     db: { countDefectsOnly: never, countEbr: never, getMeta: never },
     worker: { _started: false, usable: () => false, _isLeader: false },
     leadduty: { isLead: () => lead, me: () => ({ handle: 'someone' }), ROSTER: () => ['someone'], OWNER: 'owner', pool: { CACHE_KEY: 'pool' } },
-    util: {}, changelog: {}, responses: {}, sync: {}, logsig: {}
+    // The editor, as buildEditor hands it over: one element, with a handler of its own (a section header's click).
+    responses: { buildEditor: () => { built++; return N('<div class="jita-resp-editor">Opening & closing Responses Add section Save Restore defaults</div>').on('click', () => {}); } },
+    util: {}, changelog: {}, sync: {}, logsig: {}
 };
 eval(block('JiTA.menu = {', '\n};\n'));
 const M = JiTA.menu;
@@ -88,18 +95,21 @@ const click = (id) => {
     const t = tabs().filter((x) => x.getAttribute('data-tab') === id)[0], bar = menu.n.querySelectorAll('.jita-menu-tabs')[0];
     bar.handlers.click.forEach((h) => { if (h.sel === '.jita-menu-tab') { h.fn.call(t); } });
 };
+const editor = () => menu.n.querySelectorAll('.jita-resp-editor')[0];
 
 (async () => {
     // ================= every area =================
     M.render();
     ok('one tab per area, in order, though Canned responses is built before the Triage Assistant', tabs().map((t) => t.txt).join(' | ') ===
         'Features | Triage Assistant | Canned responses | Lead duties | About', tabs().map((t) => t.txt).join(' | '));
+    ok('...each tab carries its name for the bold-width reserve', tabs().every((t) => t.getAttribute('data-label') === t.txt), JSON.stringify(tabs().map((t) => t.attrs)));
     ok('...the title and the tab bar sit together at the top', menu.n.kids[0].cls.indexOf('jita-menu-top') >= 0 &&
         menu.n.kids[0].kids.map((k) => k.cls[0]).join() === 'jita-menu-head,jita-menu-tabs', JSON.stringify(menu.n.kids[0].kids.map((k) => k.cls)));
     const text = (id) => (paneOf(id) ? paneOf(id).all() : '');
     ok('Features has the switches, the Defect profile with its zip setting', /Log Parser/.test(text('features')) && /Defect profile/.test(text('features')) &&
-        /Read igbr\.zip/.test(text('features')) && /Screenshot translation/.test(text('features')) && !/Customize responses/.test(text('features')) && !/Sync now/.test(text('features')));
-    ok('Canned responses has a tab of its own', /Customize responses/.test(text('responses')) && !/Log Parser/.test(text('responses')));
+        /Read igbr\.zip/.test(text('features')) && /Screenshot translation/.test(text('features')) && !/Restore defaults/.test(text('features')) && !/Sync now/.test(text('features')));
+    ok('Canned responses is the editor itself, not a button that opens it', built === 1 && paneOf('responses').kids.length === 1 &&
+        paneOf('responses').kids[0] === editor() && !/Customize responses/.test(menu.n.all()), built + ' / ' + text('responses'));
     ok('the Triage Assistant tab has its actions and settings', /Sync now/.test(text('triage')) && /Panel style/.test(text('triage')) && /Results shown/.test(text('triage')) &&
         /Embedding backend/.test(text('triage')) && /Hidden suggestions/.test(text('triage')) && !/Log Parser/.test(text('triage')));
     ok('Lead duties has the Lead duties', /Open lead duties/.test(text('lead')) && /Test Confluence access/.test(text('lead')));
@@ -108,16 +118,28 @@ const click = (id) => {
 
     // ================= switching =================
     const before = menu.n.kids.length;
-    menu.n.scrollTop = 120;
     click('lead');
-    ok('a click opens its tab, without a redraw, at the top', shown() === 'lead' && marked() === 'lead' && M._tab === 'lead' && menu.n.kids.length === before && menu.n.scrollTop === 0,
-        shown() + ' / ' + M._tab + ' / ' + menu.n.scrollTop);
+    ok('a click opens its tab, without a redraw', shown() === 'lead' && marked() === 'lead' && M._tab === 'lead' && menu.n.kids.length === before,
+        shown() + ' / ' + M._tab);
     const bar = menu.n.querySelectorAll('.jita-menu-tabs')[0];
     let prevented = 0;
     (bar.handlers.mousedown || []).forEach((h) => { if (h.sel === '.jita-menu-tab') { h.fn.call(tabs()[0], { preventDefault: () => { prevented++; } }); } });
     ok('pressing the mouse on a tab does not focus it, so a click leaves no focus ring', prevented === 1, String(prevented));
     M.render();
     ok('a redraw (a switch flipped) stays on it', shown() === 'lead' && marked() === 'lead');
+
+    // ================= the canned responses editor across a redraw =================
+    const ed = editor();
+    ed.typed = 'Greetings Capsuleer,';   // stands for what is typed in it
+    click('responses');
+    M.render();
+    ok('a redraw keeps the editor, with what is typed in it, in its tab', editor() === ed && editor().typed === 'Greetings Capsuleer,' && built === 1 &&
+        paneOf('responses').kids[0] === ed && shown() === 'responses', built + ' / ' + (editor() === ed));
+    ok('...and its handlers, which emptying the menu would strip', (ed.handlers.click || []).length === 1, JSON.stringify(Object.keys(ed.handlers)));
+    menu.n.kids = [];   // Settings closed and opened again: a new, empty #jita-menu
+    M.render();
+    ok('Settings opened again builds a fresh editor (unsaved edits went with the old one)', built === 2 && editor() !== ed && !editor().typed, String(built));
+    click('features');
 
     // ================= tabs that come and go =================
     click('triage');
@@ -137,14 +159,29 @@ const click = (id) => {
     ok('on Confluence there is no Triage Assistant tab', tabs().map((t) => t.getAttribute('data-tab')).join() === 'features,responses,about' && shown() === 'features');
     global.JITA_IS_WIKI = false;
     ok('every pane has exactly one tab', panes().length === tabs().length);
+    ok('the redraws built no second editor', built === 2, String(built));
 
     // ================= looks =================
     const css = M.css;
     ok('the first heading of a tab, which repeats its name, is hidden; the others stay', css.indexOf('#jita-menu .jita-menu-pane > .jita-menu-sect:first-child > h3:first-child { display: none; }') >= 0);
-    ok('the tab bar stays at the top while a tab scrolls', /#jita-menu \.jita-menu-top \{ position: sticky; top: 0;/.test(css));
-    ok('Settings is wider, for its five tabs; the other overlays keep their width', css.indexOf('#jita-menu.jita-settings-view { width: 460px; max-width: 94vw; }') >= 0 && css.indexOf('#jita-menu { width: 360px;') >= 0);
+    ok('Settings keeps one height whichever tab is open (at most 82% of the window), wide enough for five tabs; the other overlays keep their size',
+        css.indexOf('#jita-menu.jita-settings-view { width: 460px; max-width: 94vw; height: 620px; max-height: 82vh; display: flex; flex-direction: column; overflow: hidden; }') >= 0 &&
+        css.indexOf('#jita-menu { width: 360px; max-height: 82vh; overflow-y: auto;') >= 0);
+    ok('...the title and tab bar keep their height, and the open tab scrolls under them', css.indexOf('#jita-menu .jita-menu-top { flex: 0 0 auto;') >= 0 &&
+        css.indexOf('#jita-menu .jita-menu-pane { flex: 1 1 auto; min-height: 0; overflow-y: auto; }') >= 0);
+    ok('...the canned responses tab lays out the editor, whose list scrolls over its footer', css.indexOf('#jita-menu .jita-menu-pane[data-tab="responses"] { display: flex; flex-direction: column; overflow: hidden; }') >= 0);
     ok('a focused tab gets no ring; one reached by the keyboard is marked', css.indexOf('#jita-menu .jita-menu-tab:focus { outline: none !important; box-shadow: none !important; }') >= 0 &&
         /#jita-menu \.jita-menu-tab:focus-visible \{ color: #e6e6e6; background: #343c44;/.test(css));
+    ok('every tab is as wide as its name in bold, so the open one turning bold moves no other',
+        css.indexOf('#jita-menu .jita-menu-tab::after { content: attr(data-label); display: block; height: 0; overflow: hidden; visibility: hidden; font-weight: 700; }') >= 0 &&
+        /\.jita-menu-tab\.on \{[^}]*font-weight: 700;/.test(css));
+
+    // ================= the editor's own build (it runs on a real page; here only its source) =================
+    const be = block('    buildEditor: function () {', '\n    },\n');
+    ok('the editor builds into an element of its own, list and footer, and hands it over', /var \$ed = \$\('<div class="jita-resp-editor"><\/div>'\);/.test(be) &&
+        /\$\('<div class="jita-resp-scroll"><\/div>'\)\.appendTo\(\$ed\)/.test(be) && /\$\('<div class="jita-resp-foot"><\/div>'\)\.appendTo\(\$ed\)/.test(be) &&
+        /\n        return \$ed;\n    },\n$/.test(be) && !/#jita-menu|_openOverlay/.test(be));
+    ok('...and Save keeps Settings open', /JiTA\.responses\.save\(list\);/.test(be) && !/\.close\(|closeEditor/.test(be));
 
     console.log('\n' + (fail ? 'FAILURE: ' + fail + ' check(s) failed' : 'settings tab checks passed.'));
     process.exit(fail ? 1 : 0);
