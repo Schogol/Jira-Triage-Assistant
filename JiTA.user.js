@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.40.2
+// @version     3.41.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -152,13 +152,13 @@ function gmSet(key, val) {
 // so an existing install's orphaned "dropdowns" value is ignored and credits simply defaults on. The index of
 // each feature is now recorded ONCE in the FLAG map below and read via flagOn(name) - so if a slot ever moves,
 // only FLAG needs updating (not scattered numeric reads); the persisted gm key per slot must still stay stable.
-var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""], ["screenOcr", ""]];
+var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""], ["screenOcr", ""], ["defectProfile", ""]];
 
 // Named accessors over savedVariables (the [gmKey, enabled] pairs above): map a stable feature name to its
 // fixed index so a wrong index breaks loudly at one named site instead of silently misreading a slot. flagOn
 // reads, setFlag writes - both go through the SAME savedVariables + GM persistence, so behavior is unchanged.
 // Index 0 ("key") is a reserved legacy slot with no boolean feature and is deliberately omitted.
-var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7 };
+var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7, defectProfile: 8 };
 function flagOn(name) { var i = FLAG[name]; return i != null && !!savedVariables[i][1]; }
 function setFlag(name, val) {
     var i = FLAG[name];
@@ -3651,17 +3651,34 @@ JiTA.logsig = {
         if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'match', text: text }).catch(function () { return JiTA.logsig._matchTextLocal(text); }); }
         return JiTA.logsig._matchTextLocal(text);
     },
+    // A raw log's exception blocks, segmented as applyToTable segments the rendered rows: the MESSAGE column of every
+    // record (everything after the 3rd tab; prefix-less continuation lines as-is, as cellText() reads each rendered
+    // row), grouped from EXCEPTION # to EXCEPTION END (inclusive) or the next EXCEPTION #. Shared by the matching
+    // below and the defect profile. KEEP IN SYNC with lgMatch in the worker.
+    _logBlocks: function (text) {
+        var lines = String(text || '').replace(/\r/g, '').split('\n'), messages = [], blocks = [];
+        for (var li = 0; li < lines.length; li++) {
+            var parts = lines[li].split('\t');
+            messages.push(parts.length >= 4 ? parts.slice(3).join('\t') : lines[li]);
+        }
+        var i = 0;
+        while (i < messages.length) {
+            if (messages[i].indexOf('EXCEPTION #') === -1) { i++; continue; }
+            var blockText = messages[i], j = i + 1;
+            for (; j < messages.length; j++) {
+                if (messages[j].indexOf('EXCEPTION #') !== -1) { break; }
+                blockText += '\n' + messages[j];
+                if (messages[j].indexOf('EXCEPTION END') !== -1) { j++; break; }
+            }
+            blocks.push(blockText);
+            i = j;
+        }
+        return blocks;
+    },
     _matchTextLocal: function (text) {
         return JiTA.logsig.ensure().then(function (idx) {
             var found = {};
             if (!idx || !text) { return found; }
-            // Pull the message column out of every record (everything after the 3rd tab); keep prefix-less
-            // continuation lines as-is. This mirrors what cellText() reads from each rendered row.
-            var lines = text.replace(/\r/g, '').split('\n'), messages = [];
-            for (var li = 0; li < lines.length; li++) {
-                var parts = lines[li].split('\t');
-                messages.push(parts.length >= 4 ? parts.slice(3).join('\t') : lines[li]);
-            }
             function tallyBlock(blockText) {
                 var fp = JiTA.logsig._fingerprint(blockText);
                 var defect = (fp.sig && idx.sigMap[fp.sig]) ? idx.sigMap[fp.sig].members[0].key : null;
@@ -3676,20 +3693,7 @@ JiTA.logsig = {
                 if (!loose) { found[defect].loose = false; }   // an exact hit upgrades it from "possibly related"
                 if (!found[defect].msg && fp.msg) { found[defect].msg = fp.msg; }
             }
-            // Group message lines into exception blocks exactly like applyToTable: EXCEPTION # starts a block,
-            // EXCEPTION END (inclusive) or the next EXCEPTION # ends it.
-            var i = 0;
-            while (i < messages.length) {
-                if (messages[i].indexOf('EXCEPTION #') === -1) { i++; continue; }
-                var blockText = messages[i], j = i + 1;
-                for (; j < messages.length; j++) {
-                    if (messages[j].indexOf('EXCEPTION #') !== -1) { break; }
-                    blockText += '\n' + messages[j];
-                    if (messages[j].indexOf('EXCEPTION END') !== -1) { j++; break; }
-                }
-                tallyBlock(blockText);
-                i = j;
-            }
+            JiTA.logsig._logBlocks(text).forEach(tallyBlock);
             return found;
         });
     },
@@ -6544,7 +6548,25 @@ JiTA.ui = {
 #jita-sd-exccluster { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; }\
 #jita-sd-exccluster.has-hits { display: block; }\
 #jita-sd-exccluster .jita-sd-exccluster-head { font-weight: 700; color: #cfd6dd; font-size: 11px; margin-bottom: 4px; }\
-#jita-sd-panel.collapsed #jita-sd-status, #jita-sd-panel.collapsed #jita-sd-loglink, #jita-sd-panel.collapsed #jita-sd-exccluster, #jita-sd-panel.collapsed #jita-sd-list { display: none; }\
+#jita-sd-profile { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; font-size: 11px; }\
+#jita-sd-profile.has-hits { display: block; }\
+#jita-sd-profile .jp-head { display: flex; align-items: baseline; gap: 8px; font-weight: 700; color: #cfd6dd; margin-bottom: 4px; }\
+#jita-sd-profile .jp-state { font-weight: 400; color: #7a8694; }\
+#jita-sd-profile .jp-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; }\
+#jita-sd-profile .jp-chip { background: #2c333a; color: #cfd6dd; border-radius: 8px; padding: 1px 7px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\
+#jita-sd-profile .jp-chip.strong { background: #1f3d2e; color: #7fdca4; }\
+#jita-sd-profile .jp-none { color: #7a8694; }\
+#jita-sd-profile .jp-line { color: #9aa6b2; margin-top: 4px; }\
+#jita-sd-profile .jp-warn { color: #ffb547; }\
+#jita-sd-profile .jp-open { color: #4c9aff; cursor: pointer; text-decoration: none; }\
+#jita-sd-profile .jp-open:hover { text-decoration: underline; }\
+#jita-sd-profile .jp-outs { margin-top: 6px; }\
+#jita-sd-profile .jp-sub { font-weight: 700; color: #ffb547; margin-bottom: 2px; }\
+#jita-sd-profile .jp-out { display: flex; gap: 8px; padding: 2px 0; }\
+#jita-sd-profile .jp-out a { flex: 0 0 auto; color: #4c9aff; font-weight: 700; text-decoration: none; }\
+#jita-sd-profile .jp-out a:hover { text-decoration: underline; }\
+#jita-sd-profile .jp-why { color: #9aa6b2; overflow-wrap: anywhere; }\
+#jita-sd-panel.collapsed #jita-sd-status, #jita-sd-panel.collapsed #jita-sd-loglink, #jita-sd-panel.collapsed #jita-sd-exccluster, #jita-sd-panel.collapsed #jita-sd-profile, #jita-sd-panel.collapsed #jita-sd-list { display: none; }\
 #jita-sd-panel.jita-sd-up { flex-direction: column-reverse; }\
 #jita-sd-toast { position: fixed; right: 18px; bottom: 18px; z-index: 9001; background: #333; color: #eee; padding: 8px 14px;\
   border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.45); font-family: -apple-system,Arial,sans-serif; font-size: 12px; max-width: 320px; }\
@@ -6567,31 +6589,31 @@ JiTA.ui = {
 #jita-sd-tip .jita-sd-tip-html a { color: #4c9aff; }\
 #jita-sd-tip .jita-sd-tip-html table { border-collapse: collapse; margin: 6px 0; }\
 #jita-sd-tip .jita-sd-tip-html th, #jita-sd-tip .jita-sd-tip-html td { border: 1px solid #2c333a; padding: 2px 6px; }\
-/* ---- integrated "Triage Assistant" context group (sidebar mode) ---- */\
+/* ---- integrated context groups (sidebar mode): "Triage Assistant" and "Defect Profile" (.jita-side-card) ---- */\
 /* Styled with Atlassian design tokens so it blends into the native panel in both light + dark themes. */\
 /* Native-clone path (default): the cloned Details group already supplies the card / header / title font, so\
    we only need to hide its body and rotate its chevron on collapse. */\
-#jita-side-group.collapsed [data-jita-body] { display: none !important; }\
+.jita-side-card.collapsed [data-jita-body] { display: none !important; }\
 /* We clone a real context group (Development / More fields) for exact chrome, then swap the chevron path in\
    JS - down caret when open, right caret when collapsed - matching how Jira itself toggles it (no CSS rotate).\
    The cloned group ships without a full card border, so we draw our own complete bordered card and drop the\
    inner wrapper partial border so we do not double up. */\
-#jita-side-group.jita-ta-native { margin: 8px 0; border: 1px solid var(--ds-border, #091e4224); border-radius: 8px; box-sizing: border-box; overflow: hidden; }\
-#jita-side-group.jita-ta-native > div { border: none; }\
+.jita-side-card.jita-ta-native { margin: 8px 0; border: 1px solid var(--ds-border, #091e4224); border-radius: 8px; box-sizing: border-box; overflow: hidden; }\
+.jita-side-card.jita-ta-native > div { border: none; }\
 /* Kill the lingering focus ring on the (cloned) header button after a collapse-toggle click - the cloned\
    role=button keeps focus and Jira draws a blue outline/box-shadow around the whole card, which we do not\
    want on this static toggle. */\
-#jita-side-group:focus, #jita-side-group:focus-within, #jita-side-group:focus-visible,\
-#jita-side-group *:focus, #jita-side-group *:focus-visible,\
-#jita-side-header:focus, #jita-side-header:focus-visible { outline: none !important; box-shadow: none !important; }\
+.jita-side-card:focus, .jita-side-card:focus-within, .jita-side-card:focus-visible,\
+.jita-side-card *:focus, .jita-side-card *:focus-visible,\
+.jita-side-header:focus, .jita-side-header:focus-visible { outline: none !important; box-shadow: none !important; }\
 /* Manual fallback path: drawn by hand to mimic the native group when the clone template is unavailable. */\
-#jita-side-group.jita-ta-manual { margin: 8px 0; padding: 0 16px 4px; border: 1px solid var(--ds-border, #091e4224); border-radius: 8px; }\
-#jita-side-group.jita-ta-manual.collapsed { padding-bottom: 0; }\
-#jita-side-header { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; padding: 14px 0; }\
-#jita-side-header .jita-side-chevron { display: inline-flex; color: var(--ds-icon-subtle, #626f86); }\
-#jita-side-header .jita-side-chevron svg { width: 16px; height: 16px; }\
-#jita-side-header .jita-side-htitle { flex: 1; font-weight: 600; font-size: 16px; line-height: 1; color: var(--ds-text, #172b4d); }\
-#jita-side-group .jita-side-body { padding-bottom: 8px; padding-right: 14px; }\
+.jita-side-card.jita-ta-manual { margin: 8px 0; padding: 0 16px 4px; border: 1px solid var(--ds-border, #091e4224); border-radius: 8px; }\
+.jita-side-card.jita-ta-manual.collapsed { padding-bottom: 0; }\
+.jita-side-header { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; padding: 14px 0; }\
+.jita-side-header .jita-side-chevron { display: inline-flex; color: var(--ds-icon-subtle, #626f86); }\
+.jita-side-header .jita-side-chevron svg { width: 16px; height: 16px; }\
+.jita-side-header .jita-side-htitle { flex: 1; font-weight: 600; font-size: 16px; line-height: 1; color: var(--ds-text, #172b4d); }\
+.jita-side-card .jita-side-body { padding-bottom: 8px; padding-right: 14px; }\
 .jita-side-subhead { display: flex; align-items: center; gap: 8px; margin: 2px 0 4px; }\
 .jita-side-subhead #jita-sd-title { flex: 1; font-weight: 600; font-size: 12px; color: var(--ds-text-subtle, #44546f); }\
 #jita-side-group #jita-sd-mode { font-size: 10px; background: var(--ds-background-neutral, #091e420f); color: var(--ds-text-subtle, #44546f); padding: 1px 6px; border-radius: 8px; }\
@@ -6609,6 +6631,14 @@ JiTA.ui = {
 #jita-side-group #jita-sd-exccluster.has-hits { display: block; }\
 #jita-side-group #jita-sd-exccluster .jita-sd-exccluster-head { color: var(--ds-text, #172b4d); }\
 #jita-side-group #jita-sd-exccluster .jita-exc-member a { color: var(--ds-link, #0c66e4); }\
+#jita-profile-group #jita-sd-profile { padding: 0 0 2px; border-bottom: none; background: transparent; font-size: 12px; }\
+#jita-profile-group #jita-sd-profile .jp-head { color: var(--ds-text, #172b4d); }\
+#jita-profile-group #jita-sd-profile .jp-chip { background: var(--ds-background-neutral, #091e420f); color: var(--ds-text-subtle, #44546f); }\
+#jita-profile-group #jita-sd-profile .jp-chip.strong { background: var(--ds-background-success, #dcfff1); color: var(--ds-text-success, #216e4e); }\
+#jita-profile-group #jita-sd-profile .jp-line, #jita-profile-group #jita-sd-profile .jp-state, #jita-profile-group #jita-sd-profile .jp-none, #jita-profile-group #jita-sd-profile .jp-why { color: var(--ds-text-subtlest, #626f86); }\
+#jita-profile-group #jita-sd-profile .jp-sub { color: var(--ds-text-warning, #974f0c); }\
+#jita-profile-group #jita-sd-profile .jp-warn { color: var(--ds-text-warning, #974f0c); }\
+#jita-profile-group #jita-sd-profile .jp-open, #jita-profile-group #jita-sd-profile .jp-out a { color: var(--ds-link, #0c66e4); }\
 /* Responsive 2-up grid: two columns once the context column is wide enough (each cell >= 180px),\
    automatically collapsing to one column when narrow. The min track is 180px (not 280px) because the Jira\
    context column on a 1920-wide screen is only ~400px, so a 280px min never left room for a second column\
@@ -7327,7 +7357,7 @@ JiTA.ui = {
         var next = (JiTA.ui.mode() === 'sidebar') ? 'floating' : 'sidebar';
         gmSet('sdPanelStyle', next);
         $('#jita-sd-panel').remove();
-        $('#jita-side-group').remove();
+        $('#jita-side-group, #jita-profile-group').remove();
         JiTA.ui._rerenderCurrent();
         refreshMenu();
     },
@@ -7363,7 +7393,7 @@ JiTA.ui = {
             if ($('#jita-sd-panel').length) { $('#jita-sd-panel').remove(); }   // drop a lingering floating box
             return;
         }
-        if ($('#jita-side-group').length) { $('#jita-side-group').remove(); }   // floating mode / no sidebar anchor
+        $('#jita-side-group, #jita-profile-group').remove();   // floating mode / no sidebar anchor
         JiTA.ui._ensureFloating();
     },
 
@@ -7381,6 +7411,7 @@ JiTA.ui = {
             '  <div id="jita-sd-status"></div>' +
             '  <div id="jita-sd-loglink"></div>' +
             '  <div id="jita-sd-exccluster"></div>' +
+            '  <div id="jita-sd-profile"></div>' +
             '  <ul id="jita-sd-list"></ul>' +
             '</div>'
         );
@@ -7445,7 +7476,24 @@ JiTA.ui = {
         var old = document.getElementById('jita-side-group');
         if (old && old.parentNode) { old.parentNode.removeChild(old); }
 
-        var collapsed = !!gmGet(JiTA.ui.SIDE_COLLAPSE_KEY, false);
+        var group = JiTA.ui._buildSideGroup({ id: 'jita-side-group', title: 'Triage Assistant', body: JiTA.ui._sidebarBodyHtml(), collapseKey: JiTA.ui.SIDE_COLLAPSE_KEY });
+        if (anchor.nextSibling) { anchor.parentNode.insertBefore(group, anchor.nextSibling); }
+        else { anchor.parentNode.appendChild(group); }
+        // The Defect Profile card sits right above this one: one Jira left behind goes back on top of it.
+        var pg = document.getElementById('jita-profile-group');
+        if (pg) { group.parentNode.insertBefore(pg, group); }
+        // We just (re)built an EMPTY group. If this is a re-mount of the issue still on screen (Jira wiped us),
+        // paint the last results straight back so the panel reappears populated instead of blank. No-op on a
+        // fresh navigation (snapshot key won't match the new issue) - that path renders clean from scratch.
+        JiTA.ui._restoreSnapshot();
+        return true;
+    },
+
+    // A card in Jira's context column, built to look like Jira's own groups (Details, Development): o.id, o.title, o.body
+    // (the inner HTML) and o.collapseKey (the GM flag that remembers it collapsed). Not inserted - the caller places it.
+    // Shared by the Triage Assistant and the Defect Profile cards.
+    _buildSideGroup: function (o) {
+        var collapsed = !!gmGet(o.collapseKey, false);
 
         var group = null, headerClickTarget = null;
 
@@ -7476,7 +7524,7 @@ JiTA.ui = {
                 if (titleEl && bodyEl && bodyEl.parentNode) {
                     JiTA.ui._stripAttrs(clone);                 // (keeps element refs above valid)
                     if (chevronEl) { chevronEl.setAttribute('data-jita-chevron', '1'); }
-                    titleEl.textContent = 'Triage Assistant';
+                    titleEl.textContent = o.title;
                     // We cloned a COLLAPSED group, whose body wrapper carries Jira's collapse machinery (a
                     // `hidden` attribute, a nested `<div hidden>`, and/or inline height:0 / overflow on
                     // wrappers) that survives the clone and keeps content invisible even when expanded.
@@ -7486,7 +7534,7 @@ JiTA.ui = {
                     var freshBody = document.createElement('div');
                     freshBody.setAttribute('data-jita-body', '1');
                     freshBody.className = 'jita-side-body';
-                    freshBody.innerHTML = JiTA.ui._sidebarBodyHtml();
+                    freshBody.innerHTML = o.body;
                     var bodyParent = bodyEl.parentNode;
                     bodyParent.replaceChild(freshBody, bodyEl);
                     // The cloned group was COLLAPSED, so its body is suppressed by the wrapper's collapse
@@ -7569,7 +7617,8 @@ JiTA.ui = {
                             sec.style.setProperty('top', 'auto', 'important');
                         }
                     }
-                    clone.id = 'jita-side-group';
+                    clone.id = o.id;
+                    clone.classList.add('jita-side-card');
                     clone.classList.add('jita-ta-native');
                     headerClickTarget = btnEl || clone;
                     group = clone;
@@ -7580,16 +7629,18 @@ JiTA.ui = {
         // Fallback: hand-built group (used only if the native template wasn't found / clone failed).
         if (!group) {
             var $g = $(
-                '<div id="jita-side-group" class="jita-ta-manual">' +
-                '  <div id="jita-side-header" role="button" tabindex="0" aria-expanded="true">' +
+                '<div class="jita-side-card jita-ta-manual">' +
+                '  <div class="jita-side-header" role="button" tabindex="0" aria-expanded="true">' +
                 '    <span class="jita-side-chevron" data-jita-chevron="1">' + JiTA.ui._chevronSvg + '</span>' +
-                '    <span class="jita-side-htitle">Triage Assistant</span>' +
+                '    <span class="jita-side-htitle"></span>' +
                 '  </div>' +
-                '  <div class="jita-side-body" data-jita-body="1">' + JiTA.ui._sidebarBodyHtml() + '</div>' +
+                '  <div class="jita-side-body" data-jita-body="1">' + o.body + '</div>' +
                 '</div>'
             );
             group = $g[0];
-            headerClickTarget = group.querySelector('#jita-side-header');
+            group.id = o.id;
+            group.querySelector('.jita-side-htitle').textContent = o.title;
+            headerClickTarget = group.querySelector('.jita-side-header');
         }
 
         if (collapsed) { group.classList.add('collapsed'); }
@@ -7603,7 +7654,7 @@ JiTA.ui = {
                 var isColl = group.classList.toggle('collapsed');
                 JiTA.ui._setChevron(group, isColl);
                 try { headerClickTarget.setAttribute('aria-expanded', isColl ? 'false' : 'true'); } catch (e) { /* ignore */ }
-                gmSet(JiTA.ui.SIDE_COLLAPSE_KEY, isColl);
+                gmSet(o.collapseKey, isColl);
                 // Drop focus so the cloned button doesn't keep Jira's blue focus ring after the toggle click.
                 try { headerClickTarget.blur(); } catch (e3) { /* ignore */ }
             });
@@ -7612,14 +7663,7 @@ JiTA.ui = {
             // focus via Tab still works for accessibility); a plain click then toggles without a lingering ring.
             headerClickTarget.addEventListener('mousedown', function (e) { e.preventDefault(); });
         }
-
-        if (anchor.nextSibling) { anchor.parentNode.insertBefore(group, anchor.nextSibling); }
-        else { anchor.parentNode.appendChild(group); }
-        // We just (re)built an EMPTY group. If this is a re-mount of the issue still on screen (Jira wiped us),
-        // paint the last results straight back so the panel reappears populated instead of blank. No-op on a
-        // fresh navigation (snapshot key won't match the new issue) - that path renders clean from scratch.
-        JiTA.ui._restoreSnapshot();
-        return true;
+        return group;
     },
 
     // Feature B: build a "Mark dup" control that links the open EBR as a duplicate of `defectKey` and moves
@@ -8349,10 +8393,10 @@ JiTA.ui = {
     // "vanishes for a fraction of a second" flicker. Only fires in sidebar mode when our group is actually gone;
     // the follow-up scheduleRender() then swaps the placeholder rows for live, interactive ones.
     _reensureFast: function () {
-        if (!flagOn('similarDefects') || !JiTA.ui.currentKey) { return; }
-        if (JiTA.ui.mode() !== 'sidebar' || JiTA.ui._chromePresent()) { return; }
+        if (!flagOn('similarDefects') || !JiTA.ui.currentKey || JiTA.ui.mode() !== 'sidebar') { return; }
         try {
-            if (JiTA.ui._ensureSidebar()) { JiTA.ui.scheduleRender(); }
+            if (!JiTA.ui._chromePresent() && JiTA.ui._ensureSidebar()) { JiTA.ui.scheduleRender(); }
+            JiTA.profile.reensure();   // the Defect Profile card, which Jira can wipe on its own
         } catch (e) { /* ignore */ }
     },
 
@@ -8373,6 +8417,7 @@ JiTA.ui = {
         var terms = JiTA.ui._filterTerms();   // filter box: restrict the ranked corpus to these terms (whole DB)
         $('#jita-sd-title').text('Similar defects');   // reset title (the panel is shared with the EDR reports view)
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section; clear it on the EBR view
+        JiTA.profile.clear();                                         // so is the profile of a defect's reports
         JiTA.ui.renderLogLink(key, background);   // scan the attached log for known defects (no need to open it); background = don't blank it first
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar defects…'); }
         // Everything below is asynchronous, and reading the text can mean an on-demand translation: by the time an
@@ -8428,6 +8473,7 @@ JiTA.ui = {
         $('#jita-sd-loglink').removeClass('has-hits').empty();   // EBR-only section; unused on a defect
         if (!background) { $('#jita-sd-list').empty(); }   // background refresh keeps the list until new results are ready
         JiTA.ui.renderExceptionCluster(key, background);   // list other defects that reported the same exception; background = don't blank it first
+        JiTA.profile.renderSection(key, background);        // what the bug reports attached to this defect have in common
         if (!background) { JiTA.ui.setStatus('Finding matching bug reports…'); }
         // As in render(): a late answer for an issue the user has left paints nothing. Here it matters twice over,
         // because each row's Attach takes the issue on screen as its defect when the row is drawn.
@@ -8477,6 +8523,7 @@ JiTA.ui = {
         $('#jita-sd-title').text('Reports by this reporter');
         $('#jita-sd-mode').text('');                                  // no ranking mode in this view
         $('#jita-sd-exccluster').removeClass('has-hits').empty();     // defect-only section
+        JiTA.profile.clear();                                         // defect-only section
         $('#jita-sd-loglink').removeClass('has-hits').empty();        // similar-defects-only section
         $('#jita-sd-list').empty();
         JiTA.ui.setStatus('Finding this reporter’s other reports…');
@@ -8527,6 +8574,7 @@ JiTA.ui = {
         $('#jita-sd-title').text('Similar open reports');
         $('#jita-sd-loglink').removeClass('has-hits').empty();      // similar-defects-only section, unused here
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section, unused here
+        JiTA.profile.clear();                                         // defect-only section, unused here
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar open reports…'); }
         JiTA.ui.getIssueText(key).then(function (text) {
             if (JiTA.ui.currentKey !== key || !JiTA.ui.simReportsMode) { return; }   // navigated / toggled off meanwhile
@@ -8575,6 +8623,7 @@ JiTA.ui = {
         $('#jita-sd-mode').text('');                                  // no ranking mode in this view
         $('#jita-sd-loglink').removeClass('has-hits').empty();        // similar-defects-only section
         $('#jita-sd-exccluster').removeClass('has-hits').empty();     // defect-only section
+        JiTA.profile.clear();                                         // defect-only section
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Counting recently attached reports…'); }
         T._injectCss();
         T.rows(false).then(function (res) {
@@ -8717,7 +8766,7 @@ JiTA.ui = {
         if (!isEbr && !isReports) {
             // neither a bug report nor a defect/EO/PLAT issue - remove any stale panel (either style)
             if ($('#jita-sd-panel').length) { $('#jita-sd-panel').remove(); }
-            if ($('#jita-side-group').length) { $('#jita-side-group').remove(); }
+            $('#jita-side-group, #jita-profile-group').remove();
             JiTA.ui.currentKey = null;
             return;
         }
@@ -8898,12 +8947,34 @@ JiTA.menu = {
         $feat.append(JiTA.menu._toggleRow('Triage Assistant', 5, function () {
             if (!flagOn('similarDefects')) {
                 $('#jita-sd-panel').remove();
-                $('#jita-side-group').remove();
+                $('#jita-side-group, #jita-profile-group').remove();
                 JiTA.ui.currentKey = null;
             } else {
                 JiTA.ui.ensure();
             }
         }));
+        // Defect profile: on a defect, what its attached bug reports have in common. It lives beside the Triage
+        // Assistant's matching reports, so it shows only while that is on too. Switched off, its card goes at once.
+        var $prof = JiTA.menu._toggleRow('Defect profile', 8, function () {
+            if (!flagOn('defectProfile')) { JiTA.profile.clear(); return; }
+            var k = JiTA.ui.currentKey;
+            if (!JITA_NO_JIRA_UI && k && JiTA.ui._isReportsKey(k)) { JiTA.profile.renderSection(k, true); }
+        });
+        $prof.find('.lbl').append($('<span class="sub"></span>').text('On a defect: what its attached bug reports have in common, and the ones that do not fit. Shown with the Triage Assistant.'));
+        $feat.append($prof);
+        // Its sub-option, shown only while the profile is on: each report's igbr.zip gives its crash history and full
+        // hardware, and the downloads are the cost. A GM flag of its own, on by default.
+        if (flagOn('defectProfile')) {
+            var $zipRow = $('<div class="jita-menu-row" style="padding-left:18px;"></div>');
+            $('<span class="lbl">Read igbr.zip</span>')
+                .append($('<span class="sub"></span>').text('Downloads each attached report\'s zip for its crash history and full hardware. Off: smaller downloads, weaker profiles.'))
+                .appendTo($zipRow);
+            var $zipSw = $('<div class="jita-sw"><span class="knob"></span></div>');
+            if (JiTA.profile.zipOn()) { $zipSw.addClass('on'); }
+            $zipSw.on('click', function () { gmSet(JiTA.profile.ZIP_KEY, !JiTA.profile.zipOn()); refreshMenu(); });
+            $zipRow.append($zipSw);
+            $feat.append($zipRow);
+        }
         // ISD Credits: mount / tear down the corner badge (and start the scheduler) on toggle. The badge and
         // its crawl belong to Jira tabs only - toggling from Confluence still persists the flag for them.
         $feat.append(JiTA.menu._toggleRow('ISD Credits', 3, function () {
@@ -13551,6 +13622,775 @@ JiTA.trend = {
                 '.jita-trend-view .jtr-fix { flex: 0 0 auto; color: #ffb547; font-size: 11px; white-space: nowrap; }' +
                 '.jita-trend-view .jtr-rep { flex: 0 0 auto; color: #6bd0dc; font-size: 11px; text-decoration: none; white-space: nowrap; }' +
                 '.jita-trend-view .jtr-rep:hover { text-decoration: underline; }'
+            );
+        } catch (e) { /* ignore */ }
+    },
+
+    _noop: null
+};
+
+
+/* ---- Defect profile: what the bug reports attached to a defect have in common --------------------------------
+ * A defect collects bug reports from many players, and what they share is often the clue a developer needs: 11 of
+ * 12 on AMD graphics, all on Windows 11, the same exception in 9 of their logs, the same module in their crash
+ * history. Shown on a defect, built from the bug reports linked to it, from three sources:
+ *   1. the Computer Info block in each report's description (renderer, OS build, GPU and driver, CPU, memory),
+ *      which comes with the search, so this part costs nothing;
+ *   2. the report's logs.txt: the client build from its first lines, and its exceptions, fingerprinted exactly as
+ *      known-defect matching does (JiTA.logsig), so the same exception in two reports is the same signature;
+ *   3. the report's igbr.zip (unless switched off in Settings): dxdiag.txt's Windows crash history, i.e. which
+ *      module the EVE client crashed in, and the hardware from dxdiag.txt or PDMData.txt when the description has
+ *      no Computer Info. A Mac's zip has no dxdiag.txt, so a Mac report has no crash history to count.
+ * Downloads are the cost, so only the latest MAX_REPORTS reports are read, CONCURRENCY at a time, files over the
+ * size caps are skipped, and what a report's files said is cached for good (an attached report does not change).
+ * A value is the defect's pattern once DOMINANT of at least MIN_N reports share it; a report that differs from a
+ * pattern is listed as an outlier, with why - often a report attached to the wrong defect.
+ */
+JiTA.profile = {
+    V: 3,                          // shape of a cached report reading: bump to read every report's files again
+    CACHE_PREFIX: 'rp:',           // meta store key per report
+    ZIP_KEY: 'jitaProfileZip',     // Settings: read each report's igbr.zip (on by default)
+    MAX_REPORTS: 25,               // the latest this many reports are read
+    CONCURRENCY: 3,
+    MAX_LOG_BYTES: 15 * 1024 * 1024,
+    MAX_ZIP_BYTES: 40 * 1024 * 1024,
+    MAX_LOGS: 3,                   // log files read per report
+    MAX_EXC: 40,                   // exceptions kept per report
+    DOMINANT: 0.75,
+    MIN_N: 5,
+    MARK: /Trinity platform:|Video Card:/i,
+    _builds: {},                   // defect key -> the build in flight
+    _last: {},                     // defect key -> the latest state, painted at once on a redraw
+    KEEP: 20,                      // defects whose latest state stays in memory; a tab stays open for days
+
+    zipOn: function () { return !!gmGet(JiTA.profile.ZIP_KEY, true); },
+
+    // The hardware dimensions a profile counts. `outlier`: a report differing from the pattern is flagged.
+    DIMS: [
+        { id: 'gpuVendor', label: 'GPU vendor', outlier: true, get: function (v) { return v.hw && v.hw.gpuVendor; } },
+        { id: 'gpu', label: 'GPU', outlier: true, get: function (v) { return v.hw && v.hw.gpu; } },
+        { id: 'os', label: 'OS', outlier: true, get: function (v) { return v.hw && v.hw.os; } },
+        { id: 'platform', label: 'Renderer', outlier: true, get: function (v) { return v.hw && v.hw.platform; } },
+        { id: 'cpuVendor', label: 'CPU vendor', outlier: true, get: function (v) { return v.hw && v.hw.cpuVendor; } },
+        { id: 'cpuGen', label: 'CPU generation', outlier: true, get: function (v) { return v.hw && v.hw.cpuGen; } },
+        { id: 'hybrid', label: 'Switchable graphics', outlier: true, get: function (v) { return (v.hw && v.hw.hybrid != null) ? (v.hw.hybrid ? 'Yes' : 'No') : null; } },
+        { id: 'lang', label: 'Language', outlier: false, get: function (v) { return v.lang; } }
+    ],
+
+    // ---- reading a report ---------------------------------------------------------------------------------------
+    _p2: function (n) { n = +n; return (n < 10 ? '0' : '') + n; },
+    // "Windows 11", "Windows 10", or "macOS 26" (a Mac by `mac`, or a version that says so; the major version only, as
+    // Windows is told apart by 10 and 11).
+    _osName: function (ver, build, mac) {
+        if (mac || /mac/i.test(ver || '')) { var mv = /(\d+)/.exec(ver || ''); return mv ? 'macOS ' + mv[1] : 'macOS'; }
+        if (build >= 22000) { return 'Windows 11'; }
+        if (build >= 10240 || /^10(\.|$)/.test(ver || '')) { return 'Windows 10'; }
+        return ver ? String(ver) : null;
+    },
+    _gpuVendor: function (name) {
+        var n = String(name || '');
+        if (/nvidia|geforce|quadro|\brtx\b|\bgtx\b/i.test(n)) { return 'NVIDIA'; }
+        if (/\bamd\b|radeon|\bati\b/i.test(n)) { return 'AMD'; }
+        if (/intel|\barc\b|iris|\buhd\b/i.test(n)) { return 'Intel'; }
+        if (/apple/i.test(n)) { return 'Apple'; }
+        return n ? 'Other' : null;
+    },
+    // A CPU's generation from Windows' "Family F Model M" and the vendor id. Only the generations worth telling apart
+    // are named - Intel's 12th and 13th/14th gen, AMD's Zen families - and every other CPU of a known vendor still
+    // counts, as "(other)", so a pattern is never measured against only the CPUs this table knows.
+    _cpuGen: function (raw) {
+        var m = /Family\s+(\d+)\s+Model\s+(\d+)/i.exec(raw || ''), fam = m ? +m[1] : NaN, mod = m ? +m[2] : NaN;
+        if (/GenuineIntel/i.test(raw || '')) {
+            if (fam === 6 && (mod === 183 || mod === 186 || mod === 191)) { return 'Intel 13th/14th gen (Raptor Lake)'; }
+            if (fam === 6 && (mod === 151 || mod === 154)) { return 'Intel 12th gen (Alder Lake)'; }
+            return 'Intel (other)';
+        }
+        if (/AuthenticAMD/i.test(raw || '')) {
+            if (fam === 23) { return 'AMD Zen / Zen 2'; }
+            if (fam === 25) { return mod >= 96 ? 'AMD Zen 4' : 'AMD Zen 3'; }
+            if (fam === 26) { return 'AMD Zen 5'; }
+            return 'AMD (other)';
+        }
+        return null;
+    },
+    // An Apple chip's generation from its name ("Apple M5 Pro" -> "Apple M5"): a Mac's Computer Info names no CPU model,
+    // and its GPU is the chip.
+    _appleChip: function (name) {
+        var m = /\bM(\d+)\b/i.exec(name || '');
+        return m ? 'Apple M' + m[1] : 'Apple (other)';
+    },
+
+    // The Computer Info block of a report -> { platform, os, osBuild, gpu, gpuVendor, driver, driverDate, hybrid, cpu,
+    // cpuVendor, cpuGen, threads, ghz, ramGB, freeGB }, or null when there is none. The stored text is flattened to
+    // one line, so each field is read up to the next label, not to a line end. Real ones (2026-10), a PC and a Mac:
+    //   Trinity platform: dx11  Process: x64  OS: 10.0, build: 26100,  Video Card: NVIDIA GeForce RTX 3060 Ti
+    //   (Driver: 32.0.16.1714, Released: 9-17-2026)  Is Optimus: No  Is AMD Dynamic Switchable: No
+    //   CPU: AMD64 Family 25 Model 33 Stepping 2, AuthenticAMD @ 3.40 GHz (16 CPUs)  Memory: 32681 MB (5359 MB available)
+    //
+    //   Trinity platform: metal  Process: x64  OS: 26.6, build: 2,  Video Card: Apple M5 Pro (Driver: 0.0.0.0,
+    //   Released: -)  Is Optimus: -  Is AMD Dynamic Switchable: -  CPU: Apple Family 0 Model 0 Stepping 0, Apple
+    //   Family 0 Model 0 Stepping 0 @ 2.40 GHz (18 CPUs)  Memory: 49152 MB (24576 MB available)
+    // A Mac renders with Metal, and on Apple Silicon its CPU says Apple; its "build" is not a Windows build.
+    parseComputerInfo: function (text) {
+        var P = JiTA.profile, t = String(text || '').replace(/\s+/g, ' '), at = t.search(P.MARK), hw = {}, m;
+        if (at < 0) { return null; }
+        t = t.slice(at);
+        var mac = /Trinity platform:\s*metal\b/i.test(t) || /\bCPU:\s*Apple\b/i.test(t);
+        if ((m = /Trinity platform:\s*([A-Za-z0-9]+)/i.exec(t))) { hw.platform = m[1].toLowerCase(); }
+        if ((m = /\bOS:\s*([\d.]+),\s*build:\s*(\d+)/i.exec(t))) {
+            hw.os = P._osName(m[1], +m[2], mac);
+            if (!mac) { hw.osBuild = +m[2]; }
+        }
+        else if ((m = /\bOS:\s*(.+?)(?=\s+(?:Video Card|Is Optimus|Is AMD|CPU|Memory|Process):|$)/i.exec(t))) { hw.os = P._osName(m[1].replace(/[,\s]+$/, ''), null, mac); }
+        // The driver part as the client writes it; a Mac's says "Driver: 0.0.0.0, Released: -", which is no driver.
+        if ((m = /Video Card:\s*(.+?)\s*\(Driver:\s*([^,()]*?),\s*Released:\s*([^()]*?)\s*\)/i.exec(t))) {
+            hw.gpu = m[1];
+            if (/[1-9]/.test(m[2])) { hw.driver = m[2]; }
+            var rd = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(m[3]);
+            if (rd) { hw.driverDate = rd[3] + '-' + P._p2(rd[1]) + '-' + P._p2(rd[2]); }
+        } else if ((m = /Video Card:\s*(.+?)(?=\s+(?:Is Optimus|Is AMD|CPU|Memory):|$)/i.exec(t))) { hw.gpu = m[1]; }
+        if (hw.gpu) { hw.gpuVendor = P._gpuVendor(hw.gpu); }
+        var opt = /Is Optimus:\s*(Yes|No)/i.exec(t), sw = /Is AMD Dynamic Switchable:\s*(Yes|No)/i.exec(t);
+        if (opt || sw) { hw.hybrid = !!((opt && /yes/i.test(opt[1])) || (sw && /yes/i.test(sw[1]))); }
+        if ((m = /CPU:\s*(.+?)\s*@\s*([\d.]+)\s*GHz\s*\((\d+)\s*CPUs?\)/i.exec(t))) {
+            hw.cpu = m[1]; hw.ghz = +m[2]; hw.threads = +m[3];
+            hw.cpuVendor = /AuthenticAMD/i.test(m[1]) ? 'AMD' : (/GenuineIntel/i.test(m[1]) ? 'Intel' : (/apple/i.test(m[1]) ? 'Apple' : null));
+            hw.cpuGen = (hw.cpuVendor === 'Apple') ? P._appleChip(hw.gpu) : P._cpuGen(m[1]);
+        }
+        if ((m = /Memory:\s*(\d+)\s*MB\s*\((\d+)\s*MB available\)/i.exec(t))) { hw.ramGB = Math.round(+m[1] / 1024); hw.freeGB = Math.round(+m[2] / 102.4) / 10; }
+        return hw;
+    },
+
+    // The text that carries a report's Computer Info: its description, or any other field that holds the block.
+    _issueText: function (f) {
+        var P = JiTA.profile, d = JiTA.util.toPlainText(f && f.description);
+        if (P.MARK.test(d)) { return d; }
+        for (var k in (f || {})) {
+            if (!Object.prototype.hasOwnProperty.call(f, k) || k === 'description') { continue; }
+            var v = f[k], t = (typeof v === 'string') ? v : ((v && typeof v === 'object' && v.type === 'doc') ? JiTA.util.toPlainText(v) : '');
+            if (t && P.MARK.test(t)) { return t; }
+        }
+        return d;
+    },
+
+    // "EVE Client version 24.01 build 3569502 started 10/03/2026 14:01:41", in a log's first lines.
+    parseBuild: function (text) {
+        var m = /EVE Client version\s+([\d.]+)\s+build\s+(\d+)/i.exec(String(text || '').slice(0, 20000));
+        return m ? { version: m[1], build: +m[2] } : null;
+    },
+
+    // A log's distinct exceptions as fingerprints, [{ sig, msg }]: only blocks with a full stack signature count, and
+    // an exception logged twice in one report counts once.
+    logExceptions: function (text) {
+        var out = [], seen = {};
+        JiTA.logsig._logBlocks(text).forEach(function (b) {
+            var fp = JiTA.logsig._fingerprint(b);
+            if (!fp.sig || seen[fp.sig]) { return; }
+            seen[fp.sig] = true;
+            out.push({ sig: fp.sig, msg: String(fp.msg || '').slice(0, 200) });
+        });
+        return out;
+    },
+    // A signature ("<message>|file.py:func>file.py:func") as its message and its frames, innermost last. Frames hold no
+    // "|", so the message ends at the last one; a function named "<module>" holds a ">", so a piece without ":" belongs
+    // to the frame before it.
+    _sigParts: function (sig) {
+        var at = String(sig).lastIndexOf('|'), frames = [];
+        String(sig).slice(at + 1).split('>').forEach(function (p) {
+            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }
+        });
+        return { msg: at < 0 ? String(sig) : String(sig).slice(0, at), frames: frames };
+    },
+    // Short labels for call stacks that end alike: where each one differs, up to the frames they all share.
+    _pathLabels: function (chains) {
+        var cs = 0, min = Math.min.apply(null, chains.map(function (c) { return c.length; }));
+        while (cs < min && chains.every(function (c) { return c[c.length - 1 - cs] === chains[0][chains[0].length - 1 - cs]; })) { cs++; }
+        return chains.map(function (c) {
+            var own = c.slice(0, c.length - cs);
+            if (!own.length) { return c.slice(0, 1).join('') + (c.length > 1 ? ' > …' : ''); }   // the shortest: it starts at the shared frames
+            return (own.length > 3 ? '… > ' : '') + own.slice(-3).join(' > ') + (cs ? ' > …' : '');
+        });
+    },
+
+    // What a report's dxdiag.txt adds: the EVE client's crashes in the Windows crash history ([{ module, code }]), how
+    // many system crashes it lists, and the hardware, for a report without Computer Info. `wer` is false when the file
+    // has no crash history section at all, which is not the same as an empty one.
+    readDxdiag: function (text) {
+        var P = JiTA.profile, wer = parseWER(text), crashes = [], kernel = 0;
+        (wer || []).forEach(function (e) {
+            var k = dxWerKind(e);
+            if (k === 'eve') {
+                var code = dxCrashCode(e);
+                crashes.push({ module: e.p.P4 || '?', code: dxExceptionName(code) || code || '' });
+            } else if (k === 'kernel') { kernel++; }
+        });
+        var gpus = dxGpus(text, dxDateOrder(text)), gpu = null;
+        for (var i = 0; i < gpus.length; i++) { if (!gpu || /discrete/i.test(gpus[i].role)) { gpu = gpus[i]; } }
+        var osLine = dxFirst(text, 'Operating System'), bm = /Build\s+(\d+)/i.exec(osLine), hw = {};
+        if (gpu) { hw.gpu = gpu.name; hw.gpuVendor = P._gpuVendor(gpu.name); if (gpu.version) { hw.driver = gpu.version; } }
+        if (osLine) { hw.os = P._osName(osLine, bm ? +bm[1] : null) || osLine; if (bm) { hw.osBuild = +bm[1]; } }
+        return { wer: !!wer, crashes: crashes.slice(0, 50), kernel: kernel, hw: Object.keys(hw).length ? hw : null };
+    },
+
+    // The hardware in a report's PDMData.txt, for a report without Computer Info or dxdiag.txt.
+    readPdm: function (text) {
+        var P = JiTA.profile, d = (convertTextToObject(text) || {}).DATA || {}, os = d.OS || {}, mc = d.MACHINE || {}, cpu = mc.CPU || {}, hw = {};
+        var gpu = pdmBestGpu(mc), name = pdmGpuName(gpu), build = Number(os.BUILD_NUMBER), th = Number(cpu.LOGICAL_CORE_COUNT), mem = Number(mc.TOTAL_MEMORY);
+        if (name) { hw.gpu = name; hw.gpuVendor = P._gpuVendor(name); }
+        if (/win/i.test(os.TYPE || '')) { hw.os = P._osName('10.0', isNaN(build) ? null : build); if (!isNaN(build)) { hw.osBuild = build; } }
+        else if (/mac/i.test(os.TYPE || '')) { hw.os = P._osName(String(os.MAJOR_VERSION || ''), null, true); }
+        if (cpu.VENDOR) { hw.cpuVendor = /amd/i.test(cpu.VENDOR) ? 'AMD' : (/intel/i.test(cpu.VENDOR) ? 'Intel' : (/apple/i.test(cpu.VENDOR) ? 'Apple' : null)); }
+        if (hw.cpuVendor === 'Apple') { hw.cpuGen = P._appleChip(cpu.BRAND || name); }
+        if (!isNaN(th) && th > 0) { hw.threads = th; }
+        if (!isNaN(mem) && mem > 0) { hw.ramGB = Math.round(mem / 1073741824); }
+        return Object.keys(hw).length ? hw : null;
+    },
+
+    // ---- the igbr.zip -------------------------------------------------------------------------------------------
+    // The named entries of a zip (an ArrayBuffer), found by file name without folder, case-insensitive: resolves
+    // { name: text }. A small reader on the browser's own DecompressionStream, so no library is loaded: stored and
+    // deflated entries only (what zip tools write); zip64 and encrypted entries are skipped, and so is an entry that
+    // unpacks to more than `maxBytes` (when given), as the zip says before anything is unpacked. `hint` is the report's
+    // client language (an OCR code), for text in Windows' own code page (see _decodeLog).
+    unzip: function (buf, wanted, maxBytes, hint) {
+        var P = JiTA.profile, u8 = new Uint8Array(buf), dv = new DataView(buf), want = {}, taken = {}, jobs = [], eocd = -1, i;
+        (wanted || []).forEach(function (w) { want[String(w).toLowerCase()] = true; });
+        for (i = u8.length - 22; i >= 0 && i >= u8.length - 65557; i--) { if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; } }
+        if (eocd < 0) { return Promise.resolve({}); }
+        var count = dv.getUint16(eocd + 10, true), p = dv.getUint32(eocd + 16, true);
+        function take(base, method, data) {
+            var bytes = (method === 0) ? Promise.resolve(data) : P._inflate(data);
+            jobs.push(bytes.then(function (b) { return [base, P._decode(b, hint)]; }, function () { return null; }));
+        }
+        for (var n = 0; n < count && p + 46 <= u8.length; n++) {
+            if (dv.getUint32(p, true) !== 0x02014b50) { break; }
+            var flags = dv.getUint16(p + 8, true), method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true), usize = dv.getUint32(p + 24, true);
+            var nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true), lho = dv.getUint32(p + 42, true);
+            var base = new TextDecoder('utf-8').decode(u8.subarray(p + 46, p + 46 + nlen)).replace(/^.*[\/\\]/, '').toLowerCase();
+            p += 46 + nlen + xlen + clen;
+            if (!want[base] || taken[base] || (flags & 1) || csize === 0xFFFFFFFF || (method !== 0 && method !== 8) || lho + 30 > u8.length) { continue; }
+            if (maxBytes && usize > maxBytes) { continue; }
+            if (dv.getUint32(lho, true) !== 0x04034b50) { continue; }
+            var start = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
+            if (start + csize > u8.length) { continue; }
+            taken[base] = true;
+            take(base, method, u8.subarray(start, start + csize));
+        }
+        return Promise.all(jobs).then(function (pairs) {
+            var out = {};
+            pairs.forEach(function (pr) { if (pr) { out[pr[0]] = pr[1]; } });
+            return out;
+        });
+    },
+    _inflate: function (data) {
+        if (typeof DecompressionStream !== 'function') { return Promise.reject(new Error('no DecompressionStream')); }
+        var stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        return new Response(stream).arrayBuffer().then(function (b) { return new Uint8Array(b); });
+    },
+    // Text in UTF-16 when it says so (a byte-order mark, or every other byte zero, which is how dxdiag can write it),
+    // else UTF-8 with lines in Windows' own code page read as such (_decodeLog).
+    _decode: function (b, hint) {
+        if (b.length >= 2 && b[0] === 0xFF && b[1] === 0xFE) { return new TextDecoder('utf-16le').decode(b.subarray(2)); }
+        if (b.length >= 2 && b[0] === 0xFE && b[1] === 0xFF) { return new TextDecoder('utf-16be').decode(b.subarray(2)); }
+        var zeros = 0, n = Math.min(b.length, 400);
+        for (var i = 1; i < n; i += 2) { if (b[i] === 0) { zeros++; } }
+        if (n > 20 && zeros > n / 4) { return new TextDecoder('utf-16le').decode(b); }
+        return JiTA.profile._decodeLog(b, hint);
+    },
+    // A log as text. The client writes UTF-8, but Windows hands it some messages in the PC's own code page - the
+    // socket errors, "[Errno 10060] Попытка установить соединение…" on a Russian Windows - and the client logs those
+    // bytes as they are. Read as UTF-8 they come out as �, and the same error on two PCs reads differently. So a line
+    // that is not valid UTF-8 is read in that code page, and every other line stays UTF-8.
+    _decodeLog: function (b, hint) {
+        var P = JiTA.profile, strict = new TextDecoder('utf-8', { fatal: true });
+        try { return strict.decode(b); } catch (e) { /* some lines are in another code page: found below */ }
+        var bad = [], i = 0, n = b.length;
+        while (i < n) {
+            var j = b.indexOf(10, i), end = j < 0 ? n : j + 1, k = i;
+            while (k < end && b[k] < 0x80) { k++; }
+            if (k < end) { try { strict.decode(b.subarray(i, end)); } catch (e2) { bad.push(i, end); } }
+            i = end;
+        }
+        var lax = new TextDecoder('utf-8'), legacy, out = [], at = 0;
+        try { legacy = new TextDecoder(P._codepage(b, bad, hint)); } catch (e3) { legacy = lax; }
+        for (var x = 0; x < bad.length; x += 2) {
+            if (bad[x] > at) { out.push(lax.decode(b.subarray(at, bad[x]))); }
+            out.push(legacy.decode(b.subarray(bad[x], bad[x + 1])));
+            at = bad[x + 1];
+        }
+        if (at < n) { out.push(lax.decode(b.subarray(at))); }
+        return out.join('');
+    },
+    // The code page of the lines `bad` ([start, end, start, end...] in `b`): the report's client language says it for
+    // the scripts that need one of their own; otherwise the bytes do. Cyrillic fills whole words with non-ASCII bytes,
+    // the Western languages an accented letter here and there.
+    CODEPAGES: { rus: 'windows-1251', chi_sim: 'gbk', jpn: 'shift_jis', kor: 'euc-kr' },
+    _codepage: function (b, bad, hint) {
+        var P = JiTA.profile;
+        if (P.CODEPAGES[hint]) { return P.CODEPAGES[hint]; }
+        var hi = 0, runs = 0;
+        for (var x = 0; x < bad.length && x < 2000; x += 2) {
+            var prev = false;
+            for (var k = bad[x]; k < bad[x + 1]; k++) {
+                var h = b[k] >= 0x80;
+                if (h) { hi++; if (!prev) { runs++; } }
+                prev = h;
+            }
+        }
+        return (runs && hi / runs >= 3) ? 'windows-1251' : 'windows-1252';
+    },
+    _fetchBytes: function (url) {
+        return new Promise(function (resolve, reject) {
+            if (typeof GM_xmlhttpRequest !== 'function') { reject(new Error('no GM_xmlhttpRequest')); return; }
+            GM_xmlhttpRequest({
+                method: 'GET', url: url, responseType: 'arraybuffer', timeout: 120000,
+                onload: function (r) { if (r.status >= 200 && r.status < 300 && r.response) { resolve(r.response); } else { reject(new Error('HTTP ' + r.status)); } },
+                onerror: function () { reject(new Error('network error')); },
+                ontimeout: function () { reject(new Error('timeout')); }
+            });
+        });
+    },
+    // A log, fetched as bytes so _decodeLog can read lines in Windows' own code page.
+    _fetchLog: function (url, hint) {
+        return JiTA.profile._fetchBytes(url).then(function (buf) { return JiTA.profile._decodeLog(new Uint8Array(buf), hint); });
+    },
+
+    // Read a report's files and cache what they said. `rec` is its cached reading, if any: a part it already has is
+    // not read again. A download that fails leaves its part unread, so the next visit tries again; a file over its
+    // size cap is skipped for good.
+    _readFiles: function (issue, rec, zip) {
+        var P = JiTA.profile, f = issue.fields || {}, att = f.attachment || [], jobs = Promise.resolve();
+        var hint = (JiTA.ocr._langFromLabels(f.labels || []) || {}).code;   // the client language, for Windows' own code page
+        rec = rec ? JSON.parse(JSON.stringify(rec)) : { v: P.V, key: issue.key, logs: false, zip: false };
+        // What one log says, added to `into`: the build, if none is known yet, and the exceptions it does not have yet.
+        function useLog(into, t) {
+            var seen = {}, b = P.parseBuild(t);
+            into.exc = into.exc || [];
+            into.exc.forEach(function (e) { seen[e.sig] = true; });
+            if (b && !into.build) { into.build = b.build; into.version = b.version; }
+            P.logExceptions(t).forEach(function (e) { if (!seen[e.sig] && into.exc.length < P.MAX_EXC) { seen[e.sig] = true; into.exc.push(e); } });
+            into.hasLog = true;
+        }
+        if (!rec.logs) {
+            var logs = att.filter(function (a) { return /\.txt$/i.test(a.filename || '') && /log/i.test(a.filename || '') && a.content; });
+            logs.sort(function (a, b) { return ((/^logs\.txt$/i.test(b.filename) ? 1 : 0) - (/^logs\.txt$/i.test(a.filename) ? 1 : 0)) || ((a.size || 0) - (b.size || 0)); });
+            var small = logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); }).slice(0, P.MAX_LOGS), got = {}, li = 0;
+            // One log at a time, each read as it arrives and then let go: a report can carry three logs of 15 MB, and
+            // three reports are read at once. What they say is kept only once every one of them was read.
+            jobs = (function nextLog() {
+                if (li >= small.length) {
+                    rec.logs = true;
+                    rec.skippedLogs = logs.length > small.length;
+                    if (got.hasLog) { rec.exc = got.exc; rec.build = got.build; rec.version = got.version; rec.hasLog = true; }
+                    return Promise.resolve();
+                }
+                return P._fetchLog(small[li++].content, hint).then(function (t) { useLog(got, String(t || '')); return nextLog(); },
+                    function () { /* a log failed: all of them are read again next time */ });
+            })();
+        }
+        if (zip && !rec.zip) {
+            jobs = jobs.then(function () {
+                // The client always names it igbr.zip; any other zip is something a player added.
+                var z = att.filter(function (a) { return /^igbr\.zip$/i.test(a.filename || '') && a.content; })[0];
+                if (!z) { rec.zip = true; rec.hasZip = false; return; }
+                if (z.size > P.MAX_ZIP_BYTES) { rec.zip = true; rec.hasZip = false; rec.skippedZip = true; return; }
+                // The zip's logs.txt only stands in for a report without a log of its own, so only then is it unpacked.
+                var want = ['dxdiag.txt', 'pdmdata.txt'];
+                if (rec.logs && !rec.hasLog) { want.push('logs.txt'); }
+                return P._fetchBytes(z.content).then(function (buf) {
+                    return P.unzip(buf, want, P.MAX_LOG_BYTES, hint);
+                }).then(function (files) {
+                    rec.zip = true; rec.hasZip = true;
+                    if (files['dxdiag.txt']) {
+                        var dx = P.readDxdiag(files['dxdiag.txt']);
+                        rec.wer = dx.wer; rec.crashes = dx.crashes; rec.kernel = dx.kernel; rec.dxHw = dx.hw;
+                    }
+                    if (files['pdmdata.txt']) { rec.pdmHw = P.readPdm(files['pdmdata.txt']); }
+                    if (!rec.hasLog && files['logs.txt'] && rec.logs) { useLog(rec, files['logs.txt']); }
+                }, function () { /* the download failed: read it again next time */ });
+            });
+        }
+        return jobs.then(function () {
+            rec.at = Date.now();
+            return JiTA.db.setMeta(P.CACHE_PREFIX + issue.key, rec).then(function () { return rec; }, function () { return rec; });
+        });
+    },
+
+    // One report as the profile sees it: what its description and labels say, plus its cached reading.
+    view: function (issue, rec) {
+        var P = JiTA.profile, f = issue.fields || {}, ci = P.parseComputerInfo(P._issueText(f)), L = JiTA.ocr._langFromLabels(f.labels || []);
+        var hw = ci || (rec && (rec.dxHw || rec.pdmHw)) || null;
+        return {
+            key: issue.key, created: f.created || null, status: (f.status && f.status.name) || '', lang: L ? L.label : 'English',
+            hw: hw, hwFrom: ci ? 'Computer Info' : (hw ? (rec.dxHw ? 'dxdiag.txt' : 'PDMData.txt') : null),
+            build: (rec && rec.build) || null, version: (rec && rec.version) || null,
+            logRead: (rec && rec.logs) ? !!rec.hasLog : null, exc: (rec && rec.exc) || [],
+            crashRead: (rec && rec.zip) ? !!rec.wer : null, crashes: (rec && rec.crashes) || []
+        };
+    },
+
+    // ---- the profile --------------------------------------------------------------------------------------------
+    // Count what the reports share. Returns { n, dims, exc, withLog, domExc, crashes, withWer, domCrash, builds,
+    // first, last, afterFix, outliers }. A pattern (dims[].dominant, domExc, domCrash) needs DOMINANT of at least
+    // MIN_N reports that say anything about it; a report that says nothing is neither for nor against it.
+    summarise: function (views, defect) {
+        var P = JiTA.profile, out = { n: views.length, dims: [], exc: [], crashes: [], outliers: [], builds: null, first: null, last: null, afterFix: 0 };
+        views.forEach(function (v) {
+            if (!v.created) { return; }
+            if (!out.first || v.created < out.first) { out.first = v.created; }
+            if (!out.last || v.created > out.last) { out.last = v.created; }
+        });
+        if (defect && defect.resolutiondate && JiTA.util.isResolved(defect.status, defect.resolution)) {
+            out.fixedAt = defect.resolutiondate;
+            out.afterFix = views.filter(function (v) { return v.created && Date.parse(v.created) > Date.parse(defect.resolutiondate); }).length;
+        }
+        var bs = views.filter(function (v) { return v.build; }).sort(function (a, b) { return a.build - b.build; });
+        if (bs.length) { out.builds = { n: bs.length, min: bs[0].build, minVersion: bs[0].version, max: bs[bs.length - 1].build, maxVersion: bs[bs.length - 1].version }; }
+        P.DIMS.forEach(function (d) {
+            var counts = {}, keys = {}, known = 0;
+            views.forEach(function (v) {
+                var x = d.get(v);
+                if (x == null || x === '') { return; }
+                counts[x] = (counts[x] || 0) + 1;
+                (keys[x] = keys[x] || []).push(v.key);
+                known++;
+            });
+            if (!known) { return; }
+            var vals = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a] || (a < b ? -1 : 1); });
+            var top = vals[0], dom = (known >= P.MIN_N && counts[top] / known >= P.DOMINANT) ? top : null;
+            out.dims.push({ id: d.id, label: d.label, outlier: d.outlier, get: d.get, known: known, dominant: dom, domCount: dom ? counts[top] : 0,
+                values: vals.map(function (x) { return { value: x, count: counts[x], keys: keys[x] }; }) });
+        });
+        var withLog = views.filter(function (v) { return v.logRead === true; }), sigs = {};
+        withLog.forEach(function (v) {
+            v.exc.forEach(function (e) {
+                var s = sigs[e.sig] || (sigs[e.sig] = { sig: e.sig, msg: e.msg, count: 0 });
+                s.count++;
+            });
+        });
+        out.withLog = withLog.length;
+        out.exc = Object.keys(sigs).map(function (k) { return sigs[k]; }).filter(function (s) { return s.count >= 2; })
+            .sort(function (a, b) { return b.count - a.count || (a.msg < b.msg ? -1 : 1); });
+        out.domExc = (out.exc[0] && withLog.length >= P.MIN_N && out.exc[0].count / withLog.length >= P.DOMINANT) ? out.exc[0] : null;
+        // The same message reached through different call stacks is one row of the full profile, counted by the reports
+        // that have it either way, with its stacks below it. Shown side by side they read as the same row twice.
+        var msgs = {};
+        withLog.forEach(function (v) {
+            var mine = {};
+            v.exc.forEach(function (e) {
+                var k = P._sigParts(e.sig).msg, g = msgs[k] || (msgs[k] = { key: k, msg: e.msg, count: 0, keys: [], paths: {} });
+                if (!mine[k]) { mine[k] = true; g.count++; g.keys.push(v.key); }
+                var pth = g.paths[e.sig] || (g.paths[e.sig] = { sig: e.sig, count: 0, keys: [] });
+                pth.count++;
+                pth.keys.push(v.key);
+            });
+        });
+        out.excGroups = Object.keys(msgs).map(function (k) {
+            var g = msgs[k];
+            g.paths = Object.keys(g.paths).map(function (s) { return g.paths[s]; }).sort(function (a, b) { return b.count - a.count || (a.sig < b.sig ? -1 : 1); });
+            return g;
+        }).filter(function (g) { return g.count >= 2; }).sort(function (a, b) { return b.count - a.count || (a.msg < b.msg ? -1 : 1); });
+        var withWer = views.filter(function (v) { return v.crashRead === true; }), mods = {};
+        withWer.forEach(function (v) {
+            var own = {};
+            v.crashes.forEach(function (c) { own[c.module] = c.code; });
+            Object.keys(own).forEach(function (m) { var s = mods[m] || (mods[m] = { module: m, code: own[m], count: 0, keys: [] }); s.count++; s.keys.push(v.key); });
+        });
+        out.withWer = withWer.length;
+        out.crashes = Object.keys(mods).map(function (k) { return mods[k]; }).sort(function (a, b) { return b.count - a.count || (a.module < b.module ? -1 : 1); });
+        out.domCrash = (out.crashes[0] && withWer.length >= P.MIN_N && out.crashes[0].count / withWer.length >= P.DOMINANT) ? out.crashes[0] : null;
+        views.forEach(function (v) {
+            var why = [];
+            out.dims.forEach(function (d) {
+                var x = d.get(v);
+                if (!d.dominant || !d.outlier || x == null || x === '' || x === d.dominant) { return; }
+                why.push(d.label + ' ' + x + ', while ' + d.domCount + ' of ' + d.known + ' have ' + d.dominant);
+            });
+            // The same message through another call stack is the same error here, not an outlier.
+            if (out.domExc && v.logRead === true && !v.exc.some(function (e) { return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })) {
+                why.push('its log lacks the exception ' + out.domExc.count + ' of ' + out.withLog + ' logs share');
+            }
+            if (out.domCrash && v.crashRead === true && !v.crashes.some(function (c) { return c.module === out.domCrash.module; })) {
+                why.push('no crash in ' + out.domCrash.module + ', which ' + out.domCrash.count + ' of ' + out.withWer + ' crash histories show');
+            }
+            if (why.length) { out.outliers.push({ key: v.key, why: why }); }
+        });
+        return out;
+    },
+
+    // ---- building a defect's profile ----------------------------------------------------------------------------
+    // The bug reports linked to a defect: { total, issues } with the latest MAX_REPORTS, newest first, with the fields
+    // the profile reads. One search, through Jira's linkedIssues().
+    _reports: function (key) {
+        var P = JiTA.profile, jql = 'issue in linkedIssues("' + key + '") AND project = EBR';
+        return Promise.all([
+            JiTA.sync._apiPost('/rest/api/3/search/jql', { jql: jql + ' ORDER BY created DESC', maxResults: P.MAX_REPORTS,
+                fields: ['*navigable', 'description', 'created', 'labels', 'status', 'attachment'] }),
+            JiTA.sync._apiPost('/rest/api/3/search/approximate-count', { jql: jql }).then(function (r) { return (r.data && r.data.count) || 0; }, function () { return null; })
+        ]).then(function (r) {
+            var issues = (r[0].data && r[0].data.issues) || [];
+            return { issues: issues, total: Math.max(r[1] || 0, issues.length) };
+        });
+    },
+    _usable: function (rec) { return (rec && rec.v === JiTA.profile.V) ? rec : null; },
+    _needs: function (rec, zip) { return !rec || !rec.logs || (zip && !rec.zip); },
+    // Remember a defect's latest state, dropping the defect looked at longest ago once KEEP are remembered. Defect keys
+    // are not array indices, so the object keeps them in the order they were (re)inserted.
+    _keep: function (key, s) {
+        var P = JiTA.profile;
+        delete P._last[key];
+        P._last[key] = s;
+        var keys = Object.keys(P._last);
+        if (keys.length > P.KEEP) { delete P._last[keys[0]]; }
+    },
+
+    // Build a defect's profile: what every report says at once (description, cached readings), then each report's
+    // files read CONCURRENCY at a time. `onState` hears every step: { key, total, views, summary, pending, done }.
+    // One build per defect at a time; a second caller listens in. It stops starting new reads once `still()` says
+    // the defect is no longer on screen - what was read is cached, and the next visit carries on.
+    build: function (key, onState, still) {
+        var P = JiTA.profile, job = P._builds[key];
+        if (job) { if (onState) { job.listeners.push(onState); } return job.promise; }
+        job = P._builds[key] = { listeners: onState ? [onState] : [] };
+        function emit(s) { job.listeners.forEach(function (f) { try { f(s); } catch (e) { /* ignore */ } }); }
+        job.promise = Promise.all([P._reports(key), JiTA.db.getDefect(key).then(null, function () { return null; })]).then(function (r) {
+            var got = r[0], defect = r[1], issues = got.issues, zip = P.zipOn();
+            return Promise.all(issues.map(function (iss) { return JiTA.db.getMeta(P.CACHE_PREFIX + iss.key).then(P._usable, function () { return null; }); })).then(function (recs) {
+                var views = issues.map(function (iss, i) { return P.view(iss, recs[i]); });
+                var todo = [];
+                issues.forEach(function (iss, i) { if (P._needs(recs[i], zip)) { todo.push(i); } });
+                var next = 0, left = todo.length;
+                function publish(done) {
+                    var s = { key: key, total: got.total, views: views.slice(), summary: P.summarise(views, defect), pending: left, done: done, zip: zip };
+                    P._keep(key, s);
+                    emit(s);
+                    return s;
+                }
+                publish(!left);
+                function lane() {
+                    if (next >= todo.length || (still && !still())) { return Promise.resolve(); }
+                    var i = todo[next++];
+                    return P._readFiles(issues[i], recs[i], zip).then(function (rec) { recs[i] = rec; views[i] = P.view(issues[i], rec); }, function () { /* left for next time */ })
+                        .then(function () { left--; publish(false); return lane(); });
+                }
+                var lanes = [];
+                for (var k = 0; k < P.CONCURRENCY; k++) { lanes.push(lane()); }
+                return Promise.all(lanes).then(function () { return (left || !todo.length) ? P._last[key] : publish(true); });
+            });
+        });
+        var clear = function () { if (P._builds[key] === job) { delete P._builds[key]; } };
+        job.promise.then(clear, clear);
+        return job.promise;
+    },
+
+    // ---- the Defect Profile card (on a defect) -----------------------------------------------------------------
+    // In the sidebar the profile has a card of its own, right above the Triage Assistant's, built like it (it collapses
+    // on its own, remembered in COLLAPSE_KEY) and shown only while the defect has reports attached. In the floating
+    // panel it is a section of that panel. Either way its content lives in #jita-sd-profile.
+    GROUP_ID: 'jita-profile-group',
+    COLLAPSE_KEY: 'jitaProfileCollapsed',
+    SHOW_OUTLIERS: 5,              // outliers listed in the card; Open full profile lists them all
+
+    // #jita-sd-profile, creating the card first when `create` asks for it and the sidebar has a Triage Assistant card
+    // to sit above (there is none in the floating panel).
+    _box: function (create) {
+        var P = JiTA.profile, side = document.getElementById('jita-side-group');
+        if (create && side && side.parentNode && !document.getElementById(P.GROUP_ID)) {
+            var g = JiTA.ui._buildSideGroup({ id: P.GROUP_ID, title: 'Defect Profile', body: '<div id="jita-sd-profile"></div>', collapseKey: P.COLLAPSE_KEY });
+            g.style.display = 'none';   // until there is something to show
+            side.parentNode.insertBefore(g, side);
+        }
+        return $('#jita-sd-profile');
+    },
+    _show: function (on) {
+        var g = document.getElementById(JiTA.profile.GROUP_ID);
+        if (g) { g.style.display = on ? '' : 'none'; }
+    },
+    // Off a defect, or before a new defect's profile: no card, and an empty section in the floating panel.
+    clear: function () {
+        var g = document.getElementById(JiTA.profile.GROUP_ID);
+        if (g && g.parentNode) { g.parentNode.removeChild(g); }
+        $('#jita-sd-profile').removeClass('has-hits').empty();
+    },
+    // Put the card straight back when Jira wipes it, painted from the last state, without searching again. Called from
+    // the page observer on every change, so it does nothing unless the card is missing and has something to show.
+    reensure: function () {
+        var P = JiTA.profile, key = JiTA.ui.currentKey, s = key && P._last[key];
+        if (!s || !s.total || !flagOn('defectProfile') || document.getElementById(P.GROUP_ID) || !document.getElementById('jita-side-group')) { return; }
+        P._paint(key, s);
+    },
+
+    // The profile on a defect, unless switched off in Settings > Features. Switched off while its reports are read, the
+    // reads under way finish and are cached, and no new one starts - as when the defect is left.
+    renderSection: function (key, background) {
+        var P = JiTA.profile;
+        if (!flagOn('defectProfile')) { P.clear(); return; }
+        var still = function () { return JiTA.ui.currentKey === key && flagOn('defectProfile'); };
+        if (P._last[key]) { P._paint(key, P._last[key]); } else if (!background) { P.clear(); }
+        P.build(key, function (s) { if (still()) { P._paint(key, s); } }, still).then(null, function (e) {
+            if (!still() || P._last[key]) { return; }
+            var $b = P._box(true);
+            P._show(true);
+            $b.addClass('has-hits').empty().append($('<div class="jp-line"></div>').text('Could not read the attached reports: ' + (e && e.message || e)));
+        });
+    },
+
+    _date: function (iso) { return JiTA.util.fmtDate(iso); },
+    _chip: function (text, cls, title) { return $('<span class="jp-chip"></span>').addClass(cls || '').text(text).attr('title', title || text); },
+
+    _paint: function (key, s) {
+        var P = JiTA.profile;
+        if (JiTA.ui.currentKey !== key || !flagOn('defectProfile')) { return; }
+        var $b = P._box(!!s.total);
+        if (!$b.length) { return; }
+        $b.empty();
+        if (!s.total) { $b.removeClass('has-hits'); P._show(false); return; }
+        var sm = s.summary;
+        $b.addClass('has-hits');
+        P._show(true);
+        var $h = $('<div class="jp-head"></div>').text('Attached reports: ' + s.total + (s.views.length < s.total ? ' (latest ' + s.views.length + ')' : '')).appendTo($b);
+        if (s.pending) { $('<span class="jp-state"></span>').text('reading files, ' + s.pending + ' left…').appendTo($h); }
+        var $c = $('<div class="jp-chips"></div>').appendTo($b), any = false;
+        sm.dims.forEach(function (d) {
+            if (!d.dominant || d.id === 'lang') { return; }
+            any = true;
+            P._chip(d.label + ': ' + d.dominant + ' ' + d.domCount + '/' + d.known, 'strong').appendTo($c);
+        });
+        if (sm.exc[0]) { any = true; P._chip('Exception in ' + sm.exc[0].count + '/' + sm.withLog + ' logs: ' + sm.exc[0].msg, sm.domExc ? 'strong' : '', sm.exc[0].msg + '\n' + sm.exc[0].sig).appendTo($c); }
+        if (sm.crashes[0] && sm.crashes[0].count >= 2) { any = true; P._chip('Crash in ' + sm.crashes[0].module + ' ' + sm.crashes[0].count + '/' + sm.withWer, sm.domCrash ? 'strong' : '').appendTo($c); }
+        if (!any) { $('<span class="jp-none"></span>').text(sm.n < P.MIN_N ? 'Too few reports for a pattern yet.' : 'No shared pattern.').appendTo($c); }
+        var bits = [];
+        if (sm.builds) { bits.push(sm.builds.min === sm.builds.max ? ('build ' + sm.builds.max) : ('builds ' + sm.builds.min + ' to ' + sm.builds.max)); }
+        if (sm.first) { bits.push(sm.first === sm.last ? P._date(sm.first) : (P._date(sm.first) + ' to ' + P._date(sm.last))); }
+        var $l = $('<div class="jp-line"></div>').text(bits.join(' · ')).appendTo($b);
+        if (sm.afterFix) { $('<span class="jp-warn"></span>').text(' · ⚠ ' + sm.afterFix + ' after the fix').appendTo($l); }
+        // The reports that do not fit, each with why: often a report attached to the wrong defect.
+        if (sm.outliers.length) {
+            var $os = $('<div class="jp-outs"></div>').appendTo($b);
+            $('<div class="jp-sub"></div>').text(sm.outliers.length + ' outlier' + (sm.outliers.length === 1 ? '' : 's') + ': reports that do not fit the pattern').appendTo($os);
+            sm.outliers.slice(0, P.SHOW_OUTLIERS).forEach(function (o) {
+                var $r = $('<div class="jp-out"></div>').appendTo($os);
+                $('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + o.key).text(o.key).appendTo($r);
+                $('<span class="jp-why"></span>').text(o.why.join('; ')).appendTo($r);
+            });
+            if (sm.outliers.length > P.SHOW_OUTLIERS) {
+                $('<div class="jp-line"></div>').text('and ' + (sm.outliers.length - P.SHOW_OUTLIERS) + ' more in the full profile').appendTo($os);
+            }
+        }
+        var $o = $('<div class="jp-line"></div>').appendTo($b);
+        $('<a class="jp-open" href="#"></a>').text('Open full profile').on('click', function (e) { e.preventDefault(); P.openView(key); }).appendTo($o);
+        try { JiTA.ui._fitVertical(); } catch (e) { /* ignore */ }
+    },
+
+    // ---- the full profile (overlay) -----------------------------------------------------------------------------
+    // What a count's hover says: the reports behind it.
+    _who: function (keys) {
+        keys = keys || [];
+        return keys.length ? (keys.length === 1 ? '1 report: ' : keys.length + ' reports: ') + keys.join(', ') : '';
+    },
+    openView: function (key) {
+        var P = JiTA.profile, s = P._last[key];
+        if (!s) { return; }
+        P._injectCss();
+        var ov = JiTA.menu._openOverlay({ title: 'Profile of ' + key + "'s attached reports" });
+        ov.$menu.addClass('jita-profile-view');
+        var $b = $('<div class="jpv-scroll"></div>').appendTo(ov.$menu), sm = s.summary;
+        function sect(t) { return $('<div class="jpv-sub"></div>').text(t).appendTo($b); }
+        var head = [s.total + ' report' + (s.total === 1 ? '' : 's') + ' attached' + (s.views.length < s.total ? ', the latest ' + s.views.length + ' read' : '')];
+        if (sm.first) { head.push('filed ' + P._date(sm.first) + (sm.last !== sm.first ? ' to ' + P._date(sm.last) : '')); }
+        if (sm.builds) { head.push('client ' + (sm.builds.min === sm.builds.max ? ('build ' + sm.builds.max) : ('builds ' + sm.builds.min + ' (' + sm.builds.minVersion + ') to ' + sm.builds.max + ' (' + sm.builds.maxVersion + ')'))); }
+        if (sm.fixedAt) { head.push(sm.afterFix + ' filed after the fix (' + P._date(sm.fixedAt) + ')'); }
+        $('<div class="jpv-intro"></div>').text(head.join(' · ') + '.').appendTo($b);
+        if (s.pending) { $('<div class="jpv-intro"></div>').text('Still reading files: ' + s.pending + ' report(s) left. Reopen for the rest.').appendTo($b); }
+        if (!s.zip) { $('<div class="jpv-intro"></div>').text('Reading igbr.zip is switched off in Settings, so crash histories are not counted.').appendTo($b); }
+
+        sect('Hardware and language');
+        sm.dims.forEach(function (d) {
+            var $r = $('<div class="jpv-row"></div>').appendTo($b);
+            $('<span class="jpv-label"></span>').text(d.label).appendTo($r);
+            var $v = $('<span class="jpv-vals"></span>').appendTo($r);
+            d.values.forEach(function (x) {
+                $('<span class="jpv-val"></span>').toggleClass('dom', x.value === d.dominant).text(x.value + ' ' + x.count + '/' + d.known).attr('title', P._who(x.keys)).appendTo($v);
+            });
+        });
+        if (!sm.dims.length) { $('<div class="jpv-none"></div>').text('No report has Computer Info, dxdiag.txt or PDMData.txt to read.').appendTo($b); }
+
+        sect('Exceptions shared by 2 or more logs (' + sm.withLog + ' logs read)');
+        var domSig = sm.domExc && sm.domExc.sig;
+        sm.excGroups.slice(0, 15).forEach(function (g) {
+            var $r = $('<div class="jpv-row"></div>').appendTo($b);
+            $('<span class="jpv-count"></span>').toggleClass('dom', g.paths.some(function (p) { return p.sig === domSig; })).text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
+            $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', g.paths.map(function (p) { return p.sig; }).join('\n')).appendTo($r);
+            if (g.paths.length < 2) { return; }
+            // Its call stacks, each by where it differs from the others.
+            var labels = P._pathLabels(g.paths.map(function (p) { return P._sigParts(p.sig).frames; }));
+            g.paths.slice(0, 5).forEach(function (p, i) {
+                var $s = $('<div class="jpv-row jpv-path"></div>').appendTo($b);
+                $('<span class="jpv-count"></span>').toggleClass('dom', p.sig === domSig).text(p.count + '/' + sm.withLog).attr('title', P._who(p.keys)).appendTo($s);
+                $('<span class="jpv-msg"></span>').text('via ' + labels[i]).attr('title', p.sig).appendTo($s);
+            });
+            if (g.paths.length > 5) { $('<div class="jpv-row jpv-path"></div>').text('and ' + (g.paths.length - 5) + ' more call stacks').appendTo($b); }
+        });
+        if (!sm.excGroups.length) { $('<div class="jpv-none"></div>').text('No exception appears in more than one log.').appendTo($b); }
+
+        sect('EVE client crashes in the crash histories (' + sm.withWer + ' read)');
+        sm.crashes.slice(0, 15).forEach(function (x) {
+            var $r = $('<div class="jpv-row"></div>').appendTo($b);
+            $('<span class="jpv-count"></span>').toggleClass('dom', sm.domCrash === x).text(x.count + '/' + sm.withWer).attr('title', P._who(x.keys)).appendTo($r);
+            $('<span class="jpv-msg"></span>').text(x.module + (x.code ? ' (' + x.code + ')' : '')).appendTo($r);
+        });
+        if (!sm.crashes.length) { $('<div class="jpv-none"></div>').text('No EVE client crash in the crash histories read.').appendTo($b); }
+
+        sect('Outliers: reports that do not fit the pattern');
+        sm.outliers.forEach(function (o) {
+            var $r = $('<div class="jpv-row"></div>').appendTo($b);
+            $('<a class="jpv-key" target="_blank" rel="noopener"></a>').attr('href', '/browse/' + o.key).text(o.key).appendTo($r);
+            $('<span class="jpv-msg"></span>').text(o.why.join('; ')).appendTo($r);
+        });
+        if (!sm.outliers.length) { $('<div class="jpv-none"></div>').text(sm.n < P.MIN_N ? 'A pattern needs at least ' + P.MIN_N + ' reports.' : 'Every report fits the pattern, or there is no pattern to fit.').appendTo($b); }
+
+        sect('Reports');
+        var $t = $('<table class="jpv-table"><tbody></tbody></table>').appendTo($b), $tb = $t.find('tbody');
+        var $hr = $('<tr></tr>').appendTo($tb);
+        ['Report', 'Filed', 'GPU', 'OS', 'Renderer', 'CPU', 'Build', 'Log', 'Crashes'].forEach(function (h) { $('<th></th>').text(h).appendTo($hr); });
+        s.views.forEach(function (v) {
+            var hw = v.hw || {}, $r = $('<tr></tr>').appendTo($tb);
+            $('<td></td>').append($('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + v.key).text(v.key)).appendTo($r);
+            [P._date(v.created), hw.gpu || '', hw.os || '', hw.platform || '', hw.cpuGen || hw.cpuVendor || '', v.build || '',
+                v.logRead === null ? 'not read yet' : (v.logRead ? v.exc.length + ' exception(s)' : 'no log'),
+                v.crashRead === null ? (s.zip ? 'not read yet' : 'off') : (v.crashRead ? String(v.crashes.length) : 'no history')
+            ].forEach(function (c) { $('<td></td>').text(c).appendTo($r); });
+            if (v.hwFrom && v.hwFrom !== 'Computer Info') { $r.children().eq(2).attr('title', 'From ' + v.hwFrom); }
+        });
+    },
+
+    _cssDone: false,
+    _injectCss: function () {
+        if (JiTA.profile._cssDone) { return; }
+        JiTA.profile._cssDone = true;
+        try {
+            GM_addStyle(
+                '#jita-menu.jita-profile-view { width: 1180px; max-width: 96vw; display: flex; flex-direction: column; overflow: hidden; }' +
+                '.jita-profile-view .jpv-scroll { flex: 1 1 auto; min-height: 0; max-height: 76vh; overflow-y: auto; padding: 10px 16px 16px; }' +
+                '.jita-profile-view .jpv-intro { color: #9aa6b2; font-size: 12px; line-height: 1.5; margin: 2px 0 6px; }' +
+                '.jita-profile-view .jpv-sub { color: #7a8694; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 16px 0 6px; }' +
+                '.jita-profile-view .jpv-row { display: flex; align-items: baseline; gap: 10px; padding: 4px 0; border-bottom: 1px solid #2c333a; font-size: 12px; }' +
+                '.jita-profile-view .jpv-label { flex: 0 0 160px; color: #9aa6b2; }' +
+                '.jita-profile-view .jpv-vals { display: flex; flex-wrap: wrap; gap: 4px 8px; }' +
+                '.jita-profile-view .jpv-val { background: #2c333a; color: #cfd6dd; border-radius: 8px; padding: 0 7px; }' +
+                '.jita-profile-view .jpv-val.dom, .jita-profile-view .jpv-count.dom { background: #1f3d2e; color: #7fdca4; font-weight: 700; }' +
+                '.jita-profile-view .jpv-count { flex: 0 0 auto; background: #2c333a; color: #cfd6dd; border-radius: 8px; padding: 0 7px; cursor: help; }' +
+                '.jita-profile-view .jpv-val { cursor: help; }' +
+                '.jita-profile-view .jpv-msg { color: #e6e6e6; overflow-wrap: anywhere; }' +
+                '.jita-profile-view .jpv-key { flex: 0 0 90px; color: #4c9aff; font-weight: 700; text-decoration: none; }' +
+                '.jita-profile-view .jpv-path { padding: 2px 0 2px 28px; border-bottom: none; font-size: 11px; color: #7a8694; }' +
+                '.jita-profile-view .jpv-path .jpv-count { font-size: 10px; }' +
+                '.jita-profile-view .jpv-path .jpv-msg { color: #9aa6b2; font-family: Consolas, "Courier New", monospace; }' +
+                '.jita-profile-view .jpv-none { color: #7a8694; font-size: 12px; padding: 4px 0; }' +
+                '.jita-profile-view .jpv-table { border-collapse: collapse; width: 100%; font-size: 11px; }' +
+                '.jita-profile-view .jpv-table th { text-align: left; color: #7a8694; font-weight: 600; padding: 4px 6px; border-bottom: 1px solid #3a434d; }' +
+                '.jita-profile-view .jpv-table td { color: #cfd6dd; padding: 3px 6px; border-bottom: 1px solid #2c333a; }' +
+                '.jita-profile-view .jpv-table a { color: #4c9aff; text-decoration: none; font-weight: 700; }'
             );
         } catch (e) { /* ignore */ }
     },
@@ -20505,6 +21345,11 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.41.0', date: '2026-10-04', features: [
+            'On a defect, a new Defect Profile card shows what its bug reports have in common: GPU, OS, renderer, CPU, client builds, shared exceptions and the module their crashes happened in. A shared pattern is highlighted.',
+            'Reports that do not fit the pattern are listed with the reason, which often means a report attached to the wrong defect. Open full profile shows the breakdown, report by report.',
+            'Settings > Features > Defect profile switches it off. Under it, Read igbr.zip switches off just the zip downloads that give the crash histories, for smaller downloads and weaker profiles.'
+        ] },
         { v: '3.40.2', date: '2026-10-04', fixes: [
             'A bug report attached or closed directly in Jira now leaves a defect\'s Matching bug reports, and a report\'s Similar open reports, as soon as the list is shown, instead of up to 30 minutes later. The next match takes its place.',
             'Attach refuses a report that Jira already shows as attached or closed, instead of adding a second link to it.',
