@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.42.0
+// @version     3.42.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -13696,8 +13696,9 @@ JiTA.trend = {
  *   3. the report's igbr.zip (unless switched off in Settings): dxdiag.txt's Windows crash history, i.e. which
  *      module the EVE client crashed in, and the hardware from dxdiag.txt or PDMData.txt when the description has
  *      no Computer Info. A Mac's zip has no dxdiag.txt, so a Mac report has no crash history to count.
- * Downloads are the cost, so only the latest MAX_REPORTS reports are read, CONCURRENCY at a time, files over the
- * size caps are skipped, and what a report's files said is cached for good (an attached report does not change).
+ * Every attached report is read, newest first, CONCURRENCY at a time. Downloads are the cost, so files over the size
+ * caps are skipped, and what a report's files said is cached for good (an attached report does not change): a later
+ * visit reads only the reports attached since.
  * A value is the defect's pattern once DOMINANT of at least MIN_N reports share it; a report that differs from a
  * pattern is listed as an outlier, with why - often a report attached to the wrong defect.
  */
@@ -13705,7 +13706,7 @@ JiTA.profile = {
     V: 3,                          // shape of a cached report reading: bump to read every report's files again
     CACHE_PREFIX: 'rp:',           // meta store key per report
     ZIP_KEY: 'jitaProfileZip',     // Settings: read each report's igbr.zip (on by default)
-    MAX_REPORTS: 25,               // the latest this many reports are read
+    PAGE_SIZE: 100,                // reports per search page (every attached report is read)
     CONCURRENCY: 3,
     MAX_LOG_BYTES: 15 * 1024 * 1024,
     MAX_ZIP_BYTES: 40 * 1024 * 1024,
@@ -14174,18 +14175,34 @@ JiTA.profile = {
     },
 
     // ---- building a defect's profile ----------------------------------------------------------------------------
-    // The bug reports linked to a defect: { total, issues } with the latest MAX_REPORTS, newest first, with the fields
-    // the profile reads. One search, through Jira's linkedIssues().
+    // Every bug report linked to a defect, newest first: { total, issues }. Paged through Jira's linkedIssues(). A defect
+    // can have hundreds, and each comes with every navigable field, so each is cut down to what the profile reads as its
+    // page arrives (_slim).
     _reports: function (key) {
         var P = JiTA.profile, jql = 'issue in linkedIssues("' + key + '") AND project = EBR';
-        return Promise.all([
-            JiTA.sync._apiPost('/rest/api/3/search/jql', { jql: jql + ' ORDER BY created DESC', maxResults: P.MAX_REPORTS,
-                fields: ['*navigable', 'description', 'created', 'labels', 'status', 'attachment'] }),
-            JiTA.sync._apiPost('/rest/api/3/search/approximate-count', { jql: jql }).then(function (r) { return (r.data && r.data.count) || 0; }, function () { return null; })
-        ]).then(function (r) {
-            var issues = (r[0].data && r[0].data.issues) || [];
-            return { issues: issues, total: Math.max(r[1] || 0, issues.length) };
-        });
+        var issues = [];
+        function page(token) {
+            var body = { jql: jql + ' ORDER BY created DESC', maxResults: P.PAGE_SIZE,
+                fields: ['*navigable', 'description', 'created', 'labels', 'status', 'attachment'] };
+            if (token) { body.nextPageToken = token; }
+            return JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
+                var d = (r && r.data) || {};
+                (d.issues || []).forEach(function (iss) { issues.push(P._slim(iss)); });
+                // A token that does not move on would ask for the same page forever.
+                if (!d.nextPageToken || d.isLast || d.nextPageToken === token) { return { issues: issues, total: issues.length }; }
+                return page(d.nextPageToken);
+            });
+        }
+        return page(null);
+    },
+    // A report from the search as the profile reads it: the text that carries its Computer Info (whichever field holds
+    // it, see _issueText), its date, status and labels, and each attachment's name, size and address.
+    _slim: function (iss) {
+        var f = (iss && iss.fields) || {};
+        return { key: iss.key, fields: {
+            description: JiTA.profile._issueText(f), created: f.created || null, status: f.status || null, labels: f.labels || [],
+            attachment: (f.attachment || []).map(function (a) { return { filename: a.filename, size: a.size, content: a.content }; })
+        } };
     },
     _usable: function (rec) { return (rec && rec.v === JiTA.profile.V) ? rec : null; },
     _needs: function (rec, zip) { return !rec || !rec.logs || (zip && !rec.zip); },
@@ -14303,7 +14320,7 @@ JiTA.profile = {
         var sm = s.summary;
         $b.addClass('has-hits');
         P._show(true);
-        var $h = $('<div class="jp-head"></div>').text('Attached reports: ' + s.total + (s.views.length < s.total ? ' (latest ' + s.views.length + ')' : '')).appendTo($b);
+        var $h = $('<div class="jp-head"></div>').text('Attached reports: ' + s.total).appendTo($b);
         if (s.pending) { $('<span class="jp-state"></span>').text('reading files, ' + s.pending + ' left…').appendTo($h); }
         var $c = $('<div class="jp-chips"></div>').appendTo($b), any = false;
         sm.dims.forEach(function (d) {
@@ -14351,7 +14368,7 @@ JiTA.profile = {
         ov.$menu.addClass('jita-profile-view');
         var $b = $('<div class="jpv-scroll"></div>').appendTo(ov.$menu), sm = s.summary;
         function sect(t) { return $('<div class="jpv-sub"></div>').text(t).appendTo($b); }
-        var head = [s.total + ' report' + (s.total === 1 ? '' : 's') + ' attached' + (s.views.length < s.total ? ', the latest ' + s.views.length + ' read' : '')];
+        var head = [s.total + ' report' + (s.total === 1 ? '' : 's') + ' attached'];
         if (sm.first) { head.push('filed ' + P._date(sm.first) + (sm.last !== sm.first ? ' to ' + P._date(sm.last) : '')); }
         if (sm.builds) { head.push('client ' + (sm.builds.min === sm.builds.max ? ('build ' + sm.builds.max) : ('builds ' + sm.builds.min + ' (' + sm.builds.minVersion + ') to ' + sm.builds.max + ' (' + sm.builds.maxVersion + ')'))); }
         if (sm.fixedAt) { head.push(sm.afterFix + ' filed after the fix (' + P._date(sm.fixedAt) + ')'); }
@@ -21400,6 +21417,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.42.1', date: '2026-10-05', fixes: [
+            'The defect profile now reads every bug report attached to a defect, not just the latest 25. The first visit to a defect with many reports takes longer; later visits only read the reports attached since.'
+        ] },
         { v: '3.42.0', date: '2026-10-05', features: [
             'Settings is split into tabs: Features, Triage Assistant, Canned responses, Lead duties (for Leads) and About. It keeps one size whichever tab is open, and opens on the tab you last used.',
             'Canned responses are edited right in their tab instead of a separate window. Save keeps Settings open, and unsaved edits stay while you look at another tab.'

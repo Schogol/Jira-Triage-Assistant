@@ -74,6 +74,10 @@ const muts = [
     [H, 'a crash history without the module is no outlier', "            if (out.domCrash && v.crashRead === true && !v.crashes.some(function (c) { return c.module === out.domCrash.module; })) {", '            if (false) {'],
     // building
     [H, 'reports linked from other projects count too', "var P = JiTA.profile, jql = 'issue in linkedIssues(\"' + key + '\") AND project = EBR';", "var P = JiTA.profile, jql = 'issue in linkedIssues(\"' + key + '\")';"],
+    [H, 'only the first page of reports is read', '                return page(d.nextPageToken);\n            });\n        }\n        return page(null);', '                return { issues: issues, total: issues.length };\n            });\n        }\n        return page(null);'],
+    [H, 'a page token that does not move on is asked for again', ' || d.nextPageToken === token) { return { issues: issues, total: issues.length }; }', ') { return { issues: issues, total: issues.length }; }'],
+    [H, 'every report keeps the whole search result', '(d.issues || []).forEach(function (iss) { issues.push(P._slim(iss)); });', '(d.issues || []).forEach(function (iss) { issues.push(iss); });'],
+    [H, 'Computer Info outside the description is lost', 'description: JiTA.profile._issueText(f), created:', 'description: JiTA.util.toPlainText(f.description), created:'],
     [H, 'every report is read again on every visit', '                issues.forEach(function (iss, i) { if (P._needs(recs[i], zip)) { todo.push(i); } });', '                issues.forEach(function (iss, i) { todo.push(i); });'],
     [H, 'a reading cached by an older build is trusted', '_usable: function (rec) { return (rec && rec.v === JiTA.profile.V) ? rec : null; },', '_usable: function (rec) { return rec || null; },'],
     [H, 'leaving the defect does not stop new reads', '                    if (next >= todo.length || (still && !still())) { return Promise.resolve(); }', '                    if (next >= todo.length) { return Promise.resolve(); }'],
