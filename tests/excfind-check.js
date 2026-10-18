@@ -56,6 +56,7 @@ function wrap(nodes) {
         addClass(c) { nodes.forEach((n) => { String(c).split(/\s+/).forEach((x) => { if (x && !n.hasCls(x)) { n.className = (n.className + ' ' + x).trim(); } }); }); return j; },
         removeClass(c) { nodes.forEach((n) => { const drop = String(c).split(/\s+/); n.className = n.className.split(/\s+/).filter((x) => drop.indexOf(x) < 0).join(' '); }); return j; },
         hasClass(c) { return nodes.some((n) => n.hasCls(c)); },
+        toggleClass(c, on) { return on ? j.addClass(c) : j.removeClass(c); },
         prop(k, v) { if (v === undefined) { return nodes[0] && nodes[0][k]; } nodes.forEach((n) => { n[k] = v; }); return j; },
         on(ev, f) { nodes.forEach((n) => { (n.handlers[ev] = n.handlers[ev] || []).push(f); }); return j; },
         off(ev) { nodes.forEach((n) => { n.handlers[ev] = []; }); return j; },
@@ -102,7 +103,6 @@ global.jitaLinkedKeys = (links) => (links || []).map((l) => (l.outwardIssue || l
 global.JiTA = { HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, link: {} };
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isClosedStatus: function (status) {') + '})'));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
-JiTA.util.isGmTeam = (v) => v === 'gm';
 JiTA.util.delay = (ms) => new Promise((r) => setTimeout(r, ms));
 let crashCalls = 0;
 Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _splitBlocks: function (text) {') + member('    _fingerprint: function (text) {') +
@@ -142,14 +142,19 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     let ts = X.targets([{ sig: A.sig, msg: 'KeyError: 2' }], sm);
     ok('the description\'s exceptions come first, then the most shared', ts.map((t) => t.sig).join() === [A.sig, A2.sig, B.sig].join(), ts.map((t) => t.msg + ' ' + t.count).join(' | '));
     ok('...one in both says both', ts[0].desc === true && ts[0].count === 2 && ts[0].of === 10);
-    ok('...the description\'s start ticked, and those at least half the attached logs share', ts[0].def && ts[1].def && !ts[2].def, ts.map((t) => t.def).join());
     ok('...each carries its crash site', ts.every((t) => t.crash === realCrash(t.sig)));
-    ts = X.targets([], { withLog: 2, excGroups: [{ msg: 'm', paths: [{ sig: A.sig, count: 1 }] }] });
-    ok('one log is no share, however few were read', ts.length === 1 && !ts[0].def);
-    ts = X.targets([], { withLog: 4, excGroups: [{ msg: 'm', paths: [{ sig: A.sig, count: 2 }] }] });
-    ok('exactly half the logs is enough', ts[0].def === true);
-    ts = X.targets([], { withLog: 0, excGroups: [{ msg: 'm', paths: [{ sig: A.sig, count: 2 }] }] });
-    ok('...nor is a count over no logs', !ts[0].def);
+    const one = { key: 'EBR-50', log: true, exc: [{ sig: B.sig, msg: 'ValueError: bad' }, { sig: A.sig, msg: 'KeyError: 2' }, { sig: A2.sig, msg: 'KeyError: 2' }] };
+    ts = X.targets([{ sig: A.sig, msg: 'KeyError: 2' }], { withLog: 1, excGroups: [] }, one);
+    ok('one report attached: every exception in its log is offered, after the description\'s', ts.map((t) => t.sig).join() === [A.sig, B.sig, A2.sig].join() &&
+        ts[0].desc && ts[0].one === 'EBR-50' && ts[1].one === 'EBR-50' && !ts[1].desc && ts[1].count === 0, ts.map((t) => t.msg + ' ' + t.one).join(' | '));
+    ok('...told apart by their stacks like the rest', !!ts[0].via && !!ts[2].via && ts[0].via !== ts[2].via);
+    ok('...and said to come from its log', X._src(ts[1]) === 'in the log of EBR-50' && X._src(ts[0]) === 'in the description, in the log of EBR-50', X._src(ts[0]));
+    ok('without it, no exception comes from a single log', X.targets([], sm, null).every((t) => t.one === null));
+    const view = (key, logRead, exc) => ({ key, logRead, exc });
+    const o1 = X._one({ views: [view('EBR-50', true, one.exc)] });
+    ok('a profile with one report gives that report\'s log', o1 && o1.key === 'EBR-50' && o1.log === true && o1.exc.length === 3, JSON.stringify(o1));
+    ok('...one not read yet says so, with no exceptions', X._one({ views: [view('EBR-50', null)] }).log === null && X._one({ views: [view('EBR-50', null)] }).exc.length === 0);
+    ok('...several reports, or none, give no single log', X._one({ views: [view('EBR-50', true, []), view('EBR-51', true, [])] }) === null && X._one({ views: [] }) === null && X._one(null) === null);
     const many = [];
     for (let i = 0; i < 20; i++) { many.push({ sig: 's' + i + '|a.py:f>b.py:g', count: 30 - i }); }
     ts = X.targets([], { withLog: 40, excGroups: [{ msg: 'm', paths: many }] });
@@ -235,8 +240,8 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
 
     // ================= the search =================
     const page = (keys, extra) => ({ data: Object.assign({ issues: keys.map((k) => ({ key: k.split(':')[0], fields: {
-        summary: 'S ' + k, created: '2026-10-' + String(10 + (+k.split('-')[1] % 20)) + 'T00:00:00.000+0000', status: { name: 'Open' },
-        customfield_10001: k.indexOf(':gm') > 0 ? 'gm' : null, attachment: [att('logs.txt')], labels: [],
+        summary: 'S ' + k, created: '2026-10-' + String(10 + (+k.split('-')[1] % 20)) + 'T00:00:00.000+0000', status: { name: k.indexOf(':att') > 0 ? 'Attached' : 'Open' },
+        attachment: [att('logs.txt')], labels: [],
         description: k.indexOf(':desc') > 0 ? descBlock('ValueError: bad', FB) : 'plain'
     } })) }, extra || {}) });
     let pages = {}, bodies = [], inFlight = 0, maxIn = 0, readsStarted = [], held = null;
@@ -251,13 +256,14 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     const overlay = () => { const n = new Node('div'); ROOT.appendChild(n); return n; };
     const fresh = () => { const st = X._state('EDR-77', overlay()); X._st = st; return st; };
     meta = { 'rp:EBR-3': { v: P.V, key: 'EBR-3', logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'x' }], logSig: 'logs.txt:100' } };
-    pages = { '': page(['EBR-1', 'EBR-2:gm', 'EBR-3', 'EBR-4'], { nextPageToken: 't2' }), t2: page(['EBR-4', 'EBR-5:desc', 'EBR-9'], { isLast: true }) };
+    pages = { '': page(['EBR-1', 'EBR-2:att', 'EBR-3', 'EBR-4'], { nextPageToken: 't2' }), t2: page(['EBR-4', 'EBR-5:desc', 'EBR-9'], { isLast: true }) };
     let st = fresh();
     st.targets = [Object.assign({}, tA, { def: true })]; st.on[A.sig] = true;
     await X._sweep(st);
     ok('every open report is listed, newest first, a page at a time', bodies.length === 2 && bodies[0].jql === JiTA.EBR_SCOPE + ' ORDER BY created DESC' && !bodies[0].nextPageToken &&
         bodies[1].nextPageToken === 't2' && bodies[0].fields.indexOf('attachment') >= 0 && bodies[0].fields.indexOf('description') >= 0, JSON.stringify(bodies.map((b) => b.nextPageToken)));
-    ok('...GM team reports left out, a report listed twice read once', st.n === 5 && readsStarted.join() === 'EBR-1,EBR-4,EBR-5,EBR-9', st.n + ' ' + readsStarted.join());
+    ok('...a report already attached left out, a report listed twice read once', st.n === 5 && readsStarted.join() === 'EBR-1,EBR-4,EBR-5,EBR-9', st.n + ' ' + readsStarted.join());
+    ok('...and the Team field no longer asked for', bodies[0].fields.indexOf('customfield_10001') < 0);
     ok('...a cached report is not read again', readsStarted.indexOf('EBR-3') < 0 && st.cached === 1);
     ok('...the search ends done, with what it read', st.done === true && st.read === 5 && st.listed === true, JSON.stringify({ done: st.done, read: st.read }));
     ok('...a report whose logs did not download is counted, to be read again next time', st.failed === 1);
@@ -309,16 +315,21 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('nothing to look for yet: no search', sweeps === 0 && st.started === false);
     st.desc = [{ sig: A.sig, msg: 'KeyError: 2' }];
     X._retarget(st);
-    ok('the description\'s exception starts it', sweeps === 1 && st.started && st.on[A.sig] === true);
-    st.profile = { withLog: 10, excGroups: [{ msg: 'ValueError: bad', paths: [{ sig: B.sig, count: 3 }] }] };
+    ok('the description\'s exception is offered unticked, and nothing is searched yet', sweeps === 0 && !st.started && st.targets.length === 1 && !st.on[A.sig]);
+    st.profile = { withLog: 10, excGroups: [{ msg: 'ValueError: bad', paths: [{ sig: B.sig, count: 9 }] }] };
     X._retarget(st);
-    ok('...once only; a shared exception below half the logs is offered unticked', sweeps === 1 && st.on[B.sig] === false && st.targets.length === 2);
-    st.profile = { withLog: 10, excGroups: [{ msg: 'ValueError: bad', paths: [{ sig: B.sig, count: 6 }] }] };
+    ok('...nor a shared one, however many logs share it', sweeps === 0 && st.targets.length === 2 && !st.on[B.sig]);
+    st.one = { key: 'EBR-50', log: true, exc: [{ sig: A2.sig, msg: 'KeyError: 2' }] };
     X._retarget(st);
-    ok('...ticked once more of the logs read share it', st.on[B.sig] === true);
-    st.on[B.sig] = false; st.touched[B.sig] = true;
+    ok('...nor one from a single report\'s log', sweeps === 0 && st.targets.length === 3 && !st.on[A2.sig]);
+    st.one = null;
+    st.on[B.sig] = true;
     X._retarget(st);
-    ok('...but not once it was unticked by hand', st.on[B.sig] === false);
+    ok('the first exception ticked starts the search', sweeps === 1 && st.started);
+    st.on[A.sig] = true;
+    st.profile = { withLog: 12, excGroups: [{ msg: 'ValueError: bad', paths: [{ sig: B.sig, count: 10 }] }] };
+    X._retarget(st);
+    ok('...once only, and what was ticked stays ticked as the profile counts more', sweeps === 1 && st.on[A.sig] === true && st.on[B.sig] === true);
     st.reports = [X._entry(item('EBR-6'), { exc: [{ sig: B.sig }] }, st.pool)];
     st.on[B.sig] = true; st.tsig = null;
     X._retarget(st);
@@ -326,7 +337,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     st.on[B.sig] = false; st.tsig = null;
     X._retarget(st);
     ok('...and so does unticking', st.reports[0].m.length === 0);
-    st = fresh(); st.desc = [{ sig: A.sig, msg: 'KeyError: 2' }];
+    st = fresh(); st.desc = [{ sig: A.sig, msg: 'KeyError: 2' }]; st.on[A.sig] = true;
     ROOT.removeChild(st.node);
     X._retarget(st);
     ok('a closed window starts no search', sweeps === 1 && st.started === false);
@@ -362,9 +373,14 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     st.started = true;   // the reading itself is tested above
     X._retarget(st);
     const tbox = byId['jx-targets'];
-    const boxes = find(tbox, (n) => n.tag === 'input');
-    ok('each exception has a box, ticked as it starts, with where it comes from', boxes.length === 2 && boxes[0].checked === true && boxes[1].checked === false &&
+    const unticked = find(tbox, (n) => n.tag === 'input');
+    ok('each exception has a box, none ticked, with where it comes from', unticked.length === 2 && unticked.every((n) => n.checked === false) &&
         /KeyError: 2in the description/.test(tbox.textContent) && /ValueError: badin 1 of 4 attached logs/.test(tbox.textContent), tbox.textContent);
+    ok('...and the list asks for one to be ticked', /Tick an exception above/.test(byId['jx-results'].textContent), byId['jx-results'].textContent);
+    st.on[A.sig] = true;
+    X._retarget(st);
+    const boxes = find(tbox, (n) => n.tag === 'input');
+    ok('a ticked one is drawn ticked', boxes.length === 2 && boxes[0].checked === true && boxes[1].checked === false);
     ok('...its message and stack on hover, one frame a line', find(tbox, (n) => n.hasCls('jx-target'))[0].getAttribute('title') ===
         'KeyError: 2\n\nStack, innermost last:\n    foo.py: onclick\n    bar.py: load', find(tbox, (n) => n.hasCls('jx-target'))[0].getAttribute('title'));
 
@@ -384,13 +400,22 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     const row0 = res.kids.find((n) => n.getAttribute('data-key') === 'EBR-0');
     ok('...or that it is in the report\'s description', !!row0 && /KeyError: 2 \(in its description\)/.test(row0.textContent), row0 && row0.textContent);
     X._gone(st, 'EBR-0');
-    ok('...with an Attach control for this defect', built.length === 3 && built.every((b) => b.opts.defect === 'EDR-77') && byCls(row1, 'jita-sd-link').length === 1);
+    ok('...with an Attach control for this defect, offered whoever has the report', built.length === 3 && built.every((b) => b.opts.defect === 'EDR-77' && b.opts.anyAssignee === true) &&
+        byCls(row1, 'jita-sd-link').length === 1);
+    const bo1 = built.find((b) => b.key === 'EBR-1').opts, who1 = byCls(row1, 'jx-who')[0];
+    bo1.who({ accountId: 'bob', name: 'Bob' }, 'me');
+    ok('...beside it, who has the report: someone else, marked', who1.textContent === 'assigned to Bob' && !who1.hasCls('mine') && /keeps Bob as its assignee/.test(who1.getAttribute('title')),
+        who1.textContent + ' / ' + who1.getAttribute('title'));
+    bo1.who({ accountId: 'me', name: 'Me' }, 'me');
+    ok('...the user, muted', who1.textContent === 'assigned to you' && who1.hasCls('mine') && who1.getAttribute('title') === '');
+    bo1.who(null, 'me');
+    ok('...nobody, nothing', who1.textContent === '' && !who1.hasCls('mine'));
     click(row1, 'mouseenter');
     ok('...and the hover card', tips === 1);
     click(boxes[1], 'change');   // checked is still false: unticked by hand, a no-op
     boxes[1].checked = true;
     click(byCls(byId['jx-targets'], 'jx-target')[1].kids[0], 'change');
-    ok('ticking a box adds what holds it, newest first among the exact', order() === 'EBR-2,EBR-3,EBR-1' && st.touched[B.sig] === true, order());
+    ok('ticking a box adds what holds it, newest first among the exact', order() === 'EBR-2,EBR-3,EBR-1' && st.on[B.sig] === true, order());
     ok('...the rows already there are the same rows, their Attach as it was', res.kids.indexOf(row1) >= 0 && built.length === 4, built.length);
     const tb0 = find(byId['jx-targets'], (n) => n.tag === 'input')[0];
     tb0.checked = false;
@@ -446,7 +471,27 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
 
     st.targets = []; st.desc = []; st.profileDone = true; st.tsig = 'x';
     X._paintTargets(st);
-    ok('nothing to look for, once all is read: said plainly', /Nothing to look for/.test(byId['jx-targets'].textContent));
+    const tt = () => byId['jx-targets'].textContent;
+    ok('nothing to look for, once all is read: said plainly', /Nothing to look for: .*shared by two or more/.test(tt()), tt());
+    st.one = { key: 'EBR-50', log: true, exc: [] };
+    X._paintTargets(st);
+    ok('...with one report attached, that its log holds none either', /neither does the log of EBR-50, the one report attached/.test(tt()), tt());
+    st.one.log = false;
+    X._paintTargets(st);
+    ok('...or that it has no log', /EBR-50, the one report attached, has no log/.test(tt()), tt());
+    st.one.log = null;
+    X._paintTargets(st);
+    ok('...or that its log could not be read', /the log of EBR-50, the one report attached, could not be read/.test(tt()), tt());
+    st.targets = [tB]; st.profileDone = false;
+    X._paintTargets(st);
+    ok('while the one report\'s log is read, that is said', /Still reading the log of EBR-50/.test(tt()), tt());
+    st.one = null;
+    X._paintTargets(st);
+    ok('...with several, that the shared ones are still counted', /Still counting the exceptions the attached reports share/.test(tt()), tt());
+    st.profileDone = true; st.desc = null;
+    X._paintTargets(st);
+    ok('...and with only the description to come, that', /Still reading the description of EDR-77/.test(tt()), tt());
+    st.desc = []; st.targets = [];
 
     // the window closed: nothing more is drawn
     ROOT.removeChild(st.node);
@@ -464,11 +509,17 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     sweeps = 0;
     X._load(st);
     await flush();
-    ok('the defect\'s description is read from the local copy', st.desc && st.desc.length === 1 && st.desc[0].sig === A.sig && sweeps === 1, JSON.stringify(st.desc));
+    ok('the defect\'s description is read from the local copy, and nothing searched before a box is ticked', st.desc && st.desc.length === 1 && st.desc[0].sig === A.sig && sweeps === 0,
+        JSON.stringify(st.desc) + ' ' + sweeps);
     ok('...the profile of its attached reports is asked for', builds.length === 1 && builds[0].key === 'EDR-77');
     ok('...and goes on while the window is open', builds[0].still() === true);
     builds[0].onState({ summary: { withLog: 4, excGroups: [{ msg: 'ValueError: bad', paths: [{ sig: B.sig, count: 3 }] }] }, done: false });
-    ok('a profile state adds its shared exceptions', st.targets.length === 2 && st.on[B.sig] === true && st.profileDone === false);
+    ok('a profile state adds its shared exceptions, unticked', st.targets.length === 2 && !st.on[B.sig] && st.profileDone === false && st.one === null);
+    builds[0].onState({ summary: { withLog: 1, excGroups: [] }, views: [{ key: 'EBR-50', logRead: true, exc: [{ sig: A2.sig, msg: 'KeyError: 2' }] }], done: false });
+    ok('one report attached: the exceptions in its log are offered, unticked', st.one && st.one.key === 'EBR-50' && st.targets.length === 2 && st.targets[1].one === 'EBR-50' &&
+        !st.on[A2.sig] && sweeps === 0, st.targets.map((t) => t.msg + ' ' + t.one).join(' | '));
+    builds[0].onState({ summary: { withLog: 2, excGroups: [] }, views: [{ key: 'EBR-50', logRead: true, exc: [{ sig: A2.sig }] }, { key: 'EBR-51', logRead: true, exc: [{ sig: B.sig }] }], done: false });
+    ok('...two attached: neither log\'s own exceptions are', st.one === null && st.targets.length === 1);
     buildD.reject(new Error('search failed'));
     await flush();
     ok('a profile that fails still ends the waiting', st.profileDone === true);
@@ -487,11 +538,11 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
 
     // ================= the Attach control's options (the real one) =================
     eval('Object.assign(JiTA.ui, {' + line('    _assigneeCache: {},') + member('    _getAssignee: function (key) {') + member('    _attachReportButton: function (reportKey, opts) {') + '});');
-    let attaches = [], dones = [], fades = 0, offList = [], live = {};
+    let attaches = [], assigned = [], dones = [], fades = 0, offList = [], live = {};
     Object.assign(JiTA.ui, { currentKey: null, _fadeOutAndReplace() { fades++; }, _takeOffList(keys, still) { offList.push(keys.join() + ':' + still()); return Promise.resolve(); },
         _liveStatus: (keys) => Promise.resolve(live), _isOpenStatus: (s) => !!s && !JiTA.util.isClosedStatus(s) });
     JiTA.link.currentUser = () => Promise.resolve('me');
-    JiTA.link.attachDuplicate = (a, b) => { attaches.push(a + '->' + b); return Promise.resolve({ attached: true, linked: true }); };
+    JiTA.link.attachDuplicate = (a, b, s, r, to) => { attaches.push(a + '->' + b); assigned.push(to); return Promise.resolve({ attached: true, linked: true }); };
     JiTA.db.deleteDefects = () => Promise.resolve();
     JiTA.sync._ebrRemoved = () => Promise.resolve();
     ajax = { 'EBR-9?fields=assignee': { ok: true, data: { fields: { assignee: null } } }, 'EBR-8?fields=assignee': { ok: true, data: { fields: { assignee: null } } } };
@@ -507,6 +558,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     click(b[0]);
     await flush();
     ok('...attached to the defect it was given, not the issue the panel shows', attaches.join() === 'EBR-9->EDR-77', attaches.join());
+    ok('...an unassigned report going to the user, as from the panel', assigned.join() === 'me', String(assigned));
     ok('...and the list\'s own step takes the row away, not the panel\'s slide-out', dones.join() === 'EBR-9' && fades === 0, dones.join() + ' ' + fades);
     live = { 'EBR-8': 'Attached' };
     b = JiTA.ui._attachReportButton('EBR-8', { defect: 'EDR-77', still: () => on, done: (k) => { dones.push(k); } });
@@ -515,6 +567,39 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     await flush();
     ok('a report attached in Jira meanwhile leaves the list too', attaches.length === 1 && dones.join() === 'EBR-9,EBR-8' && offList.join() === 'EBR-8:true', dones.join() + ' / ' + offList.join());
     live = {};
+
+    // a report someone else has
+    ajax['EBR-7?fields=assignee'] = { ok: true, data: { fields: { assignee: { accountId: 'bob', displayName: 'Bob' } } } };
+    let whos = [];
+    const whoOpt = (a, me) => { whos.push((a ? a.name : '-') + '/' + me); };
+    b = JiTA.ui._attachReportButton('EBR-7', { defect: 'EDR-77', still: () => on, done: (k) => { dones.push(k); }, who: whoOpt });
+    await flush();
+    ok('someone else\'s report is not offered without anyAssignee, and who is told whose it is', b.text() === 'assigned' && whos.join() === 'Bob/me', b.text() + ' ' + whos.join());
+    whos = [];
+    b = JiTA.ui._attachReportButton('EBR-7', { defect: 'EDR-77', still: () => on, done: (k) => { dones.push(k); }, who: whoOpt, anyAssignee: true });
+    await flush();
+    ok('with anyAssignee it is offered, saying whose it is', b.text() === 'Attach' && /Assigned to Bob, who stays its assignee/.test(b.attr('title')) && whos.join() === 'Bob/me', b.attr('title'));
+    let asked = '';
+    global.confirm = (q) => { asked = q; return true; };
+    toasts = [];
+    click(b[0]);
+    await flush();
+    ok('...the confirm names its assignee', /It is assigned to Bob, who stays its assignee/.test(asked), asked);
+    ok('...it is attached without changing its assignee', attaches.pop() === 'EBR-7->EDR-77' && assigned.pop() === null, String(assigned));
+    ok('...the toast says whose it still is', toasts.some((x) => /Attached EBR-7 to EDR-77, still assigned to Bob\./.test(x)), toasts.join());
+    ok('...and who is told again from the fresh read', whos.join() === 'Bob/me,Bob/me', whos.join());
+    ajax['EBR-6?fields=assignee'] = { ok: true, data: { fields: { assignee: null } } };
+    b = JiTA.ui._attachReportButton('EBR-6', { defect: 'EDR-77', still: () => on, done: (k) => { dones.push(k); }, anyAssignee: true });
+    await flush();
+    ok('an unassigned report says nothing of an assignee (control)', b.text() === 'Attach' && !/Assigned to/.test(b.attr('title')), b.attr('title'));
+    ajax['EBR-6?fields=assignee'] = { ok: true, data: { fields: { assignee: { accountId: 'bob', displayName: 'Bob' } } } };
+    asked = ''; toasts = [];
+    click(b[0]);
+    await flush();
+    ok('...taken meanwhile, it is still attached, keeping the new assignee', !/assigned to/.test(asked) && attaches.pop() === 'EBR-6->EDR-77' && assigned.pop() === null &&
+        toasts.some((x) => /still assigned to Bob/.test(x)), toasts.join());
+    global.confirm = () => true;
+
     JiTA.ui.currentKey = 'EDR-5';
     b = JiTA.ui._attachReportButton('EBR-9');
     await flush();

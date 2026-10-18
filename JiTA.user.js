@@ -7851,31 +7851,41 @@ JiTA.ui = {
     //
     // A list other than the panel's passes `opts`: defect (the defect to attach to; the panel's is the issue on screen),
     // still() (whether that list is still the one on screen) and done(key) (the report has left the open set, attached
-    // here or found attached or closed in Jira), which takes the row away in place of the panel's slide-out.
+    // here or found attached or closed in Jira), which takes the row away in place of the panel's slide-out. It can also
+    // pass anyAssignee, to offer a report someone else has as well (attaching it keeps them as its assignee), and
+    // who(assignee, me), told the report's assignee (or null) each time it is read, to show it.
     _attachReportButton: function (reportKey, opts) {
         opts = opts || {};
         var defectKey = opts.defect || JiTA.ui.currentKey;   // the defect this row was rendered for (captured now)
         var still = opts.still || function () { return JiTA.ui.currentKey === defectKey; };
+        var who = opts.who || function () {};
         var $btn = $('<span class="jita-sd-link jita-sd-linking"></span>').text('…')
             .attr('title', 'Checking assignee…');
+        function theirs(a, me) { return !!(a && (!me || a.accountId !== me)); }   // assigned, and not to this user
+        function named(a) { return (a && a.name) || 'someone else'; }
 
-        function wireAttach() {
+        // `other`: the assignee, when someone else has the report (offered only with anyAssignee); null otherwise.
+        function wireAttach(other) {
             $btn.removeClass('jita-sd-linking jita-sd-noattach').text('Attach')
-                .attr('title', 'Attach ' + reportKey + ' to ' + defectKey + ' as a duplicate (sets it to Attached)');
+                .attr('title', 'Attach ' + reportKey + ' to ' + defectKey + ' as a duplicate (sets it to Attached)' +
+                    (other ? '. Assigned to ' + named(other) + ', who stays its assignee' : ''));
             $btn.on('click', function (ev) {
                 ev.preventDefault();
                 ev.stopPropagation();
                 var $b = $(this);
                 if ($b.hasClass('jita-sd-linked') || $b.hasClass('jita-sd-linking')) { return; }
                 if (!still()) { JiTA.ui.toast('This list was drawn for ' + defectKey + ', not the issue on screen - wait for it to refresh.'); return; }
-                if (!confirm('Attach ' + reportKey + ' to ' + defectKey + ' as a duplicate and set it to Attached?')) { return; }
+                if (!confirm('Attach ' + reportKey + ' to ' + defectKey + ' as a duplicate and set it to Attached?' +
+                    (other ? '\n\nIt is assigned to ' + named(other) + ', who stays its assignee.' : ''))) { return; }
                 $b.addClass('jita-sd-linking').text('…');
                 // Pass the current user so the report is assigned to the triager on attach. The gate above read a cache
                 // that lives as long as the tab: someone may have taken the report since, and attaching would have
-                // reassigned it to this user. Ask Jira again now, and refuse if it is someone else's.
+                // reassigned it to this user. Ask Jira again now: one that is someone else's is refused, or with
+                // anyAssignee attached without touching its assignee.
                 delete JiTA.ui._assigneeCache[reportKey];
                 Promise.all([JiTA.link.currentUser(), JiTA.ui._getAssignee(reportKey), JiTA.ui._liveStatus([reportKey])]).then(function (r0) {
-                    var me = r0[0], now = r0[1], st = r0[2];
+                    var me = r0[0], now = r0[1], st = r0[2], taken = theirs(now, me);
+                    who(now, me);
                     // Attached or closed in Jira itself since the list was drawn: attaching would add a second link to it.
                     if (Object.prototype.hasOwnProperty.call(st, reportKey) && !JiTA.ui._isOpenStatus(st[reportKey])) {
                         $b.off('click').removeClass('jita-sd-linking').addClass('jita-sd-noattach').text(st[reportKey] || 'gone')
@@ -7886,17 +7896,17 @@ JiTA.ui = {
                         if (opts.done) { opts.done(reportKey); }
                         return;
                     }
-                    if (now && (!me || now.accountId !== me)) {
+                    if (taken && !opts.anyAssignee) {
                         $b.off('click').removeClass('jita-sd-linking').addClass('jita-sd-noattach').text('assigned')
                             .attr('title', 'Assigned to ' + (now.name || 'someone else') + ' - only unassigned reports or ones assigned to you can be attached');
                         JiTA.ui.toast(reportKey + ' was taken by ' + (now.name || 'someone else') + ' meanwhile - not attached.');
                         return;
                     }
-                    return JiTA.link.attachDuplicate(reportKey, defectKey, 'Attached', 'Duplicate', me).then(function (res) {
+                    return JiTA.link.attachDuplicate(reportKey, defectKey, 'Attached', 'Duplicate', taken ? null : me).then(function (res) {
                         JiTA.ui._hideTip();
                         $b.removeClass('jita-sd-linking').addClass('jita-sd-linked').text(res.attached ? '✓ attached' : '✓ linked');
                         var msg = res.attached
-                            ? ('Attached ' + reportKey + ' to ' + defectKey + '.')
+                            ? ('Attached ' + reportKey + ' to ' + defectKey + (taken ? ', still assigned to ' + named(now) : '') + '.')
                             : ('Linked ' + reportKey + ' to ' + defectKey + ' (could not set Attached).');
                         if (!res.linked) { msg = 'Set ' + reportKey + ' to Attached, but the duplicate link failed.'; }
                         JiTA.ui.toast(msg);
@@ -7922,11 +7932,14 @@ JiTA.ui = {
             });
         }
 
-        // Gate on the report's live assignee: only unassigned or assigned-to-me may be attached.
+        // Gate on the report's live assignee: only unassigned or assigned-to-me may be attached, unless anyAssignee.
         Promise.all([JiTA.link.currentUser(), JiTA.ui._getAssignee(reportKey)]).then(function (res) {
             var me = res[0], assignee = res[1];   // assignee: { accountId, name } or null (unassigned)
-            if (!assignee || (me && assignee.accountId === me)) {
-                wireAttach();
+            who(assignee, me);
+            if (!theirs(assignee, me)) {
+                wireAttach(null);
+            } else if (opts.anyAssignee) {
+                wireAttach(assignee);
             } else {
                 $btn.removeClass('jita-sd-linking').addClass('jita-sd-noattach').text('assigned')
                     .attr('title', 'Assigned to ' + (assignee.name || 'someone else') +
@@ -14643,25 +14656,26 @@ JiTA.profile = {
  * Hidden for now. A double tap of '+' on a defect is the only way in; it is in no menu and not in the changelog.
  *
  * What it looks for: the exceptions pasted into the defect's description, and those its attached reports' logs share as
- * the Defect Profile counts them (in two logs or more, and not hidden in the Triage Assistant). Each can be ticked off.
- * The description's, and the ones at least SHARED_MIN of the attached logs share, start ticked.
+ * the Defect Profile counts them (in two logs or more, and not hidden in the Triage Assistant). A defect with a single
+ * report attached has nothing shared, so every exception in that report's log is offered instead. None starts ticked:
+ * the user ticks the ones to look for, and the search starts with the first one.
  *
- * Where: every open bug report, newest first, from a live search (GM team ones left out, as in Matching bug reports).
- * Each report's logs are read by the profile's own reader, so an exception is the same signature on both sides, and what
+ * Where: every open bug report, newest first, from a live search. One whose status says it is attached or closed is left
+ * out, as Matching bug reports leaves it out. Each report's logs are read by the profile's own reader, so an exception is the same signature on both sides, and what
  * a report's logs held is cached: the first search downloads every report's log, later ones only those of new reports,
  * or of reports whose log files changed. igbr.zip is not read here: its logs.txt is the one attached beside it.
  * Exceptions pasted into a report's description count too.
  *
  * A report holds an exception when one of its exceptions has the same stack, or failing that the same crash site
  * (message and innermost frames): the two levels "Known defects in attached log" uses. Ticking an exception only matches
- * what was read again. Closing the window stops new reads; opening it again carries on from the cache.
+ * what was read again. A report someone else has says so and can still be attached; attaching it keeps its assignee.
+ * Closing the window stops new reads; opening it again carries on from the cache.
  */
 JiTA.excfind = {
     CONCURRENCY: 4,
-    SHARED_MIN: 0.5,             // shared by at least this share of the attached logs read: ticked from the start
     MAX_SHARED: 12,              // shared exceptions offered, the most shared first
     WAIT_MS: 150,                // a lane with nothing to read waits this long for the next page of reports
-    FIELDS: ['summary', 'created', 'status', 'attachment', 'labels', 'description', 'customfield_10001'],
+    FIELDS: ['summary', 'created', 'status', 'attachment', 'labels', 'description'],
     _st: null,                   // the search on screen; a window opened again starts a new one
 
     // ---- what to look for ---------------------------------------------------------------------------------------
@@ -14676,18 +14690,19 @@ JiTA.excfind = {
         return out;
     },
 
-    // The exceptions to look for, from the defect's description (desc: [{ sig, msg }]) and the profile of its attached
-    // reports (sm: a JiTA.profile summary, or null): [{ sig, crash, msg, desc, count, of, def }], the description's first,
-    // then the most shared. `count` of `of` attached logs share it; `def` says whether it starts ticked.
-    targets: function (desc, sm) {
+    // The exceptions to look for, from the defect's description (desc: [{ sig, msg }]), the profile of its attached
+    // reports (sm: a JiTA.profile summary, or null) and, when it has just one, that report's log (one: from _one, or
+    // null): [{ sig, crash, msg, desc, count, of, one }], the description's first, then the most shared, then the one
+    // report's. `count` of `of` attached logs share it; `one` names the report whose log holds it. None comes ticked.
+    targets: function (desc, sm, one) {
         var X = JiTA.excfind, out = [], by = {}, shared = [], of = (sm && sm.withLog) || 0;
         function add(sig, msg) {
             var t = by[sig];
-            if (!t) { t = by[sig] = { sig: sig, crash: JiTA.logsig._crashOf(sig), msg: msg || '', desc: false, count: 0, of: 0, def: false }; out.push(t); }
+            if (!t) { t = by[sig] = { sig: sig, crash: JiTA.logsig._crashOf(sig), msg: msg || '', desc: false, count: 0, of: 0, one: null }; out.push(t); }
             if (!t.msg && msg) { t.msg = msg; }
             return t;
         }
-        (desc || []).forEach(function (e) { var t = add(e.sig, e.msg); t.desc = true; t.def = true; });
+        (desc || []).forEach(function (e) { add(e.sig, e.msg).desc = true; });
         ((sm && sm.excGroups) || []).forEach(function (g) {
             (g.paths || []).forEach(function (p) { shared.push({ sig: p.sig, msg: g.msg, count: p.count }); });
         });
@@ -14696,8 +14711,8 @@ JiTA.excfind = {
             var t = add(e.sig, e.msg);
             t.count = e.count;
             t.of = of;
-            if (e.count >= 2 && of && e.count / of >= X.SHARED_MIN) { t.def = true; }
         });
+        ((one && one.exc) || []).forEach(function (e) { add(e.sig, e.msg).one = one.key; });
         // Exceptions with the same message are told apart by where their stacks differ (`via`), as the full profile does.
         var byMsg = {}, P = JiTA.profile;
         out.forEach(function (t) { var k = P._sigParts(t.sig).msg; (byMsg[k] = byMsg[k] || []).push(t); });
@@ -14710,6 +14725,12 @@ JiTA.excfind = {
         return out;
     },
     _chosen: function (st) { return st.targets.filter(function (t) { return !!st.on[t.sig]; }); },
+    // The defect's attached report, when it has exactly one, from a profile state: { key, log, exc }, `log` as the profile
+    // read it (true: read, false: no log, null: not read), `exc` the exceptions in its log. Null for none, or several.
+    _one: function (s) {
+        var v = (s && s.views && s.views.length === 1) ? s.views[0] : null;
+        return v ? { key: v.key, log: v.logRead, exc: v.exc || [] } : null;
+    },
 
     // ---- matching ---------------------------------------------------------------------------------------------------
     // One open report as the search keeps it: its summary, date and status, and the exceptions of its logs (rec, the
@@ -14790,7 +14811,7 @@ JiTA.excfind = {
         return st;
     },
     _state: function (key, node) {
-        return { key: key, node: node, desc: null, profile: null, profileDone: false, targets: [], tsig: null, on: {}, touched: {},
+        return { key: key, node: node, desc: null, profile: null, profileDone: false, one: null, targets: [], tsig: null, on: {},
             seen: {}, queue: [], n: 0, pool: {}, reports: [], rows: {}, linked: {}, listed: false, started: false, done: false,
             read: 0, cached: 0, failed: 0, error: null };
     },
@@ -14804,6 +14825,7 @@ JiTA.excfind = {
         try {
             JiTA.profile.build(st.key, function (s) {
                 st.profile = s.summary;
+                st.one = X._one(s);
                 if (s.done) { st.profileDone = true; }
                 X._retarget(st);
             }, function () { return X._alive(st) || (JiTA.ui.currentKey === st.key && flagOn('defectProfile')); })
@@ -14842,13 +14864,11 @@ JiTA.excfind = {
     },
 
     // The exceptions to look for changed (the description was read, the profile counted more logs, a box was ticked):
-    // tick the new ones as they start, keep what was ticked by hand, match again and start the search once there is
-    // something to look for.
+    // match again, and start the search with the first exception ticked.
     _retarget: function (st) {
         var X = JiTA.excfind;
         if (!X._alive(st)) { return; }
-        var ts = X.targets(st.desc, st.profile);
-        ts.forEach(function (t) { if (!st.touched[t.sig]) { st.on[t.sig] = t.def; } });
+        var ts = X.targets(st.desc, st.profile, st.one);
         st.targets = ts;
         var sig = ts.map(function (t) { return t.sig + '|' + t.count + '/' + t.of + (st.on[t.sig] ? '+' : '-'); }).join('\n') +
             '#' + (st.desc !== null) + st.profileDone;
@@ -14858,7 +14878,7 @@ JiTA.excfind = {
             X._rematch(st);
             X._paintResults(st);
         }
-        if (!st.started && ts.length) { st.started = true; X._sweep(st); }
+        if (!st.started && X._chosen(st).length) { st.started = true; X._sweep(st); }
         X._status(st);
     },
 
@@ -14898,7 +14918,10 @@ JiTA.excfind = {
         return JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
             var d = (r && r.data) || {};
             (d.issues || []).forEach(function (iss) {
-                if (st.seen[iss.key] || JiTA.util.isGmTeam((iss.fields || {}).customfield_10001)) { return; }
+                var f = iss.fields || {};
+                // A status that says the report is attached or closed: the search goes by status category, which does not
+                // cover every such status, and attaching one again would only be refused.
+                if (st.seen[iss.key] || JiTA.util.isClosedStatus(f.status && f.status.name)) { return; }
                 st.seen[iss.key] = true;
                 st.queue.push(X._slim(iss));
                 st.n++;
@@ -14952,7 +14975,21 @@ JiTA.excfind = {
         var bits = [];
         if (t.desc) { bits.push('in the description'); }
         if (t.count) { bits.push('in ' + t.count + ' of ' + t.of + ' attached logs'); }
+        if (t.one) { bits.push('in the log of ' + t.one); }
         return bits.join(', ');
+    },
+    // Why there is nothing to look for, once everything is read.
+    _nothing: function (st) {
+        var o = st.one, why = 'Nothing to look for: the description holds no exception with a stack trace, and ';
+        if (!o) { return why + 'no exception is shared by two or more of its attached reports\' logs.'; }
+        if (o.log === false) { return why + o.key + ', the one report attached, has no log.'; }
+        if (o.log === null) { return why + 'the log of ' + o.key + ', the one report attached, could not be read.'; }
+        return why + 'neither does the log of ' + o.key + ', the one report attached.';
+    },
+    // What is still being read, while the list of exceptions may still grow.
+    _pending: function (st) {
+        if (st.profileDone) { return 'Still reading the description of ' + st.key + '…'; }
+        return st.one ? 'Still reading the log of ' + st.one.key + '…' : 'Still counting the exceptions the attached reports share…';
     },
     _paintTargets: function (st) {
         var X = JiTA.excfind, $t = $('#jx-targets');
@@ -14960,22 +14997,20 @@ JiTA.excfind = {
         $t.empty();
         var pending = st.desc === null || !st.profileDone;
         if (!st.targets.length) {
-            $('<div class="jx-empty"></div>').text(pending ? 'Looking for the exceptions of ' + st.key + '…'
-                : 'Nothing to look for: the description holds no exception with a stack trace, and no exception is shared by two or more of its attached reports\' logs.').appendTo($t);
+            $('<div class="jx-empty"></div>').text(pending ? 'Looking for the exceptions of ' + st.key + '…' : X._nothing(st)).appendTo($t);
             return;
         }
         st.targets.forEach(function (t) {
             var $l = $('<label class="jx-target"></label>').attr('title', JiTA.profile._sigTip(t.sig, t.msg)).appendTo($t);
             $('<input type="checkbox">').prop('checked', !!st.on[t.sig]).on('change', function () {
                 st.on[t.sig] = this.checked;
-                st.touched[t.sig] = true;
                 X._retarget(st);
             }).appendTo($l);
             var $m = $('<span class="jx-tmsg"></span>').text(t.msg || '(no message)').appendTo($l);
             if (t.via) { $('<span class="jx-via"></span>').text(' via ' + t.via).appendTo($m); }
             $('<span class="jx-tsrc"></span>').text(X._src(t)).appendTo($l);
         });
-        if (pending) { $('<div class="jx-note"></div>').text('Still counting the exceptions the attached reports share…').appendTo($t); }
+        if (pending) { $('<div class="jx-note"></div>').text(X._pending(st)).appendTo($t); }
     },
 
     _paintResults: function (st) {
@@ -15006,6 +15041,7 @@ JiTA.excfind = {
         $('<a class="jx-key" target="_blank" rel="noopener"></a>').attr('href', '/browse/' + rep.key).text(rep.key).appendTo($row);
         $('<span class="jx-sum"></span>').text(rep.summary).appendTo($row);
         $('<span class="jx-date"></span>').text(JiTA.util.fmtDate(rep.created)).appendTo($row);
+        var $who = $('<span class="jx-who"></span>').appendTo($row);
         var $act = $('<span class="jx-act"></span>').appendTo($row);
         if (st.linked[rep.key]) {
             $('<span class="jx-linked">linked</span>').attr('title', rep.key + ' is linked to ' + st.key + ' already, but still open').appendTo($act);
@@ -15013,13 +15049,21 @@ JiTA.excfind = {
             $act.append(JiTA.ui._attachReportButton(rep.key, {
                 defect: st.key,
                 still: function () { return X._alive(st); },
-                done: function (k) { X._gone(st, k); }
+                done: function (k) { X._gone(st, k); },
+                anyAssignee: true,
+                who: function (a, me) { X._who($who, a, me); }
             }));
         }
         $('<div class="jx-why"></div>').appendTo($row);
         $row.on('mouseenter', function () { JiTA.ui._showTip({ key: rep.key, summary: rep.summary, description: '' }, this, rep.status); });
         $row.on('mouseleave', function () { JiTA.ui._hideTip(); });
         return row;
+    },
+    // Who has a listed report, beside its Attach control; nothing when nobody does.
+    _who: function ($w, a, me) {
+        var mine = !!(a && me && a.accountId === me), name = (a && a.name) || 'someone else';
+        $w.toggleClass('mine', mine).text(!a ? '' : (mine ? 'assigned to you' : 'assigned to ' + name))
+            .attr('title', (a && !mine) ? 'Attaching it keeps ' + name + ' as its assignee' : '');
     },
     _why: function (row, m) {
         var $w = $(row).children('.jx-why').empty();
@@ -15079,6 +15123,9 @@ JiTA.excfind = {
                 '.jita-excfind-view .jx-key:hover { text-decoration: underline; }' +
                 '.jita-excfind-view .jx-sum { flex: 1 1 0; min-width: 0; color: #e6e6e6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-excfind-view .jx-date { flex: 0 0 auto; color: #7a8694; font-size: 11px; }' +
+                '.jita-excfind-view .jx-who { flex: 0 0 auto; max-width: 180px; color: #f0b429; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '.jita-excfind-view .jx-who.mine { color: #7a8694; }' +
+                '.jita-excfind-view .jx-who:empty { display: none; }' +
                 '.jita-excfind-view .jx-act { flex: 0 0 76px; text-align: right; }' +
                 '.jita-excfind-view .jx-act .jita-sd-link { float: none; margin: 0; font-size: 11px; }' +
                 '.jita-excfind-view .jx-linked { color: #7a8694; font-size: 11px; }' +
