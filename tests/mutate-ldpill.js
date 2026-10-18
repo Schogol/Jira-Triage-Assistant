@@ -23,7 +23,7 @@ const muts = [
     // ---- the chip ----
     [NG, 'a finished month hides behind the bare name', "        if (o.pages === 0 && o.checks === 0) { return '📋 Lead duties: all done ✓'; }\n", ''],
     [NG, 'unknown counts read as all done', "if (o.pages === 0 && o.checks === 0) { return '📋 Lead duties: all done ✓'; }", "if (!o.pages && !o.checks) { return '📋 Lead duties: all done ✓'; }"],
-    [NG, 'the vague wording is back', "        return bits.join(', ');\n    },", "        return bits.length ? bits.join(', ') : 'due this month';\n    },"],
+    [NG, 'the vague wording is back', "            bits.push('VMS needs a login');\n        }\n        return bits.join(', ');\n    },", "            bits.push('VMS needs a login');\n        }\n        return bits.length ? bits.join(', ') : 'due this month';\n    },"],
     [NG, 'a finished month removes the chip', "            R._paint(R._label(o));", "            if (o.pages === 0 && o.checks === 0) { R.remove(); return; }\n            R._paint(R._label(o));"]
 ];
 let allRed = true;

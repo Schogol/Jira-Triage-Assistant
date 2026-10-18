@@ -41,7 +41,7 @@ const muts = [
     // ---- the two Attach buttons ----
     [H, 'a defect row attaches whatever report is on screen', '            var ebr = forKey;', '            var ebr = JiTA.ui.currentKey;'],
     [H, 'a defect row drawn for another report still attaches', 'if (JiTA.ui.currentKey !== ebr) { JiTA.ui.toast(', 'if (false) { JiTA.ui.toast('],
-    [H, 'a report row drawn for another defect still attaches', 'if (JiTA.ui.currentKey !== defectKey) { JiTA.ui.toast(', 'if (false) { JiTA.ui.toast(']
+    [H, 'a report row drawn for another defect still attaches', 'if (!still()) { JiTA.ui.toast(', 'if (false) { JiTA.ui.toast(']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

@@ -193,6 +193,9 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('...the reading has the build, the exceptions, the crash history and the hardware', rec.logs && rec.hasLog && rec.build === 3569502 && rec.exc.length === 2 &&
         rec.zip && rec.wer && rec.crashes[0].module === 'nvwgf2umx.dll' && rec.dxHw && rec.pdmHw && rec.pdmHw.gpuVendor === 'AMD', JSON.stringify(rec).slice(0, 200));
     ok('...and it is cached for the report', metaSets.indexOf('rp:EBR-1') >= 0 && meta['rp:EBR-1'] && meta['rp:EBR-1'].v === P.V);
+    ok('...naming the log files it read, by name and size', rec.logSig === 'logs.txt:2000|other_log.txt:3000' && rec.logSig === P._logSig(issue.fields.attachment), rec.logSig);
+    ok('...which changes when a log is added', P._logSig(issue.fields.attachment.concat([att('late_log.txt', 10)])) !== rec.logSig &&
+        P._logSig(issue.fields.attachment.concat([att('shot.png', 10)])) === rec.logSig);
     hints = [];
     await P._readFiles({ key: 'EBR-11', fields: { labels: ['Russian'], attachment: [att('logs.txt')] } }, null, false);
     ok('the report\'s client language goes with its logs, for their code page', hints.join() === 'rus', hints.join());
@@ -208,7 +211,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     textAnswer = (u) => (/other_log/.test(u) ? Promise.reject(new Error('timeout')) : Promise.resolve(LOG_A));
     rec = await P._readFiles(issue, null, true);
     ok('a log download that fails leaves the logs unread, to be read again next time', rec.logs === false && rec.zip === true, JSON.stringify({ logs: rec.logs, zip: rec.zip }));
-    ok('...and nothing the logs read before it said is kept', !rec.exc && !rec.build && !rec.hasLog, JSON.stringify(rec).slice(0, 150));
+    ok('...and nothing the logs read before it said is kept', !rec.exc && !rec.build && !rec.hasLog && rec.logSig === undefined, JSON.stringify(rec).slice(0, 150));
     let inFlight = 0, maxInFlight = 0;
     textAnswer = () => { inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); return new Promise((r) => setImmediate(() => { inFlight--; r(LOG_A); })); };
     texts = []; bytes = [];

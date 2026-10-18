@@ -3454,7 +3454,7 @@ JiTA.logsig = {
         var lbl = document.createElement('span');
         lbl.className = 'jita-excl-label';
         lbl.textContent = c.label || c.sig;
-        lbl.title = c.sig;
+        lbl.title = JiTA.profile._sigTip(c.sig, c.label);
         headRow.appendChild(lbl);
         var members = document.createElement('div');
         members.className = 'jita-exc-members';
@@ -7848,8 +7848,14 @@ JiTA.ui = {
     // "checking…" state until we've confirmed the assignee, then either enables ("Attach") or shows a muted,
     // non-clickable "assigned" hint. On attach it also sets the assignee to the current user (matches Jira's
     // native Attach dialog). The assignee can change server-side, so we gate on a LIVE fetch, not stored data.
-    _attachReportButton: function (reportKey) {
-        var defectKey = JiTA.ui.currentKey;   // the defect this row was rendered for (captured now)
+    //
+    // A list other than the panel's passes `opts`: defect (the defect to attach to; the panel's is the issue on screen),
+    // still() (whether that list is still the one on screen) and done(key) (the report has left the open set, attached
+    // here or found attached or closed in Jira), which takes the row away in place of the panel's slide-out.
+    _attachReportButton: function (reportKey, opts) {
+        opts = opts || {};
+        var defectKey = opts.defect || JiTA.ui.currentKey;   // the defect this row was rendered for (captured now)
+        var still = opts.still || function () { return JiTA.ui.currentKey === defectKey; };
         var $btn = $('<span class="jita-sd-link jita-sd-linking"></span>').text('…')
             .attr('title', 'Checking assignee…');
 
@@ -7861,7 +7867,7 @@ JiTA.ui = {
                 ev.stopPropagation();
                 var $b = $(this);
                 if ($b.hasClass('jita-sd-linked') || $b.hasClass('jita-sd-linking')) { return; }
-                if (JiTA.ui.currentKey !== defectKey) { JiTA.ui.toast('This list was drawn for ' + defectKey + ', not the issue on screen - wait for it to refresh.'); return; }
+                if (!still()) { JiTA.ui.toast('This list was drawn for ' + defectKey + ', not the issue on screen - wait for it to refresh.'); return; }
                 if (!confirm('Attach ' + reportKey + ' to ' + defectKey + ' as a duplicate and set it to Attached?')) { return; }
                 $b.addClass('jita-sd-linking').text('…');
                 // Pass the current user so the report is assigned to the triager on attach. The gate above read a cache
@@ -7876,7 +7882,8 @@ JiTA.ui = {
                             .attr('title', 'No longer an open bug report in Jira');
                         JiTA.ui.toast(st[reportKey] ? (reportKey + ' is already ' + st[reportKey] + ' in Jira - not attached.')
                             : (reportKey + ' is no longer an open bug report in Jira - not attached.'));
-                        JiTA.ui._takeOffList([reportKey], function () { return JiTA.ui.currentKey === defectKey; });
+                        JiTA.ui._takeOffList([reportKey], still);
+                        if (opts.done) { opts.done(reportKey); }
                         return;
                     }
                     if (now && (!me || now.accountId !== me)) {
@@ -7904,7 +7911,7 @@ JiTA.ui = {
                             JiTA.db.deleteDefects([reportKey]).then(function () {
                                 JiTA.sync._ebrRemoved([reportKey]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
                             }, function (e) { console.log('[JiTA] could not drop ' + reportKey + ' from the local DB:', e && e.message || e); })
-                                .then(function () { JiTA.ui._fadeOutAndReplace($b.closest('li'), defectKey); });
+                                .then(function () { if (opts.done) { opts.done(reportKey); } else { JiTA.ui._fadeOutAndReplace($b.closest('li'), defectKey); } });
                         }
                     });
                 }).catch(function (e) {
@@ -13910,6 +13917,20 @@ JiTA.profile = {
         });
         return { msg: at < 0 ? String(sig) : String(sig).slice(0, at), frames: frames };
     },
+    // Signatures as a hover text a person can read: the message once, then each stack one frame a line, innermost last
+    // (where it was thrown). A signature on its own is one long lowercased line. `sigs` is one signature, or several of
+    // one message; `msg` is the message as written, which the signature has lowercased.
+    _sigTip: function (sigs, msg) {
+        var P = JiTA.profile, list = [].concat(sigs || []), out = [];
+        list.forEach(function (sig, i) {
+            var p = P._sigParts(sig);
+            if (!i) { out.push(msg || p.msg); }
+            if (!p.frames.length) { return; }
+            out.push('', (list.length > 1 ? 'Stack ' + (i + 1) + ' of ' + list.length : 'Stack') + ', innermost last:');
+            p.frames.forEach(function (f) { out.push('    ' + f.replace(':', ': ')); });
+        });
+        return out.join('\n');
+    },
     // Short labels for call stacks that end alike: where each one differs, up to the frames they all share.
     _pathLabels: function (chains) {
         var cs = 0, min = Math.min.apply(null, chains.map(function (c) { return c.length; }));
@@ -14064,6 +14085,15 @@ JiTA.profile = {
         return JiTA.profile._fetchBytes(url).then(function (buf) { return JiTA.profile._decodeLog(new Uint8Array(buf), hint); });
     },
 
+    // A report's log files as _readFiles picks them: text files with "log" in the name. _logSig names them by name and
+    // size, and a reading keeps it (logSig), so one made before a log was added can be told from the report as it is now.
+    _logFiles: function (att) {
+        return (att || []).filter(function (a) { return /\.txt$/i.test(a.filename || '') && /log/i.test(a.filename || '') && a.content; });
+    },
+    _logSig: function (att) {
+        return JiTA.profile._logFiles(att).map(function (a) { return (a.filename || '') + ':' + (a.size || 0); }).sort().join('|');
+    },
+
     // Read a report's files and cache what they said. `rec` is its cached reading, if any: a part it already has is
     // not read again. A download that fails leaves its part unread, so the next visit tries again; a file over its
     // size cap is skipped for good.
@@ -14081,7 +14111,7 @@ JiTA.profile = {
             into.hasLog = true;
         }
         if (!rec.logs) {
-            var logs = att.filter(function (a) { return /\.txt$/i.test(a.filename || '') && /log/i.test(a.filename || '') && a.content; });
+            var logs = P._logFiles(att);
             logs.sort(function (a, b) { return ((/^logs\.txt$/i.test(b.filename) ? 1 : 0) - (/^logs\.txt$/i.test(a.filename) ? 1 : 0)) || ((a.size || 0) - (b.size || 0)); });
             var small = logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); }).slice(0, P.MAX_LOGS), got = {}, li = 0;
             // One log at a time, each read as it arrives and then let go: a report can carry three logs of 15 MB, and
@@ -14089,6 +14119,7 @@ JiTA.profile = {
             jobs = (function nextLog() {
                 if (li >= small.length) {
                     rec.logs = true;
+                    rec.logSig = P._logSig(att);
                     rec.skippedLogs = logs.length > small.length;
                     if (got.hasLog) { rec.exc = got.exc; rec.build = got.build; rec.version = got.version; rec.hasLog = true; }
                     return Promise.resolve();
@@ -14427,7 +14458,7 @@ JiTA.profile = {
             any = true;
             P._chip(d.label + ': ' + d.dominant + ' ' + d.domCount + '/' + d.known, 'strong').appendTo($c);
         });
-        if (sm.exc[0]) { any = true; P._chip('Exception in ' + sm.exc[0].count + '/' + sm.withLog + ' logs: ' + sm.exc[0].msg, sm.domExc ? 'strong' : '', sm.exc[0].msg + '\n' + sm.exc[0].sig).appendTo($c); }
+        if (sm.exc[0]) { any = true; P._chip('Exception in ' + sm.exc[0].count + '/' + sm.withLog + ' logs: ' + sm.exc[0].msg, sm.domExc ? 'strong' : '', P._sigTip(sm.exc[0].sig, sm.exc[0].msg)).appendTo($c); }
         if (sm.crashes[0] && sm.crashes[0].count >= 2) { any = true; P._chip('Crash in ' + sm.crashes[0].module + ' ' + sm.crashes[0].count + '/' + sm.withWer, sm.domCrash ? 'strong' : '').appendTo($c); }
         if (!any) { $('<span class="jp-none"></span>').text(sm.n < P.MIN_N ? 'Too few reports for a pattern yet.' : 'No shared pattern.').appendTo($c); }
         // Exceptions whose defect is hidden in the Triage Assistant: out of the pattern, folded away under one line.
@@ -14506,14 +14537,14 @@ JiTA.profile = {
         sm.excGroups.slice(0, 15).forEach(function (g) {
             var $r = $('<div class="jpv-row"></div>').appendTo($b);
             $('<span class="jpv-count"></span>').toggleClass('dom', g.paths.some(function (p) { return p.sig === domSig; })).text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
-            $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', g.paths.map(function (p) { return p.sig; }).join('\n')).appendTo($r);
+            $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', P._sigTip(g.paths.map(function (p) { return p.sig; }), g.msg)).appendTo($r);
             if (g.paths.length < 2) { return; }
             // Its call stacks, each by where it differs from the others.
             var labels = P._pathLabels(g.paths.map(function (p) { return P._sigParts(p.sig).frames; }));
             g.paths.slice(0, 5).forEach(function (p, i) {
                 var $s = $('<div class="jpv-row jpv-path"></div>').appendTo($b);
                 $('<span class="jpv-count"></span>').toggleClass('dom', p.sig === domSig).text(p.count + '/' + sm.withLog).attr('title', P._who(p.keys)).appendTo($s);
-                $('<span class="jpv-msg"></span>').text('via ' + labels[i]).attr('title', p.sig).appendTo($s);
+                $('<span class="jpv-msg"></span>').text('via ' + labels[i]).attr('title', P._sigTip(p.sig, g.msg)).appendTo($s);
             });
             if (g.paths.length > 5) { $('<div class="jpv-row jpv-path"></div>').text('and ' + (g.paths.length - 5) + ' more call stacks').appendTo($b); }
         });
@@ -14531,7 +14562,7 @@ JiTA.profile = {
                 var $r = $('<div class="jpv-row"></div>').appendTo($hl);
                 $('<span class="jpv-count"></span>').text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
                 g.defects.forEach(function (d) { $('<a class="jpv-key" target="_blank" rel="noopener"></a>').attr('href', '/browse/' + d).text(d).appendTo($r); });
-                $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', g.paths.map(function (p) { return p.sig; }).join('\n')).appendTo($r);
+                $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', P._sigTip(g.paths.map(function (p) { return p.sig; }), g.msg)).appendTo($r);
             });
             $hh.on('click', function () { var open = !$hv.hasClass('open'); $hv.toggleClass('open', open); $hh.text(hhead(open)); });
         }
@@ -14598,6 +14629,465 @@ JiTA.profile = {
                 '.jita-profile-view .jpv-table th { text-align: left; color: #7a8694; font-weight: 600; padding: 4px 6px; border-bottom: 1px solid #3a434d; }' +
                 '.jita-profile-view .jpv-table td { color: #cfd6dd; padding: 3px 6px; border-bottom: 1px solid #2c333a; }' +
                 '.jita-profile-view .jpv-table a { color: #4c9aff; text-decoration: none; font-weight: 700; }'
+            );
+        } catch (e) { /* ignore */ }
+    },
+
+    _noop: null
+};
+
+
+/* ---- Exception search (hidden): the open bug reports whose logs hold a defect's exceptions ----------------------------
+ * The other way round from "Known defects in attached log", which names the defects a report's log points at: this finds
+ * the open bug reports whose logs hold the exceptions of the defect on screen, reports nobody has attached to it yet.
+ * Hidden for now. A double tap of '+' on a defect is the only way in; it is in no menu and not in the changelog.
+ *
+ * What it looks for: the exceptions pasted into the defect's description, and those its attached reports' logs share as
+ * the Defect Profile counts them (in two logs or more, and not hidden in the Triage Assistant). Each can be ticked off.
+ * The description's, and the ones at least SHARED_MIN of the attached logs share, start ticked.
+ *
+ * Where: every open bug report, newest first, from a live search (GM team ones left out, as in Matching bug reports).
+ * Each report's logs are read by the profile's own reader, so an exception is the same signature on both sides, and what
+ * a report's logs held is cached: the first search downloads every report's log, later ones only those of new reports,
+ * or of reports whose log files changed. igbr.zip is not read here: its logs.txt is the one attached beside it.
+ * Exceptions pasted into a report's description count too.
+ *
+ * A report holds an exception when one of its exceptions has the same stack, or failing that the same crash site
+ * (message and innermost frames): the two levels "Known defects in attached log" uses. Ticking an exception only matches
+ * what was read again. Closing the window stops new reads; opening it again carries on from the cache.
+ */
+JiTA.excfind = {
+    CONCURRENCY: 4,
+    SHARED_MIN: 0.5,             // shared by at least this share of the attached logs read: ticked from the start
+    MAX_SHARED: 12,              // shared exceptions offered, the most shared first
+    WAIT_MS: 150,                // a lane with nothing to read waits this long for the next page of reports
+    FIELDS: ['summary', 'created', 'status', 'attachment', 'labels', 'description', 'customfield_10001'],
+    _st: null,                   // the search on screen; a window opened again starts a new one
+
+    // ---- what to look for ---------------------------------------------------------------------------------------
+    // The exceptions with a stack in a text (a description): [{ sig, msg }], each once.
+    _fps: function (text) {
+        var out = [], seen = {};
+        if (!text || String(text).indexOf('EXCEPTION #') < 0) { return out; }
+        JiTA.logsig._splitBlocks(String(text)).forEach(function (b) {
+            var fp = JiTA.logsig._fingerprint(b);
+            if (fp.sig && !seen[fp.sig]) { seen[fp.sig] = true; out.push({ sig: fp.sig, msg: fp.msg }); }
+        });
+        return out;
+    },
+
+    // The exceptions to look for, from the defect's description (desc: [{ sig, msg }]) and the profile of its attached
+    // reports (sm: a JiTA.profile summary, or null): [{ sig, crash, msg, desc, count, of, def }], the description's first,
+    // then the most shared. `count` of `of` attached logs share it; `def` says whether it starts ticked.
+    targets: function (desc, sm) {
+        var X = JiTA.excfind, out = [], by = {}, shared = [], of = (sm && sm.withLog) || 0;
+        function add(sig, msg) {
+            var t = by[sig];
+            if (!t) { t = by[sig] = { sig: sig, crash: JiTA.logsig._crashOf(sig), msg: msg || '', desc: false, count: 0, of: 0, def: false }; out.push(t); }
+            if (!t.msg && msg) { t.msg = msg; }
+            return t;
+        }
+        (desc || []).forEach(function (e) { var t = add(e.sig, e.msg); t.desc = true; t.def = true; });
+        ((sm && sm.excGroups) || []).forEach(function (g) {
+            (g.paths || []).forEach(function (p) { shared.push({ sig: p.sig, msg: g.msg, count: p.count }); });
+        });
+        shared.sort(function (a, b) { return b.count - a.count || (a.sig < b.sig ? -1 : 1); });
+        shared.slice(0, X.MAX_SHARED).forEach(function (e) {
+            var t = add(e.sig, e.msg);
+            t.count = e.count;
+            t.of = of;
+            if (e.count >= 2 && of && e.count / of >= X.SHARED_MIN) { t.def = true; }
+        });
+        // Exceptions with the same message are told apart by where their stacks differ (`via`), as the full profile does.
+        var byMsg = {}, P = JiTA.profile;
+        out.forEach(function (t) { var k = P._sigParts(t.sig).msg; (byMsg[k] = byMsg[k] || []).push(t); });
+        Object.keys(byMsg).forEach(function (k) {
+            var g = byMsg[k];
+            if (g.length < 2) { return; }
+            var labels = P._pathLabels(g.map(function (t) { return P._sigParts(t.sig).frames; }));
+            g.forEach(function (t, i) { t.via = labels[i]; });
+        });
+        return out;
+    },
+    _chosen: function (st) { return st.targets.filter(function (t) { return !!st.on[t.sig]; }); },
+
+    // ---- matching ---------------------------------------------------------------------------------------------------
+    // One open report as the search keeps it: its summary, date and status, and the exceptions of its logs (rec, the
+    // profile's reading) and of its description, as { sig, crash } objects shared through `pool`, so an exception many
+    // reports hold is kept once and its crash site worked out once.
+    _entry: function (item, rec, pool) {
+        var f = item.fields || {};
+        function take(list) {
+            return (list || []).map(function (e) {
+                return pool[e.sig] || (pool[e.sig] = { sig: e.sig, crash: JiTA.logsig._crashOf(e.sig) });
+            });
+        }
+        return { key: item.key, summary: f.summary || '', created: f.created || null, status: (f.status && f.status.name) || '',
+            log: take(rec && rec.exc), desc: take(item.desc), m: [] };
+    },
+
+    // Which of the ticked exceptions a report holds: [{ t, exact, where }], same-stack matches first. One of its exceptions
+    // with the same stack is exact; failing that, one with the same crash site is not. `where` is 'log' or 'description'.
+    match: function (rep, chosen) {
+        var out = [];
+        (chosen || []).forEach(function (t) {
+            var hit = null;
+            [['log', rep.log], ['description', rep.desc]].forEach(function (src) {
+                (src[1] || []).forEach(function (e) {
+                    if (e.sig === t.sig) { if (!hit || !hit.exact) { hit = { t: t, exact: true, where: src[0] }; } }
+                    else if (!hit && e.crash && e.crash === t.crash) { hit = { t: t, exact: false, where: src[0] }; }
+                });
+            });
+            if (hit) { out.push(hit); }
+        });
+        out.sort(function (a, b) { return (b.exact ? 1 : 0) - (a.exact ? 1 : 0); });
+        // Two ticked exceptions can end in the same place (the description's stack and a longer one the attached logs
+        // share), and one exception of the report then matches both: it is said once, by its best match.
+        var seen = {};
+        return out.filter(function (h) { var k = h.t.crash || h.t.sig; if (seen[k]) { return false; } seen[k] = true; return true; });
+    },
+
+    // The reports that hold a ticked exception (their `m`, from match), those with a same-stack match first, then newest
+    // first. A report attached from this window is gone.
+    hits: function (reports) {
+        var out = (reports || []).filter(function (r) { return !r.gone && r.m && r.m.length; });
+        out.sort(function (a, b) {
+            var ea = a.m[0].exact ? 1 : 0, eb = b.m[0].exact ? 1 : 0;
+            if (ea !== eb) { return eb - ea; }
+            var ca = a.created || '', cb = b.created || '';
+            if (ca !== cb) { return ca < cb ? 1 : -1; }
+            return a.key < b.key ? -1 : (a.key > b.key ? 1 : 0);
+        });
+        return out;
+    },
+    _rematch: function (st) {
+        var chosen = JiTA.excfind._chosen(st);
+        st.reports.forEach(function (r) { r.m = JiTA.excfind.match(r, chosen); });
+    },
+
+    // ---- the window ---------------------------------------------------------------------------------------------
+    openView: function () {
+        var X = JiTA.excfind, key = jitaCurrentKey();
+        if (JITA_NO_JIRA_UI) { return null; }
+        if (!/^(EDR|EO|PLAT)-\d+$/.test(key || '')) {
+            JiTA.ui.toast('Open a defect first: this looks through the open bug reports for its exceptions.');
+            return null;
+        }
+        JiTA.ui.injectCss();   // the Attach control and the hover card are styled by the panel's sheet
+        X._injectCss();
+        var ov = JiTA.menu._openOverlay({ title: 'Open bug reports with the exceptions of ' + key });
+        ov.$menu.addClass('jita-excfind-view');
+        var $b = $('<div class="jx-scroll"></div>').appendTo(ov.$menu);
+        $('<div class="jx-sub">Exceptions to look for</div>').appendTo($b);
+        $('<div class="jx-targets" id="jx-targets"></div>').appendTo($b);
+        $('<div class="jx-sub">Open bug reports that hold one</div>').appendTo($b);
+        $('<div class="jx-results" id="jx-results"></div>').appendTo($b);
+        var $foot = $('<div class="jx-foot"></div>').appendTo(ov.$menu);
+        $('<span class="jx-muted" id="jx-status"></span>').appendTo($foot);
+        var st = X._st = X._state(key, ov.$overlay[0]);
+        X._paintTargets(st);
+        X._load(st);
+        return st;
+    },
+    _state: function (key, node) {
+        return { key: key, node: node, desc: null, profile: null, profileDone: false, targets: [], tsig: null, on: {}, touched: {},
+            seen: {}, queue: [], n: 0, pool: {}, reports: [], rows: {}, linked: {}, listed: false, started: false, done: false,
+            read: 0, cached: 0, failed: 0, error: null };
+    },
+    _alive: function (st) { return !!st && JiTA.excfind._st === st && !!(st.node && st.node.isConnected); },
+
+    _load: function (st) {
+        var X = JiTA.excfind;
+        X._defectText(st.key).then(function (text) { st.desc = X._fps(text); X._retarget(st); });
+        // The attached reports' shared exceptions, as the profile counts them. A build already under way for the panel is
+        // joined, not started again; one started here goes on while the panel shows this defect's profile.
+        try {
+            JiTA.profile.build(st.key, function (s) {
+                st.profile = s.summary;
+                if (s.done) { st.profileDone = true; }
+                X._retarget(st);
+            }, function () { return X._alive(st) || (JiTA.ui.currentKey === st.key && flagOn('defectProfile')); })
+                .then(null, function () { /* no attached reports to read */ })
+                .then(function () { st.profileDone = true; X._retarget(st); });
+        } catch (e) { st.profileDone = true; }
+        X._links(st);
+    },
+
+    // The defect's description: from the local copy, else from Jira.
+    _defectText: function (key) {
+        return Promise.resolve().then(function () { return JiTA.db.getDefect(key); }).then(null, function () { return null; }).then(function (rec) {
+            if (rec && rec.description) { return rec.description; }
+            return new Promise(function (resolve) {
+                $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + encodeURIComponent(key) + '?fields=description', dataType: 'json' })
+                    .done(function (d) { resolve(JiTA.util.toPlainText(d && d.fields && d.fields.description)); })
+                    .fail(function () { resolve(''); });
+            });
+        });
+    },
+
+    // The reports already linked to the defect: shown as linked, without an Attach control that would link them twice.
+    _links: function (st) {
+        var X = JiTA.excfind;
+        $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + encodeURIComponent(st.key) + '?fields=issuelinks', dataType: 'json' })
+            .done(function (d) {
+                if (!X._alive(st)) { return; }
+                jitaLinkedKeys(d && d.fields && d.fields.issuelinks).forEach(function (k) {
+                    st.linked[k] = true;
+                    var row = st.rows[k];
+                    if (row && row.parentNode) { row.parentNode.removeChild(row); }
+                    delete st.rows[k];   // drawn again, as linked
+                });
+                X._paintResults(st);
+            });
+    },
+
+    // The exceptions to look for changed (the description was read, the profile counted more logs, a box was ticked):
+    // tick the new ones as they start, keep what was ticked by hand, match again and start the search once there is
+    // something to look for.
+    _retarget: function (st) {
+        var X = JiTA.excfind;
+        if (!X._alive(st)) { return; }
+        var ts = X.targets(st.desc, st.profile);
+        ts.forEach(function (t) { if (!st.touched[t.sig]) { st.on[t.sig] = t.def; } });
+        st.targets = ts;
+        var sig = ts.map(function (t) { return t.sig + '|' + t.count + '/' + t.of + (st.on[t.sig] ? '+' : '-'); }).join('\n') +
+            '#' + (st.desc !== null) + st.profileDone;
+        if (sig !== st.tsig) {
+            st.tsig = sig;
+            X._paintTargets(st);
+            X._rematch(st);
+            X._paintResults(st);
+        }
+        if (!st.started && ts.length) { st.started = true; X._sweep(st); }
+        X._status(st);
+    },
+
+    // ---- reading the open reports -------------------------------------------------------------------------------------
+    // Read every open report, newest first. The listing runs ahead a page at a time and CONCURRENCY lanes read what it
+    // has listed; a lane that catches up waits for the next page.
+    _sweep: function (st) {
+        var X = JiTA.excfind, next = 0;
+        var listing = X._list(st, null).then(null, function (e) {
+            st.error = 'Could not list the open bug reports: ' + (e && e.message || e);
+        }).then(function () { st.listed = true; X._status(st); });
+        function lane() {
+            if (!X._alive(st)) { return Promise.resolve(); }
+            if (next < st.queue.length) {
+                var item = st.queue[next];
+                st.queue[next++] = null;   // let the listed issue go once it is read
+                return X._read(item).then(function (r) { X._add(st, item, r); }, function () { st.failed++; X._status(st); }).then(lane);
+            }
+            if (st.listed) { return Promise.resolve(); }
+            return JiTA.util.delay(X.WAIT_MS).then(lane);
+        }
+        var lanes = [listing];
+        for (var i = 0; i < X.CONCURRENCY; i++) { lanes.push(lane()); }
+        return Promise.all(lanes).then(function () {
+            if (!X._alive(st)) { return; }
+            st.done = true;
+            X._paintResults(st);
+            X._status(st);
+        });
+    },
+
+    _list: function (st, token) {
+        var X = JiTA.excfind;
+        if (!X._alive(st)) { return Promise.resolve(); }
+        var body = { jql: JiTA.EBR_SCOPE + ' ORDER BY created DESC', fields: X.FIELDS, maxResults: JiTA.PAGE_SIZE };
+        if (token) { body.nextPageToken = token; }
+        return JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
+            var d = (r && r.data) || {};
+            (d.issues || []).forEach(function (iss) {
+                if (st.seen[iss.key] || JiTA.util.isGmTeam((iss.fields || {}).customfield_10001)) { return; }
+                st.seen[iss.key] = true;
+                st.queue.push(X._slim(iss));
+                st.n++;
+            });
+            X._status(st);
+            if (!d.nextPageToken || d.isLast || d.nextPageToken === token) { return null; }   // a token that does not move on would loop
+            return X._list(st, d.nextPageToken);
+        });
+    },
+    // A listed report, cut down to what the search keeps: what the profile's reader needs (attachments, labels), its
+    // summary, date and status, and the exceptions in its description (the description itself is let go).
+    _slim: function (iss) {
+        var f = iss.fields || {};
+        return { key: iss.key, desc: JiTA.excfind._fps(JiTA.util.toPlainText(f.description)), fields: {
+            summary: f.summary || '', created: f.created || null, status: f.status || null, labels: f.labels || [],
+            attachment: (f.attachment || []).map(function (a) { return { filename: a.filename, size: a.size, content: a.content }; })
+        } };
+    },
+
+    // A report's exceptions: its cached reading while its log files are the ones that were read, else its logs read now.
+    // Resolves { rec, cached }.
+    _read: function (item) {
+        var P = JiTA.profile;
+        return Promise.resolve().then(function () { return JiTA.db.getMeta(P.CACHE_PREFIX + item.key); }).then(P._usable, function () { return null; }).then(function (rec) {
+            if (rec && rec.logs && (rec.logSig == null || rec.logSig === P._logSig(item.fields.attachment))) { return { rec: rec, cached: true }; }
+            if (rec && rec.logs) { rec = JiTA.excfind._unread(rec); }   // a log was added or replaced since it was read
+            return P._readFiles(item, rec, false).then(function (r) { return { rec: r, cached: false }; });
+        });
+    },
+    // A reading with its log part taken out, so _readFiles reads the logs again. What it has from the zip stays.
+    _unread: function (rec) {
+        var r = JSON.parse(JSON.stringify(rec));
+        r.logs = false; r.hasLog = false; r.exc = []; r.build = null; r.version = null; r.skippedLogs = false;
+        delete r.logSig;
+        return r;
+    },
+
+    _add: function (st, item, r) {
+        var X = JiTA.excfind, rep = X._entry(item, r && r.rec, st.pool);
+        st.read++;
+        if (r && r.cached) { st.cached++; }
+        if (!(r && r.rec && r.rec.logs)) { st.failed++; }   // a log that did not download is read again next time
+        st.reports.push(rep);
+        rep.m = X.match(rep, X._chosen(st));
+        if (rep.m.length) { X._paintResults(st); }
+        X._status(st);
+    },
+
+    // ---- drawing ----------------------------------------------------------------------------------------------------
+    _src: function (t) {
+        var bits = [];
+        if (t.desc) { bits.push('in the description'); }
+        if (t.count) { bits.push('in ' + t.count + ' of ' + t.of + ' attached logs'); }
+        return bits.join(', ');
+    },
+    _paintTargets: function (st) {
+        var X = JiTA.excfind, $t = $('#jx-targets');
+        if (!X._alive(st) || !$t.length) { return; }
+        $t.empty();
+        var pending = st.desc === null || !st.profileDone;
+        if (!st.targets.length) {
+            $('<div class="jx-empty"></div>').text(pending ? 'Looking for the exceptions of ' + st.key + '…'
+                : 'Nothing to look for: the description holds no exception with a stack trace, and no exception is shared by two or more of its attached reports\' logs.').appendTo($t);
+            return;
+        }
+        st.targets.forEach(function (t) {
+            var $l = $('<label class="jx-target"></label>').attr('title', JiTA.profile._sigTip(t.sig, t.msg)).appendTo($t);
+            $('<input type="checkbox">').prop('checked', !!st.on[t.sig]).on('change', function () {
+                st.on[t.sig] = this.checked;
+                st.touched[t.sig] = true;
+                X._retarget(st);
+            }).appendTo($l);
+            var $m = $('<span class="jx-tmsg"></span>').text(t.msg || '(no message)').appendTo($l);
+            if (t.via) { $('<span class="jx-via"></span>').text(' via ' + t.via).appendTo($m); }
+            $('<span class="jx-tsrc"></span>').text(X._src(t)).appendTo($l);
+        });
+        if (pending) { $('<div class="jx-note"></div>').text('Still counting the exceptions the attached reports share…').appendTo($t); }
+    },
+
+    _paintResults: function (st) {
+        var X = JiTA.excfind, box = document.getElementById('jx-results');
+        if (!X._alive(st) || !box) { return; }
+        var list = X.hits(st.reports), keep = {};
+        list.forEach(function (rep) {
+            var row = st.rows[rep.key] || (st.rows[rep.key] = X._row(st, rep));
+            X._why(row, rep.m);
+            keep[rep.key] = true;
+            box.appendChild(row);   // in order: a row already there moves, its Attach control as it was
+        });
+        Array.prototype.slice.call(box.childNodes).forEach(function (n) {
+            if (!(n.getAttribute && keep[n.getAttribute('data-key')])) { box.removeChild(n); }
+        });
+        var none = '';
+        if (!list.length && st.targets.length) {
+            none = !X._chosen(st).length ? 'Tick an exception above to look for it.'
+                : (st.done ? 'No open bug report holds these exceptions.' : 'None found so far.');
+        }
+        if (none) { $('<div class="jx-empty"></div>').text(none).appendTo(box); }
+    },
+
+    _row: function (st, rep) {
+        var X = JiTA.excfind, row = document.createElement('div'), $row = $(row);
+        row.className = 'jx-row';
+        row.setAttribute('data-key', rep.key);
+        $('<a class="jx-key" target="_blank" rel="noopener"></a>').attr('href', '/browse/' + rep.key).text(rep.key).appendTo($row);
+        $('<span class="jx-sum"></span>').text(rep.summary).appendTo($row);
+        $('<span class="jx-date"></span>').text(JiTA.util.fmtDate(rep.created)).appendTo($row);
+        var $act = $('<span class="jx-act"></span>').appendTo($row);
+        if (st.linked[rep.key]) {
+            $('<span class="jx-linked">linked</span>').attr('title', rep.key + ' is linked to ' + st.key + ' already, but still open').appendTo($act);
+        } else {
+            $act.append(JiTA.ui._attachReportButton(rep.key, {
+                defect: st.key,
+                still: function () { return X._alive(st); },
+                done: function (k) { X._gone(st, k); }
+            }));
+        }
+        $('<div class="jx-why"></div>').appendTo($row);
+        $row.on('mouseenter', function () { JiTA.ui._showTip({ key: rep.key, summary: rep.summary, description: '' }, this, rep.status); });
+        $row.on('mouseleave', function () { JiTA.ui._hideTip(); });
+        return row;
+    },
+    _why: function (row, m) {
+        var $w = $(row).children('.jx-why').empty();
+        (m || []).forEach(function (h) {
+            var $h = $('<span class="jx-hit"></span>').appendTo($w);
+            $('<span class="jx-tag"></span>').addClass(h.exact ? 'exact' : 'site').text(h.exact ? 'same stack' : '~ same crash site').appendTo($h);
+            $('<span class="jx-msg"></span>').text((h.t.msg || 'exception') + (h.t.via ? ' via ' + h.t.via : '') +
+                (h.where === 'description' ? ' (in its description)' : '')).attr('title', JiTA.profile._sigTip(h.t.sig, h.t.msg)).appendTo($h);
+        });
+    },
+    // A report left the open set (attached here, or found attached or closed in Jira): its row goes.
+    _gone: function (st, key) {
+        var X = JiTA.excfind;
+        st.reports.forEach(function (r) { if (r.key === key) { r.gone = true; } });
+        var row = st.rows[key];
+        delete st.rows[key];
+        JiTA.ui._collapseRow(row, function () { X._paintResults(st); X._status(st); });
+    },
+
+    line: function (st) {
+        var n = JiTA.excfind.hits(st.reports).length, bits = [];
+        if (st.error) { bits.push(st.error); }
+        if (st.started) {
+            if (st.done && !st.error) { bits.push('All ' + st.read + ' open bug reports read'); }
+            else if (st.done) { bits.push(st.read + ' read'); }
+            else { bits.push('Reading the open bug reports: ' + st.read + ' of ' + st.n + (st.listed ? '' : ' listed so far')); }
+            if (st.cached) { bits.push(st.cached + ' from earlier searches'); }
+            if (st.failed) { bits.push(st.failed + ' could not be read, tried again next time'); }
+            bits.push(n + (n === 1 ? ' holds' : ' hold') + ' a ticked exception');
+        }
+        return bits.join(' · ');
+    },
+    _status: function (st) {
+        var el = document.getElementById('jx-status');
+        if (JiTA.excfind._alive(st) && el) { el.textContent = JiTA.excfind.line(st); }
+    },
+
+    _cssDone: false,
+    _injectCss: function () {
+        if (JiTA.excfind._cssDone) { return; }
+        JiTA.excfind._cssDone = true;
+        try {
+            GM_addStyle(
+                '#jita-menu.jita-excfind-view { width: 1180px; max-width: 96vw; display: flex; flex-direction: column; overflow: hidden; }' +
+                '.jita-excfind-view .jx-scroll { flex: 1 1 auto; min-height: 0; max-height: 72vh; overflow-y: auto; padding: 6px 16px 12px; }' +
+                '.jita-excfind-view .jx-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #3a434d; background: #282d33; }' +
+                '.jita-excfind-view .jx-muted { color: #9aa6b2; font-size: 12px; flex: 1; }' +
+                '.jita-excfind-view .jx-sub { color: #7a8694; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 12px 0 6px; }' +
+                '.jita-excfind-view .jx-empty, .jita-excfind-view .jx-note { color: #9aa6b2; font-size: 12px; padding: 6px 2px; }' +
+                '.jita-excfind-view .jx-target { display: flex; align-items: baseline; gap: 8px; padding: 4px 0; font-size: 12px; cursor: pointer; }' +
+                '.jita-excfind-view .jx-target input { flex: 0 0 auto; margin: 0; }' +
+                '.jita-excfind-view .jx-tmsg { flex: 1 1 auto; min-width: 0; color: #e6e6e6; font-family: Consolas, "Courier New", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '.jita-excfind-view .jx-via { color: #7a8694; }' +
+                '.jita-excfind-view .jx-tsrc { flex: 0 0 auto; color: #7a8694; font-size: 11px; white-space: nowrap; }' +
+                '.jita-excfind-view .jx-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 7px 0; border-bottom: 1px solid #2c333a; font-size: 12px; }' +
+                '.jita-excfind-view .jx-key { flex: 0 0 88px; color: #4c9aff; font-weight: 700; text-decoration: none; }' +
+                '.jita-excfind-view .jx-key:hover { text-decoration: underline; }' +
+                '.jita-excfind-view .jx-sum { flex: 1 1 0; min-width: 0; color: #e6e6e6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '.jita-excfind-view .jx-date { flex: 0 0 auto; color: #7a8694; font-size: 11px; }' +
+                '.jita-excfind-view .jx-act { flex: 0 0 76px; text-align: right; }' +
+                '.jita-excfind-view .jx-act .jita-sd-link { float: none; margin: 0; font-size: 11px; }' +
+                '.jita-excfind-view .jx-linked { color: #7a8694; font-size: 11px; }' +
+                '.jita-excfind-view .jx-why { flex: 0 0 100%; box-sizing: border-box; padding-left: 98px; display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 11px; }' +
+                '.jita-excfind-view .jx-hit { min-width: 0; overflow-wrap: anywhere; }' +
+                '.jita-excfind-view .jx-tag { font-weight: 700; margin-right: 6px; }' +
+                '.jita-excfind-view .jx-tag.exact { color: #7fdca4; }' +
+                '.jita-excfind-view .jx-tag.site { color: #9aa6b2; }' +
+                '.jita-excfind-view .jx-msg { color: #9aa6b2; font-family: Consolas, "Courier New", monospace; }'
             );
         } catch (e) { /* ignore */ }
     },
@@ -21701,6 +22191,8 @@ JiTA.changelog = {
         { v: '3.44.0', date: '2026-10-18', features: [
             'Defect profile: an exception whose defect you hid in the Triage Assistant no longer counts toward the pattern or its outliers. It is listed apart, under a folded hidden exceptions line in the card and in the full profile.',
             'Defect profile: switchable graphics is no longer counted, as it says No on practically every report.'
+        ], fixes: [
+            'Defect profile: hovering an exception shows its message and its call stack one frame per line, instead of one long lowercased line.'
         ] },
         { v: '3.43.0', date: '2026-10-18', features: [
             'Lead duties: a person with several open follow-ups gets a Resolve all button in the Follow-ups tab, which closes them all out at once with one note saved on each.',
@@ -22753,12 +23245,13 @@ if (JITA_IS_WIKI) {
     // no menu round-trip. A single '<' stays inert, so it can't misfire while reading. open() itself guards
     // the disabled-feature / already-open cases. Double-tap '>' opens the duplicate finder. Double-tap '#' switches the
     // Triage Assistant panel to the trending defects and back on a bug report, and opens the standalone trending list
-    // anywhere else. (Inside Triage mode the overlay's own key layer handles '#', so it never reaches here.)
+    // anywhere else. (Inside Triage mode the overlay's own key layer handles '#', so it never reaches here.) Double-tap
+    // '+' on a defect opens the hidden exception search (JiTA.excfind).
     (function () {
-        var lastLt = 0, lastGt = 0, lastHash = 0;
+        var lastLt = 0, lastGt = 0, lastHash = 0, lastPlus = 0;
         document.addEventListener('keydown', function (e) {
             if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || e.isComposing) { return; }   // a held key repeats in under 400 ms
-            if (e.key !== '<' && e.key !== '>' && e.key !== '#') { return; }
+            if (e.key !== '<' && e.key !== '>' && e.key !== '#' && e.key !== '+') { return; }
             var t = e.target;
             if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) { return; }
             var now = Date.now();
@@ -22766,6 +23259,13 @@ if (JITA_IS_WIKI) {
                 if (!JiTA.triage || JiTA.triage._open) { return; }
                 if (now - lastLt < 400) { lastLt = 0; try { JiTA.triage.open(); } catch (e2) { /* ignore */ } }
                 else { lastLt = now; }
+                return;
+            }
+            if (e.key === '+') {   // double-tap '+' -> the open bug reports holding this defect's exceptions (hidden)
+                if (!JiTA.excfind || document.querySelector('#jita-menu.jita-excfind-view')) { return; }
+                if (now - lastPlus >= 400) { lastPlus = now; return; }
+                lastPlus = 0;
+                try { JiTA.excfind.openView(); } catch (e5) { /* ignore */ }
                 return;
             }
             if (e.key === '#') {   // double-tap '#' -> Trending defects

@@ -71,7 +71,7 @@ Object.assign(JiTA.ui, eval('({' + [
     slice('    render: function (key, background) {'),
     slice('    renderReports: function (key, background) {'),
     slice('    _markDupButton: function (defectKey) {'),
-    slice('    _attachReportButton: function (reportKey) {')
+    slice('    _attachReportButton: function (reportKey, opts) {')
 ].join('') + '})'));
 Object.assign(JiTA.ui, {
     currentKey: null, reporterMode: false, simReportsMode: false, trendMode: false, modeOverride: null,

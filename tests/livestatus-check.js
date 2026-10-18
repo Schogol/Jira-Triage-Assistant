@@ -169,7 +169,7 @@ Date.now = () => clock;
     // ================= Attach =================
     JiTA.ui._liveStatus = realLive;
     JiTA.ui._collapseRow = (e) => { collapsed.push(e.key); };
-    Object.assign(JiTA.ui, eval('({' + line('    _assigneeCache: {},') + member('    _getAssignee: function (key) {') + member('    _attachReportButton: function (reportKey) {') + '})'));
+    Object.assign(JiTA.ui, eval('({' + line('    _assigneeCache: {},') + member('    _getAssignee: function (key) {') + member('    _attachReportButton: function (reportKey, opts) {') + '})'));
     let attaches = [];
     Object.assign(JiTA.ui, { currentKey: 'EDR-1', toast: (m) => { toasts.push(m); }, _hideTip() {}, _fadeOutAndReplace() {} });
     JiTA.link.currentUser = () => Promise.resolve('me');
