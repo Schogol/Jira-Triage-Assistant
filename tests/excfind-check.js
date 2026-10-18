@@ -1,4 +1,4 @@
-// excfind-check.js - the hidden exception search (double-tap '+' on a defect): the open bug reports whose logs hold the
+// excfind-check.js - the exception search (double-tap + on a defect): the open bug reports whose logs hold the
 // defect's exceptions. Evals the real JiTA.excfind, JiTA.logsig's fingerprints, JiTA.profile's cache helpers, the Attach
 // control's options (JiTA.ui._attachReportButton) and the launcher against stubs and a small DOM.
 const fs = require('fs');
@@ -199,6 +199,49 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('...whichever of the two it is', m.length === 1 && m[0].exact && m[0].t === tA2);
     const r4 = X._entry(item('EBR-4'), null, pool);
     ok('a report without a reading holds nothing', r4.log.length === 0 && X.match(r4, [tA]).length === 0);
+    ok('two exceptions without a crash site do not match each other loosely', X.match(X._entry(item('EBR-37'), { exc: [{ sig: 'keyerror: y|' }] }, {}), [{ sig: 'valueerror: x|', crash: null }]).length === 0);
+
+    // ================= editing what an exception is looked for by =================
+    const UE = "UserError: User error, msg=IndustryValidationError, dict={'errors': [(<Error.MISMATCH_COST: 25>, (12, 1677))]}";
+    const FU = ['ui/industry.py(10) Validate', 'ui/foo.py(123) OnClick', 'ui/bar.py(45) Load'];
+    const U = fp(UE, FU), tU = { sig: U.sig, crash: U.crashSig, msg: U.msg };
+    const um = (msg, fr) => X._exc(fp(msg, fr || FU).sig).m;
+    const samples = ['KeyError: 2', UE, 'Bad 0xFF00 thing (3, 4) id 123456 v 99L', 'list [1, 22] and {7} or 5,6', 'TypeError:   spaced   out'];
+    ok('an edit reads numbers as a signature does (in step with _fingerprint)',
+        samples.every((msg) => { const f = fp(msg, FA); return X._normMsg(f.msg).toLowerCase() === P._sigParts(f.sig).msg; }),
+        samples.map((msg) => X._normMsg(fp(msg, FA).msg)).join(' | '));
+    ok('an edit starts from the message in its own case, the numbers that match any number already shown as #',
+        X._editText(tU) === "UserError: User error, msg=IndustryValidationError, dict={'errors': [(<Error.MISMATCH_COST: 25>, (#, #))]}", X._editText(tU));
+    ok('...and from the signature\'s whole message when the message it has was cut short', X._editText({ sig: U.sig, crash: U.crashSig, msg: U.msg.slice(0, 30) }) === P._sigParts(U.sig).msg);
+    let re = X._pattern(X._editText(tU).replace('25', '#'));
+    ok('# stands for any number', re.test(um(UE)) && re.test(um(UE.replace('25', '30'))) && re.test(um(UE.replace('25', '7').replace('1677', '42'))), re.source);
+    ok('...not for text', !re.test(um(UE.replace('25', 'x'))));
+    ok('...and the rest must be as written', !re.test(um(UE.replace('MISMATCH_COST', 'MISSING_ITEM'))));
+    ok('...the whole message, not a part of it', !X._pattern('KeyError: 2').test(um('KeyError: 23')) && X._pattern('KeyError: 2').test(um('KeyError: 2')));
+    ok('the text an edit starts from matches the exception itself, and no other value', X._pattern(X._editText(tU)).test(um(UE)) && !X._pattern(X._editText(tU)).test(um(UE.replace('25', '30'))));
+    ok('...and so does the message typed as written: its numbers are read as the signature reads them', X._pattern(UE).test(um(UE)));
+    re = X._pattern('UserError: User error, msg=* dict=*');
+    ok('* stands for any text', re.test(um(UE)) && re.test(um('UserError: User error, msg=Other, dict={}')) && !re.test(um('ValueError: x')), re.source);
+    ok('...whatever the case and spacing typed', X._pattern('  usererror:   USER error, *').test(um(UE)));
+    ok('...and other regex characters are text', X._pattern('a.b').test('a.b') && !X._pattern('a.b').test('axb') && X._pattern('(x)+[y]$').test('(x)+[y]$'));
+    ok('* alone is any message', X._pattern('*').test(um('Whatever: 1')) && X._pattern('*').test(''));
+    const eU = X._exc(U.sig);
+    ok('an exception keeps its message, frames and crash-site frames apart', eU.m === P._sigParts(U.sig).msg && eU.fr === 'industry.py:validate>foo.py:onclick>bar.py:load' &&
+        eU.cfr === 'foo.py:onclick>bar.py:load' && eU.crash === U.crashSig, JSON.stringify(eU));
+    ts = X.targets([{ sig: U.sig, msg: U.msg }, { sig: A.sig, msg: 'KeyError: 2' }], null, null, { [U.sig]: 'UserError: *' });
+    ok('an edited target is looked for by its edit, with its own frames', ts[0].pat === 'UserError: *' && ts[0].re.test(eU.m) && ts[0].fr === eU.fr && ts[0].cfr === eU.cfr);
+    ok('...the others as they are', ts[1].pat === null && !ts[1].re);
+    const pool2 = {}, otherStack = ['ui/other.py(1) Start', 'ui/foo.py(123) OnClick', 'ui/bar.py(45) Load'];
+    const tUe = X._withPattern({ sig: U.sig, crash: U.crashSig, msg: U.msg }, X._editText(tU).replace('25', '#'));
+    const rep30 = (key, msg, fr) => X._entry(item(key), { exc: [{ sig: fp(msg, fr).sig }] }, pool2);
+    m = X.match(rep30('EBR-31', UE.replace('25', '30'), FU), [tUe]);
+    ok('an edit matches another value at the same stack exactly', m.length === 1 && m[0].exact);
+    m = X.match(rep30('EBR-32', UE.replace('25', '30'), otherStack), [tUe]);
+    ok('...by another stack to the same crash site loosely', m.length === 1 && !m[0].exact);
+    ok('...at another crash site not at all', X.match(rep30('EBR-33', UE.replace('25', '30'), FB), [tUe]).length === 0);
+    ok('...nor where the rest of the message differs, at either level', X.match(rep30('EBR-34', UE.replace('MISMATCH_COST', 'OTHER'), FU), [tUe]).length === 0 &&
+        X.match(rep30('EBR-35', UE.replace('MISMATCH_COST', 'OTHER'), otherStack), [tUe]).length === 0);
+    ok('unedited, another value is no match (control)', X.match(rep30('EBR-36', UE.replace('25', '30'), FU), [tU]).length === 0);
 
     const reps = [r1, r2, r3, r4];
     reps.forEach((r) => { r.m = X.match(r, [tA2]); });
@@ -414,7 +457,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('...and the hover card', tips === 1);
     click(boxes[1], 'change');   // checked is still false: unticked by hand, a no-op
     boxes[1].checked = true;
-    click(byCls(byId['jx-targets'], 'jx-target')[1].kids[0], 'change');
+    click(byCls(byId['jx-targets'], 'jx-target')[1].kids[0].kids[0], 'change');
     ok('ticking a box adds what holds it, newest first among the exact', order() === 'EBR-2,EBR-3,EBR-1' && st.on[B.sig] === true, order());
     ok('...the rows already there are the same rows, their Attach as it was', res.kids.indexOf(row1) >= 0 && built.length === 4, built.length);
     const tb0 = find(byId['jx-targets'], (n) => n.tag === 'input')[0];
@@ -498,6 +541,76 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('a closed window is no longer this search', X._alive(st) === false && opts.still() === false);
     X._paintResults(st);
     ok('...and is not drawn into', !document.getElementById('jx-results'));
+
+    // ================= editing in the window =================
+    const keyOn = (n, k) => (n.handlers.keydown || []).forEach((f) => f.call(n, { key: k, preventDefault() {}, stopPropagation() {} }));
+    X._edits = {};
+    X._load = () => {};
+    st = X.openView();
+    st.started = true; st.profileDone = true; st.desc = [{ sig: U.sig, msg: U.msg }, { sig: A.sig, msg: 'KeyError: 2' }];
+    X._retarget(st);
+    const tgt = () => byId['jx-targets'], rowsT = () => byCls(tgt(), 'jx-target'), editsOf = (r) => byCls(r, 'jx-tedit');
+    const box = () => find(tgt(), (n) => n.hasCls('jx-pat'))[0];
+    ok('each exception offers an edit', rowsT().length === 2 && rowsT().every((r) => editsOf(r).map((n) => n.textContent).join() === 'edit'));
+    click(editsOf(rowsT()[0])[0]);
+    let inp = box();
+    ok('edit opens a box with the text to start from, and the hint', !!inp && inp.value === X._editText(st.targets[0]) && st.editor === inp && st.editing === U.sig &&
+        /# stands for any number/.test(tgt().textContent), inp && inp.value);
+    ok('...the row marked as being edited, so the box takes the room the message had', rowsT()[0].hasCls('editing') && !rowsT()[1].hasCls('editing'));
+    ok('...in place of the message, the box to tick still there, no edit link on it', byCls(rowsT()[0], 'jx-tmsg').length === 0 && editsOf(rowsT()[0]).length === 0 &&
+        find(rowsT()[0], (n) => n.getAttribute('type') === 'checkbox').length === 1);
+    st.profile = { withLog: 4, excGroups: [{ msg: 'ValueError: bad', paths: [{ sig: B.sig, count: 2 }] }] };
+    X._retarget(st);
+    ok('the list is not redrawn under the typing', box() === inp && inp.isConnected && st.targets.length === 3);
+    inp.value = inp.value.replace('25', '#');
+    keyOn(inp, 'Enter');
+    const want = X._editText(st.targets[0]).replace('25', '#');
+    ok('Enter keeps the edit, and the list is drawn again', st.edit[U.sig] === want && !st.editing && !inp.isConnected && rowsT().length === 3, JSON.stringify(st.edit));
+    const msg0 = byCls(rowsT()[0], 'jx-tmsg')[0];
+    ok('...the edited message shown and marked, with a reset', msg0.hasCls('edited') && msg0.textContent === want && editsOf(rowsT()[0]).map((n) => n.textContent).join() === 'edit,reset');
+    ok('...and the target looked for by it', st.targets[0].pat === want && !!st.targets[0].re);
+    X._add(st, item('EBR-41', null, [], '2026-10-07T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: fp(UE.replace('25', '30'), FU).sig }] }, cached: false });
+    const hasRow = (k) => byId['jx-results'].kids.find((n) => n.getAttribute('data-key') === k);
+    ok('unticked, the edit finds nothing yet (control)', !hasRow('EBR-41'));
+    const cb0 = find(rowsT()[0], (n) => n.getAttribute('type') === 'checkbox')[0];
+    cb0.checked = true; click(cb0, 'change');
+    ok('ticked, it finds the same error with another value', !!hasRow('EBR-41'));
+    ok('...and the match says what it was looked for by', hasRow('EBR-41').textContent.indexOf(want) >= 0, hasRow('EBR-41').textContent);
+    click(editsOf(rowsT()[0])[0]);
+    ok('editing it again starts from the edit', box().value === want);
+    keyOn(box(), 'Escape');
+    click(editsOf(rowsT()[1])[0]);
+    inp = box(); inp.value = 'KeyError: #';
+    keyOn(inp, 'Escape');
+    ok('Esc closes the box and keeps nothing', !st.editing && st.edit[A.sig] === undefined && !box() && editsOf(rowsT()[1]).length === 1);
+    click(editsOf(rowsT()[1])[0]);
+    keyOn(box(), 'Enter');
+    ok('Enter on the text as it started keeps no edit', !st.editing && st.edit[A.sig] === undefined && editsOf(rowsT()[1]).length === 1);
+    click(editsOf(rowsT()[1])[0]);
+    inp = box(); inp.value = 'KeyError: *';
+    (inp.handlers.blur || []).forEach((f) => f.call(inp));
+    ok('leaving the box closes it a moment later, not at once', st.editing === A.sig && box() === inp);
+    await settle();
+    ok('...keeping what was typed', !st.editing && st.edit[A.sig] === 'KeyError: *', JSON.stringify(st.edit));
+    click(editsOf(rowsT()[2])[0]);
+    box().value = 'ValueError: *';
+    click(editsOf(rowsT()[1])[0]);
+    ok('opening another edit keeps what was typed in the one open', st.edit[B.sig] === 'ValueError: *' && st.editing === A.sig && box().value === 'KeyError: *');
+    X._endEdit(st, B.sig, 'ValueError: bad');
+    ok('...and the late close of that one changes nothing', st.edit[B.sig] === 'ValueError: *' && st.editing === A.sig);
+    keyOn(box(), 'Escape');
+    X._keepEdit(st, B.sig, '   ');
+    ok('an empty text is no edit', st.edit[B.sig] === undefined);
+    click(editsOf(rowsT()[0])[1]);
+    ok('reset looks for the exception as it is again', st.edit[U.sig] === undefined && !byCls(rowsT()[0], 'jx-tmsg')[0].hasCls('edited') && st.targets[0].pat === null);
+    const kept = st.edit;
+    ROOT.removeChild(st.node);
+    st = X.openView();
+    ok('edits are remembered for the defect when the window opens again', st.edit === kept && st.edit[A.sig] === 'KeyError: *');
+    ok('...and another defect has its own', X._state('EDR-78', overlay()).edit !== kept);
+    ROOT.removeChild(st.node);
+    X._edits = {};
+    X._load = realLoad;
 
     // ================= loading the defect =================
     let builds = [], buildD = null;
