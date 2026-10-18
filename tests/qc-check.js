@@ -94,6 +94,22 @@ function cell(tbl, key, col) {
     tbl = itemsTable(R._qcSection(value(), pym));
     ok('a flag raised without a reason says so', cell(tbl, 'EBR-3', 'Reason') === '(no reason given)', cell(tbl, 'EBR-3', 'Reason'));
 
+    // ---- notes over several lines (v3.43.0) ----
+    await Q.uncheck('EBR-3', pym);
+    await Q.markChecked('EBR-3', 'flag', pym, '\r\n  Wrong   status\r\nshould be <Closed>\n\n\n\n  see   the log  \n\n', item('EBR-3'));
+    const ml = 'Wrong status\nshould be <Closed>\n\nsee the log';
+    ok('a reason keeps its line breaks, each line squeezed and one blank line at most between them',
+        value().flags['EBR-3'].note === ml && value().done[pym]['EBR-3'].note === ml, JSON.stringify(value().flags['EBR-3'].note));
+    tbl = itemsTable(R._qcSection(value(), pym));
+    ok('...the Reason column breaks its lines, escaped', cell(tbl, 'EBR-3', 'Reason') === 'Wrong status<br />should be &lt;Closed&gt;<br /><br />see the log', cell(tbl, 'EBR-3', 'Reason'));
+    const fs3 = R._flagsSection(value());
+    ok('...and so does Open follow-ups on the page', fs3.indexOf('<td>Wrong status<br />should be &lt;Closed&gt;<br /><br />see the log</td>') >= 0, fs3.slice(fs3.indexOf('Wrong status') - 20, fs3.indexOf('Wrong status') + 90));
+    const msg3 = Q.followUpText({ name: 'ISD Bob', known: true, entries: [{ key: 'EBR-3', flag: value().flags['EBR-3'] }] });
+    ok('...and the follow-up message keeps every line under its issue', msg3.indexOf('* EBR-3 - Summary of EBR-3\n  Wrong status\n  should be <Closed>\n\n  see the log\n') >= 0, JSON.stringify(msg3));
+    ok('a note is capped at NOTE_MAX characters, with no space left dangling', L._note('x'.repeat(L.NOTE_MAX - 1) + ' yz').length === L.NOTE_MAX - 1 &&
+        L._note('a\n' + 'b'.repeat(400)).length === L.NOTE_MAX && L.NOTE_MAX === 300, String(L._note('x'.repeat(L.NOTE_MAX - 1) + ' yz').length));
+    ok('...and blank lines at either end are dropped', L._note('\n\n \n hi \n \n') === 'hi' && L._note(null) === '' && L._note('   ') === '', JSON.stringify(L._note('\n\n \n hi \n \n')));
+
     // ---- Undo ----
     seed();
     await Q.markChecked('EBR-1', 'flag', pym, 'Should have been attached', item('EBR-1'));

@@ -48,9 +48,10 @@ const muts = [
     [H, 'a failed Flag or Skip settles as marked', "' Try again once Confluence answers.', null);", "' Try again once Confluence answers.', true);"],
     [H, 'a Flag is queued', '}, false);   // replays as a plain Checked: never queued', '});'],
     [H, 'a Skip is queued', 'settle, false);   // replays as a review: never queued', 'settle);'],
-    [H, 'a Flag forgets the reason typed before', "U._drafts[it.key] || '')", "'')"],
-    [H, 'a Flag does not keep its reason', 'U._drafts[it.key] = note;', ''],
+    [H, 'a Flag keeps its reason under another key', "title: 'Flag ' + it.key, save: 'Flag', draft: it.key,", "title: 'Flag ' + it.key, save: 'Flag', draft: 'flag',"],
+    [H, 'a Flag asks without saying which issue', "title: 'Flag ' + it.key, save: 'Flag', draft: it.key,", "title: 'Flag', save: 'Flag', draft: it.key,"],
     [H, 'a saved Flag keeps its draft', 'if (r) { delete U._drafts[it.key]; }', ''],
+    [H, 'a failed Flag drops its draft', 'if (r) { delete U._drafts[it.key]; }', 'delete U._drafts[it.key];'],
     // ---- drawing only the clicked row, only on its own tab ----
     [H, 'a QC mark draws into another tab', "if (!res || !U.isOpen() || U._tab !== 'qc') { return; }", 'if (!res || !U.isOpen()) { return; }'],
     [H, 'a wiki mark draws into another tab', "if (!res || !U.isOpen() || U._tab !== 'wiki') { return; }", 'if (!res || !U.isOpen()) { return; }'],
@@ -85,10 +86,22 @@ const muts = [
     // ---- Resolve all (v3.43.0) ----
     [H, 'nobody gets Resolve all', '            if (g.entries.length > 1) {', '            if (false) {'],
     [H, 'Resolve all shows on a single follow-up', '            if (g.entries.length > 1) {', '            if (g.entries.length > 0) {'],
-    [H, 'a cancelled Resolve all resolves anyway', "(optional, saved on each)', '');\n                        if (note === null) { return; }", "(optional, saved on each)', '');"],
-    [H, 'Resolve all resolves only the first follow-up', "U._resolve($g.find('button'), keys, note);", "U._resolve($g.find('button'), keys.slice(0, 1), note);"],
+    [H, 'Resolve all resolves only the first follow-up', "U._resolve($g.find('button'), keys, note, draft);", "U._resolve($g.find('button'), keys.slice(0, 1), note, draft);"],
     [H, 'the group does not wait for the write', "        $btns.prop('disabled', true);\n        L.qc.resolveFlags(", '        L.qc.resolveFlags('],
-    [H, 'a failed resolve leaves its buttons disabled', "function (e) { $btns.prop('disabled', false); U._status(", 'function (e) { U._status(']
+    [H, 'a failed resolve leaves its buttons disabled', "function (e) { $btns.prop('disabled', false); U._status(", 'function (e) { U._status('],
+    // ---- the note dialog's drafts (v3.43.0) ----
+    [H, 'a landed resolve keeps its note', 'function (r) { delete U._drafts[draft]; U._afterResolve(r); }', 'U._afterResolve'],
+    [H, 'a failed resolve drops its note', "function (e) { $btns.prop('disabled', false); U._status(", "function (e) { delete U._drafts[draft]; $btns.prop('disabled', false); U._status("],
+    [H, 'a Resolve all is not told where its note is kept', "U._resolve($g.find('button'), keys, note, draft);", "U._resolve($g.find('button'), keys, note);"],
+    [H, 'a Resolve is not told where its note is kept', 'U._resolve($btn, [o.key], note, draft);', 'U._resolve($btn, [o.key], note);'],
+    [H, 'a resolve note is kept under one key for everything', "_resolveDraft: function (keys) { return 'resolve:' + keys.join(','); },", "_resolveDraft: function () { return 'resolve'; },"],
+    [H, 'Resolve all asks without naming the person', "' follow-ups' + (g.known ? (' for ' + g.name) : '')", "' follow-ups'"],
+    [H, 'Resolve all keeps its note under the first row', 'var draft = U._resolveDraft(keys);', 'var draft = U._resolveDraft([keys[0]]);'],
+    // ---- notes shown with their lines ----
+    [H, 'an open follow-up\'s reason loses its lines', "$('<span class=\"ld-sum ld-lines\"></span>').text(f.note || f.summary", "$('<span class=\"ld-sum\"></span>').text(f.note || f.summary"],
+    [H, 'a resolved follow-up\'s notes lose their lines', "$('<span class=\"ld-sum ld-lines\"></span>').text(txt.reason)", "$('<span class=\"ld-sum\"></span>').text(txt.reason)"],
+    [H, 'an open follow-up row is not lined up with its note', "$('<div class=\"ld-row ld-noterow flagged\"></div>')", "$('<div class=\"ld-row flagged\"></div>')"],
+    [H, 'a resolved follow-up row is not lined up with its note', "$('<div class=\"ld-row ld-noterow done\"></div>')", "$('<div class=\"ld-row done\"></div>')"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

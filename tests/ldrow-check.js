@@ -63,8 +63,7 @@ global.document = {
     querySelector: (s) => (s === '#jita-menu.jita-leadduty-view' ? {} : null),
     getElementById: (id) => (id === 'ld-status' ? status : null)
 };
-let answer = '', promptDefault = null;
-global.prompt = (q, def) => { promptDefault = def; return answer; };
+let answer = '', promptDefault = null, asked = null;   // what the note dialog is answered with, what it offers, what it asks
 global.confirm = () => true;
 global.GM_addStyle = () => {};
 global.window = {};   // no window.console: ledger.mutate's dry-run dump of the would-be value stays out of this output
@@ -90,6 +89,15 @@ eval(src.slice(cs, ce));
 eval(src.slice(ls, le + em.length));
 eval(src.slice(us, ue));
 const L = JiTA.leadduty, U = L.ui;
+// The note dialog, behaving as the real one does (notedlg-check.js drives that): it offers the draft, keeps what was
+// typed in it, and calls back on Save only. A null answer is Cancel.
+U._askNote = (o, then) => {
+    asked = o;
+    promptDefault = U._drafts[o.draft] || '';
+    if (answer === null) { return; }
+    if (/\S/.test(answer)) { U._drafts[o.draft] = answer; } else { delete U._drafts[o.draft]; }
+    then(answer);
+};
 
 // failNext: the next PUT fails (HTTP 500). failGetNext: the next read fails (HTTP 503), so the whole write does.
 // parkNext: the next PUT lands in the store at once, but its answer is held until release() - the shape of two
@@ -184,6 +192,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     answer = 'wrong component';
     await click(r1, 'Flag');
     let n1 = rowOf('EBR-1');
+    ok('Flag asks for its reason in the note dialog, kept under the issue key', asked && asked.title === 'Flag EBR-1' && asked.save === 'Flag' && asked.draft === 'EBR-1', JSON.stringify(asked));
     ok('Flag: the row shows the flag', isDone(n1) && has(n1, 'flagged') && tick(n1) === '!' && !!button(n1, 'Undo'));
     ok('...taken from the ledger the write left behind, reason and all', U._qc.done['EBR-1'] && U._qc.done['EBR-1'].verdict === 'flag' &&
         props[QK].value.flags['EBR-1'].note === 'wrong component');
@@ -235,11 +244,13 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('a Flag that cannot be saved is not queued: the row stays open with both answers live again', !isDone(n4) && !!button(n4, 'Checked') && !!button(n4, 'Flag') && !button(n4, 'Checked').props.disabled);
     ok('...the status line says it was not saved', status.textContent === 'Not saved - HTTP 500 Try again once Confluence answers. · 2 of 4 checked' + tail, status.textContent);
     ok('...nothing is in the mirror for a replay to turn into a plain Checked', !mirror(QL).done['EBR-4'] && mirror(QL).pending.indexOf('EBR-4') < 0 && !U._qcLocalDone['EBR-4']);
-    answer = 'bad title, as said';
+    answer = 'bad title\n\n\n  and   no repro steps  ';
     await click(n4, 'Flag');
     n4 = rowOf('EBR-4');
     ok('...the next Flag offers the reason typed before', promptDefault === 'bad title', String(promptDefault));
-    ok('...and once it is saved the draft is gone', isDone(n4) && tick(n4) === '!' && !U._drafts['EBR-4'] && props[QK].value.flags['EBR-4'].note === 'bad title, as said');
+    ok('...and once it is saved the draft is gone', isDone(n4) && tick(n4) === '!' && !U._drafts['EBR-4'] && asked.draft === 'EBR-4');
+    ok('...a reason over several lines keeps its lines, tidied', props[QK].value.flags['EBR-4'].note === 'bad title\n\nand no repro steps' &&
+        props[QK].value.done[qym]['EBR-4'].note === 'bad title\n\nand no repro steps', JSON.stringify(props[QK].value.flags['EBR-4'].note));
 
     gm.leadDutyDryRun = true;
     await click(n3, 'Checked');
@@ -396,13 +407,19 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     let rb = resolveButtons()[0];
     rb.handlers.click.forEach((f) => f.call(rb));
     await settle();
+    const rdraft = asked && asked.draft;
+    ok('Resolve asks for its note in the note dialog, kept under its own key', /^resolve:[A-Z]+-\d+$/.test(rdraft || '') && asked.save === 'Resolve' &&
+        asked.title === 'Resolve ' + rdraft.slice(8), JSON.stringify(asked));
     ok('a Resolve that fails: its button comes back and the tab is left as it was', rb.props.disabled === false && body.emptied === fbase && loads.flags === 0);
     ok('...the status line says why', status.textContent.indexOf('Could not resolve: HTTP 500') === 0, status.textContent);
+    ok('...and its note is kept for the next try', U._drafts[rdraft] === 'talked it through', JSON.stringify(U._drafts));
 
     const openBefore = L.qc.openFlags(props[QK].value).length;
     rb = resolveButtons()[0];
     rb.handlers.click.forEach((f) => f.call(rb));
+    ok('...which offers it again', promptDefault === 'talked it through' && asked.draft === rdraft, String(promptDefault));
     await settle();
+    ok('...and once it lands the note is no longer kept', !(rdraft in U._drafts), JSON.stringify(U._drafts));
     ok('Resolve: the tab is not reloaded through a ledger read', loads.flags === 0);
     ok('...it is redrawn once, from the value just written', body.emptied === fbase + 1 && resolveButtons().length === openBefore - 1);
     ok('...at the same scroll position', body._scroll === 120, String(body._scroll));
@@ -437,7 +454,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
 
     // ================= Resolve all (v3.43.0) =================
     const QF = props[QK].value.flags;
-    QF['EBR-71'] = { by: 'schogol', at: '2026-10-01T00:00:00.000Z', ym: qym, note: 'wrong component', actor: 'ISD Dana', kind: 'report', summary: 'one' };
+    QF['EBR-71'] = { by: 'schogol', at: '2026-10-01T00:00:00.000Z', ym: qym, note: 'wrong component\nand the wrong version', actor: 'ISD Dana', kind: 'report', summary: 'one' };
     QF['EBR-72'] = { by: 'solnichka', at: '2026-10-02T00:00:00.000Z', ym: qym, note: 'no repro steps', actor: 'ISD Dana', kind: 'report', summary: 'two' };
     QF['EBR-73'] = { by: 'schogol', at: '2026-10-03T00:00:00.000Z', ym: qym, note: 'closed too early', actor: 'ISD Erin', kind: 'report', summary: 'three' };
     let saves = 0;
@@ -449,12 +466,17 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     let ra = button(groupOf('ISD Dana'), 'Resolve all');
     ok('a person with several open follow-ups gets Resolve all', !!ra);
     ok('...one with a single follow-up does not', !!groupOf('ISD Erin') && !button(groupOf('ISD Erin'), 'Resolve all'));
+    const note71 = find(groupOf('ISD Dana'), (n) => has(n, 'ld-sum') && n._text.indexOf('wrong component') === 0);
+    ok('a follow-up\'s reason is shown with its line breaks', !!note71 && has(note71, 'ld-lines') && note71._text === 'wrong component\nand the wrong version' &&
+        has(note71.parent, 'ld-noterow'), note71 && JSON.stringify(note71._text));
     let rbase = body.emptied, s0 = saves;
-    answer = null;                                 // Cancel in the prompt
+    answer = null;                                 // Cancel in the note dialog
     ra.handlers.click.forEach((f) => f.call(ra));
     await settle();
+    ok('Resolve all asks once, for the whole group', asked.title === 'Resolve 2 follow-ups for ISD Dana' && asked.save === 'Resolve all' &&
+        asked.draft === 'resolve:EBR-72,EBR-71', JSON.stringify(asked));
     ok('a cancelled Resolve all writes nothing', saves === s0 && body.emptied === rbase && !props[QK].value.flags['EBR-71'].resolvedAt);
-    answer = 'went through both with Dana';
+    answer = 'went through both with Dana\nshe fixes the components next week';
     failNext = true;
     ra.handlers.click.forEach((f) => f.call(ra));
     const groupBtns = () => descendants(groupOf('ISD Dana')).filter(isBtn);
@@ -462,12 +484,18 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     await settle();
     ok('a Resolve all that fails: the buttons come back, nothing changed, and it says why', groupBtns().every((b) => b.props.disabled === false) &&
         !props[QK].value.flags['EBR-71'].resolvedAt && body.emptied === rbase && status.textContent.indexOf('Could not resolve: HTTP 500') === 0, status.textContent);
+    ok('...keeping its note for the next try', U._drafts['resolve:EBR-72,EBR-71'] === answer, JSON.stringify(U._drafts));
     s0 = saves;
     ra.handlers.click.forEach((f) => f.call(ra));
+    ok('...which offers it again', promptDefault === answer, JSON.stringify(promptDefault));
     await settle();
     const R71 = props[QK].value.flags['EBR-71'], R72 = props[QK].value.flags['EBR-72'];
     ok('Resolve all closes out all of the person\'s follow-ups in one write', saves === s0 + 1 && !!R71.resolvedAt && R71.resolvedAt === R72.resolvedAt, (saves - s0) + ' writes');
-    ok('...each with the note', R71.outcome === 'went through both with Dana' && R72.outcome === 'went through both with Dana');
+    ok('...each with the note, its lines kept', R71.outcome === answer && R72.outcome === answer, JSON.stringify(R71.outcome));
+    ok('...and the note is no longer kept', !('resolve:EBR-72,EBR-71' in U._drafts), JSON.stringify(U._drafts));
+    const out71 = find(body, (n) => has(n, 'ld-outcome') && n._text.indexOf('Resolved: went through') === 0);
+    ok('...shown under Recently resolved with its lines, in a note row', !!out71 && out71._text === 'Resolved: ' + answer && has(out71.parent, 'ld-lines') &&
+        has(out71.parent.parent, 'ld-noterow'), out71 && JSON.stringify(out71._text));
     ok('...and leaves the other people\'s alone', !props[QK].value.flags['EBR-73'].resolvedAt);
     ok('...the tab is redrawn once, without the group', body.emptied === rbase + 1 && !groupOf('ISD Dana') && !!groupOf('ISD Erin') && loads.flags === 1);
     ok('...and the count follows it', counts[counts.length - 1] === L.qc.openFlags(props[QK].value).length, String(counts.slice(-2)));
