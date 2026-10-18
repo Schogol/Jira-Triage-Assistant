@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.42.1
+// @version     3.43.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -16207,6 +16207,7 @@ JiTA.leadduty = {
     // Both outcomes are worth evaluating: Attached means "this became a defect", Closed means "this was
     // rejected or converted to support", and a wrong Close costs at least as much as a wrong Attach.
     QC_EBR_STATUSES: ['Attached', 'Closed'],
+    NOTE_MAX: 300,               // characters kept of a flag's reason or a resolution's note
 
     _changedToMulti: null,       // null = untested, false = this instance rejects CHANGED TO ("A","B")
 
@@ -16214,6 +16215,16 @@ JiTA.leadduty = {
     _clone: function (v) { return v == null ? null : JSON.parse(JSON.stringify(v)); },
     _p2: function (n) { return (n < 10 ? '0' : '') + n; },
     _dry: function () { return !!gmGet(JiTA.leadduty.DRY_KEY, false); },
+
+    // A note as it is stored: its line breaks kept, with one blank line at most between paragraphs, the spaces in each
+    // line squeezed and trimmed, and at most NOTE_MAX characters.
+    _note: function (note) {
+        var lines = String(note == null ? '' : note).replace(/\r\n?/g, '\n').split('\n').map(function (l) {
+            return l.replace(/\s+/g, ' ').replace(/^ | $/g, '');
+        });
+        return lines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/^\n+|\n+$/g, '')
+            .slice(0, JiTA.leadduty.NOTE_MAX).replace(/\s+$/, '');
+    },
 
     // Month keys are UTC on purpose. JiTA.credits._ymNow() is LOCAL time, and two Leads in different
     // timezones must never disagree about which month is being frozen.
@@ -17275,7 +17286,7 @@ JiTA.leadduty = {
             ym = ym || L._prevYm();
             var handle = (L.me() && L.me().handle) || '?';
             var nowIso = new Date().toISOString();
-            var txt = String(note == null ? '' : note).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').slice(0, 300);
+            var txt = L._note(note);
             var actor = String((item && item.actor) || '').slice(0, 80);
             return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
                 v = v || { v: 1, months: {}, done: {}, flags: {} };
@@ -17331,19 +17342,26 @@ JiTA.leadduty = {
             return !(flag && flag.ym === ym && flag.resolvedAt);
         },
 
-        // Close out a follow-up. The flag is kept (resolved, not deleted) so the ledger page can show that it
-        // was dealt with; _prune drops it once it is older than the retention window.
-        resolveFlag: function (key, note) {
+        // Close out follow-ups: one, or every open one of a person at once, with the same note on each, in one ledger
+        // write. The flags are kept (resolved, not deleted) so the ledger page can show they were dealt with; _prune
+        // drops them once they are older than the retention window. One another Lead resolved meanwhile keeps their
+        // resolution, and nothing is written when none of them is still open.
+        resolveFlags: function (keys, note) {
             var L = JiTA.leadduty;
             var handle = (L.me() && L.me().handle) || '?';
             var nowIso = new Date().toISOString();
-            var txt = String(note == null ? '' : note).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').slice(0, 300);
+            var txt = L._note(note);
             return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
-                if (!v || !v.flags || !v.flags[key]) { return null; }
-                v.flags[key].resolvedBy = handle;
-                v.flags[key].resolvedAt = nowIso;
-                if (txt) { v.flags[key].outcome = txt; }
-                return v;
+                var n = 0;
+                (keys || []).forEach(function (key) {
+                    var f = v && v.flags && v.flags[key];
+                    if (!f || f.resolvedAt) { return; }
+                    f.resolvedBy = handle;
+                    f.resolvedAt = nowIso;
+                    if (txt) { f.outcome = txt; }
+                    n++;
+                });
+                return n ? v : null;
             }).then(L.report.tap);
         },
 
@@ -17403,7 +17421,8 @@ JiTA.leadduty = {
             entries.forEach(function (e) {
                 var f = e.flag;
                 out.push('* ' + e.key + (f.summary ? (' - ' + f.summary) : ''));
-                out.push('  ' + (f.note || '(no reason was recorded)'));
+                // Every line of the reason indented under its issue; a blank line between paragraphs stays blank.
+                out.push((f.note || '(no reason was recorded)').split('\n').map(function (l) { return l ? '  ' + l : ''; }).join('\n'));
             });
             out.push('');
             out.push('This is not a telling-off - we sample everyone every month to keep our handling ' +
@@ -17846,6 +17865,8 @@ JiTA.leadduty = {
 
         // ---- rendering (Confluence storage format, which is XHTML - every value goes through esc) ----
         _txt: function (s) { return JiTA.conf.esc(s); },
+        // A note, which can run over several lines: escaped first, then each line break made a <br />.
+        _lines: function (s) { return JiTA.conf.esc(s).replace(/\n/g, '<br />'); },
         _issue: function (key) {
             return '<a href="' + JiTA.conf.esc(JiTA.HOST + '/browse/' + key) + '">' + JiTA.conf.esc(key) + '</a>';
         },
@@ -17922,7 +17943,7 @@ JiTA.leadduty = {
             }).map(function (o) {
                 return [R._issue(o.key), R._txt(o.flag.kind || ''), R._txt(o.flag.summary || ''),
                     R._txt(o.flag.actor || ''), R._txt(o.flag.by || ''), R._when(o.flag.at),
-                    R._txt(o.flag.ym || ''), R._txt(o.flag.note || '')];
+                    R._txt(o.flag.ym || ''), R._lines(o.flag.note || '')];
             });
             return h + '<p><strong>' + open.length + '</strong> open. "Handled by" is whoever moved the report ' +
                 'to Attached or Closed, or created the defect.</p>' +
@@ -17994,7 +18015,7 @@ JiTA.leadduty = {
                     if (d && d.verdict === 'flag') { f++; flagged++; }
                     rows.push([R._issue(key), R._txt(lead), R._txt((d && d.actor) || ''),
                         R._txt(!d ? 'Outstanding' : (d.verdict === 'flag' ? 'Flagged' : 'Checked')),
-                        R._when(d && d.at), R._txt(R._reason(d, flags[key], pym))]);
+                        R._when(d && d.at), R._lines(R._reason(d, flags[key], pym))]);
                 });
                 sum.push([R._txt(lead), String(n), String(c), String(f)]);
             });
@@ -18494,14 +18515,16 @@ JiTA.leadduty.ui = {
                 // Name BOTH audiences: the note is quoted verbatim into the follow-up message the handler
                 // reads (see qc.followUpText), so "shown to the other Leads" alone invites a Lead to write
                 // peer shorthand that then lands in front of the Bug Hunter it is about.
-                var note = prompt('What is wrong with ' + it.key +
-                    '? (the other Leads see this, and it is quoted to whoever handled it)', U._drafts[it.key] || '');
-                if (note === null) { return; }
-                U._drafts[it.key] = note;   // kept until the flag is saved, so a failed save does not cost the reason
-                U._act(this, L.qc.markChecked(it.key, 'flag', ym, note, it), L.qc.localKey(ym), it.key, function (r, msg, marked) {
-                    if (r) { delete U._drafts[it.key]; }
-                    settle(r, msg, marked);
-                }, false);   // replays as a plain Checked: never queued
+                var btn = this;
+                U._askNote({
+                    title: 'Flag ' + it.key, save: 'Flag', draft: it.key,
+                    hint: 'What is wrong with it? The other Leads see this, and it is quoted to whoever handled it.'
+                }, function (note) {
+                    U._act(btn, L.qc.markChecked(it.key, 'flag', ym, note, it), L.qc.localKey(ym), it.key, function (r, msg, marked) {
+                        if (r) { delete U._drafts[it.key]; }   // the dialog kept it until the flag was saved
+                        settle(r, msg, marked);
+                    }, false);   // replays as a plain Checked: never queued
+                });
             }).appendTo($act);
         }
         return $row;
@@ -18571,6 +18594,36 @@ JiTA.leadduty.ui = {
         });
     },
 
+    // Resolve follow-ups from a Resolve or Resolve all button: $btns are disabled while the write runs and come back
+    // if it fails. `draft` is where the note dialog kept the note: dropped once the write lands, kept for another try
+    // if it fails.
+    _resolve: function ($btns, keys, note, draft) {
+        var L = JiTA.leadduty, U = L.ui;
+        $btns.prop('disabled', true);
+        L.qc.resolveFlags(keys, note).then(function (r) { delete U._drafts[draft]; U._afterResolve(r); },
+            function (e) { $btns.prop('disabled', false); U._status('Could not resolve: ' + String(e && e.message || e)); });
+    },
+
+    // The key a resolve's note is kept under while it is not saved yet.
+    _resolveDraft: function (keys) { return 'resolve:' + keys.join(','); },
+
+    // A resolve has landed: fold the ledger it left into this tab's state, and redraw Follow-ups from it while that
+    // tab is on screen.
+    _afterResolve: function (r) {
+        var U = JiTA.leadduty.ui;
+        var v = U._adopt(U._qc, r);
+        if (v && U._qc) { U._qc.ledgerValue = v; }   // the QC tab's Undo reads whether a flag is resolved
+        if (!U.isOpen()) { return; }
+        if (v) { U._tabCount(v); }                    // the count shows on every tab
+        if (U._tab !== 'flags') { return; }
+        if (!v) { U._loadFlags(false); return; }      // a dry run wrote nothing to show: read the ledger as it is
+        // The resolved rows move to "Recently resolved", so this tab is redrawn rather than patched - but from the
+        // value just written, with no loading state in between, and at the same scroll position.
+        var top = U._body().scrollTop();
+        U._renderFlags(v);
+        U._body().scrollTop(top);
+    },
+
     _renderFlags: function (ledgerValue) {
         var L = JiTA.leadduty, U = L.ui;
         var $b = U._body().empty();
@@ -18608,37 +18661,39 @@ JiTA.leadduty.ui = {
                     JiTA.util.copy($msg.val()).then(function () { U._flashBtn($btn, 'Copied'); },
                         function () { $msg.show(); $toggle.text('Hide text'); $msg.trigger('select'); U._status('Could not reach the clipboard - the text is selected, copy it with Ctrl+C.'); });
                 }).appendTo($gact);
+            // One conversation usually covers all of a person's follow-ups, so they can be closed out together, with
+            // one note saved on each.
+            if (g.entries.length > 1) {
+                var keys = g.entries.map(function (o) { return o.key; });
+                $('<button class="jita-btn ld-mini" title="Close out every follow-up listed for this person at once, with one note saved on each">Resolve all</button>')
+                    .on('click', function () {
+                        var draft = U._resolveDraft(keys);
+                        U._askNote({
+                            title: 'Resolve ' + keys.length + ' follow-ups' + (g.known ? (' for ' + g.name) : ''), save: 'Resolve all', draft: draft,
+                            hint: 'What was done about them? Optional, and saved on each.'
+                        }, function (note) {
+                            U._resolve($g.find('button'), keys, note, draft);   // the whole group waits for the write
+                        });
+                    }).appendTo($gact);
+            }
 
             g.entries.forEach(function (o) {
                 var f = o.flag;
-                var $row = $('<div class="ld-row flagged"></div>').appendTo($g);
+                var $row = $('<div class="ld-row ld-noterow flagged"></div>').appendTo($g);
                 $('<span class="ld-tick"></span>').text('!').appendTo($row);
                 $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
                     .attr('href', JiTA.HOST + '/browse/' + o.key).text(o.key).appendTo($row);
-                $('<span class="ld-sum"></span>').text(f.note || f.summary || '(no reason given)').appendTo($row);
+                $('<span class="ld-sum ld-lines"></span>').text(f.note || f.summary || '(no reason given)').appendTo($row);
                 $('<span class="ld-meta"></span>')
                     .text('flagged by ' + (f.by || '?') + ' · ' + String(f.at || '').slice(0, 10) + ' · from ' + (f.ym || '?')).appendTo($row);
                 var $act = $('<span class="ld-act"></span>').appendTo($row);
                 $('<button class="jita-btn ld-mini" title="Close this follow-up out - it leaves the list and the ledger page">Resolve</button>')
                     .on('click', function () {
-                        var note = prompt('What was done about ' + o.key + '? (optional)', '');
-                        if (note === null) { return; }
-                        var $btn = $(this).prop('disabled', true);
-                        L.qc.resolveFlag(o.key, note).then(function (r) {
-                            var v = U._adopt(U._qc, r);
-                            if (v && U._qc) { U._qc.ledgerValue = v; }   // the QC tab's Undo reads whether a flag is resolved
-                            if (!U.isOpen()) { return; }
-                            if (v) { U._tabCount(v); }                    // the count shows on every tab
-                            if (U._tab !== 'flags') { return; }
-                            if (!v) { U._loadFlags(false); return; }      // a dry run wrote nothing to show: read the ledger as it is
-                            // The resolved row has to move to "Recently resolved", so this tab is redrawn rather
-                            // than patched - but from the value just written, with no loading state in between,
-                            // and at the same scroll position.
-                            var top = U._body().scrollTop();
-                            U._renderFlags(v);
-                            U._body().scrollTop(top);
-                        },
-                            function (e) { $btn.prop('disabled', false); U._status('Could not resolve: ' + String(e && e.message || e)); });
+                        var $btn = $(this), draft = U._resolveDraft([o.key]);
+                        U._askNote({
+                            title: 'Resolve ' + o.key, save: 'Resolve', draft: draft,
+                            hint: 'What was done about it? Optional.'
+                        }, function (note) { U._resolve($btn, [o.key], note, draft); });
                     }).appendTo($act);
             });
         });
@@ -18652,12 +18707,12 @@ JiTA.leadduty.ui = {
             $('<div class="ld-sub" style="margin-top:14px;"></div>').text('Recently resolved').appendTo($b);
             done.forEach(function (k) {
                 var f = flags[k];
-                var $row = $('<div class="ld-row done"></div>').appendTo($b);
+                var $row = $('<div class="ld-row ld-noterow done"></div>').appendTo($b);
                 $('<span class="ld-tick"></span>').text('✓').appendTo($row);
                 $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
                     .attr('href', JiTA.HOST + '/browse/' + k).text(k).appendTo($row);
                 var txt = L.qc.flagText(f);
-                var $sum = $('<span class="ld-sum"></span>').text(txt.reason).appendTo($row);
+                var $sum = $('<span class="ld-sum ld-lines"></span>').text(txt.reason).appendTo($row);
                 if (txt.outcome) { $('<span class="ld-outcome"></span>').text('Resolved: ' + txt.outcome).appendTo($sum); }
                 $('<span class="ld-meta"></span>')
                     .text('resolved by ' + (f.resolvedBy || '?') + ' · ' + String(f.resolvedAt || '').slice(0, 10)).appendTo($row);
@@ -19062,9 +19117,83 @@ JiTA.leadduty.ui = {
         }).catch(function () { $btns.prop('disabled', false); });
     },
 
-    // Issue key -> the reason typed for a Flag that has not been saved yet. The prompt offers it again, so a Flag
-    // whose save failed costs the Lead a click, not the text.
+    // A note typed but not saved yet, by where it was typed: the issue key for a Flag, _resolveDraft() for a Resolve.
+    // The note dialog offers it again, so a dialog cancelled or a save that failed costs the Lead a click, not the text.
     _drafts: {},
+
+    // The dialog a Flag or a Resolve asks for its note in: a text area that takes several lines, over the Lead duties
+    // window. o: { title, hint, save (the Save button's label), draft (its _drafts key) }. then(note) runs on Save;
+    // Cancel and Esc close it without saving. What was typed stays in _drafts either way, and the caller drops it once
+    // the write lands. While it is open every key stays in it: Esc must not reach the window behind and close that,
+    // and none of Jira's shortcuts may fire from it.
+    _askNote: function (o, then) {
+        var L = JiTA.leadduty, U = L.ui, D = document;
+        U._closeNote();
+        try { JiTA.ui._hideTip(true); } catch (e) { /* ignore */ }
+        U._injectCss();
+        function el(tag, cls, text) {
+            var n = D.createElement(tag);
+            if (cls) { n.className = cls; }
+            if (text != null) { n.textContent = text; }
+            return n;
+        }
+        var layer = el('div'), box = el('div');
+        layer.id = 'ld-note-layer';
+        layer.setAttribute('data-no-focus-lock', 'true');   // a focus trap of Jira's that is open must leave the text area alone
+        box.id = 'ld-note-dlg';
+        box.setAttribute('role', 'dialog');
+        box.setAttribute('aria-modal', 'true');
+        box.appendChild(el('div', 'ldn-title', o.title || 'Note'));
+        if (o.hint) { box.appendChild(el('div', 'ldn-hint', o.hint)); }
+        var ta = el('textarea', 'ldn-ta');
+        ta.rows = 6;
+        ta.maxLength = L.NOTE_MAX;
+        ta.value = U._drafts[o.draft] || '';
+        box.appendChild(ta);
+        var foot = el('div', 'ldn-foot'), count = el('span', 'ldn-count');
+        foot.appendChild(el('span', 'ldn-keys', 'Ctrl+Enter saves · Esc cancels'));
+        foot.appendChild(count);
+        var cancel = el('button', 'ldn-btn', 'Cancel'), save = el('button', 'ldn-btn ldn-save', o.save || 'Save');
+        cancel.type = 'button';
+        save.type = 'button';
+        foot.appendChild(cancel);
+        foot.appendChild(save);
+        box.appendChild(foot);
+        layer.appendChild(box);
+        function counted() { count.textContent = ta.value.length + ' / ' + L.NOTE_MAX; }
+        var st = { layer: layer };
+        function close(saved) {
+            if (U._noteDlg !== st) { return; }
+            if (o.draft) {
+                if (/\S/.test(ta.value)) { U._drafts[o.draft] = ta.value; } else { delete U._drafts[o.draft]; }
+            }
+            U._closeNote();
+            if (saved) { then(ta.value); }
+        }
+        st.keys = function (e) {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(false); return; }
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); e.stopImmediatePropagation(); close(true); return; }
+            e.stopPropagation();   // typing stays typing, and nothing else on the page hears it
+        };
+        ta.addEventListener('input', counted);
+        cancel.addEventListener('click', function () { close(false); });
+        save.addEventListener('click', function () { close(true); });
+        // A click beside the dialog does nothing, so a stray one cannot cost the note, and it leaves the focus in the text.
+        layer.addEventListener('mousedown', function (e) { if (e.target === layer) { e.preventDefault(); } });
+        U._noteDlg = st;
+        window.addEventListener('keydown', st.keys, true);   // window capture: ahead of the Lead duties window and of Jira
+        D.body.appendChild(layer);
+        counted();
+        try { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) { /* ignore */ }
+    },
+    _noteDlg: null,
+    _closeNote: function () {
+        var U = JiTA.leadduty.ui, st = U._noteDlg;
+        if (!st) { return; }
+        U._noteDlg = null;
+        window.removeEventListener('keydown', st.keys, true);
+        if (st.layer.parentNode) { st.layer.parentNode.removeChild(st.layer); }
+    },
 
     // Take a QC verdict back. A flag asks first, because undoing it also withdraws a follow-up the other Leads
     // can see; a plain Checked does not, since checking it again is one click.
@@ -19135,6 +19264,23 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid #2c333a; font-size: 12px; }' +
                 '.jita-leadduty-view .ld-row.done { opacity: .5; }' +
                 '.jita-leadduty-view .ld-row.flagged { opacity: .8; }' +
+                // A note keeps the lines it was written in, and its row lines up with the note's first line.
+                '.jita-leadduty-view .ld-row.ld-noterow { align-items: baseline; }' +
+                '.jita-leadduty-view .ld-lines { white-space: pre-line; }' +
+                // The note dialog of a Flag or a Resolve, over the Lead duties window (10000) and the hover card (10001).
+                '#ld-note-layer { position: fixed; inset: 0; z-index: 10010; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.35); font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; }' +
+                '#ld-note-dlg { width: 560px; max-width: 92vw; box-sizing: border-box; padding: 14px 16px 12px; background: #1D2125; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 8px; box-shadow: 0 8px 30px rgba(0,0,0,.55); font-size: 13px; }' +
+                '#ld-note-dlg .ldn-title { color: #f2f2f4; font-size: 14px; font-weight: 700; margin-bottom: 4px; }' +
+                '#ld-note-dlg .ldn-hint { color: #9aa6b2; font-size: 12px; margin-bottom: 8px; }' +
+                '#ld-note-dlg .ldn-ta { display: block; width: 100%; box-sizing: border-box; min-height: 110px; max-height: 50vh; margin: 0; padding: 8px 10px; background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; font: 13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; resize: vertical; }' +
+                '#ld-note-dlg .ldn-ta:focus { outline: none; border-color: #4c9aff; }' +
+                '#ld-note-dlg .ldn-foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }' +
+                '#ld-note-dlg .ldn-keys, #ld-note-dlg .ldn-count { color: #7a8694; font-size: 11px; }' +
+                '#ld-note-dlg .ldn-count { margin-left: auto; }' +
+                '#ld-note-dlg .ldn-btn { background: #2c333a; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 6px 12px; cursor: pointer; font: inherit; font-size: 12px; }' +
+                '#ld-note-dlg .ldn-btn:hover { background: #343c44; border-color: #4c9aff; }' +
+                '#ld-note-dlg .ldn-save { background: #4c9aff; color: #fff; font-weight: 700; border-color: #4c9aff; }' +
+                '#ld-note-dlg .ldn-save:hover { background: #3d8bf0; }' +
                 '.jita-leadduty-view .ld-tick { flex: 0 0 14px; color: #4caf7d; font-weight: 700; }' +
                 '.jita-leadduty-view .ld-row.flagged .ld-tick { color: #f0b429; }' +
                 '.jita-leadduty-view .ld-title { color: #4c9aff; text-decoration: none; overflow-wrap: anywhere; }' +
@@ -21417,6 +21563,11 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.43.0', date: '2026-10-18', features: [
+            'Lead duties: a person with several open follow-ups gets a Resolve all button in the Follow-ups tab, which closes them all out at once with one note saved on each.',
+            'Lead duties: the note for a Flag, a Resolve or a Resolve all is written in a box that takes several lines, and its line breaks are kept on the Follow-ups tab, in the follow-up message and on the ledger page.',
+            'A note you cancel, or one that could not be saved, is offered again the next time you open the box for it.'
+        ] },
         { v: '3.42.1', date: '2026-10-05', fixes: [
             'The defect profile now reads every bug report attached to a defect, not just the latest 25. The first visit to a defect with many reports takes longer; later visits only read the reports attached since.'
         ] },
