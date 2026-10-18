@@ -124,11 +124,29 @@ function cell(tbl, key, col) {
 
     // A follow-up that has been dealt with stays on the record.
     await Q.markChecked('EBR-3', 'flag', pym, 'Wrong status', item('EBR-3'));
-    await Q.resolveFlag('EBR-3', 'Talked it through with Bob');
+    await Q.resolveFlags(['EBR-3'], 'Talked it through with Bob');
     const w1 = writes;
     r = await Q.uncheck('EBR-3', pym);
     ok('a resolved flag is not undone', !!value().done[pym]['EBR-3'] && !r.written && writes === w1);
     ok('...and its follow-up is kept, outcome included', value().flags['EBR-3'] && value().flags['EBR-3'].outcome === 'Talked it through with Bob');
+
+    // Resolve all: several of a person's follow-ups closed out in one write, one note on each (v3.43.0).
+    value().flags['EBR-81'] = { by: 'schogol', at: 'a', ym: pym, note: 'one', actor: 'ISD Dana' };
+    value().flags['EBR-82'] = { by: 'solnichka', at: 'b', ym: pym, note: 'two', actor: 'ISD Dana' };
+    value().flags['EBR-83'] = { by: 'schogol', at: 'c', ym: pym, note: 'three', actor: 'ISD Dana', resolvedBy: 'lookuptable', resolvedAt: 'earlier', outcome: 'already handled' };
+    let w3 = writes; taps = 0;
+    r = await Q.resolveFlags(['EBR-81', 'EBR-82', 'EBR-83'], '  Went through all of them  with Dana ');
+    let F = value().flags;
+    ok('Resolve all closes out every open follow-up in one write', r.written && writes === w3 + 1 && taps === 1 && !!F['EBR-81'].resolvedAt &&
+        F['EBR-81'].resolvedAt === F['EBR-82'].resolvedAt, (writes - w3) + ' writes');
+    ok('...with the same note and resolver on each', F['EBR-81'].outcome === 'Went through all of them with Dana' && F['EBR-82'].outcome === F['EBR-81'].outcome &&
+        F['EBR-81'].resolvedBy === F['EBR-82'].resolvedBy && F['EBR-81'].resolvedBy !== '?', JSON.stringify([F['EBR-81'], F['EBR-82']]));
+    ok('...while one another Lead resolved meanwhile keeps their resolution', F['EBR-83'].resolvedBy === 'lookuptable' && F['EBR-83'].resolvedAt === 'earlier' &&
+        F['EBR-83'].outcome === 'already handled', JSON.stringify(F['EBR-83']));
+    w3 = writes; taps = 0;
+    r = await Q.resolveFlags(['EBR-81', 'EBR-83', 'EBR-404'], 'again');
+    F = value().flags;
+    ok('...and with none of them left open, nothing is written', !r.written && writes === w3 && taps === 0 && F['EBR-81'].outcome === 'Went through all of them with Dana');
 
     // A follow-up from another month belongs to that month.
     value().flags['EBR-7'] = { by: 'schogol', at: 'x', ym: '2020-01', note: 'old', resolvedAt: 'y' };

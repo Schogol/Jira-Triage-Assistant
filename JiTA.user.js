@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.42.1
+// @version     3.43.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -17331,19 +17331,26 @@ JiTA.leadduty = {
             return !(flag && flag.ym === ym && flag.resolvedAt);
         },
 
-        // Close out a follow-up. The flag is kept (resolved, not deleted) so the ledger page can show that it
-        // was dealt with; _prune drops it once it is older than the retention window.
-        resolveFlag: function (key, note) {
+        // Close out follow-ups: one, or every open one of a person at once, with the same note on each, in one ledger
+        // write. The flags are kept (resolved, not deleted) so the ledger page can show they were dealt with; _prune
+        // drops them once they are older than the retention window. One another Lead resolved meanwhile keeps their
+        // resolution, and nothing is written when none of them is still open.
+        resolveFlags: function (keys, note) {
             var L = JiTA.leadduty;
             var handle = (L.me() && L.me().handle) || '?';
             var nowIso = new Date().toISOString();
             var txt = String(note == null ? '' : note).replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '').slice(0, 300);
             return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
-                if (!v || !v.flags || !v.flags[key]) { return null; }
-                v.flags[key].resolvedBy = handle;
-                v.flags[key].resolvedAt = nowIso;
-                if (txt) { v.flags[key].outcome = txt; }
-                return v;
+                var n = 0;
+                (keys || []).forEach(function (key) {
+                    var f = v && v.flags && v.flags[key];
+                    if (!f || f.resolvedAt) { return; }
+                    f.resolvedBy = handle;
+                    f.resolvedAt = nowIso;
+                    if (txt) { f.outcome = txt; }
+                    n++;
+                });
+                return n ? v : null;
             }).then(L.report.tap);
         },
 
@@ -18571,6 +18578,32 @@ JiTA.leadduty.ui = {
         });
     },
 
+    // Resolve follow-ups from a Resolve or Resolve all button: $btns are disabled while the write runs and come back
+    // if it fails.
+    _resolve: function ($btns, keys, note) {
+        var L = JiTA.leadduty, U = L.ui;
+        $btns.prop('disabled', true);
+        L.qc.resolveFlags(keys, note).then(U._afterResolve,
+            function (e) { $btns.prop('disabled', false); U._status('Could not resolve: ' + String(e && e.message || e)); });
+    },
+
+    // A resolve has landed: fold the ledger it left into this tab's state, and redraw Follow-ups from it while that
+    // tab is on screen.
+    _afterResolve: function (r) {
+        var U = JiTA.leadduty.ui;
+        var v = U._adopt(U._qc, r);
+        if (v && U._qc) { U._qc.ledgerValue = v; }   // the QC tab's Undo reads whether a flag is resolved
+        if (!U.isOpen()) { return; }
+        if (v) { U._tabCount(v); }                    // the count shows on every tab
+        if (U._tab !== 'flags') { return; }
+        if (!v) { U._loadFlags(false); return; }      // a dry run wrote nothing to show: read the ledger as it is
+        // The resolved rows move to "Recently resolved", so this tab is redrawn rather than patched - but from the
+        // value just written, with no loading state in between, and at the same scroll position.
+        var top = U._body().scrollTop();
+        U._renderFlags(v);
+        U._body().scrollTop(top);
+    },
+
     _renderFlags: function (ledgerValue) {
         var L = JiTA.leadduty, U = L.ui;
         var $b = U._body().empty();
@@ -18608,6 +18641,17 @@ JiTA.leadduty.ui = {
                     JiTA.util.copy($msg.val()).then(function () { U._flashBtn($btn, 'Copied'); },
                         function () { $msg.show(); $toggle.text('Hide text'); $msg.trigger('select'); U._status('Could not reach the clipboard - the text is selected, copy it with Ctrl+C.'); });
                 }).appendTo($gact);
+            // One conversation usually covers all of a person's follow-ups, so they can be closed out together, with
+            // one note saved on each.
+            if (g.entries.length > 1) {
+                var keys = g.entries.map(function (o) { return o.key; });
+                $('<button class="jita-btn ld-mini" title="Close out every follow-up listed for this person at once, with one note saved on each">Resolve all</button>')
+                    .on('click', function () {
+                        var note = prompt('What was done about these ' + keys.length + ' follow-ups' + (g.known ? (' for ' + g.name) : '') + '? (optional, saved on each)', '');
+                        if (note === null) { return; }
+                        U._resolve($g.find('button'), keys, note);   // the whole group waits for the write
+                    }).appendTo($gact);
+            }
 
             g.entries.forEach(function (o) {
                 var f = o.flag;
@@ -18623,22 +18667,7 @@ JiTA.leadduty.ui = {
                     .on('click', function () {
                         var note = prompt('What was done about ' + o.key + '? (optional)', '');
                         if (note === null) { return; }
-                        var $btn = $(this).prop('disabled', true);
-                        L.qc.resolveFlag(o.key, note).then(function (r) {
-                            var v = U._adopt(U._qc, r);
-                            if (v && U._qc) { U._qc.ledgerValue = v; }   // the QC tab's Undo reads whether a flag is resolved
-                            if (!U.isOpen()) { return; }
-                            if (v) { U._tabCount(v); }                    // the count shows on every tab
-                            if (U._tab !== 'flags') { return; }
-                            if (!v) { U._loadFlags(false); return; }      // a dry run wrote nothing to show: read the ledger as it is
-                            // The resolved row has to move to "Recently resolved", so this tab is redrawn rather
-                            // than patched - but from the value just written, with no loading state in between,
-                            // and at the same scroll position.
-                            var top = U._body().scrollTop();
-                            U._renderFlags(v);
-                            U._body().scrollTop(top);
-                        },
-                            function (e) { $btn.prop('disabled', false); U._status('Could not resolve: ' + String(e && e.message || e)); });
+                        U._resolve($(this), [o.key], note);
                     }).appendTo($act);
             });
         });
@@ -21417,6 +21446,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.43.0', date: '2026-10-18', features: [
+            'Lead duties: a person with several open follow-ups gets a Resolve all button in the Follow-ups tab, which closes them all out at once with one note saved on each.'
+        ] },
         { v: '3.42.1', date: '2026-10-05', fixes: [
             'The defect profile now reads every bug report attached to a defect, not just the latest 25. The first visit to a defect with many reports takes longer; later visits only read the reports attached since.'
         ] },

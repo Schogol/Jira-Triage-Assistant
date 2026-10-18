@@ -18,6 +18,10 @@ const muts = [
     // ---- Undo ----
     [H, "another Lead's verdict can be undone", "v.done[ym][key];\n                if (!d || d.by !== handle) { return null; }\n", "v.done[ym][key];\n                if (!d) { return null; }\n"],
     [H, 'a resolved flag can be undone', "                if (f && f.ym === ym && f.resolvedAt) { return null; }\n", ''],
+    // ---- Resolve all (v3.43.0) ----
+    [H, "a resolve overwrites another Lead's resolution", '                    if (!f || f.resolvedAt) { return; }', '                    if (!f) { return; }'],
+    [H, 'a resolve with nothing left open still writes', '                return n ? v : null;', '                return v;'],
+    [H, 'a resolve closes out only the first follow-up', '                (keys || []).forEach(function (key) {\n                    var f = v && v.flags', '                (keys || []).slice(0, 1).forEach(function (key) {\n                    var f = v && v.flags'],
     [H, 'the open follow-up survives an Undo', "                if (f && f.ym === ym) { delete v.flags[key]; }\n", ''],
     [H, "another month's follow-up is withdrawn", "                if (f && f.ym === ym) { delete v.flags[key]; }\n", "                if (f) { delete v.flags[key]; }\n"],
     [H, 'an Undo never reaches the page', "                if (f && f.ym === ym) { delete v.flags[key]; }\n                return v;\n            }).then(L.report.tap);", "                if (f && f.ym === ym) { delete v.flags[key]; }\n                return v;\n            });"],

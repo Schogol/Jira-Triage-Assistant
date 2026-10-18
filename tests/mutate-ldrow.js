@@ -77,11 +77,18 @@ const muts = [
     [H, 'a failed QC load paints into another tab', "if (!U.isOpen() || U._tab !== 'qc') { return; }", 'if (!U.isOpen()) { return; }'],
     [H, 'a failed Follow-ups load paints into another tab', "if (!U.isOpen() || U._tab !== 'flags') { return; }", 'if (!U.isOpen()) { return; }'],
     // ---- the follow-ups redraw ----
-    [H, 'Resolve loses the scroll position', 'U._renderFlags(v);\n                            U._body().scrollTop(top);', 'U._renderFlags(v);'],
+    [H, 'Resolve loses the scroll position', 'U._renderFlags(v);\n        U._body().scrollTop(top);', 'U._renderFlags(v);'],
     [H, 'Resolve leaves the QC tab offering Undo on a resolved flag', 'if (v && U._qc) { U._qc.ledgerValue = v; }', ''],
     [H, 'a Resolve on another tab leaves the count stale', 'if (v) { U._tabCount(v); }', ''],
-    [H, 'a dry-run Resolve reloads into another tab', "if (U._tab !== 'flags') { return; }\n                            if (!v) { U._loadFlags(false); return; }",
-        "if (!v) { U._loadFlags(false); return; }\n                            if (U._tab !== 'flags') { return; }"]
+    [H, 'a dry-run Resolve reloads into another tab', "if (U._tab !== 'flags') { return; }\n        if (!v) { U._loadFlags(false); return; }",
+        "if (!v) { U._loadFlags(false); return; }\n        if (U._tab !== 'flags') { return; }"],
+    // ---- Resolve all (v3.43.0) ----
+    [H, 'nobody gets Resolve all', '            if (g.entries.length > 1) {', '            if (false) {'],
+    [H, 'Resolve all shows on a single follow-up', '            if (g.entries.length > 1) {', '            if (g.entries.length > 0) {'],
+    [H, 'a cancelled Resolve all resolves anyway', "(optional, saved on each)', '');\n                        if (note === null) { return; }", "(optional, saved on each)', '');"],
+    [H, 'Resolve all resolves only the first follow-up', "U._resolve($g.find('button'), keys, note);", "U._resolve($g.find('button'), keys.slice(0, 1), note);"],
+    [H, 'the group does not wait for the write', "        $btns.prop('disabled', true);\n        L.qc.resolveFlags(", '        L.qc.resolveFlags('],
+    [H, 'a failed resolve leaves its buttons disabled', "function (e) { $btns.prop('disabled', false); U._status(", 'function (e) { U._status(']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

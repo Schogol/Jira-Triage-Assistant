@@ -201,7 +201,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('...and the other rows stay put', rows()[0] === n1 && rows()[2] === r3 && body.emptied === base);
 
     // Another Lead resolves the flag meanwhile, so this tab still offers Undo - and the ledger refuses it.
-    await L.qc.resolveFlag('EBR-1', 'talked');
+    await L.qc.resolveFlags(['EBR-1'], 'talked');
     await click(n1, 'Undo');
     n1 = rowOf('EBR-1');
     ok('a refused Undo shows the row as the ledger has it: still flagged, no Undo any more', isDone(n1) && tick(n1) === '!' && !button(n1, 'Undo'));
@@ -434,6 +434,44 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     await settle();
     ok('...on the Follow-ups tab it reads the ledger as it is, since nothing was written', loads.flags === 1);
     delete gm.leadDutyDryRun;
+
+    // ================= Resolve all (v3.43.0) =================
+    const QF = props[QK].value.flags;
+    QF['EBR-71'] = { by: 'schogol', at: '2026-10-01T00:00:00.000Z', ym: qym, note: 'wrong component', actor: 'ISD Dana', kind: 'report', summary: 'one' };
+    QF['EBR-72'] = { by: 'solnichka', at: '2026-10-02T00:00:00.000Z', ym: qym, note: 'no repro steps', actor: 'ISD Dana', kind: 'report', summary: 'two' };
+    QF['EBR-73'] = { by: 'schogol', at: '2026-10-03T00:00:00.000Z', ym: qym, note: 'closed too early', actor: 'ISD Erin', kind: 'report', summary: 'three' };
+    let saves = 0;
+    const save0 = JiTA.conf.saveProperty;
+    JiTA.conf.saveProperty = function () { saves++; return save0.apply(this, arguments); };
+    const groupOf = (name) => body.kids.find((k) => has(k, 'ld-group') && find(k, (n) => has(n, 'ld-gname') && n._text === name));
+    U._tab = 'flags';
+    U._renderFlags(clone(props[QK].value));
+    let ra = button(groupOf('ISD Dana'), 'Resolve all');
+    ok('a person with several open follow-ups gets Resolve all', !!ra);
+    ok('...one with a single follow-up does not', !!groupOf('ISD Erin') && !button(groupOf('ISD Erin'), 'Resolve all'));
+    let rbase = body.emptied, s0 = saves;
+    answer = null;                                 // Cancel in the prompt
+    ra.handlers.click.forEach((f) => f.call(ra));
+    await settle();
+    ok('a cancelled Resolve all writes nothing', saves === s0 && body.emptied === rbase && !props[QK].value.flags['EBR-71'].resolvedAt);
+    answer = 'went through both with Dana';
+    failNext = true;
+    ra.handlers.click.forEach((f) => f.call(ra));
+    const groupBtns = () => descendants(groupOf('ISD Dana')).filter(isBtn);
+    ok('...while it is written, every button of the group waits', groupBtns().length >= 4 && groupBtns().every((b) => b.props.disabled === true), String(groupBtns().length));
+    await settle();
+    ok('a Resolve all that fails: the buttons come back, nothing changed, and it says why', groupBtns().every((b) => b.props.disabled === false) &&
+        !props[QK].value.flags['EBR-71'].resolvedAt && body.emptied === rbase && status.textContent.indexOf('Could not resolve: HTTP 500') === 0, status.textContent);
+    s0 = saves;
+    ra.handlers.click.forEach((f) => f.call(ra));
+    await settle();
+    const R71 = props[QK].value.flags['EBR-71'], R72 = props[QK].value.flags['EBR-72'];
+    ok('Resolve all closes out all of the person\'s follow-ups in one write', saves === s0 + 1 && !!R71.resolvedAt && R71.resolvedAt === R72.resolvedAt, (saves - s0) + ' writes');
+    ok('...each with the note', R71.outcome === 'went through both with Dana' && R72.outcome === 'went through both with Dana');
+    ok('...and leaves the other people\'s alone', !props[QK].value.flags['EBR-73'].resolvedAt);
+    ok('...the tab is redrawn once, without the group', body.emptied === rbase + 1 && !groupOf('ISD Dana') && !!groupOf('ISD Erin') && loads.flags === 1);
+    ok('...and the count follows it', counts[counts.length - 1] === L.qc.openFlags(props[QK].value).length, String(counts.slice(-2)));
+    JiTA.conf.saveProperty = save0;
 
     // ================= Late loads paint only into their own tab =================
     const errorShown = (msg) => !!find(body, (n) => n._text === msg);
