@@ -16,7 +16,7 @@ const muts = [
     [H, 'a Mac\'s 0.0.0.0 counts as a driver', '            if (/[1-9]/.test(m[2])) { hw.driver = m[2]; }', '            hw.driver = m[2];'],
     [H, 'an Apple CPU gets no generation', "hw.cpuGen = (hw.cpuVendor === 'Apple') ? P._appleChip(hw.gpu) : P._cpuGen(m[1]);", 'hw.cpuGen = P._cpuGen(m[1]);'],
     [H, 'a Mac\'s PDMData gives no macOS version', "hw.os = P._osName(String(os.MAJOR_VERSION || ''), null, true);", "hw.os = 'macOS';"],
-    [H, 'Optimus is not switchable graphics', "hw.hybrid = !!((opt && /yes/i.test(opt[1])) || (sw && /yes/i.test(sw[1])));", "hw.hybrid = !!(sw && /yes/i.test(sw[1]));"],
+    [H, 'switchable graphics is read again', '        if (hw.gpu) { hw.gpuVendor = P._gpuVendor(hw.gpu); }\n', "        if (hw.gpu) { hw.gpuVendor = P._gpuVendor(hw.gpu); }\n        hw.hybrid = /Is Optimus:\\s*Yes/i.test(t);\n"],
     [H, 'Raptor Lake desktop parts are missed', '(mod === 183 || mod === 186 || mod === 191)', '(mod === 186 || mod === 191)'],
     [H, 'an Intel CPU the table does not name is not counted', "            return 'Intel (other)';", '            return null;'],
     [H, 'Zen 4 is read as Zen 3', "if (fam === 25) { return mod >= 96 ? 'AMD Zen 4' : 'AMD Zen 3'; }", "if (fam === 25) { return 'AMD Zen 3'; }"],
@@ -51,7 +51,8 @@ const muts = [
     // the same message through other call stacks
     [H, 'a message reached two ways is two rows', '                var k = P._sigParts(e.sig).msg, g = msgs[k]', '                var k = e.sig, g = msgs[k]'],
     [H, 'a report that reaches the shared message another way is an outlier', 'return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg;', 'return e.sig === out.domExc.sig;'],
-    [H, 'a "<module>" frame is cut in two', "            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }", '            if (p) { frames.push(p); }'],
+    [H, 'a "<module>" frame is cut in two', "        String(sig).slice(at + 1).split('>').forEach(function (p) {\n            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }",
+        "        String(sig).slice(at + 1).split('>').forEach(function (p) {\n            if (p) { frames.push(p); }"],
     [H, 'call stacks are labelled by their whole chain', 'chains[0][chains[0].length - 1 - cs]; })) { cs++; }', 'chains[0][chains[0].length - 1 - cs]; })) { break; }'],
     [H, 'the full profile lists a message\'s call stacks nowhere', '            if (g.paths.length < 2) { return; }', '            return;'],
     [H, 'what a half-read set of logs said is kept', "useLog(got, String(t || ''));", "useLog(rec, String(t || ''));"],
@@ -81,7 +82,7 @@ const muts = [
     [H, 'every report is read again on every visit', '                issues.forEach(function (iss, i) { if (P._needs(recs[i], zip)) { todo.push(i); } });', '                issues.forEach(function (iss, i) { todo.push(i); });'],
     [H, 'a reading cached by an older build is trusted', '_usable: function (rec) { return (rec && rec.v === JiTA.profile.V) ? rec : null; },', '_usable: function (rec) { return rec || null; },'],
     [H, 'leaving the defect does not stop new reads', '                    if (next >= todo.length || (still && !still())) { return Promise.resolve(); }', '                    if (next >= todo.length) { return Promise.resolve(); }'],
-    [H, 'a profile is marked done before all its reports are read', '                return Promise.all(lanes).then(function () { return (left || !todo.length) ? P._last[key] : publish(true); });', '                return Promise.all(lanes).then(function () { return publish(true); });'],
+    [H, 'a profile is marked done before all its reports are read', '                        return (left || !todo.length) ? P._last[key] : publish(true);', '                        return publish(true);'],
     // the panel and Settings
     [H, 'a value no pattern holds is shown as one', "            if (!d.dominant || d.id === 'lang') { return; }", "            if (d.id === 'lang') { return; }"],
     [H, 'a shared exception below the pattern is highlighted', "sm.domExc ? 'strong' : ''", "'strong'"],
@@ -114,7 +115,44 @@ const muts = [
     [H, 'switched off, a card is still painted', "        if (JiTA.ui.currentKey !== key || !flagOn('defectProfile')) { return; }", '        if (JiTA.ui.currentKey !== key) { return; }'],
     [H, 'switched off, a wiped card comes back', "if (!s || !s.total || !flagOn('defectProfile') || document.getElementById(P.GROUP_ID)", 'if (!s || !s.total || document.getElementById(P.GROUP_ID)'],
     [H, 'Read igbr.zip shows with the profile off', "        if (flagOn('defectProfile')) {\n            var $zipRow", "        if (true) {\n            var $zipRow"],
-    [H, 'switching it off in Settings leaves the card', "            if (!flagOn('defectProfile')) { JiTA.profile.clear(); return; }", "            if (!flagOn('defectProfile')) { return; }"]
+    [H, 'switching it off in Settings leaves the card', "            if (!flagOn('defectProfile')) { JiTA.profile.clear(); return; }", "            if (!flagOn('defectProfile')) { return; }"],
+    // exceptions whose defect is hidden in the Triage Assistant (v3.44.0): the lookup
+    [H, 'a crash site keeps every frame', "        return s.slice(0, at) + '|' + frames.slice(-JiTA.logsig.CRASH_FRAMES).join('>');", "        return s.slice(0, at) + '|' + frames.join('>');"],
+    [H, 'a crash site cuts a "<module>" frame in two', "            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }\n        });\n        if (frames.length < JiTA.logsig.MIN_FRAMES)",
+        "            if (p) { frames.push(p); }\n        });\n        if (frames.length < JiTA.logsig.MIN_FRAMES)"],
+    [H, 'the worker\'s crash site keeps every frame', "        return s.slice(0, at) + '|' + frames.slice(-LG_CRASH).join('>');", "        return s.slice(0, at) + '|' + frames.join('>');"],
+    [H, 'no defect is found by its crash site', 'var c = idx && idx.sigMap[sig], cs = JiTA.logsig._crashOf(sig), cc = cs && idx && idx.crashMap[cs];', 'var c = idx && idx.sigMap[sig], cs = JiTA.logsig._crashOf(sig), cc = null;'],
+    [H, 'the crash site beats the same stack', "                if (c && c.members.length) { out[sig] = c.members[0].key; }\n                else if (cc && cc.members.length) { out[sig] = cc.members[0].key; }",
+        "                if (cc && cc.members.length) { out[sig] = cc.members[0].key; }\n                else if (c && c.members.length) { out[sig] = c.members[0].key; }"],
+    [H, 'the worker finds no defect by its crash site', 'var c = idx.sigMap[sig], cs = lgCrashOf(sig), cc = cs && idx.crashMap[cs];', 'var c = idx.sigMap[sig], cs = lgCrashOf(sig), cc = null;'],
+    [H, 'the worker does not answer the lookup', "                else if (op === 'defects') { result = lgDefects(payload.sigs); }\n", ''],
+    [H, 'the lookup never asks the worker', "        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'defects', sigs: sigs })", "        if (false) { return JiTA.worker.call('logsig', { op: 'defects', sigs: sigs })"],
+    [H, 'a worker that cannot answer leaves no answer', "{ op: 'defects', sigs: sigs }).catch(function () { return JiTA.logsig._defectsLocal(sigs); }); }", "{ op: 'defects', sigs: sigs }); }"],
+    // ...the profile
+    [H, 'a hidden exception still makes the pattern', '                if (hid(e.sig)) { return; }\n', ''],
+    [H, 'a hidden exception stays among the shared ones', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig); });', 'out.excGroups = P._groups(withLog, function () { return true; });'],
+    [H, 'hidden exceptions are not listed apart', 'out.hiddenExc = P._groups(withLog, function (e) { return hid(e.sig); });', 'out.hiddenExc = [];'],
+    [H, 'a hidden exception does not name its defect', "                if (typeof hit === 'string' && g.defects.indexOf(hit) < 0) { g.defects.push(hit); }\n", ''],
+    [H, 'a report with the shared message only by a hidden stack is an outlier', '!v.exc.some(function (e) { return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })',
+        '!v.exc.some(function (e) { return !hid(e.sig) && P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })'],
+    // ...building
+    [H, 'the defects are never looked up', 'var look = P._lookup(views, def), late = false, timer = null;', 'var look = null, late = false, timer = null;'],
+    [H, 'the profile is drawn before the lookup', 'var wait = look ? Promise.race(', 'var wait = look ? Promise.resolve() || Promise.race('],
+    [H, 'a slow lookup holds the profile back', 'var wait = look ? Promise.race(', 'var wait = look ? look.then(function () {}) || Promise.race('],
+    [H, 'a slow lookup is never drawn', "                    if (late) { look.then(function () { publish(!left && finished); }); }\n", ''],
+    [H, 'a report read later has its exceptions looked up nowhere', '                            .then(function () { return P._lookup([views[i]], def); })\n', ''],
+    [H, 'every signature is asked about again', "if (!Object.prototype.hasOwnProperty.call(def, e.sig) && !seen[e.sig]) {", 'if (!seen[e.sig]) {'],
+    [H, 'a failed lookup counts as no defect', '}, function () { /* asked again with the next lookup */ });', "}, function () { want.forEach(function (s) { def[s] = ''; }); });"],
+    [H, 'a lookup that throws breaks the build', 'return Promise.resolve().then(function () { return JiTA.logsig.defectsForSigs(want); }).then(', 'return JiTA.logsig.defectsForSigs(want).then('],
+    [H, 'a defect unhidden since still hides its exception', "function hiddenOf(sig) { var d = def[sig]; return (d && JiTA.hidden.isHidden(d)) ? d : ''; }", "function hiddenOf(sig) { return def[sig] || ''; }"],
+    // ...the card and the full profile
+    [H, 'the card shows the hidden exceptions unfolded', "var $hx = $('<div class=\"jp-hidden\"></div>').toggleClass('open', !!P._hidOpen)", "var $hx = $('<div class=\"jp-hidden\"></div>').toggleClass('open', true)"],
+    [H, 'the card folds them again on every redraw', "var $hx = $('<div class=\"jp-hidden\"></div>').toggleClass('open', !!P._hidOpen)", "var $hx = $('<div class=\"jp-hidden\"></div>').toggleClass('open', false)"],
+    [H, 'the card has no hidden exceptions line', '        if (hx.length) {\n            var $hx', '        if (false) {\n            var $hx'],
+    [H, 'the card does not name the hidden defect', "                g.defects.forEach(function (d) { $('<a target=\"_blank\" rel=\"noopener\"></a>')", "                [].forEach(function (d) { $('<a target=\"_blank\" rel=\"noopener\"></a>')"],
+    [H, 'the full profile shows the hidden exceptions unfolded', "var $hv = $('<div class=\"jpv-hidden\"></div>').appendTo($b);", "var $hv = $('<div class=\"jpv-hidden\"></div>').addClass('open').appendTo($b);"],
+    [H, 'the full profile has no hidden exceptions', '        if (hx.length) {\n            var $hv', '        if (false) {\n            var $hv'],
+    [H, 'the full profile says no exception is shared when only hidden ones are', "hx.length ? 'No exception appears in more than one log, apart from the hidden ones below.' :", "false ? '' :"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
