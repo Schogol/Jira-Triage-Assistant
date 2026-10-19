@@ -242,9 +242,10 @@ const rec = (key, over) => Object.assign({
     ok('the bug report refetch carries one on too', meta.resumeTokenEbr && meta.resumeTokenEbr.token === 'te' && JSON.stringify(tails[2]) === '[false,false,true]', JSON.stringify(tails));
 
     // ================= the tail =================
-    let marks = 0, embeds = 0, translates = 0, renders = 0;
+    let marks = 0, embeds = 0, translates = 0, renders = 0, logreads = 0, resets = 0;
     const T = {
         sched: { markSynced: () => { marks++; } }, embed: { prepare: () => { embeds++; } }, translate: { prepare: () => { translates++; } },
+        logread: { prepare: () => { logreads++; } }, repexc: { reset: () => { resets++; } },
         ui: { currentKey: 'EBR-1', scheduleRender: () => { renders++; }, _isReportsKey: (k) => /^(EDR|EO|PLAT)-/.test(k) }
     };
     const tail = new Function('JiTA', 'return ' + obj(['    _afterSync: function (defects, ebr, shown) {']) + '._afterSync;')(T);
@@ -255,6 +256,12 @@ const rec = (key, over) => Object.assign({
     ok('a bug report change embeds, translates and redraws a defect page', run(false, true, false, 'EDR-1') === '1111');
     ok('a sync someone asked for redraws whatever it found', run(false, false, true, 'EBR-1') === '1001');
     ok('...but nothing with no issue open', run(true, true, true, null) === '1110');
+    logreads = resets = 0; tail(false, true, false);
+    ok('a bug report change reads the new reports\' logs, for the exception boost', logreads === 1 && resets === 0, logreads + ' / ' + resets);
+    logreads = resets = 0; tail(true, false, false);
+    ok('a defect change drops what the boost knew of which defects hold an exception', resets === 1 && logreads === 0, logreads + ' / ' + resets);
+    logreads = resets = 0; tail(false, false, true);
+    ok('...and a sync that changed nothing does neither', logreads === 0 && resets === 0, logreads + ' / ' + resets);
 
     // ================= the paths into it =================
     const P = {

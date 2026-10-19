@@ -63,7 +63,8 @@ global.JiTA = {
     link: { dupInfo: () => { dupInfos++; return Promise.resolve({}); }, currentUser: () => Promise.resolve('me-id') },
     ui: {},
     db: {}, rank: {}, trend: { warm() {} }, sync: { _ebrRemoved() {} }, util: { fmtDate: (s) => s },
-    profile: { renderSection() {}, clear() {} }   // profile-check.js covers the defect profile
+    profile: { renderSection() {}, clear() {} },   // profile-check.js covers the defect profile
+    repexc: { soon: () => Promise.resolve(null), forReport: () => Promise.resolve({}), forDefect: () => null }   // excboost-check.js covers the boost
 };
 JiTA.link.attachDuplicate = eval('({' + slice('    attachDuplicate: function (ebrKey, otherKey, statusName, preferredResolution, assigneeAccountId) {') + '})').attachDuplicate;
 const realAttach = JiTA.link.attachDuplicate;

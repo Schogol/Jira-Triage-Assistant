@@ -42,6 +42,8 @@ global.JiTA = {
 Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    staleFactor: function (brCreatedIso, resolutionDateIso) {') +
     member('    humanizeAge: function (days) {') + cut('    fmtDate: function (iso) {', '\n    }\n};') + '\n    }' + '})'));   // the last member: no comma after it
 (0, eval)(cut('JiTA.rank._pickMode = function (', '\n};\n') + '\n};');
+['_boostMap', '_boostRow', '_withBoost'].forEach((n) => { (0, eval)(cut('JiTA.rank.' + n + ' = function (', '\n};\n') + '\n};'); });
+JiTA.repexc = { FACTOR: { exact: 1.3, site: 1.15 }, PCT_MAX: 99 };   // excboost-check.js covers the boost itself
 (0, eval)(cut('JiTA.rank.suggestBest = function (', '\n};\n') + '\n};');
 Object.assign(JiTA.ui, eval('({' + member('    _row: function (r, target, action, opts) {') + member('    _reporterRow: function (r) {') + '})'));
 
