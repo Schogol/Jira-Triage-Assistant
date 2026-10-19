@@ -8,7 +8,7 @@ Run them locally from the repo root with Node 24:
 ```
 node tests/ci-static.js --base origin/main   # syntax, LF endings, no em dashes, @version went up, changelog history
 node tests/run-checks.js                     # every *-check.js harness
-node tests/run-breakages.js                  # every mutate-*.js suite (pull requests only in CI)
+node tests/run-breakages.js                  # every mutate-*.js suite, side by side (pull requests only in CI)
 ```
 
 ## The changelog
@@ -47,6 +47,16 @@ go red. They catch tests that pass without actually testing anything.
 - `every mutation caught` is the only passing result.
 - `SURVIVED` / `GREEN` means a harness stayed green through a breakage: the test needs tightening.
 - `ANCHOR` means the code a suite breaks has changed or moved. Update the suite in the same change.
+
+`run-breakages.js` runs the suites side by side, one per worker. `JITA_BREAK_WORKERS` sets the number of workers;
+the default is one per CPU, at most 8. Each worker runs in a temporary copy of `tests/` because the suites write
+their broken copies under fixed names (`mutt.js` and the like). A suite that runs `ci-static.js` or git needs the
+real checkout, so those suites run one after another in `tests/` itself, alongside the workers. Such a suite
+passes `--only` to `ci-static.js` to run just the check it breaks (for example `--only es5`).
+
+To wait for pending promises, a harness should hop through `setImmediate` a few times, not use
+`setTimeout(r, 0)`. On Windows a timeout lasts a whole 15 ms timer tick, and a suite pays that for every wait of
+every breakage.
 
 ## Adding a test
 

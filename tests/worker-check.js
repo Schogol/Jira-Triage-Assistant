@@ -15,7 +15,7 @@ const cut = (from, to) => {
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
-const flush = () => new Promise((r) => setTimeout(r, 0));
+const flush = async () => { for (let i = 0; i < 20; i++) { await new Promise((r) => setImmediate(r)); } };   // not a timeout: 15 ms each on Windows
 const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.resolve = a; d.reject = b; }); return d; };
 
 // ---- the worker's index builds ----

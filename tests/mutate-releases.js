@@ -29,7 +29,7 @@ const cases = [
 function run(text) {
     fs.writeFileSync(path.join(__dirname, 'mutr.js'), text);
     let out = '';
-    try { out = execFileSync(process.execPath, ['ci-static.js', '--base', BASE], { cwd: __dirname, encoding: 'utf8', env: Object.assign({}, process.env, { JITA_SRC: 'mutr.js' }) }); }
+    try { out = execFileSync(process.execPath, ['ci-static.js', '--base', BASE, '--only', 'changelog'], { cwd: __dirname, encoding: 'utf8', env: Object.assign({}, process.env, { JITA_SRC: 'mutr.js' }) }); }
     catch (e) { out = e.stdout || ''; }
     return out.split('\n').filter((l) => /^  FAIL  every (version released|changelog entry)/.test(l));
 }
