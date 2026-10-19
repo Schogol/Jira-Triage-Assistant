@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.44.0
+// @version     3.44.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6606,6 +6606,7 @@ JiTA.ui = {
 #jita-sd-tip { position: fixed; z-index: 10001; display: none; width: 420px; max-height: 60vh; overflow-y: auto;\
   background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.55);\
   padding: 10px 12px; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; font-size: 12px; line-height: 1.45; }\
+#jita-sd-tip.jita-sd-tip-side { width: 380px; box-sizing: border-box; max-height: 88vh; }\
 #jita-sd-tip .jita-sd-tip-title { font-weight: 700; color: #fff; margin-bottom: 4px; }\
 #jita-sd-tip .jita-sd-tip-meta { color: #9fb4cc; font-size: 10px; margin-bottom: 6px; }\
 #jita-sd-tip .jita-sd-tip-desc { color: #cfd6dd; white-space: pre-wrap; word-break: break-word; }\
@@ -7073,14 +7074,18 @@ JiTA.ui = {
     // neither side fits, the card goes ABOVE or BELOW the row instead (whichever has more room), flush
     // against it and left-aligned: the whole row stays clickable, and the pointer still reaches the card
     // directly for scrolling a long description.
-    _positionTip: function ($tip, anchor) {
+    //
+    // `box` (optional) is the window the row is in: the card then goes beside the window, level with the row, so it
+    // never lies over the list. Under the row, a long description grew up over the row itself, and stood in the way of
+    // the next one. The exception search keeps room for it on its left.
+    _positionTip: function ($tip, anchor, box) {
         $tip.css({ display: 'block', visibility: 'hidden' });
-        var el = $tip[0], rect = anchor.getBoundingClientRect();
+        var el = $tip[0], rect = anchor.getBoundingClientRect(), side = box ? box.getBoundingClientRect() : rect;
         var tipW = el.offsetWidth, tipH = el.offsetHeight;
         var vw = window.innerWidth, vh = window.innerHeight, M = 6, GAP = 10;
         var left = null, top = rect.top;
-        if (rect.left - tipW - GAP >= M) { left = rect.left - tipW - GAP; }             // beside, on the left
-        else if (rect.right + GAP + tipW <= vw - M) { left = rect.right + GAP; }        // beside, on the right
+        if (side.left - tipW - GAP >= M) { left = side.left - tipW - GAP; }             // beside, on the left
+        else if (side.right + GAP + tipW <= vw - M) { left = side.right + GAP; }        // beside, on the right
         if (left === null) {
             left = Math.min(Math.max(M, rect.left), Math.max(M, vw - tipW - M));        // left-aligned with the row
             var below = vh - rect.bottom - M, above = rect.top - M;
@@ -7116,7 +7121,7 @@ JiTA.ui = {
     // flattened stored text is shown instantly as a placeholder, then upgraded to the formatted version when
     // the fetch returns. _tipKey guards the async swap so a slow fetch can't replace a tip we've moved off of.
     _tipKey: null,
-    _showTip: function (r, anchor, meta) {
+    _showTip: function (r, anchor, meta, box) {
         JiTA.ui.injectCss();
         JiTA.ui._tipKey = r.key;
         if (JiTA.ui._tipHideTimer) { clearTimeout(JiTA.ui._tipHideTimer); JiTA.ui._tipHideTimer = null; }   // row-to-row / row-to-card moves keep the card alive
@@ -7129,6 +7134,7 @@ JiTA.ui = {
             $tip.on('mouseleave', function () { JiTA.ui._hideTip(true); });
         }
         $tip.empty();
+        $tip.toggleClass('jita-sd-tip-side', !!box);   // beside a window: as wide as the room it keeps, and as tall as the window
         JiTA.ui._watchMedia($tip[0]);   // arm the media killer for this tip (catches Jira's async hydration)
         $('<div class="jita-sd-tip-title"></div>').text(r.key + ' - ' + (r.summary || '')).appendTo($tip);
         if (meta) { $('<div class="jita-sd-tip-meta"></div>').text(meta).appendTo($tip); }
@@ -7155,14 +7161,14 @@ JiTA.ui = {
         if (typeof cached === 'string') {
             if (cached) { paintHtml($desc, cached); }
             else { $desc.addClass('jita-sd-tip-dim').text('(no description)'); }
-            JiTA.ui._positionTip($tip, anchor);
+            JiTA.ui._positionTip($tip, anchor, box);
             return;
         }
 
         // Placeholder: the flattened stored text, shown immediately so there's no hover lag.
         var flat = (r.description || '').replace(/\s+/g, ' ').trim();
         if (flat) { $desc.text(flat); } else { $desc.addClass('jita-sd-tip-dim').text('Loading…'); }
-        JiTA.ui._positionTip($tip, anchor);
+        JiTA.ui._positionTip($tip, anchor, box);
 
         JiTA.ui._getRendered(r.key).then(function (htmlStr) {
             if (JiTA.ui._tipKey !== r.key) { return; }   // mouse moved to another row already
@@ -7174,7 +7180,7 @@ JiTA.ui = {
             // A row redrawn under the pointer (Lead duties swaps a row in place) leaves this anchor detached, and a
             // detached element measures as 0,0: the replacement's own hover is placing the card, so leave it be.
             if (anchor && anchor.isConnected === false) { return; }
-            JiTA.ui._positionTip($live, anchor);
+            JiTA.ui._positionTip($live, anchor, box);
         });
     },
 
@@ -15026,6 +15032,7 @@ JiTA.excfind = {
         X._injectCss();
         var ov = JiTA.menu._openOverlay({ title: 'Open bug reports with the exceptions of ' + key });
         ov.$menu.addClass('jita-excfind-view');
+        ov.$overlay.addClass('jx-overlay');
         var $b = $('<div class="jx-scroll"></div>').appendTo(ov.$menu);
         $('<div class="jx-sub">Exceptions to look for</div>').appendTo($b);
         $('<div class="jx-targets" id="jx-targets"></div>').appendTo($b);
@@ -15035,6 +15042,7 @@ JiTA.excfind = {
         var $foot = $('<div class="jx-foot"></div>').appendTo(ov.$menu);
         $('<span class="jx-muted" id="jx-status"></span>').appendTo($foot);
         var st = X._st = X._state(key, ov.$overlay[0]);
+        st.box = ov.$menu[0];   // the hover card goes beside it
         X._addBox(st, $add);
         X._paintTargets(st);
         X._load(st);
@@ -15315,7 +15323,7 @@ JiTA.excfind = {
             }));
         }
         $('<div class="jx-why"></div>').appendTo($row);
-        $row.on('mouseenter', function () { JiTA.ui._showTip({ key: rep.key, summary: rep.summary, description: '' }, this, rep.status); });
+        $row.on('mouseenter', function () { JiTA.ui._showTip({ key: rep.key, summary: rep.summary, description: '' }, this, rep.status, st.box); });
         $row.on('mouseleave', function () { JiTA.ui._hideTip(); });
         return row;
     },
@@ -15369,8 +15377,11 @@ JiTA.excfind = {
         JiTA.excfind._cssDone = true;
         try {
             GM_addStyle(
-                '#jita-menu.jita-excfind-view { width: 1180px; max-width: 96vw; display: flex; flex-direction: column; overflow: hidden; }' +
-                '.jita-excfind-view .jx-scroll { flex: 1 1 auto; min-height: 0; max-height: 72vh; overflow-y: auto; padding: 6px 16px 12px; }' +
+                // One size whatever it finds, and 400px kept on its left for the hover card (380px wide, see #jita-sd-tip.jita-sd-tip-side):
+                // a screen too narrow for both keeps the room and gives up width.
+                '#jita-menu-overlay.jx-overlay { justify-content: flex-start; }' +
+                '#jita-menu.jita-excfind-view { box-sizing: border-box; width: min(1180px, calc(100vw - 416px)); max-width: none; margin-left: max(400px, calc((100vw - 1180px) / 2)); height: 88vh; max-height: 88vh; display: flex; flex-direction: column; overflow: hidden; }' +
+                '.jita-excfind-view .jx-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 16px 12px; }' +
                 '.jita-excfind-view .jx-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #3a434d; background: #282d33; }' +
                 '.jita-excfind-view .jx-muted { color: #9aa6b2; font-size: 12px; flex: 1; }' +
                 '.jita-excfind-view .jx-sub { color: #7a8694; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 12px 0 6px; }' +
@@ -22530,6 +22541,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.44.1', date: '2026-10-19', fixes: [
+            'Exception search: the window keeps one size whatever it finds, and a report\'s description shows beside the window when you hover it, no longer over the list.'
+        ] },
         { v: '3.44.0', date: '2026-10-19', features: [
             'New: on a defect, double-tap + to find the open bug reports whose logs hold the defect\'s exceptions, and attach them from the list.',
             'Tick the exceptions to look for: those in the defect\'s description, those its attached reports share, or every exception in the log of its one attached report. Nothing starts ticked, and nothing is downloaded until you tick one.',
