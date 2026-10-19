@@ -177,17 +177,17 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     const pool = {};
     crashCalls = 0;
     const item = (key, logExc, descExc, created) => ({ key, desc: descExc || [], fields: { summary: key + ' summary', created: created || '2026-10-0' + key.slice(-1) + 'T00:00:00.000+0000', status: { name: 'Open' } } });
-    const r1 = X._entry(item('EBR-1'), { exc: [{ sig: A.sig, msg: 'x' }, { sig: B.sig, msg: 'y' }] }, pool);
-    const r2 = X._entry(item('EBR-2'), { exc: [{ sig: A.sig, msg: 'x' }] }, pool);
+    const r1 = X._entry(item('EBR-1'), { exc: [{ sig: A.sig, msg: 'KeyError: 2' }, { sig: B.sig, msg: 'ValueError: bad' }] }, pool);
+    const r2 = X._entry(item('EBR-2'), { exc: [{ sig: A.sig, msg: 'KeyError: 2' }] }, pool);
     ok('an exception many reports hold is kept once, its crash site worked out once', r1.log[0] === r2.log[0] && crashCalls === 2 && r1.log[0].crash === realCrash(A.sig), crashCalls);
     ok('...a report keeps its summary, date and status', r1.summary === 'EBR-1 summary' && r1.status === 'Open' && /^2026-10-01/.test(r1.created));
-    const tA = { sig: A.sig, crash: realCrash(A.sig), msg: 'KeyError: 2' }, tA2 = { sig: A2.sig, crash: realCrash(A2.sig), msg: 'KeyError: 2 (2)' }, tB = { sig: B.sig, crash: realCrash(B.sig), msg: 'ValueError' };
+    const tA = { sig: A.sig, crash: realCrash(A.sig), msg: 'KeyError: 2' }, tA2 = { sig: A2.sig, crash: realCrash(A2.sig), msg: 'KeyError: 2' }, tB = { sig: B.sig, crash: realCrash(B.sig), msg: 'ValueError: bad' };
     let m = X.match(r1, [tA]);
     ok('the same stack is an exact match, in the log', m.length === 1 && m[0].exact === true && m[0].where === 'log' && m[0].t === tA);
     m = X.match(r2, [tA2]);
     ok('another stack to the same crash site is a loose one', m.length === 1 && m[0].exact === false);
     ok('another crash site is none', X.match(r2, [tB]).length === 0);
-    const r3 = X._entry(item('EBR-3', null, [{ sig: A2.sig, msg: 'k' }]), { exc: [{ sig: A.sig, msg: 'x' }] }, pool);
+    const r3 = X._entry(item('EBR-3', null, [{ sig: A2.sig, msg: 'KeyError: 2' }]), { exc: [{ sig: A.sig, msg: 'KeyError: 2' }] }, pool);
     m = X.match(r3, [tA2]);
     ok('an exact match in the description beats a loose one in the log', m.length === 1 && m[0].exact && m[0].where === 'description', JSON.stringify(m.map((h) => [h.exact, h.where])));
     m = X.match(r1, [tA2, tB]);
@@ -211,16 +211,33 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('an edit reads numbers as a signature does (in step with _fingerprint)',
         samples.every((msg) => { const f = fp(msg, FA); return X._normMsg(f.msg).toLowerCase() === P._sigParts(f.sig).msg; }),
         samples.map((msg) => X._normMsg(fp(msg, FA).msg)).join(' | '));
-    ok('an edit starts from the message in its own case, the numbers that match any number already shown as #',
-        X._editText(tU) === "UserError: User error, msg=IndustryValidationError, dict={'errors': [(<Error.MISMATCH_COST: 25>, (#, #))]}", X._editText(tU));
-    ok('...and from the signature\'s whole message when the message it has was cut short', X._editText({ sig: U.sig, crash: U.crashSig, msg: U.msg.slice(0, 30) }) === P._sigParts(U.sig).msg);
-    let re = X._pattern(X._editText(tU).replace('25', '#'));
+    ok('an edit starts from the message as written, numbers and all', X._editText(tU) === UE, X._editText(tU));
+    ok('...one cut short ends in a *, for the rest of it', X._editText({ sig: U.sig, msg: 'x'.repeat(X.MSG_CUT) }) === 'x'.repeat(X.MSG_CUT) + '*' &&
+        X._editText({ sig: U.sig, msg: 'x'.repeat(X.MSG_CUT - 1) }) === 'x'.repeat(X.MSG_CUT - 1));
+    ok('...and one without a message from the signature\'s', X._editText({ sig: U.sig, msg: '' }) === P._sigParts(U.sig).msg);
+    ok('a message is cut where a profile reading cuts it', /msg: String\(fp\.msg \|\| ''\)\.slice\(0, (\d+)\)/.exec(src)[1] === String(X.MSG_CUT));
+    let re = X._pattern(UE.replace('25', '#'));
     ok('# stands for any number', re.test(um(UE)) && re.test(um(UE.replace('25', '30'))) && re.test(um(UE.replace('25', '7').replace('1677', '42'))), re.source);
     ok('...not for text', !re.test(um(UE.replace('25', 'x'))));
     ok('...and the rest must be as written', !re.test(um(UE.replace('MISMATCH_COST', 'MISSING_ITEM'))));
     ok('...the whole message, not a part of it', !X._pattern('KeyError: 2').test(um('KeyError: 23')) && X._pattern('KeyError: 2').test(um('KeyError: 2')));
     ok('the text an edit starts from matches the exception itself, and no other value', X._pattern(X._editText(tU)).test(um(UE)) && !X._pattern(X._editText(tU)).test(um(UE.replace('25', '30'))));
-    ok('...and so does the message typed as written: its numbers are read as the signature reads them', X._pattern(UE).test(um(UE)));
+    ok('...the signature\'s test reads numbers as the signature does (only for a message cut short)', X._pattern(UE).test(um(UE)) && X._pattern(UE).test(um(UE.replace('(12, 1677)', '(3, 4)'))));
+    const W = (msg) => X._asWritten(msg).raw;
+    let rw = X._rawPattern(UE.replace('25', '#'));
+    ok('as written, # stands for any number', rw.test(W(UE)) && rw.test(W(UE.replace('25', '30'))) && !rw.test(W(UE.replace('25', 'x'))), rw.source);
+    ok('...and every other number is as written, even one a signature reads as any number', !rw.test(W(UE.replace('(12, 1677)', '(12, 9)'))));
+    rw = X._rawPattern("UserError: User error, msg=IndustryValidationError, dict={'errors': [(<Error.MISMATCH_COST: #>, (12, #))]}");
+    ok('...so (12, #) takes 12 and any number, not 13', rw.test(W(UE)) && rw.test(W(UE.replace('1677', '5'))) && !rw.test(W(UE.replace('(12, 1677)', '(13, 1677)'))));
+    ok('...* any text, case and spacing aside, the whole message', X._rawPattern('  usererror:  USER error, *').test(W(UE)) && !X._rawPattern('User error').test(W(UE)) &&
+        X._rawPattern('a.b').test('a.b') && !X._rawPattern('a.b').test('axb'));
+    ok('...a # in the message is matched by a # too', X._rawPattern('item #').test(W('Item #')) && X._rawPattern('item #').test(W('item 12')));
+    const T = (pat, msg, pre) => X._tokMatch(X._toks(pat), W(msg), pre);
+    ok('the tokens match as the test does: # digits, * anything, the rest as written', T('KeyError: #', 'KeyError: 22') && !T('KeyError: #', 'KeyError: x') && T('a*b', 'axxb') &&
+        T('a*', 'a') && !T('ab', 'a') && !T('a', 'ab') && T('Item #', 'item #'));
+    ok('...and, for a message cut short, may run off its end', T('KeyError: # in *', 'KeyError: 2', true) && T('KeyError: #', 'KeyError: 12', true) && !T('KeyError: x', 'KeyError: 2', true) &&
+        !T('KeyError: x', 'KeyError: 2', false));
+    ok('...a long message and pattern are no trouble', T('a'.repeat(150) + '*' + 'b#*', 'a'.repeat(150) + 'c'.repeat(300) + 'b12 end'));
     re = X._pattern('UserError: User error, msg=* dict=*');
     ok('* stands for any text', re.test(um(UE)) && re.test(um('UserError: User error, msg=Other, dict={}')) && !re.test(um('ValueError: x')), re.source);
     ok('...whatever the case and spacing typed', X._pattern('  usererror:   USER error, *').test(um(UE)));
@@ -233,8 +250,8 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('an edited target is looked for by its edit, with its own frames', ts[0].pat === 'UserError: *' && ts[0].re.test(eU.m) && ts[0].fr === eU.fr && ts[0].cfr === eU.cfr);
     ok('...the others as they are', ts[1].pat === null && !ts[1].re);
     const pool2 = {}, otherStack = ['ui/other.py(1) Start', 'ui/foo.py(123) OnClick', 'ui/bar.py(45) Load'];
-    const tUe = X._withPattern({ sig: U.sig, crash: U.crashSig, msg: U.msg }, X._editText(tU).replace('25', '#'));
-    const rep30 = (key, msg, fr) => X._entry(item(key), { exc: [{ sig: fp(msg, fr).sig }] }, pool2);
+    const tUe = X._withPattern({ sig: U.sig, crash: U.crashSig, msg: U.msg }, UE.replace('25', '#'));
+    const rep30 = (key, msg, fr) => X._entry(item(key), { exc: [{ sig: fp(msg, fr).sig, msg: fp(msg, fr).msg }] }, pool2);
     m = X.match(rep30('EBR-31', UE.replace('25', '30'), FU), [tUe]);
     ok('an edit matches another value at the same stack exactly', m.length === 1 && m[0].exact);
     m = X.match(rep30('EBR-32', UE.replace('25', '30'), otherStack), [tUe]);
@@ -243,13 +260,44 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('...nor where the rest of the message differs, at either level', X.match(rep30('EBR-34', UE.replace('MISMATCH_COST', 'OTHER'), FU), [tUe]).length === 0 &&
         X.match(rep30('EBR-35', UE.replace('MISMATCH_COST', 'OTHER'), otherStack), [tUe]).length === 0);
     ok('unedited, another value is no match (control)', X.match(rep30('EBR-36', UE.replace('25', '30'), FU), [tU]).length === 0);
+    const U2 = UE.replace('(12, 1677)', '(13, 1)');
+    ok('two messages a signature reads as one (its tuple read as any numbers)', fp(U2, FU).sig === U.sig);
+    ok('...are, unedited, two exceptions: looked for as written, numbers included', X.match(rep30('EBR-37', U2, FU), [tU]).length === 0 &&
+        X.match(rep30('EBR-38', U2, otherStack), [tU]).length === 0);
+    m = X.match(rep30('EBR-39', UE, FU), [tU]);
+    ok('...while the message as written is found, exactly at its stack', m.length === 1 && m[0].exact);
+    m = X.match(rep30('EBR-40', UE, otherStack), [tU]);
+    ok('...and loosely at another stack to its crash site', m.length === 1 && !m[0].exact);
+    ok('...whatever its case', X.match(rep30('EBR-41', UE.toUpperCase(), FU), [tU]).length === 1);
+    ok('an edit with # where the numbers differ finds them', X.match(rep30('EBR-42', U2, FU), [X._withPattern({ sig: U.sig, crash: U.crashSig, msg: U.msg }, UE.replace('(12, 1677)', '(#, #)'))]).length === 1);
+    ok('...and a number it keeps stays that number', X.match(rep30('EBR-43', U2, FU), [X._withPattern({ sig: U.sig, crash: U.crashSig, msg: U.msg }, UE.replace('(12, 1677)', '(12, #)'))]).length === 0);
+    const longA = 'KeyError: ' + 'k'.repeat(250) + ' 7', longB = 'KeyError: ' + 'k'.repeat(250) + ' 8';
+    const cutEntry = (msg) => X._entry(item('EBR-44'), { exc: [{ sig: fp(msg, FA).sig, msg: fp(msg, FA).msg.slice(0, X.MSG_CUT) }] }, {});
+    const tLong = { sig: fp(longA, FA).sig, crash: fp(longA, FA).crashSig, msg: fp(longA, FA).msg };
+    ok('a message a reading cut short is compared as far as it goes', X.match(cutEntry(longA), [tLong]).length === 1 && cutEntry(longA).log[0].cut);
+    ok('...beyond it, the signature tells them apart (a bare number it keeps)', X.match(cutEntry(longB), [tLong]).length === 0);
+    const tLongE = X._withPattern(Object.assign({}, tLong), 'KeyError: ' + 'k'.repeat(250) + ' #');
+    ok('...and an edit is checked as far as the message goes, the rest by the signature', X.match(cutEntry(longB), [tLongE]).length === 1 &&
+        X.match(cutEntry('KeyError: ' + 'k'.repeat(249) + 'j 8'), [tLongE]).length === 0);
+    const longC = 'KeyError: (5) ' + 'k'.repeat(250) + ' 8', longD = longC.replace('(5)', '(6)');
+    const tLongC = X._withPattern({ sig: fp(longC, FA).sig, crash: fp(longC, FA).crashSig, msg: fp(longC, FA).msg }, 'KeyError: (5) ' + 'k'.repeat(250) + ' #');
+    ok('...a number it keeps in the part there is stays that number, though the signature reads it as any', fp(longD, FA).sig === fp(longC, FA).sig &&
+        X.match(cutEntry(longC), [tLongC]).length === 1 && X.match(cutEntry(longD), [tLongC]).length === 0);
+    ok('without the message as written (an older reading), the signature decides alone',
+        X.match(X._entry(item('EBR-45'), { exc: [{ sig: fp(U2, FU).sig }] }, {}), [tU]).length === 1 && X._exc(U.sig).raw === null);
+    ok('the same exception with another message as written is kept apart, the same one shared', (() => {
+        const pl = {}, a = X._entry(item('EBR-46'), { exc: [{ sig: U.sig, msg: UE }] }, pl), b = X._entry(item('EBR-47'), { exc: [{ sig: U.sig, msg: U2 }, { sig: U.sig, msg: UE }] }, pl);
+        return a.log[0] === b.log[1] && a.log[0] !== b.log[0];
+    })());
     ts = X.targets([{ sig: A.sig, msg: 'KeyError: 2' }], null, null, null,
         { typed: [{ id: 'typed:1', text: 'KeyError: *' }], pasted: [{ sig: B.sig, msg: 'ValueError: bad' }, { sig: A.sig, msg: 'KeyError: 2' }], n: 1 });
     ok('added exceptions come after the defect\'s own: pasted ones at their stack, typed ones last',
         ts.map((t) => t.msg + (t.own ? '+' : '') + (t.typed ? '*' : '')).join() === 'KeyError: 2+,ValueError: bad+,KeyError: *+*', ts.map((t) => t.msg).join());
     ok('...a typed one has no stack, and is not told apart by one', ts[2].typed && ts[2].fr === null && ts[2].cfr === null && !ts[2].via && ts[2].pat === 'KeyError: *');
-    ok('...matches its message at any stack, as the same message', (() => { const mm = X.match(X._entry(item('EBR-61'), { exc: [{ sig: A2.sig }] }, {}), [ts[2]]); return mm.length === 1 && !mm[0].exact; })());
-    ok('...and not another message', X.match(X._entry(item('EBR-62'), { exc: [{ sig: B.sig }] }, {}), [ts[2]]).length === 0);
+    ok('...matches its message at any stack, as the same message', (() => { const mm = X.match(X._entry(item('EBR-61'), { exc: [{ sig: A2.sig, msg: 'KeyError: 2' }] }, {}), [ts[2]]); return mm.length === 1 && !mm[0].exact; })());
+    ok('...and not another message', X.match(X._entry(item('EBR-62'), { exc: [{ sig: B.sig, msg: 'ValueError: bad' }] }, {}), [ts[2]]).length === 0);
+    ok('...its numbers as written too', X.match(X._entry(item('EBR-63'), { exc: [{ sig: A.sig, msg: 'KeyError: 2' }] }, {}), [X._typed({ id: 'typed:9', text: 'KeyError: 3' })]).length === 0 &&
+        X.match(X._entry(item('EBR-64'), { exc: [{ sig: A.sig, msg: 'KeyError: 2' }] }, {}), [X._typed({ id: 'typed:9', text: 'KeyError: #' })]).length === 1);
     ok('where an added exception comes from', X._src(ts[2]) === 'added by you, at any stack' && X._src(ts[1]) === 'added by you' && X._src(ts[0]) === 'in the description',
         [X._src(ts[2]), X._src(ts[1]), X._src(ts[0])].join(' | '));
     ok('hovering a typed one says it has no stack', X._tip(ts[2]) === 'Looked for by this message alone, at any stack' && X._tip(ts[0]) === P._sigTip(A.sig, 'KeyError: 2'));
@@ -264,7 +312,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
 
     // ================= reading a report: the cache, and when it is out of date =================
     let reads = [];
-    P._readFiles = (it, rec, zip) => { reads.push({ key: it.key, rec: rec, zip: zip }); return Promise.resolve({ v: P.V, key: it.key, logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'x' }], logSig: P._logSig(it.fields.attachment) }); };
+    P._readFiles = (it, rec, zip) => { reads.push({ key: it.key, rec: rec, zip: zip }); return Promise.resolve({ v: P.V, key: it.key, logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'KeyError: 2' }], logSig: P._logSig(it.fields.attachment) }); };
     const att = (name, size) => ({ filename: name, size: size || 100, content: 'https://jira/att/' + name });
     const it5 = { key: 'EBR-5', desc: [], fields: { attachment: [att('logs.txt', 500)] } };
     meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: 'logs.txt:500', zip: true, wer: true };
@@ -303,13 +351,13 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     P._readFiles = (it) => {
         readsStarted.push(it.key);
         inFlight++; maxIn = Math.max(maxIn, inFlight);
-        const go = () => { inFlight--; return { v: P.V, key: it.key, logs: it.key !== 'EBR-9', hasLog: true, exc: it.key === 'EBR-4' ? [{ sig: A2.sig, msg: 'k' }] : [], logSig: 'logs.txt:100' }; };
+        const go = () => { inFlight--; return { v: P.V, key: it.key, logs: it.key !== 'EBR-9', hasLog: true, exc: it.key === 'EBR-4' ? [{ sig: A2.sig, msg: 'KeyError: 2' }] : [], logSig: 'logs.txt:100' }; };
         if (held) { return held.promise.then(go); }
         return new Promise((res) => setImmediate(() => res(go())));
     };
     const overlay = () => { const n = new Node('div'); ROOT.appendChild(n); return n; };
     const fresh = () => { const st = X._state('EDR-77', overlay()); X._st = st; return st; };
-    meta = { 'rp:EBR-3': { v: P.V, key: 'EBR-3', logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'x' }], logSig: 'logs.txt:100' } };
+    meta = { 'rp:EBR-3': { v: P.V, key: 'EBR-3', logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'KeyError: 2' }], logSig: 'logs.txt:100' } };
     pages = { '': page(['EBR-1', 'EBR-2:att', 'EBR-3', 'EBR-4'], { nextPageToken: 't2' }), t2: page(['EBR-4', 'EBR-5:desc', 'EBR-9'], { isLast: true }) };
     let st = fresh();
     st.targets = [Object.assign({}, tA, { def: true })]; st.on[A.sig] = true;
@@ -450,7 +498,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('the reports holding a ticked exception are listed as they are read, exact first', order() === 'EBR-3,EBR-1', order());
     const row1 = res.kids.find((n) => n.getAttribute('data-key') === 'EBR-1');
     ok('...each says how it matched', /same stack/.test(res.kids[0].textContent) && /~ same crash site/.test(row1.textContent) && /KeyError: 2/.test(row1.textContent), row1.textContent);
-    add('EBR-0', [], '2026-09-01T00:00:00.000+0000', [{ sig: A.sig, msg: 'k' }]);
+    add('EBR-0', [], '2026-09-01T00:00:00.000+0000', [{ sig: A.sig, msg: 'KeyError: 2' }]);
     const row0 = res.kids.find((n) => n.getAttribute('data-key') === 'EBR-0');
     ok('...or that it is in the report\'s description', !!row0 && /KeyError: 2 \(in its description\)/.test(row0.textContent), row0 && row0.textContent);
     X._gone(st, 'EBR-0');
@@ -486,15 +534,15 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     X._why(wr, [{ t: { sig: A.sig, msg: 'KeyError: 2' }, exact: true, where: 'log' }]);
     ok('...and its stack on hover', byCls(wr, 'jx-msg')[0].getAttribute('title') === P._sigTip(A.sig, 'KeyError: 2'));
     const phs = (n) => byCls(n, 'jx-ph').map((x) => x.textContent + '=' + x.getAttribute('title')).join();
-    ok('an exception is shown as it is looked for: the numbers that match any number as #', X._shown(tU) === X._editText(tU) && /\(#, #\)/.test(X._shown(tU)) && /COST: 25>/.test(X._shown(tU)), X._shown(tU));
+    ok('an exception is shown as it is looked for: as written, numbers and all', X._shown(tU) === UE, X._shown(tU));
     ok('...an edited one by its edit', X._shown(Object.assign({}, tU, { pat: 'UserError: * (#)' })) === 'UserError: * (#)');
     ok('...one without a message says so', X._shown({ sig: '|a.py:f>b.py:g', msg: '' }) === '(no message)');
     let mk = X._marked($('<span></span>'), 'a # b * c', false);
-    ok('a # is marked as any number, a * left plain in an exception as it is', mk[0].textContent === 'a # b * c' && phs(mk[0]) === '#=any number', phs(mk[0]));
+    ok('in an exception as it is, neither # nor * is marked', mk[0].textContent === 'a # b * c' && phs(mk[0]) === '', phs(mk[0]));
     mk = X._marked($('<span></span>'), '#* x', true);
     ok('...and in an edit, a * marked as any text', mk[0].textContent === '#* x' && phs(mk[0]) === '#=any number,*=any text', phs(mk[0]));
     X._why(wr, [{ t: tU, exact: true, where: 'log' }]);
-    ok('a match line shows the exception as it was looked for, its # marked', /\(#, #\)/.test(wr.textContent) && phs(wr) === '#=any number,#=any number', wr.textContent);
+    ok('a match line shows the exception as it was looked for, as written', /\(12, 1677\)/.test(wr.textContent) && phs(wr) === '', wr.textContent);
     X._why(wr, [{ t: Object.assign({}, tU, { pat: 'UserError: *' }), exact: false, where: 'description' }]);
     ok('...an edited one by its edit, and where it was found', /~ same crash siteUserError: \* \(in its description\)$/.test(wr.textContent) && phs(wr) === '*=any text', wr.textContent);
     st.targets = [{ sig: A.sig, msg: 'KeyError: 2', via: 'foo.py:onclick > …', desc: true }];
@@ -579,13 +627,12 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     const tgt = () => byId['jx-targets'], rowsT = () => byCls(tgt(), 'jx-target'), editsOf = (r) => byCls(r, 'jx-tedit');
     const box = () => find(tgt(), (n) => n.hasCls('jx-pat'))[0];
     ok('each exception offers an edit', rowsT().length === 2 && rowsT().every((r) => editsOf(r).map((n) => n.textContent).join() === 'edit'));
-    ok('...and its row shows what it is looked for by, as the box will: the numbers that match any number as #, marked',
-        byCls(rowsT()[0], 'jx-tmsg')[0].textContent === X._editText(st.targets[0]) && byCls(rowsT()[0], 'jx-ph').length === 2 && byCls(rowsT()[1], 'jx-ph').length === 0,
-        byCls(rowsT()[0], 'jx-tmsg')[0].textContent);
+    ok('...and its row shows what it is looked for by, as the box will start: the message as written, nothing marked',
+        byCls(rowsT()[0], 'jx-tmsg')[0].textContent === UE && UE === X._editText(st.targets[0]) && byCls(tgt(), 'jx-ph').length === 0, byCls(rowsT()[0], 'jx-tmsg')[0].textContent);
     click(editsOf(rowsT()[0])[0]);
     let inp = box();
     ok('edit opens a box with the text to start from, and the hint', !!inp && inp.value === X._editText(st.targets[0]) && st.editor === inp && st.editing === U.sig &&
-        /# stands for any number/.test(tgt().textContent), inp && inp.value);
+        /Put # where any number will do/.test(tgt().textContent), inp && inp.value);
     ok('...the row marked as being edited, so the box takes the room the message had', rowsT()[0].hasCls('editing') && !rowsT()[1].hasCls('editing'));
     ok('...in place of the message, the box to tick still there, no edit link on it', byCls(rowsT()[0], 'jx-tmsg').length === 0 && editsOf(rowsT()[0]).length === 0 &&
         find(rowsT()[0], (n) => n.getAttribute('type') === 'checkbox').length === 1);
@@ -598,7 +645,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('Enter keeps the edit, and the list is drawn again', st.edit[U.sig] === want && !st.editing && !inp.isConnected && rowsT().length === 3, JSON.stringify(st.edit));
     const msg0 = byCls(rowsT()[0], 'jx-tmsg')[0];
     ok('...the edited message shown and marked, with a reset', msg0.hasCls('edited') && msg0.textContent === want && editsOf(rowsT()[0]).map((n) => n.textContent).join() === 'edit,reset');
-    ok('...its # marked, the one typed as well', byCls(msg0, 'jx-ph').length === 3);
+    ok('...its # marked', byCls(msg0, 'jx-ph').length === 1);
     ok('...and the target looked for by it', st.targets[0].pat === want && !!st.targets[0].re);
     X._add(st, item('EBR-41', null, [], '2026-10-07T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: fp(UE.replace('25', '30'), FU).sig }] }, cached: false });
     const hasRow = (k) => byId['jx-results'].kids.find((n) => n.getAttribute('data-key') === k);

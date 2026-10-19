@@ -14658,8 +14658,9 @@ JiTA.profile = {
  * What it looks for: the exceptions pasted into the defect's description, and those its attached reports' logs share as
  * the Defect Profile counts them (in two logs or more, and not hidden in the Triage Assistant). A defect with a single
  * report attached has nothing shared, so every exception in that report's log is offered instead. None starts ticked:
- * the user ticks the ones to look for, and the search starts with the first one. Each can be edited before it is looked
- * for: # in the edited message stands for any number and * for any text, while the rest, and the stack, must match.
+ * the user ticks the ones to look for, and the search starts with the first one. An exception is looked for as written
+ * in the log, numbers included. Each can be edited before it is looked for: # in the edited message stands for any number
+ * and * for any text, while the rest, and the stack, must match.
  *
  * Where: every open bug report, newest first, from a live search. One whose status says it is attached or closed is left
  * out, as Matching bug reports leaves it out. Each report's logs are read by the profile's own reader, so an exception is
@@ -14667,8 +14668,9 @@ JiTA.profile = {
  * or of reports whose log files changed. igbr.zip is not read here: its logs.txt is the one attached beside it.
  * Exceptions pasted into a report's description count too.
  *
- * A report holds an exception when one of its exceptions has the same stack, or failing that the same crash site
- * (message and innermost frames): the two levels "Known defects in attached log" uses. Ticking an exception only matches
+ * A report holds an exception when one of its exceptions has the same message as written and the same stack, or failing
+ * that the same crash site (message and innermost frames): the two levels "Known defects in attached log" uses, though
+ * that one goes by the signature, which reads some numbers as any number. Ticking an exception only matches
  * what was read again. A report someone else has says so and can still be attached; attaching it keeps its assignee.
  * Closing the window stops new reads; opening it again carries on from the cache.
  */
@@ -14676,6 +14678,7 @@ JiTA.excfind = {
     CONCURRENCY: 4,
     MAX_SHARED: 12,              // shared exceptions offered, the most shared first
     WAIT_MS: 150,                // a lane with nothing to read waits this long for the next page of reports
+    MSG_CUT: 200,                // a profile reading keeps this many characters of a message. KEEP IN SYNC with JiTA.profile.logExceptions
     FIELDS: ['summary', 'created', 'status', 'attachment', 'labels', 'description'],
     _st: null,                   // the search on screen; a window opened again starts a new one
     _edits: {},                  // defect key -> { sig: edited text }: kept while the page is, across windows
@@ -14733,8 +14736,9 @@ JiTA.excfind = {
     },
     // A message the user typed: looked for as an edit is, by its message alone, at any stack, since it has none.
     _typed: function (a) {
+        var X = JiTA.excfind;
         return { sig: a.id, crash: null, msg: a.text, desc: false, count: 0, of: 0, one: null, own: true, typed: true,
-            pat: a.text, re: JiTA.excfind._pattern(a.text), fr: null, cfr: null };
+            pat: a.text, re: X._pattern(a.text), rawRe: X._rawPattern(a.text), toks: X._toks(a.text), fr: null, cfr: null };
     },
     // ---- editing what an exception is looked for by ---------------------------------------------------------------------
     // The numbers _fingerprint turns into # in an exception's message, turned the same way, case kept. KEEP IN SYNC with
@@ -14758,24 +14762,51 @@ JiTA.excfind = {
         }).join('[\\s\\S]*');
         return new RegExp('^' + src + '$');
     },
-    // The text an edit starts from: the message as written, with the numbers that already match any number shown as #.
-    // A message cut short (a profile reading keeps 200 characters) is not the whole message, so the signature's is used.
+    // The test an edited message stands for on an exception's message as written (_asWritten): # any number, * any text,
+    // the rest as written. A # in the message itself is matched by a # too.
+    _rawPattern: function (text) {
+        var src = String(text == null ? '' : text).replace(/\s+/g, ' ').trim().toLowerCase().split('*').map(function (piece) {
+            return piece.split('#').map(function (lit) { return lit.replace(/[.*+?^$(){}|[\]\\]/g, '\\$&'); }).join('(?:\\d+|#)');
+        }).join('[\\s\\S]*');
+        return new RegExp('^' + src + '$');
+    },
+    // The same test as tokens, for a message cut short: one character each, # and * as themselves.
+    _toks: function (text) { return String(text == null ? '' : text).replace(/\s+/g, ' ').trim().toLowerCase().split(''); },
+    // Whether the tokens match s, or with `prefix`, could match it continued: s is then only the start of the message,
+    // and a match may run off its end.
+    _tokMatch: function (toks, s, prefix) {
+        var memo = {};
+        function digit(c) { return c >= '0' && c <= '9'; }
+        function go(i, j) {
+            var k = i + ',' + j, r = false, q;
+            if (memo[k] !== undefined) { return memo[k]; }
+            if (i === toks.length) { r = j === s.length; }
+            else if (j === s.length) { r = !!prefix || (toks[i] === '*' && go(i + 1, j)); }
+            else if (toks[i] === '*') { for (q = j; q <= s.length && !r; q++) { r = go(i + 1, q); } }
+            else if (toks[i] === '#') {
+                if (s[j] === '#') { r = go(i + 1, j + 1); }
+                for (q = j; !r && q < s.length && digit(s[q]); q++) { r = go(i + 1, q + 1); }
+            }
+            else { r = toks[i] === s[j] && go(i + 1, j + 1); }
+            memo[k] = r;
+            return r;
+        }
+        return go(0, 0);
+    },
+    // The text an edit starts from: the message as written. One cut short (a profile reading keeps MSG_CUT characters) ends
+    // in a *, for the rest of it.
     _editText: function (t) {
-        var base = JiTA.excfind._normMsg(String(t.msg || '').replace(/\s+/g, ' ').trim());
-        var m = t.sig.slice(0, t.sig.lastIndexOf('|'));
-        return base.toLowerCase() === m ? base : m;
+        var w = String(t.msg || '').replace(/\s+/g, ' ').trim();
+        if (!w) { return t.sig.slice(0, t.sig.lastIndexOf('|')); }
+        return w.length >= JiTA.excfind.MSG_CUT ? w + '*' : w;
     },
-    // What an exception is looked for by, as the window shows it: its edit, or its message with the numbers that already
-    // match any number shown as #. Shown as written, (12, 1677) read as two numbers the search would want, though it takes
-    // any two.
-    _shown: function (t) {
-        if (t.pat != null) { return t.pat; }
-        return JiTA.excfind._editText(t) || '(no message)';
-    },
-    // Put text into $el with its placeholders marked: # (any number), and in an edited message * (any text). A * in an
-    // exception as it is matches only a *, so it stays plain there.
+    // What an exception is looked for by, as the window shows it: its edit, or its message as written.
+    _shown: function (t) { return t.pat != null ? t.pat : (t.msg || '(no message)'); },
+    // Put text into $el, and in an edited message mark its placeholders: # (any number) and * (any text). In an exception as
+    // it is, both are only themselves.
     _marked: function ($el, text, edited) {
-        String(text).split(edited ? /([#*])/ : /(#)/).forEach(function (part, i) {
+        if (!edited) { $el.append(document.createTextNode(String(text))); return $el; }
+        String(text).split(/([#*])/).forEach(function (part, i) {
             if (!part) { return; }
             if (i % 2) { $('<span class="jx-ph"></span>').text(part).attr('title', part === '#' ? 'any number' : 'any text').appendTo($el); }
             else { $el.append(document.createTextNode(part)); }
@@ -14787,6 +14818,8 @@ JiTA.excfind = {
     _withPattern: function (t, text) {
         t.pat = text;
         t.re = JiTA.excfind._pattern(text);
+        t.rawRe = JiTA.excfind._rawPattern(text);
+        t.toks = JiTA.excfind._toks(text);
         t.fr = t.sig.slice(t.sig.lastIndexOf('|') + 1);
         t.cfr = t.crash ? t.crash.slice(t.crash.lastIndexOf('|') + 1) : null;
         return t;
@@ -14895,13 +14928,14 @@ JiTA.excfind = {
 
     // ---- matching ---------------------------------------------------------------------------------------------------
     // One open report as the search keeps it: its summary, date and status, and the exceptions of its logs (rec, the
-    // profile's reading) and of its description, as { sig, crash } objects shared through `pool`, so an exception many
-    // reports hold is kept once and its crash site worked out once.
+    // profile's reading) and of its description, as _exc objects shared through `pool`, so an exception many reports
+    // hold, with the same message as written, is kept once and its crash site worked out once.
     _entry: function (item, rec, pool) {
         var f = item.fields || {};
         function take(list) {
             return (list || []).map(function (e) {
-                return pool[e.sig] || (pool[e.sig] = JiTA.excfind._exc(e.sig));
+                var k = e.sig + '\n' + (e.msg == null ? '\u0000' : e.msg);
+                return pool[k] || (pool[k] = JiTA.excfind._exc(e.sig, e.msg));
             });
         }
         return { key: item.key, summary: f.summary || '', created: f.created || null, status: (f.status && f.status.name) || '',
@@ -14910,22 +14944,45 @@ JiTA.excfind = {
 
     // Which of the ticked exceptions a report holds: [{ t, exact, where }], same-stack matches first. One of its exceptions
     // with the same stack is exact; failing that, one with the same crash site is not. `where` is 'log' or 'description'.
-    // One exception as matching needs it: its signature and crash site, and the parts of them an edited target looks at
-    // (m: the message, fr: the frames, cfr: the crash site's frames). Frames hold no "|", so the message ends at the last.
-    _exc: function (sig) {
-        var crash = JiTA.logsig._crashOf(sig), at = sig.lastIndexOf('|');
-        return { sig: sig, crash: crash, m: sig.slice(0, at), fr: sig.slice(at + 1), cfr: crash ? crash.slice(crash.lastIndexOf('|') + 1) : null };
+    // One exception as matching needs it: its signature and crash site, the parts of them an edited target looks at (m: the
+    // signature's message, fr: the frames, cfr: the crash site's frames), and its message as written (raw, cut, see
+    // _asWritten). Frames hold no "|", so the signature's message ends at the last.
+    _exc: function (sig, msg) {
+        var crash = JiTA.logsig._crashOf(sig), at = sig.lastIndexOf('|'), w = JiTA.excfind._asWritten(msg);
+        return { sig: sig, crash: crash, m: sig.slice(0, at), fr: sig.slice(at + 1), cfr: crash ? crash.slice(crash.lastIndexOf('|') + 1) : null,
+            raw: w ? w.raw : null, cut: !!(w && w.cut) };
+    },
+    // A message as written, as matching compares it: lowercased (_fingerprint has squashed its spacing). `cut` when it may be only its start
+    // (a profile reading keeps the first MSG_CUT characters). Null without a message; the signature then decides alone.
+    _asWritten: function (msg) {
+        if (msg == null) { return null; }
+        var w = String(msg);
+        return { raw: w.toLowerCase(), cut: w.length >= JiTA.excfind.MSG_CUT };
+    },
+    // Whether two exceptions have the same message as written, numbers included. A cut one is compared as far as it goes.
+    _sameMsg: function (a, b) {
+        if (!a || !b || a.raw == null || b.raw == null) { return true; }
+        if (a.cut || b.cut) { var n = Math.min(a.raw.length, b.raw.length); return a.raw.slice(0, n) === b.raw.slice(0, n); }
+        return a.raw === b.raw;
+    },
+    // Whether an edited or typed message holds for one exception, by its message as written: # any number, * any text. A
+    // message cut short is checked as far as it goes, and the rest by the signature's message (_pattern).
+    _fits: function (t, e) {
+        if (e.raw == null) { return t.re.test(e.m); }
+        if (!e.cut) { return t.rawRe.test(e.raw); }
+        return t.re.test(e.m) && JiTA.excfind._tokMatch(t.toks, e.raw, true);
     },
     match: function (rep, chosen) {
-        var out = [];
+        var X = JiTA.excfind, out = [];
         (chosen || []).forEach(function (t) {
-            var hit = null;
+            var hit = null, tw = X._asWritten(t.msg);
             [['log', rep.log], ['description', rep.desc]].forEach(function (src) {
                 (src[1] || []).forEach(function (e) {
-                    // An edited target: its message test, and the frames of its stack or of its crash site.
-                    var re = t.re, same = re ? (e.fr === t.fr && re.test(e.m)) : e.sig === t.sig;
-                    var site = re ? (!!t.cfr && e.cfr === t.cfr && re.test(e.m)) : (!!e.crash && e.crash === t.crash);
-                    if (t.typed) { site = re.test(e.m); }   // typed by hand: there is no stack to match, only the message
+                    // An edited target: its message test, and the frames of its stack or of its crash site. One as it is: its
+                    // signature, and its message as written.
+                    var re = t.re, same = re ? (e.fr === t.fr && X._fits(t, e)) : (e.sig === t.sig && X._sameMsg(e, tw));
+                    var site = re ? (!!t.cfr && e.cfr === t.cfr && X._fits(t, e)) : (!!e.crash && e.crash === t.crash && X._sameMsg(e, tw));
+                    if (t.typed) { site = X._fits(t, e); }   // typed by hand: there is no stack to match, only the message
                     if (same) { if (!hit || !hit.exact) { hit = { t: t, exact: true, where: src[0] }; } }
                     else if (!hit && site) { hit = { t: t, exact: false, where: src[0] }; }
                 });
@@ -15192,8 +15249,8 @@ JiTA.excfind = {
             }
             $('<span class="jx-tsrc"></span>').text(X._src(t)).appendTo($row);
             if (editing) {
-                $('<div class="jx-pathint"></div>').text('# stands for any number (the numbers shown as # already do), * for any text; the rest, and the stack, ' +
-                    'must match. Enter keeps it, Esc cancels.').appendTo($t);
+                $('<div class="jx-pathint"></div>').text('Put # where any number will do and * where any text will; the rest, and the stack, must match as written. ' +
+                    'Enter keeps it, Esc cancels.').appendTo($t);
                 return;
             }
             if (t.typed) { X._removeLink(st, t, $row); return; }   // a typed message is removed and typed again, not edited
@@ -22476,7 +22533,7 @@ JiTA.changelog = {
         { v: '3.44.0', date: '2026-10-19', features: [
             'New: on a defect, double-tap + to find the open bug reports whose logs hold the defect\'s exceptions, and attach them from the list.',
             'Tick the exceptions to look for: those in the defect\'s description, those its attached reports share, or every exception in the log of its one attached report. Nothing starts ticked, and nothing is downloaded until you tick one.',
-            'Each exception shows # where any number already matches. Click edit to change what it is looked for by: # stands for any number and * for any text, so the same error with other values is found too. The stack still has to match.',
+            'An exception is looked for as written in the log, numbers included. Click edit to put # where any number will do and * where any text will, so the same error with other values is found too. The stack still has to match.',
             'Add exceptions of your own in the box below the list: type a message (# any number, * any text) to find it at any stack, or paste an exception from a log to find it at its stack.',
             'Reports with the same stack come first, then those with only the same crash site. A report someone else has says who, and can still be attached; it stays assigned to them.',
             'What a report\'s logs held is remembered, so a later search only downloads the logs of new or changed reports.',
