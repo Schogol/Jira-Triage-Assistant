@@ -69,6 +69,7 @@ function wrap(nodes) {
 }
 global.document = {
     createElement: (t) => new Node(t),
+    createTextNode: (t) => { const n = new Node('#text'); n.txt = String(t); return n; },
     getElementById: (id) => { const n = byId[id]; return n && n.isConnected ? n : null; },
     querySelector: () => null
 };
@@ -242,6 +243,16 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('...nor where the rest of the message differs, at either level', X.match(rep30('EBR-34', UE.replace('MISMATCH_COST', 'OTHER'), FU), [tUe]).length === 0 &&
         X.match(rep30('EBR-35', UE.replace('MISMATCH_COST', 'OTHER'), otherStack), [tUe]).length === 0);
     ok('unedited, another value is no match (control)', X.match(rep30('EBR-36', UE.replace('25', '30'), FU), [tU]).length === 0);
+    ts = X.targets([{ sig: A.sig, msg: 'KeyError: 2' }], null, null, null,
+        { typed: [{ id: 'typed:1', text: 'KeyError: *' }], pasted: [{ sig: B.sig, msg: 'ValueError: bad' }, { sig: A.sig, msg: 'KeyError: 2' }], n: 1 });
+    ok('added exceptions come after the defect\'s own: pasted ones at their stack, typed ones last',
+        ts.map((t) => t.msg + (t.own ? '+' : '') + (t.typed ? '*' : '')).join() === 'KeyError: 2+,ValueError: bad+,KeyError: *+*', ts.map((t) => t.msg).join());
+    ok('...a typed one has no stack, and is not told apart by one', ts[2].typed && ts[2].fr === null && ts[2].cfr === null && !ts[2].via && ts[2].pat === 'KeyError: *');
+    ok('...matches its message at any stack, as the same message', (() => { const mm = X.match(X._entry(item('EBR-61'), { exc: [{ sig: A2.sig }] }, {}), [ts[2]]); return mm.length === 1 && !mm[0].exact; })());
+    ok('...and not another message', X.match(X._entry(item('EBR-62'), { exc: [{ sig: B.sig }] }, {}), [ts[2]]).length === 0);
+    ok('where an added exception comes from', X._src(ts[2]) === 'added by you, at any stack' && X._src(ts[1]) === 'added by you' && X._src(ts[0]) === 'in the description',
+        [X._src(ts[2]), X._src(ts[1]), X._src(ts[0])].join(' | '));
+    ok('hovering a typed one says it has no stack', X._tip(ts[2]) === 'Looked for by this message alone, at any stack' && X._tip(ts[0]) === P._sigTip(A.sig, 'KeyError: 2'));
 
     const reps = [r1, r2, r3, r4];
     reps.forEach((r) => { r.m = X.match(r, [tA2]); });
@@ -470,13 +481,29 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
 
     const wr = new Node('div'), ww = new Node('div');
     ww.className = 'jx-why'; wr.appendChild(ww);
-    X._why(wr, [{ t: { msg: 'KeyError: 2', via: 'other.py:start > …' }, exact: true, where: 'log' }]);
+    X._why(wr, [{ t: { sig: A.sig, msg: 'KeyError: 2', via: 'other.py:start > …' }, exact: true, where: 'log' }]);
     ok('a match names the stack it is, when its message is not enough', /same stackKeyError: 2 via other\.py:start/.test(wr.textContent), wr.textContent);
     X._why(wr, [{ t: { sig: A.sig, msg: 'KeyError: 2' }, exact: true, where: 'log' }]);
     ok('...and its stack on hover', byCls(wr, 'jx-msg')[0].getAttribute('title') === P._sigTip(A.sig, 'KeyError: 2'));
+    const phs = (n) => byCls(n, 'jx-ph').map((x) => x.textContent + '=' + x.getAttribute('title')).join();
+    ok('an exception is shown as it is looked for: the numbers that match any number as #', X._shown(tU) === X._editText(tU) && /\(#, #\)/.test(X._shown(tU)) && /COST: 25>/.test(X._shown(tU)), X._shown(tU));
+    ok('...an edited one by its edit', X._shown(Object.assign({}, tU, { pat: 'UserError: * (#)' })) === 'UserError: * (#)');
+    ok('...one without a message says so', X._shown({ sig: '|a.py:f>b.py:g', msg: '' }) === '(no message)');
+    let mk = X._marked($('<span></span>'), 'a # b * c', false);
+    ok('a # is marked as any number, a * left plain in an exception as it is', mk[0].textContent === 'a # b * c' && phs(mk[0]) === '#=any number', phs(mk[0]));
+    mk = X._marked($('<span></span>'), '#* x', true);
+    ok('...and in an edit, a * marked as any text', mk[0].textContent === '#* x' && phs(mk[0]) === '#=any number,*=any text', phs(mk[0]));
+    X._why(wr, [{ t: tU, exact: true, where: 'log' }]);
+    ok('a match line shows the exception as it was looked for, its # marked', /\(#, #\)/.test(wr.textContent) && phs(wr) === '#=any number,#=any number', wr.textContent);
+    X._why(wr, [{ t: Object.assign({}, tU, { pat: 'UserError: *' }), exact: false, where: 'description' }]);
+    ok('...an edited one by its edit, and where it was found', /~ same crash siteUserError: \* \(in its description\)$/.test(wr.textContent) && phs(wr) === '*=any text', wr.textContent);
     st.targets = [{ sig: A.sig, msg: 'KeyError: 2', via: 'foo.py:onclick > …', desc: true }];
     X._paintTargets(st);
     ok('...and so does its box', / via foo\.py:onclick/.test(byId['jx-targets'].textContent), byId['jx-targets'].textContent);
+    st.targets = [{ sig: fp('TypeError: bad operand for *: int', FU).sig, msg: 'TypeError: bad operand for *: int' }, Object.assign({}, tU, { pat: 'UserError: *' })];
+    X._paintTargets(st);
+    const trows = byCls(byId['jx-targets'], 'jx-target');
+    ok('a * in an exception as it is shown plain, one in an edit marked', phs(trows[0]) === '' && phs(trows[1]) === '*=any text', phs(trows[0]) + ' / ' + phs(trows[1]));
     X._retarget(Object.assign(st, { tsig: null }));
     // the Attach control's options
     const opts = built.find((b) => b.key === 'EBR-1').opts;
@@ -552,6 +579,9 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     const tgt = () => byId['jx-targets'], rowsT = () => byCls(tgt(), 'jx-target'), editsOf = (r) => byCls(r, 'jx-tedit');
     const box = () => find(tgt(), (n) => n.hasCls('jx-pat'))[0];
     ok('each exception offers an edit', rowsT().length === 2 && rowsT().every((r) => editsOf(r).map((n) => n.textContent).join() === 'edit'));
+    ok('...and its row shows what it is looked for by, as the box will: the numbers that match any number as #, marked',
+        byCls(rowsT()[0], 'jx-tmsg')[0].textContent === X._editText(st.targets[0]) && byCls(rowsT()[0], 'jx-ph').length === 2 && byCls(rowsT()[1], 'jx-ph').length === 0,
+        byCls(rowsT()[0], 'jx-tmsg')[0].textContent);
     click(editsOf(rowsT()[0])[0]);
     let inp = box();
     ok('edit opens a box with the text to start from, and the hint', !!inp && inp.value === X._editText(st.targets[0]) && st.editor === inp && st.editing === U.sig &&
@@ -568,6 +598,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('Enter keeps the edit, and the list is drawn again', st.edit[U.sig] === want && !st.editing && !inp.isConnected && rowsT().length === 3, JSON.stringify(st.edit));
     const msg0 = byCls(rowsT()[0], 'jx-tmsg')[0];
     ok('...the edited message shown and marked, with a reset', msg0.hasCls('edited') && msg0.textContent === want && editsOf(rowsT()[0]).map((n) => n.textContent).join() === 'edit,reset');
+    ok('...its # marked, the one typed as well', byCls(msg0, 'jx-ph').length === 3);
     ok('...and the target looked for by it', st.targets[0].pat === want && !!st.targets[0].re);
     X._add(st, item('EBR-41', null, [], '2026-10-07T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: fp(UE.replace('25', '30'), FU).sig }] }, cached: false });
     const hasRow = (k) => byId['jx-results'].kids.find((n) => n.getAttribute('data-key') === k);
@@ -608,8 +639,80 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     st = X.openView();
     ok('edits are remembered for the defect when the window opens again', st.edit === kept && st.edit[A.sig] === 'KeyError: *');
     ok('...and another defect has its own', X._state('EDR-78', overlay()).edit !== kept);
+
+    // ================= exceptions of one's own =================
     ROOT.removeChild(st.node);
-    X._edits = {};
+    X._edits = {}; X._added = {};
+    st = X.openView();
+    st.started = true; st.profileDone = true; st.desc = [{ sig: U.sig, msg: U.msg }];
+    X._retarget(st);
+    const scroll = byId['jx-targets'].parentNode, ain = find(scroll, (n) => n.hasCls('jx-addin'))[0], addMsg = () => st.addMsg.textContent;
+    const removeOf = (sig) => editsOf(rowsT()[st.targets.findIndex((t) => t.sig === sig)]).filter((n) => n.textContent === 'remove')[0];
+    ok('below the list, a box to add an exception of one\'s own, outside the list that is redrawn', !!ain && ain.parentNode.hasCls('jx-add') && !byCls(tgt(), 'jx-addin').length);
+    keyOn(ain, 'Enter');
+    ok('an empty box adds nothing, and says what to put in it', st.targets.length === 1 && /Type an exception/.test(addMsg()), addMsg());
+    ain.value = '  *  ';
+    keyOn(ain, 'Enter');
+    ok('...nor a * on its own', st.targets.length === 1 && /on its own, \* finds every exception/.test(addMsg()) && ain.value === '  *  ', addMsg());
+    ain.value = 'UserError:   User error, msg=IndustryValidationError*';
+    keyOn(ain, 'Enter');
+    const own = st.targets[1];
+    ok('a typed message is added, last and ticked, the box emptied', st.targets.length === 2 && own.typed && own.pat === 'UserError: User error, msg=IndustryValidationError*' &&
+        st.on[own.sig] === true && ain.value === '' && addMsg() === '', JSON.stringify(own));
+    ok('...looked for at any stack', own.fr === null && own.re.test(um(UE, FA)));
+    const ownRow = rowsT()[1];
+    ok('...its row says so, with only a remove, its * marked as any text', /added by you, at any stack/.test(ownRow.textContent) && editsOf(ownRow).map((n) => n.textContent).join() === 'remove' &&
+        phs(ownRow) === '*=any text' && ownRow.getAttribute('title') === 'Looked for by this message alone, at any stack', ownRow.textContent);
+    ain.value = 'UserError: User error, msg=IndustryValidationError*';
+    keyOn(ain, 'Enter');
+    ok('the same message twice is added once', st.added.typed.length === 1 && st.targets.length === 2);
+    X._add(st, item('EBR-60', null, [], '2026-10-08T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: fp(UE.replace('25', '40'), FA).sig }] }, cached: false });
+    ok('a report with that message at another stack is found, as the same message',
+        !!hasRow('EBR-60') && /same messageUserError: User error, msg=IndustryValidationError\*/.test(hasRow('EBR-60').textContent), hasRow('EBR-60') && hasRow('EBR-60').textContent);
+    ain.value = descBlock('ValueError: bad', FB);
+    keyOn(ain, 'Enter');
+    let pasted = st.targets.filter((t) => t.sig === B.sig)[0];
+    ok('a whole exception pasted from a log is added at its stack, ticked', !!pasted && pasted.own && !pasted.typed && st.on[B.sig] === true && st.added.pasted.length === 1 && ain.value === '',
+        JSON.stringify(st.added));
+    ok('...editable like the others, and removable', editsOf(rowsT()[st.targets.indexOf(pasted)]).map((n) => n.textContent).join() === 'edit,remove' &&
+        /added by you/.test(rowsT()[st.targets.indexOf(pasted)].textContent));
+    ain.value = 'Formatted exception info: ValueError: worse Caught at: ' + frames(FB).join(' ');
+    keyOn(ain, 'Enter');
+    ok('...also without its EXCEPTION # line, from its message and stack', st.added.pasted.length === 2 && st.targets.some((t) => t.sig === fp('ValueError: worse', FB).sig));
+    ain.value = descBlock('IndexError: one', FB) + ' ' + descBlock('IndexError: two', FA);
+    keyOn(ain, 'Enter');
+    ok('...and two pasted at once are both added', st.added.pasted.length === 4 &&
+        [fp('IndexError: one', FB).sig, fp('IndexError: two', FA).sig].every((sg) => st.targets.some((t) => t.sig === sg) && st.on[sg] === true), JSON.stringify(st.added.pasted.map((e) => e.msg)));
+    st.added.pasted.splice(2, 2);
+    X._retarget(st);
+    ain.value = descBlock(UE, FU);
+    keyOn(ain, 'Enter');
+    ok('pasting one already in the list only ticks it', st.added.pasted.length === 2 && st.on[U.sig] === true && st.targets.length === 4 &&
+        editsOf(rowsT()[0]).map((n) => n.textContent).join() === 'edit');
+    ain.value = frames(FA).join(' ');
+    keyOn(ain, 'Enter');
+    ok('a stack without its message is not added, and that is said', st.targets.length === 4 && /Paste the whole exception/.test(addMsg()) && ain.value !== '', addMsg());
+    ain.value = 'KeyError: #';
+    (ain.handlers.keydown || []).forEach((f) => f.call(ain, { key: 'Enter', shiftKey: true, preventDefault() {}, stopPropagation() {} }));
+    ok('Shift+Enter is a new line, not an add', st.added.typed.length === 1 && ain.value === 'KeyError: #');
+    keyOn(ain, 'Escape');
+    ok('Esc empties the box, and the message with it', ain.value === '' && addMsg() === '');
+    ain.value = 'KeyError: #';
+    click(find(scroll, (n) => n.hasCls('jx-addbtn'))[0]);
+    ok('the Add button adds as Enter does', st.added.typed.length === 2 && st.targets.length === 5);
+    const typedSig = st.added.typed[0].id;
+    click(removeOf(typedSig));
+    ok('remove takes a typed one out of the list, unticked', st.added.typed.length === 1 && !st.targets.some((t) => t.sig === typedSig) && st.on[typedSig] === undefined);
+    ok('...and what only it held leaves the results', !hasRow('EBR-60'));
+    click(removeOf(B.sig));
+    ok('a pasted one is removed the same way', st.added.pasted.length === 1 && !st.targets.some((t) => t.sig === B.sig) && st.on[B.sig] === undefined);
+    const keptA = st.added;
+    ROOT.removeChild(st.node);
+    st = X.openView();
+    ok('what was added is remembered for the defect when the window opens again', st.added === keptA && st.added.typed.length === 1 && st.added.pasted.length === 1);
+    ok('...and another defect has its own', X._state('EDR-78', overlay()).added !== keptA);
+    ROOT.removeChild(st.node);
+    X._edits = {}; X._added = {};
     X._load = realLoad;
 
     // ================= loading the defect =================
