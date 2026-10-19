@@ -5,8 +5,10 @@
 //
 //   node tests/ci-static.js                      everything except the checks against a base
 //   node tests/ci-static.js --base origin/main   plus the version check and the changelog against that ref
+//   node tests/ci-static.js --only es5,changelog only those checks (parse, eol, dash, es5, version, changelog)
 //
 // Run it from anywhere inside the repo. It reads the committed state through git, so stage new files first.
+// --only is for the breakage suites, which test one rule each: the parse check alone starts node once per script.
 const fs = require('fs'), path = require('path');
 const { execFileSync } = require('child_process');
 
@@ -14,6 +16,14 @@ const ROOT = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: '
 const git = (args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 const argBase = process.argv.indexOf('--base');
 const BASE = argBase > 0 ? process.argv[argBase + 1] : null;
+const argOnly = process.argv.indexOf('--only');
+const ONLY = argOnly > 0 ? String(process.argv[argOnly + 1] || '').split(',') : null;
+const CHECKS = ['parse', 'eol', 'dash', 'es5', 'version', 'changelog'];
+if (ONLY && (!ONLY.length || ONLY.some((k) => CHECKS.indexOf(k) < 0))) {
+    console.log('--only takes a comma-separated list of: ' + CHECKS.join(', '));
+    process.exit(2);
+}
+const want = (k) => !ONLY || ONLY.indexOf(k) >= 0;
 
 let fail = 0;
 const ok = (name, cond, detail) => {
@@ -22,36 +32,41 @@ const ok = (name, cond, detail) => {
 };
 
 // ---- every script parses ----
-const files = git(['ls-files', '-z']).split('\0').filter(Boolean);
-files.filter((f) => /\.js$/.test(f)).forEach((f) => {
-    try {
-        execFileSync(process.execPath, ['--check', path.join(ROOT, f)], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
-        ok('parses: ' + f, true);
-    } catch (e) {
-        ok('parses: ' + f, false, String(e.stderr || e.message).trim().split('\n').slice(0, 4).join('\n          '));
-    }
-});
+if (want('parse')) {
+    git(['ls-files', '-z']).split('\0').filter((f) => /\.js$/.test(f)).forEach((f) => {
+        try {
+            execFileSync(process.execPath, ['--check', path.join(ROOT, f)], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8' });
+            ok('parses: ' + f, true);
+        } catch (e) {
+            ok('parses: ' + f, false, String(e.stderr || e.message).trim().split('\n').slice(0, 4).join('\n          '));
+        }
+    });
+}
 
 // ---- git stores LF ----
 // The Windows working copy is CRLF (core.autocrlf), which is fine: what matters is what is committed. A file
 // committed with CRLF or mixed endings shows up here as i/crlf or i/mixed. Binary files (i/-text) are skipped.
-const eol = git(['ls-files', '--eol', '-z']).split('\0').filter(Boolean).map((l) => {
+const eol = !(want('eol') || want('dash')) ? [] : git(['ls-files', '--eol', '-z']).split('\0').filter(Boolean).map((l) => {
     const m = /^i\/(\S*)\s+w\/\S*\s+attr\/.*?\t(.*)$/.exec(l);
     return m ? { index: m[1], file: m[2] } : null;
 }).filter(Boolean);
-const badEol = eol.filter((e) => e.index !== 'lf' && e.index !== 'none' && e.index !== '-text');
-ok('every text file is committed with LF endings (' + eol.length + ' files)', badEol.length === 0,
-    badEol.map((e) => e.file + ' is stored as ' + e.index).join('\n          '));
+if (want('eol')) {
+    const badEol = eol.filter((e) => e.index !== 'lf' && e.index !== 'none' && e.index !== '-text');
+    ok('every text file is committed with LF endings (' + eol.length + ' files)', badEol.length === 0,
+        badEol.map((e) => e.file + ' is stored as ' + e.index).join('\n          '));
+}
 
 // ---- no em dashes ----
-const EM = String.fromCharCode(0x2014);
-const dashed = [];
-eol.filter((e) => e.index !== '-text').forEach((e) => {
-    const lines = fs.readFileSync(path.join(ROOT, e.file), 'utf8').split('\n');
-    lines.forEach((l, i) => { if (l.indexOf(EM) >= 0) { dashed.push(e.file + ':' + (i + 1) + '  ' + l.trim().slice(0, 100)); } });
-});
-ok('no em dashes in any tracked file', dashed.length === 0, dashed.slice(0, 20).join('\n          ') +
-    (dashed.length > 20 ? '\n          ...and ' + (dashed.length - 20) + ' more' : ''));
+if (want('dash')) {
+    const EM = String.fromCharCode(0x2014);
+    const dashed = [];
+    eol.filter((e) => e.index !== '-text').forEach((e) => {
+        const lines = fs.readFileSync(path.join(ROOT, e.file), 'utf8').split('\n');
+        lines.forEach((l, i) => { if (l.indexOf(EM) >= 0) { dashed.push(e.file + ':' + (i + 1) + '  ' + l.trim().slice(0, 100)); } });
+    });
+    ok('no em dashes in any tracked file', dashed.length === 0, dashed.slice(0, 20).join('\n          ') +
+        (dashed.length > 20 ? '\n          ...and ' + (dashed.length - 20) + ' more' : ''));
+}
 
 // ---- the page code is ES5 ----
 // JiTA.user.js is written as plain ES5 (var + function) throughout. The one exception is jitaWorkerBody: it is
@@ -71,9 +86,11 @@ function es5Breaks(text) {
     });
     return out;
 }
-const es5 = es5Breaks(fs.readFileSync(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'), 'utf8'));
-ok('the page code declares with var, not let / const (jitaWorkerBody excepted)', es5.length === 0,
-    es5.slice(0, 20).join('\n          '));
+if (want('es5')) {
+    const es5 = es5Breaks(fs.readFileSync(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'), 'utf8'));
+    ok('the page code declares with var, not let / const (jitaWorkerBody excepted)', es5.length === 0,
+        es5.slice(0, 20).join('\n          '));
+}
 
 // ---- the version moves forward ----
 // Tampermonkey only offers an update when @version is higher than the installed one, so a change that ships
@@ -83,8 +100,8 @@ function version(text) {
     return m ? [+m[1], +m[2], +m[3]] : null;
 }
 const head = version(fs.readFileSync(path.join(ROOT, 'JiTA.user.js'), 'utf8'));
-ok('JiTA.user.js has a major.feature.patch @version', !!head);
-if (BASE) {
+if (want('version')) { ok('JiTA.user.js has a major.feature.patch @version', !!head); }
+if (want('version') && BASE) {
     const changed = git(['diff', '--name-only', BASE + '...HEAD', '--', 'JiTA.user.js']).trim() !== '';
     if (!changed) {
         console.log('  ----  JiTA.user.js unchanged against ' + BASE + ', no version bump needed');
@@ -113,8 +130,8 @@ function changelog(text) {
     return (J.changelog && Array.isArray(J.changelog.ENTRIES)) ? J.changelog.ENTRIES : null;
 }
 // JITA_SRC names another copy whose changelog to check instead, as the harnesses take it (mutate-releases.js).
-const entries = changelog(fs.readFileSync(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'), 'utf8'));
-ok('JiTA.user.js carries its changelog', !!entries);
+const entries = want('changelog') ? changelog(fs.readFileSync(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'), 'utf8')) : null;
+if (want('changelog')) { ok('JiTA.user.js carries its changelog', !!entries); }
 if (entries) {
     const listed = {};
     entries.forEach((e) => { listed[e.v] = e; });

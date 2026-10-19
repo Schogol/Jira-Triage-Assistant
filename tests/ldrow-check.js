@@ -131,7 +131,7 @@ U._tabCount = function (v) { counts.push(L.qc.openFlags(v).length); return tabCo
 
 // ---- helpers ----
 const clone = (v) => JSON.parse(JSON.stringify(v));
-const settle = () => new Promise((r) => setTimeout(r, 0));
+const settle = async () => { for (let i = 0; i < 20; i++) { await new Promise((r) => setImmediate(r)); } };   // not a timeout: 15 ms each on Windows
 const rows = () => body.kids.filter((k) => has(k, 'ld-row'));
 const rowOf = (key) => rows().find((r) => r.attrs['data-key'] === key);
 function find(n, pred) { if (pred(n)) { return n; } for (const k of n.kids) { const f = find(k, pred); if (f) { return f; } } return null; }

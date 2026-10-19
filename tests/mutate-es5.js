@@ -27,7 +27,7 @@ const controls = [
 function run(text) {
     fs.writeFileSync(path.join(__dirname, TMP), text);
     let out = '';
-    try { out = execFileSync(process.execPath, ['ci-static.js'], { cwd: __dirname, encoding: 'utf8', env: Object.assign({}, process.env, { JITA_SRC: TMP }) }); }
+    try { out = execFileSync(process.execPath, ['ci-static.js', '--only', 'es5'], { cwd: __dirname, encoding: 'utf8', env: Object.assign({}, process.env, { JITA_SRC: TMP }) }); }
     catch (e) { out = e.stdout || ''; }
     return out.split('\n').filter((l) => /^  FAIL  the page code declares with var/.test(l));
 }

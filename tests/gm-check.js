@@ -19,12 +19,12 @@ let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
 
 // ---- a fake clock: the flow polls every 200 ms for up to 9 s, which a test should not sit through ----
-const realTimeout = setTimeout;
 let now = 0, timers = [], seq = 0;
 global.setTimeout = (fn, ms) => { const id = ++seq; timers.push({ id, at: now + (ms || 0), fn, every: 0 }); return id; };
 global.setInterval = (fn, ms) => { const id = ++seq; timers.push({ id, at: now + ms, fn, every: ms }); return id; };
 global.clearTimeout = global.clearInterval = (id) => { timers = timers.filter((x) => x.id !== id); };
-const flush = () => new Promise((r) => realTimeout(r, 0));   // lets every pending promise callback run
+// Lets every pending promise callback run. Not a real timeout: on Windows one lasts a whole 15 ms timer tick.
+const flush = async () => { for (let i = 0; i < 20; i++) { await new Promise((r) => setImmediate(r)); } };
 async function advance(ms) {   // run each timer due within ms, in time order, settling promises between them
     const end = now + ms;
     for (;;) {
