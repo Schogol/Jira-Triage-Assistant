@@ -64,7 +64,8 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
         db: { getDefect: () => Promise.resolve({ key: 'EBR-7', summary: 's' }) },
         util: { effectiveText: () => 'text' },
         ui: { _filterTerms: () => [], modeOverride: null },
-        rank: { suggestBest: (text, key, created, mode, terms, up) => { hook = up; return Promise.resolve({ mode: 'Keyword', results: [] }); } }
+        rank: { suggestBest: (text, key, created, mode, terms, up) => { hook = up; return Promise.resolve({ mode: 'Keyword', results: [] }); } },
+        repexc: { soon: () => Promise.resolve(null), forReport: () => Promise.resolve({}) }   // excboost-check.js covers the boost
     };
     const tStart = src.indexOf('\nJiTA.triage = {');
     Object.assign(T, eval('({' + cut('    _resolve: function (item) {', '\n    },\n', tStart) + '\n    }})'));

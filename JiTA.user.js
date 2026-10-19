@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.44.1
+// @version     3.45.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -3716,6 +3716,38 @@ JiTA.logsig = {
             return out;
         });
     },
+    // Every defect that holds one of these exceptions, for the ranking (JiTA.repexc): { defect key: 'exact' } when its
+    // description has the same stack, 'site' when only the same crash site. Every member of a cluster, not just its newest.
+    // KEEP IN SYNC with lgHolding in the worker.
+    holding: function (sigs) {
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'holding', sigs: sigs }).catch(function () { return JiTA.logsig._holdingLocal(sigs); }); }
+        return JiTA.logsig._holdingLocal(sigs);
+    },
+    _holdingLocal: function (sigs) {
+        return JiTA.logsig.ensure().then(function (idx) {
+            var out = {};
+            if (!idx) { return out; }
+            (sigs || []).forEach(function (sig) {
+                var c = idx.sigMap[sig];
+                if (c) { c.members.forEach(function (m) { out[m.key] = 'exact'; }); }
+            });
+            (sigs || []).forEach(function (sig) {
+                var cs = JiTA.logsig._crashOf(sig), cc = cs && idx.crashMap[cs];
+                if (cc) { cc.members.forEach(function (m) { if (!out[m.key]) { out[m.key] = 'site'; } }); }
+            });
+            return out;
+        });
+    },
+    // A defect's own exceptions, the ones pasted in its description: { sigs, crashes }. KEEP IN SYNC with lgSigsOf.
+    sigsOf: function (key) {
+        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'sigsOf', key: key }).catch(function () { return JiTA.logsig._sigsOfLocal(key); }); }
+        return JiTA.logsig._sigsOfLocal(key);
+    },
+    _sigsOfLocal: function (key) {
+        return JiTA.logsig.ensure().then(function (idx) {
+            return { sigs: (idx && idx.keyToSigs[key]) || [], crashes: (idx && idx.keyToCrash[key]) || [] };
+        });
+    },
     // A signature's crash site, as _fingerprint builds it: the message and the innermost CRASH_FRAMES frames. Frames hold
     // no "|", so the message ends at the last one; a function named "<module>" holds a ">", so a piece without ":"
     // belongs to the frame before it. KEEP IN SYNC with lgCrashOf in the worker.
@@ -5559,6 +5591,8 @@ JiTA.sync = {
         JiTA.sched.markSynced();   // any sync also resets the auto-sync 30-min clock
         if (defects || ebr) { JiTA.embed.prepare(true); }   // embed the new / changed text in the background
         if (ebr) { JiTA.translate.prepare(); }              // translate any new foreign reports to English
+        if (ebr) { JiTA.logread.prepare(); }                // read the logs of new or changed reports, for the exception boost
+        if (defects) { JiTA.repexc.reset(); }               // which defects hold an exception may have changed
         var k = JiTA.ui.currentKey;
         if (!k) { return; }
         // Defect data feeds the EBR (similar defects) view, bug report data the EDR/EO/PLAT (matching reports) view.
@@ -6216,15 +6250,45 @@ JiTA.rank._gateScored = function (cands, scope) {
     return out;
 };
 
+// ---- the exception boost (see JiTA.repexc) ----
+// `boost` (optional) is asked about the candidates before the cut: boost(keys) answers, or resolves, { key: 'exact' |
+// 'site' } for the candidates an exception confirms. Never rejects: a boost that fails boosts nothing.
+JiTA.rank._boostMap = function (boost, rows) {
+    if (!boost) { return Promise.resolve(null); }
+    var keys = [], seen = {};
+    (rows || []).forEach(function (r) { if (r && r.key && !seen[r.key]) { seen[r.key] = true; keys.push(r.key); } });
+    return Promise.resolve().then(function () { return boost(keys); }).then(function (m) { return m || {}; }, function () { return {}; });
+};
+// Raise a candidate an exception confirms: its score, its RRF and its shown % (capped below 100), and note why.
+JiTA.rank._boostRow = function (r, kind) {
+    var f = JiTA.repexc.FACTOR[kind];
+    if (!f) { return; }
+    if (typeof r.score === 'number') { r.score *= f; }
+    if (typeof r.rrf === 'number') { r.rrf *= f; }
+    if (typeof r.pct === 'number') { r.pct = Math.min(JiTA.repexc.PCT_MAX, Math.round(r.pct * f)); }
+    r.excHit = kind;
+};
+// `demote` (or nothing) followed by the boost of `map`; just `demote` when the map boosts nothing.
+JiTA.rank._withBoost = function (demote, map) {
+    if (!map || !Object.keys(map).length) { return demote; }
+    return function (r) {
+        if (demote) { demote(r); }
+        if (map[r.key]) { JiTA.rank._boostRow(r, map[r.key]); }
+    };
+};
+
 // Shared HYBRID body for suggestBest / suggestEbrBest: pull semantic candidates from the shared worker, gate them
-// tab-side, then RRF-fuse with the local BM25 candidates (with optional `demote`, defect side only). If the worker
-// is unavailable / errors / yields nothing usable, fall back to keyword-only.
-JiTA.rank._hybridResults = function (text, key, filterTerms, scope, bmFn, keywordOnly, demote) {
+// tab-side, then RRF-fuse with the local BM25 candidates (with optional `demote`, defect side only, and the optional
+// exception `boost`, both before the cut). If the worker is unavailable / errors / yields nothing usable, fall back to
+// keyword-only.
+JiTA.rank._hybridResults = function (text, key, filterTerms, scope, bmFn, keywordOnly, demote, boost) {
     return JiTA.rank._workerSemantic(text, scope, key, filterTerms).then(function (cands) {
         var sem = JiTA.rank._gateScored(cands, scope);
         if (!sem.length) { return keywordOnly(); }
         return bmFn(text, key, JiTA.rank.CAND, filterTerms).then(function (bm) {
-            return { mode: 'Hybrid', results: JiTA.rank._fuse(sem, bm, demote) };
+            return JiTA.rank._boostMap(boost, sem.slice(0, JiTA.rank.CAND).concat(bm)).then(function (map) {
+                return { mode: 'Hybrid', results: JiTA.rank._fuse(sem, bm, JiTA.rank._withBoost(demote, map)) };
+            });
         });
     }).catch(function () { return keywordOnly(); });
 };
@@ -6264,7 +6328,8 @@ JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid, onUpgrade) {
 // shared terms (item/module names, error strings) that embeddings smooth over are caught by BM25, while
 // paraphrases are caught by the embeddings, so the "obvious" duplicate surfaces far more reliably.
 // Returns { mode: 'Hybrid' | 'Keyword', results: [...] } with a display % already attached to each result.
-JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, onUpgrade) {
+// `boost` (optional): the defects an exception in this report's log confirms (see JiTA.rank._boostMap).
+JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, onUpgrade, boost) {
     // Feature A: gently demote a Closed defect that was fixed long before this bug report was filed - it
     // is very unlikely to be the report's real duplicate. Scales whatever score fields the result carries
     // (score / rrf / pct) by the age factor and notes the gap, so the row says why it ranks lower.
@@ -6282,17 +6347,20 @@ JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, 
         // Pull a wider candidate set so the demotion can re-order before we cut to TOP_N (a stale match
         // shouldn't keep a slot a fresher one deserves).
         return JiTA.rank.suggest(text, key, JiTA.rank.CAND, filterTerms).then(function (list) {
-            for (var d = 0; d < list.length; d++) { demote(list[d]); }
-            list.sort(function (a, c) { return c.score - a.score; });
-            list = list.slice(0, JiTA.TOP_N);
-            var top = (list[0] && list[0].score) || 0;
-            for (var i = 0; i < list.length; i++) { list[i].pct = top > 0 ? Math.round(list[i].score / top * 100) : 0; }
-            return { mode: 'Keyword', results: list };
+            return JiTA.rank._boostMap(boost, list).then(function (map) {
+                var adj = JiTA.rank._withBoost(demote, map);
+                for (var d = 0; d < list.length; d++) { adj(list[d]); }
+                list.sort(function (a, c) { return c.score - a.score; });
+                list = list.slice(0, JiTA.TOP_N);
+                var top = (list[0] && list[0].score) || 0;
+                for (var i = 0; i < list.length; i++) { list[i].pct = top > 0 ? Math.round(list[i].score / top * 100) : 0; }
+                return { mode: 'Keyword', results: list };
+            });
         });
     }
     // HYBRID (semantic + keyword, RRF-fused) over the DEFECT indexes, with stale-match demotion.
     function hybrid() {
-        return JiTA.rank._hybridResults(text, key, filterTerms, 'defects', JiTA.rank.suggest, keywordOnly, demote);
+        return JiTA.rank._hybridResults(text, key, filterTerms, 'defects', JiTA.rank.suggest, keywordOnly, demote, boost);
     }
     return JiTA.rank._pickMode(forceMode, keywordOnly, hybrid, onUpgrade);
 };
@@ -6300,16 +6368,25 @@ JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, 
 // EDR (defect) -> matching OPEN bug reports, best available ranking. Same hybrid (semantic + BM25, fused
 // with RRF) approach as suggestBest, but over the EBR indexes and with no stale-demotion (open reports have
 // no fix date). Returns { mode: 'Hybrid' | 'Keyword', results: [...] } with a display % per result.
-JiTA.rank.suggestEbrBest = function (text, key, forceMode, filterTerms, onUpgrade) {
+// `boost` (optional): the reports whose logs hold this defect's exceptions (see JiTA.rank._boostMap).
+JiTA.rank.suggestEbrBest = function (text, key, forceMode, filterTerms, onUpgrade, boost) {
     function keywordOnly() {
-        // suggestEbr already attaches a top-relative pct.
-        return JiTA.rank.suggestEbr(text, key, JiTA.TOP_N, filterTerms).then(function (list) {
-            return { mode: 'Keyword', results: list };
+        // A wider pull than TOP_N, so a boosted report can move into the cut; the % is then top-relative over the cut.
+        return JiTA.rank.suggestEbr(text, key, JiTA.rank.CAND, filterTerms).then(function (list) {
+            return JiTA.rank._boostMap(boost, list).then(function (map) {
+                var adj = JiTA.rank._withBoost(null, map);
+                if (adj) { for (var d = 0; d < list.length; d++) { adj(list[d]); } }
+                list.sort(function (a, c) { return c.score - a.score; });
+                list = list.slice(0, JiTA.TOP_N);
+                var top = (list[0] && list[0].score) || 0;
+                for (var i = 0; i < list.length; i++) { list[i].pct = top > 0 ? Math.round(list[i].score / top * 100) : 0; }
+                return { mode: 'Keyword', results: list };
+            });
         });
     }
     // HYBRID over the OPEN-EBR indexes; no stale-demotion (open reports have no fix date).
     function hybrid() {
-        return JiTA.rank._hybridResults(text, key, filterTerms, 'ebr', JiTA.rank.suggestEbr, keywordOnly);
+        return JiTA.rank._hybridResults(text, key, filterTerms, 'ebr', JiTA.rank.suggestEbr, keywordOnly, null, boost);
     }
     return JiTA.rank._pickMode(forceMode, keywordOnly, hybrid, onUpgrade);
 };
@@ -6567,6 +6644,8 @@ JiTA.ui = {
 .jita-sd-sum { margin-top: 2px; color: #e6e6e6; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-meta { margin-top: 2px; color: #7a8694; font-size: 10px; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-date { margin-top: 2px; color: #7a8694; font-size: 10px; text-align: right; }\
+.jita-sd-exc { margin-top: 2px; color: #7fdca4; font-size: 10px; font-weight: 700; }\
+.jita-sd-exc.site { color: #9aa6b2; }\
 #jita-sd-loglink { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; }\
 #jita-sd-loglink.has-hits { display: block; }\
 #jita-sd-loglink .jita-sd-loglink-head { font-weight: 700; color: #ffb547; font-size: 11px; margin-bottom: 4px; }\
@@ -6689,6 +6768,8 @@ JiTA.ui = {
 #jita-side-group #jita-sd-list a, #jita-side-group .jita-sd-link { color: var(--ds-link, #0c66e4); }\
 #jita-side-group .jita-sd-sum { color: var(--ds-text, #172b4d); }\
 #jita-side-group .jita-sd-meta, #jita-side-group .jita-sd-score, #jita-side-group .jita-sd-date { color: var(--ds-text-subtlest, #626f86); }\
+#jita-side-group .jita-sd-exc { color: var(--ds-text-success, #216e4e); }\
+#jita-side-group .jita-sd-exc.site { color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group .jita-sd-proj { background: var(--ds-background-neutral, #091e420f); color: var(--ds-text-subtle, #44546f); }\
 #jita-side-group .jita-sd-hide { color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group .jita-sd-hide:hover { color: #c9372c; }\
@@ -8085,7 +8166,7 @@ JiTA.ui = {
         var terms = JiTA.ui._filterTerms();   // honor the active filter when picking the replacement row
         JiTA.ui.getIssueText(defectKey).then(function (text) {
             if (JiTA.ui.currentKey !== defectKey || !text) { return; }
-            return JiTA.rank.suggestEbrBest(text, defectKey, JiTA.ui.modeOverride, terms).then(function (out) {
+            return JiTA.rank.suggestEbrBest(text, defectKey, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(defectKey)).then(function (out) {
                 if (JiTA.ui.currentKey !== defectKey) { return; }
                 var results = out.results || [];
                 $('#jita-sd-mode').text(out.mode);
@@ -8178,6 +8259,7 @@ JiTA.ui = {
         action(r.key).appendTo($li);
         $('<div class="jita-sd-sum"></div>').text(r.summary || '').appendTo($li);
         if (meta) { $('<div class="jita-sd-meta"></div>').text(meta).appendTo($li); }
+        if (r.excHit) { JiTA.repexc.badge(r.excHit, '<div class="jita-sd-exc"></div>').appendTo($li); }   // why it ranks higher
         var created = JiTA.util.fmtDate(r.created);
         if (created) { $('<div class="jita-sd-date"></div>').text('Created ' + created).appendTo($li); }
         return $li;
@@ -8287,6 +8369,7 @@ JiTA.ui = {
     // fresh page (trend.warm's) downloaded and matched multi-MB logs a second time; and a failed read of the
     // attachment list was kept as "no hits", hiding the section until the tab was reloaded.
     _logScanCache: {},
+    _logExc: {},   // key -> the exceptions a finished scan read in the report's logs, [{ sig, msg }] (for JiTA.repexc)
     scanIssueLog: function (key) {
         var cache = JiTA.ui._logScanCache;
         if (cache[key]) { return cache[key]; }
@@ -8304,9 +8387,17 @@ JiTA.ui = {
                         var fn = atts[i].filename || '';
                         if (/\.txt$/i.test(fn) && /log/i.test(fn) && atts[i].content) { logs.push(atts[i]); }
                     }
-                    if (!logs.length) { resolve({}); return; }
+                    if (!logs.length) { JiTA.ui._logExc[key] = []; resolve({}); return; }
                     console.log('[JiTA] log scan ' + key + ': ' + logs.length + ' log attachment(s)');
-                    var merged = {}, pending = logs.length;
+                    var merged = {}, pending = logs.length, exc = [], seen = {};
+                    // The report's own exceptions, each once, fingerprinted as the profile does: the ranking boosts the
+                    // defects that hold one (JiTA.repexc).
+                    function keepExc(txt) {
+                        if (!(JiTA.profile && JiTA.profile.logExceptions)) { return; }
+                        try {   // a throw here would leave this log uncounted, and the scan pending for good
+                            JiTA.profile.logExceptions(txt).forEach(function (e) { if (!seen[e.sig]) { seen[e.sig] = true; exc.push(e); } });
+                        } catch (e) { /* the matching below still runs */ }
+                    }
                     function mergeFound(found) {
                         Object.keys(found || {}).forEach(function (k) {
                             if (!merged[k]) { merged[k] = { defect: k, count: 0, msg: found[k].msg, loose: !!found[k].loose }; }
@@ -8316,12 +8407,14 @@ JiTA.ui = {
                         });
                         if (--pending === 0) {
                             console.log('[JiTA] log scan ' + key + ': ' + Object.keys(merged).length + ' known defect(s) matched');
+                            JiTA.ui._logExc[key] = exc;
                             resolve(merged);
                         }
                     }
                     logs.forEach(function (att) {
                         JiTA.ui._fetchText(att.content).then(function (txt) {
                             if (!txt) { mergeFound({}); return; }
+                            keepExc(txt);
                             JiTA.logsig.matchText(txt).then(mergeFound, function () { mergeFound({}); });
                         }, function () { mergeFound({}); });
                     });
@@ -8493,8 +8586,12 @@ JiTA.ui = {
                     return;
                 }
                 if (!text) { JiTA.ui.setStatus('Could not read this issue’s text.'); return; }
-                return JiTA.ui._getCreated(key).then(function (brCreated) {
-                return JiTA.rank.suggestBest(text, key, brCreated, JiTA.ui.modeOverride, terms).then(function (out) {
+                // The defects an exception in this report's log confirms. Its log may still be downloading: then the list
+                // is drawn without them, and once more when they are known.
+                var late = function () { if (!stale()) { JiTA.ui.scheduleRender(); } };
+                return Promise.all([JiTA.ui._getCreated(key), JiTA.repexc.soon(JiTA.repexc.forReport(key), late)]).then(function (got) {
+                var brCreated = got[0];
+                return JiTA.rank.suggestBest(text, key, brCreated, JiTA.ui.modeOverride, terms, undefined, got[1]).then(function (out) {
                     if (stale()) { return; }
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
@@ -8546,7 +8643,8 @@ JiTA.ui = {
                     return;
                 }
                 if (!text) { JiTA.ui.setStatus('Could not read this defect’s text.'); return; }
-                return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms).then(function (out) {
+                // Reports whose logs hold this defect's exceptions rank higher (JiTA.repexc; their logs are read ahead by JiTA.logread).
+                return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(key)).then(function (out) {
                     if (stale()) { return; }
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
@@ -9147,6 +9245,22 @@ JiTA.menu = {
             $cnt.on('keydown', function (e) { if (e.key === 'Enter') { commitTopN(); } });
             $cntRow.append($cnt);
             $ta.append($cntRow);
+
+            // The background reading of every open report's logs (JiTA.logread), which lets a defect's matching bug reports
+            // rank by the exceptions their logs hold. A GM flag of its own, on by default; switched on, a pass starts.
+            var $lrRow = $('<div class="jita-menu-row"></div>');
+            $('<span class="lbl">Read open reports\' logs</span>')
+                .append($('<span class="sub"></span>').text('Downloads the logs of every open bug report in the background, so the reports matching a defect rank higher when their logs hold its exceptions. The first run downloads a lot, later ones only new or changed reports.'))
+                .appendTo($lrRow);
+            var $lrSw = $('<div class="jita-sw"><span class="knob"></span></div>');
+            if (JiTA.logread.on()) { $lrSw.addClass('on'); }
+            $lrSw.on('click', function () {
+                gmSet(JiTA.logread.KEY, !JiTA.logread.on());
+                if (JiTA.logread.on()) { JiTA.logread.prepare(); }
+                refreshMenu();
+            });
+            $lrRow.append($lrSw);
+            $ta.append($lrRow);
 
             // Embedding backend (GPU vs CPU). Same flags toggleEmbedBackend() reads/writes; it reloads.
             var gpuOn = gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false);
@@ -10427,6 +10541,25 @@ function jitaWorkerBody(cfg) {
         });
         return out;
     }
+    // Every defect holding one of these exceptions: { defect key: 'exact' | 'site' }. KEEP IN SYNC with JiTA.logsig._holdingLocal.
+    function lgHolding(sigs) {
+        var idx = logsigCache, out = {};
+        if (!idx) { return out; }
+        (sigs || []).forEach(function (sig) {
+            var c = idx.sigMap[sig];
+            if (c) { c.members.forEach(function (m) { out[m.key] = 'exact'; }); }
+        });
+        (sigs || []).forEach(function (sig) {
+            var cs = lgCrashOf(sig), cc = cs && idx.crashMap[cs];
+            if (cc) { cc.members.forEach(function (m) { if (!out[m.key]) { out[m.key] = 'site'; } }); }
+        });
+        return out;
+    }
+    // A defect's own exceptions: { sigs, crashes }. KEEP IN SYNC with JiTA.logsig._sigsOfLocal.
+    function lgSigsOf(key) {
+        var idx = logsigCache;
+        return { sigs: (idx && idx.keyToSigs[key]) || [], crashes: (idx && idx.keyToCrash[key]) || [] };
+    }
 
     // One load at a time: the delayed embed pass and the open panel's first query both asked before the first
     // load finished, built a second pipeline (a second WebGPU session) and dropped one of them undisposed.
@@ -11349,6 +11482,8 @@ function jitaWorkerBody(cfg) {
                 else if (op === 'clusters') { result = lgClusters(); }
                 else if (op === 'match') { result = lgMatch(payload.text); }
                 else if (op === 'defects') { result = lgDefects(payload.sigs); }
+                else if (op === 'holding') { result = lgHolding(payload.sigs); }
+                else if (op === 'sigsOf') { result = lgSigsOf(payload.key); }
                 else { throw new Error('unknown logsig op: ' + op); }
             }
             else if (type === 'embedPass') {
@@ -11761,9 +11896,17 @@ JiTA.triage = {
                 delete T._cache[key];
                 if (T._open && T._queue[T._idx] && T._queue[T._idx].key === key) { T._render(); }
             };
-            var rank = (defectMode || view === 'simreports')
-                ? JiTA.rank.suggestEbrBest(base.text, key, JiTA.ui.modeOverride, terms, upgrade)
-                : JiTA.rank.suggestBest(base.text, key, (base.rec && base.rec.created) || item.created || null, JiTA.ui.modeOverride, terms, upgrade);
+            // The exceptions boost as in the panel: on a defect, the reports whose logs hold its exceptions; on a report,
+            // the defects holding an exception of its log. A report's log may still be downloading, and then the list is
+            // ranked without it and ranked again when it is known (upgrade).
+            var rank;
+            if (defectMode) { rank = JiTA.rank.suggestEbrBest(base.text, key, JiTA.ui.modeOverride, terms, upgrade, JiTA.repexc.forDefect(key)); }
+            else if (view === 'simreports') { rank = JiTA.rank.suggestEbrBest(base.text, key, JiTA.ui.modeOverride, terms, upgrade); }
+            else {
+                rank = JiTA.repexc.soon(JiTA.repexc.forReport(key), upgrade).then(function (boost) {
+                    return JiTA.rank.suggestBest(base.text, key, (base.rec && base.rec.created) || item.created || null, JiTA.ui.modeOverride, terms, upgrade, boost);
+                });
+            }
             return rank.then(function (out) {
                 var results = out.results || [];   // already capped at the user's TOP_N (sdTopN); digits address the first MATCH_KEYS
                 return Promise.all(results.map(function (r) {   // enrich for the row title-peek (a handful of DB reads)
@@ -12145,6 +12288,7 @@ JiTA.triage = {
                     }
                     $('<span class="jt-msum"></span>').text(r.summary || '').appendTo($li);
                     if (meta) { $('<span class="jt-mmeta"></span>').text(meta).appendTo($li); }
+                    if (r.excHit) { JiTA.repexc.badge(r.excHit, '<span class="jt-mexc"></span>').appendTo($li); }   // why it ranks higher
                     // Feature C hover preview, same as the panel rows: the styled card with the defect's summary,
                     // full (rendered) description and status - r already carries description/created from the
                     // enrichment reads above. The tip is fixed-position at z 10001, above the overlay's 10000.
@@ -13001,6 +13145,8 @@ JiTA.triage = {
                 '.jita-triage-view .jt-pct { color: #fff; font-weight: 800; margin-left: 8px; font-size: 11px; }' +
                 '.jita-triage-view .jt-msum { display: block; color: #e6e6e6; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }' +
                 '.jita-triage-view .jt-mmeta { display: block; color: #7a8694; font-size: 10px; margin-top: 2px; }' +
+                '.jita-triage-view .jt-mexc { display: block; color: #7fdca4; font-size: 10px; font-weight: 700; margin-top: 2px; }' +
+                '.jita-triage-view .jt-mexc.site { color: #9aa6b2; }' +
                 '.jita-triage-view .jt-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
                 '.jita-triage-view .jt-msg { flex: 0 0 auto; padding: 8px 16px; border-top: 1px solid #3a434d; color: #9aa6b2; font-size: 12px; min-height: 31px; }' +
                 '.jita-triage-view .jt-msg.warn { color: #ffb547; font-weight: 600; }' +
@@ -14171,7 +14317,9 @@ JiTA.profile = {
         }
         return jobs.then(function () {
             rec.at = Date.now();
-            return JiTA.db.setMeta(P.CACHE_PREFIX + issue.key, rec).then(function () { return rec; }, function () { return rec; });
+            // The ranking's copy of this report's exceptions is out of date once this is stored (JiTA.repexc).
+            var stored = function () { JiTA.repexc.forget(issue.key); return rec; };
+            return JiTA.db.setMeta(P.CACHE_PREFIX + issue.key, rec).then(stored, stored);
         });
     },
 
@@ -14447,7 +14595,11 @@ JiTA.profile = {
         if (!flagOn('defectProfile')) { P.clear(); return; }
         var still = function () { return JiTA.ui.currentKey === key && flagOn('defectProfile'); };
         if (P._last[key]) { P._paint(key, P._last[key]); } else if (!background) { P.clear(); }
-        P.build(key, function (s) { if (still()) { P._paint(key, s); } }, still).then(null, function (e) {
+        P.build(key, function (s) {
+            if (!still()) { return; }
+            P._paint(key, s);
+            if (s.done) { JiTA.repexc.profileReady(key); }   // its shared exceptions now known: Matching bug reports may rank them
+        }, still).then(null, function (e) {
             if (!still() || P._last[key]) { return; }
             var $b = P._box(true);
             P._show(true);
@@ -14669,7 +14821,8 @@ JiTA.profile = {
  * and * for any text, while the rest, and the stack, must match.
  *
  * Where: every open bug report, newest first, from a live search. One whose status says it is attached or closed is left
- * out, as Matching bug reports leaves it out. Each report's logs are read by the profile's own reader, so an exception is
+ * out, as Matching bug reports leaves it out. So is one filed in the launcher (SCOPE): it has no logs.txt or igbr.zip to
+ * read, and its description is not looked at either. Each report's logs are read by the profile's own reader, so an exception is
  * the same signature on both sides, and what a report's logs held is cached: the first search downloads every report's log, later ones only those of new reports,
  * or of reports whose log files changed. igbr.zip is not read here: its logs.txt is the one attached beside it.
  * Exceptions pasted into a report's description count too.
@@ -14686,6 +14839,10 @@ JiTA.excfind = {
     WAIT_MS: 150,                // a lane with nothing to read waits this long for the next page of reports
     MSG_CUT: 200,                // a profile reading keeps this many characters of a message. KEEP IN SYNC with JiTA.profile.logExceptions
     FIELDS: ['summary', 'created', 'status', 'attachment', 'labels', 'description'],
+    // The reports looked in: the open ones, less those filed in the launcher, which have no logs.txt or igbr.zip. They are
+    // told apart as the bug hunters' backlog filter leaves them out (JiTA.triage.DEFAULT_JQL): by the label or the component
+    // Launcher. Jira's "not in" never matches an empty field, so a report with no labels or no component stays in.
+    SCOPE: JiTA.EBR_SCOPE + ' AND (labels is EMPTY OR labels not in ("Launcher")) AND (component is EMPTY OR component not in ("Launcher"))',
     _st: null,                   // the search on screen; a window opened again starts a new one
     _edits: {},                  // defect key -> { sig: edited text }: kept while the page is, across windows
     _added: {},                  // defect key -> the exceptions the user added: { typed: [{ id, text }], pasted: [{ sig, msg }], n }
@@ -15153,7 +15310,7 @@ JiTA.excfind = {
     _list: function (st, token) {
         var X = JiTA.excfind;
         if (!X._alive(st)) { return Promise.resolve(); }
-        var body = { jql: JiTA.EBR_SCOPE + ' ORDER BY created DESC', fields: X.FIELDS, maxResults: JiTA.PAGE_SIZE };
+        var body = { jql: X.SCOPE + ' ORDER BY created DESC', fields: X.FIELDS, maxResults: JiTA.PAGE_SIZE };
         if (token) { body.nextPageToken = token; }
         return JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
             var d = (r && r.data) || {};
@@ -15423,6 +15580,270 @@ JiTA.excfind = {
                 '.jita-excfind-view .jx-msg { color: #9aa6b2; font-family: Consolas, "Courier New", monospace; }'
             );
         } catch (e) { /* ignore */ }
+    },
+
+    _noop: null
+};
+
+
+/* ---- Exceptions as ranking evidence: an exception both sides hold confirms a match ----------------------------------
+ * Similar defects (on a bug report) and Matching bug reports (on a defect) are ranked on text. An exception both sides
+ * hold is strong evidence on top of that, so it raises the candidate: by FACTOR.exact for the same stack, by FACTOR.site
+ * for the same crash site only (message and innermost frames), compared as "Known defects in attached log" compares
+ * them. The shown % rises with it, capped at PCT_MAX, and the row says why (badge).
+ *
+ * Only a candidate the text already matched is raised: nothing joins a list on an exception alone. A log holds
+ * exceptions that have nothing to do with the reported bug, and on their own they would put unrelated known defects
+ * at the top of every list.
+ *
+ * On a bug report the evidence is its own log: its cached reading (JiTA.profile's rp:<key>, written by the background
+ * pass below, the exception search and the defect profile), else what the panel's log scan read in it. The worker says
+ * which defects' descriptions hold one of those exceptions (logsig 'holding'). On a defect it is the defect's own
+ * exceptions - those pasted in its description (logsig 'sigsOf') and those its attached reports' logs share (the
+ * defect profile, once built) - against each candidate report's cached reading. So only a report whose logs have been
+ * read can be raised on a defect, which is why JiTA.logread reads every open report's logs ahead.
+ */
+JiTA.repexc = {
+    FACTOR: { exact: 1.3, site: 1.15 },
+    PCT_MAX: 99,
+    WAIT_MS: 1500,     // how long a list waits for a report's exceptions before it is drawn without them
+    _report: {},       // report key -> Promise of { defect key: 'exact' | 'site' }, for the session (reset after a defect sync)
+    _reads: {},        // report key -> Promise of its cached reading's exception signatures ([] none, null logs not read)
+    _usedProf: {},     // defect key -> the profile exceptions its last ranking used, so a finished profile ranks it again
+
+    reset: function () { JiTA.repexc._report = {}; },
+    // A report's reading was just written: what was cached from it is out of date.
+    forget: function (key) { delete JiTA.repexc._reads[key]; delete JiTA.repexc._report[key]; },
+
+    // A report's cached reading: the signatures of its logs' exceptions, [] when they hold none, null when its logs
+    // have not been read (no reading, or one made without them).
+    _reading: function (key) {
+        var R = JiTA.repexc, P = JiTA.profile;
+        if (!R._reads[key]) {
+            R._reads[key] = Promise.resolve().then(function () { return JiTA.db.getMeta(P.CACHE_PREFIX + key); }).then(function (rec) {
+                rec = P._usable(rec);
+                return (rec && rec.logs) ? (rec.exc || []).map(function (e) { return e.sig; }) : null;
+            }, function () { return null; });
+        }
+        return R._reads[key];
+    },
+
+    // A bug report's own exceptions: its cached reading, else what the panel's log scan read in its logs. The scan is
+    // shared with "Known defects in attached log", so this downloads nothing the panel does not.
+    _reportSigs: function (key) {
+        return JiTA.repexc._reading(key).then(function (sigs) {
+            if (sigs) { return sigs; }
+            return JiTA.ui.scanIssueLog(key).then(function () {
+                return (JiTA.ui._logExc[key] || []).map(function (e) { return e.sig; });
+            });
+        });
+    },
+
+    // The defects an exception in this bug report's log confirms: Promise of { defect key: 'exact' | 'site' }. Never
+    // rejects; a look that failed is tried again next time.
+    forReport: function (key) {
+        var R = JiTA.repexc;
+        if (!R._report[key]) {
+            var p = R._report[key] = R._reportSigs(key).then(function (sigs) {
+                return sigs.length ? JiTA.logsig.holding(sigs) : {};
+            }).then(function (m) { return m || {}; }, function () {
+                if (R._report[key] === p) { delete R._report[key]; }
+                return {};
+            });
+        }
+        return R._report[key];
+    },
+
+    // A boost for the ranking from a Promise of { key: kind }: resolves function () { return map; } when the map is known
+    // within WAIT_MS (null when it boosts nothing), else null at once - and calls onLate when the map arrives later with
+    // something in it, so the list can be ranked again. Never rejects.
+    soon: function (p, onLate) {
+        var R = JiTA.repexc, late = false;
+        return new Promise(function (resolve) {
+            var t = setTimeout(function () { late = true; resolve(null); }, R.WAIT_MS);
+            p.then(function (map) {
+                var any = !!(map && Object.keys(map).length);
+                if (late) {
+                    if (any && onLate) { try { onLate(); } catch (e) { /* ignore */ } }
+                    return;
+                }
+                clearTimeout(t);
+                resolve(any ? function () { return map; } : null);
+            }, function () { if (!late) { clearTimeout(t); resolve(null); } });
+        });
+    },
+
+    // The exceptions 2 or more of a defect's attached reports' logs share, from its profile once built (hidden ones are
+    // already left out there), sorted.
+    _profileSigs: function (key) {
+        var s = flagOn('defectProfile') ? JiTA.profile._last[key] : null, out = [];
+        ((s && s.summary && s.summary.excGroups) || []).forEach(function (g) {
+            (g.paths || []).forEach(function (p) { if (p.count >= 2 && out.indexOf(p.sig) < 0) { out.push(p.sig); } });
+        });
+        return out.sort();
+    },
+    // A defect's exceptions: { sigs: { sig: true }, crashes: { crash site: true }, n }, from its description and its
+    // profile. Remembers which profile exceptions were used (see profileReady).
+    _defectSigs: function (key) {
+        var R = JiTA.repexc, out = { sigs: {}, crashes: {}, n: 0 };
+        function add(sig) {
+            if (!sig || out.sigs[sig]) { return; }
+            out.sigs[sig] = true;
+            out.n++;
+            var c = JiTA.logsig._crashOf(sig);
+            if (c) { out.crashes[c] = true; }
+        }
+        var prof = R._profileSigs(key);
+        R._usedProf[key] = prof.join('\n');
+        prof.forEach(add);
+        return JiTA.logsig.sigsOf(key).then(function (d) {
+            ((d && d.sigs) || []).forEach(add);
+            ((d && d.crashes) || []).forEach(function (c) { out.crashes[c] = true; });
+            return out;
+        }, function () { return out; });
+    },
+    // Whether a report's log exceptions hold one of the defect's: 'exact' for the same stack, else 'site' for the same
+    // crash site, else null.
+    _kind: function (sigs, ds) {
+        var site = false;
+        for (var i = 0; i < (sigs || []).length; i++) {
+            if (ds.sigs[sigs[i]]) { return 'exact'; }
+            if (!site) { var c = JiTA.logsig._crashOf(sigs[i]); if (c && ds.crashes[c]) { site = true; } }
+        }
+        return site ? 'site' : null;
+    },
+    // A boost for a defect's matching bug reports: asked about the candidates, it answers which of them have logs that
+    // hold one of the defect's exceptions. Local data only (readings and the logsig index), so the list waits for it.
+    forDefect: function (key) {
+        var R = JiTA.repexc;
+        return function (keys) {
+            return R._defectSigs(key).then(function (ds) {
+                if (!ds.n) { return {}; }
+                return Promise.all(keys.map(function (k) { return R._reading(k); })).then(function (reads) {
+                    var out = {};
+                    keys.forEach(function (k, i) { var kind = R._kind(reads[i], ds); if (kind) { out[k] = kind; } });
+                    return out;
+                });
+            });
+        };
+    },
+    // The defect's profile is complete: when the exceptions its reports share are not the ones its open list was ranked
+    // with, rank it again.
+    profileReady: function (key) {
+        var R = JiTA.repexc;
+        if (R._usedProf[key] == null || R._usedProf[key] === R._profileSigs(key).join('\n')) { return; }
+        if (JiTA.ui.currentKey === key) { JiTA.ui.scheduleRender(); }
+    },
+
+    // The row's badge, saying why it ranks higher. `html` is the element to make it of.
+    badge: function (kind, html) {
+        var exact = kind === 'exact';
+        return $(html).addClass(exact ? 'exact' : 'site')
+            .text(exact ? 'same exception in log' : '~ same crash site in log')
+            .attr('title', (exact ? 'The bug report\'s log holds an exception with the same stack as one of the defect\'s'
+                : 'The bug report\'s log holds an exception with the same crash site (message and innermost frames) as one of the defect\'s') +
+                ', so it ranks higher and its % is raised');
+    },
+
+    _noop: null
+};
+
+
+/* ---- Reading the open bug reports' logs in the background, for the exception boost ----------------------------------
+ * On a defect, a matching bug report can only be raised by an exception once its logs have been read (JiTA.repexc). This
+ * pass reads them ahead: the logs of every open bug report the exception search looks in (JiTA.excfind.SCOPE, which
+ * leaves out the launcher's), newest first, into the cache the exception search and the defect
+ * profile read and write (JiTA.excfind._read), so a report read by any of them is not downloaded again. The first pass
+ * reads them all; once a pass has listed and read everything, the next lists only the reports updated since it began,
+ * so a new report, or one whose logs changed, is read and the rest are left alone. One tab at a time (a Web Lock), after
+ * each bug report sync that changed something and once after a page load. Settings > Triage Assistant > Read open
+ * reports' logs switches it off, and a pass under way then stops before its next download.
+ */
+JiTA.logread = {
+    KEY: 'jitaLogRead',          // GM: the Settings switch (on by default)
+    AT_KEY: 'logreadAt',         // meta: when the last complete pass began
+    LOCK: 'jita-logread-pass',
+    CONCURRENCY: 2,
+    GAP_MS: 300,                 // between one lane's downloads
+    START_MS: 45 * 1000,         // after a page load, before the first pass
+    FIELDS: ['status', 'labels', 'attachment', 'customfield_10001'],
+    _running: null,
+
+    on: function () { return gmGet(JiTA.logread.KEY, true) !== false; },
+
+    // Start a pass unless one runs in this tab or another, or it is switched off. Never rejects.
+    prepare: function () {
+        var LR = JiTA.logread;
+        if (JITA_NO_JIRA_UI || !flagOn('similarDefects') || !LR.on()) { return Promise.resolve(); }
+        if (LR._running) { return LR._running; }
+        var run = (navigator.locks && navigator.locks.request)
+            ? navigator.locks.request(LR.LOCK, { ifAvailable: true }, function (lock) { return lock ? LR.pass() : null; })
+            : LR.pass();
+        LR._running = Promise.resolve(run).then(function (n) { LR._running = null; return n; }, function (e) {
+            LR._running = null;
+            console.log('[JiTA] reading the open reports\' logs stopped:', e && e.message || e);
+        });
+        return LR._running;
+    },
+
+    // One pass: the listing runs ahead a page at a time, CONCURRENCY lanes read what it has listed. Resolves the number of
+    // reports whose logs it downloaded.
+    pass: function () {
+        var LR = JiTA.logread, began = new Date().toISOString();
+        return JiTA.db.getMeta(LR.AT_KEY).then(null, function () { return null; }).then(function (at) {
+            var since = at ? JiTA.util.jqlSince(at) : null;
+            var jql = JiTA.excfind.SCOPE + (since ? ' AND updated >= "' + since + '"' : '') + ' ORDER BY created DESC';
+            var queue = [], listed = false, listOk = true, next = 0, read = 0, failed = 0;
+            function list(token) {
+                if (!LR.on()) { listOk = false; return Promise.resolve(); }
+                var body = { jql: jql, fields: LR.FIELDS, maxResults: JiTA.PAGE_SIZE };
+                if (token) { body.nextPageToken = token; }
+                return JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
+                    var d = (r && r.data) || {};
+                    (d.issues || []).forEach(function (iss) {
+                        var f = iss.fields || {};
+                        // Never ranked, so never read: a status the search lets through that says closed, and the GM team's.
+                        if (JiTA.util.isClosedStatus(f.status && f.status.name) || JiTA.util.isGmTeam(f.customfield_10001)) { return; }
+                        queue.push({ key: iss.key, fields: { labels: f.labels || [], attachment: (f.attachment || []).map(function (a) {
+                            return { filename: a.filename, size: a.size, content: a.content };
+                        }) } });
+                    });
+                    if (!d.nextPageToken || d.isLast || d.nextPageToken === token) { return null; }   // a token that does not move on would loop
+                    return list(d.nextPageToken);
+                });
+            }
+            var listing = list(null).then(null, function (e) {
+                listOk = false;
+                console.log('[JiTA] could not list the open reports to read their logs:', e && e.message || e);
+            }).then(function () { listed = true; });
+            function lane() {
+                if (!LR.on()) { return Promise.resolve(); }
+                if (next < queue.length) {
+                    var item = queue[next];
+                    queue[next++] = null;   // let the listed report go once it is read
+                    return JiTA.excfind._read(item).then(function (r) {
+                        if (!(r && r.rec && r.rec.logs)) { failed++; }   // a log that did not download
+                        // Only a download counts and is spaced out: reading a report with no log file attached fetches nothing.
+                        if (r && !r.cached && JiTA.profile._logFiles(item.fields.attachment).length) { read++; return JiTA.util.delay(LR.GAP_MS); }
+                    }, function () { failed++; }).then(lane);
+                }
+                if (listed) { return Promise.resolve(); }
+                return JiTA.util.delay(JiTA.excfind.WAIT_MS).then(lane);
+            }
+            var lanes = [listing];
+            for (var i = 0; i < LR.CONCURRENCY; i++) { lanes.push(lane()); }
+            return Promise.all(lanes).then(function () {
+                // Only a pass that listed and read everything moves the mark on: what one missed is listed again next time.
+                var whole = listOk && !failed && LR.on() && next >= queue.length;
+                return (whole ? JiTA.db.setMeta(LR.AT_KEY, began).then(null, function () { /* listed again next time */ }) : Promise.resolve()).then(function () {
+                    if (read) {
+                        console.log('[JiTA] read the logs of ' + read + ' open bug report(s)');
+                        if (JiTA.ui._isReportsKey(JiTA.ui.currentKey || '')) { JiTA.ui.scheduleRender(); }   // Matching bug reports can rank them now
+                    }
+                    return read;
+                });
+            });
+        });
     },
 
     _noop: null
@@ -22541,6 +22962,15 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.45.0', date: '2026-10-20', features: [
+            'Similar defects: a defect holding an exception that is also in the bug report\'s log ranks higher, with a higher %, and its row says why: "same exception in log" for the same stack, "~ same crash site in log" for the crash site.',
+            'Matching bug reports on a defect rank higher the same way when their logs hold one of the defect\'s exceptions: the ones pasted in its description, and the ones its attached reports share.',
+            'An exception only confirms a match the text already found: nothing joins a list on an exception alone, since a log also holds exceptions unrelated to the bug.',
+            'Triage mode ranks its matches the same way.',
+            'To know what the open bug reports\' logs hold, JiTA now reads them in the background. The first run downloads a lot, later ones only new or changed reports. Settings > Triage Assistant > Read open reports\' logs switches it off.'
+        ], fixes: [
+            'Exception search (double-tap + on a defect): bug reports filed in the launcher are skipped. They have no logs.txt or igbr.zip to read, so the search gets through the open reports sooner.'
+        ] },
         { v: '3.44.1', date: '2026-10-19', fixes: [
             'Exception search: the window keeps one size whatever it finds, and a report\'s description shows beside the window when you hover it, no longer over the list.'
         ] },
@@ -23581,6 +24011,7 @@ if (JITA_IS_WIKI) {
     // the scheduler's startup tick (below) so its full re-fetch grabs the single-flight lock first.
     setTimeout(function () { try { JiTA.migrate.run(); } catch (e) { /* swallow */ } }, 4000);
     setTimeout(function () { try { JiTA.translate.prepare(); } catch (e) { /* swallow */ } }, 6000);   // background-translate the foreign-report backlog
+    setTimeout(function () { try { JiTA.logread.prepare(); } catch (e) { /* swallow */ } }, JiTA.logread.START_MS);   // read the open reports' logs, for the exception boost
     // Keep the hidden set in sync across tabs: another tab hiding/unhiding an issue invalidates our cached map
     // and re-renders the open view so a just-hidden suggestion drops out (and an unhidden one comes back).
     if (typeof GM_addValueChangeListener === 'function') {

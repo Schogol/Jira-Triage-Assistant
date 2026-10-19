@@ -28,7 +28,7 @@ global.flagOn = (n) => flags[n] !== false;
     fn('function parseWER(text) {'), line('var DX_APP_CRASH = '), fn('function dxWerKind(e) {'), fn('function dxCrashCode(e) {'), fn('function dxFirst(text, label) {'),
     fn('function dxParseDate(s, order) {'), fn('function dxDateOrder(text) {'), fn('function dxNvidiaDriver(ver) {'), fn('function dxGpus(text, order) {')
 ].join('\n') + '\nObject.assign(global, { pdmBestGpu, pdmGpuName, convertTextToObject, parseWER, dxWerKind, dxCrashCode, dxExceptionName, dxFirst, dxDateOrder, dxGpus });');
-global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, triage: {} };
+global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, triage: {}, repexc: { forget() {}, profileReady() {} } };
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isResolved: function (status, resolution) {') + '})'));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _fingerprint: function (text) {') + member('    _logBlocks: function (text) {') +
