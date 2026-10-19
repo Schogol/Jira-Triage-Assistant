@@ -446,10 +446,10 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     X._sweep = realSweep;
 
     // ================= the window =================
-    let built = [], loads = 0, tips = 0;
+    let built = [], loads = 0, tips = 0, tipBox = null;
     JiTA.ui.injectCss = () => {};
     JiTA.ui.toast = (t) => { toasts.push(t); };
-    JiTA.ui._showTip = () => { tips++; };
+    JiTA.ui._showTip = (r, a, meta, box) => { tips++; tipBox = box; };
     JiTA.ui._hideTip = () => {};
     JiTA.ui._collapseRow = (el, done) => { if (el && el.parentNode) { el.parentNode.removeChild(el); } if (done) { done(); } };
     JiTA.ui._attachReportButton = (key, opts) => { built.push({ key, opts }); return $('<span class="jita-sd-link">Attach</span>'); };
@@ -513,7 +513,8 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     bo1.who(null, 'me');
     ok('...nobody, nothing', who1.textContent === '' && !who1.hasCls('mine'));
     click(row1, 'mouseenter');
-    ok('...and the hover card', tips === 1);
+    ok('...and the hover card, beside the window', tips === 1 && !!tipBox && tipBox === st.node.kids[0] && st.box === tipBox);
+    ok('...whose overlay keeps the room for it', st.node.hasCls('jx-overlay'));
     click(boxes[1], 'change');   // checked is still false: unticked by hand, a no-op
     boxes[1].checked = true;
     click(byCls(byId['jx-targets'], 'jx-target')[1].kids[0].kids[0], 'change');
