@@ -31,7 +31,9 @@ global.flagOn = (n) => flags[n] !== false;
 global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, triage: {} };
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isResolved: function (status, resolution) {') + '})'));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
-Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _fingerprint: function (text) {') + member('    _logBlocks: function (text) {') + '})'));
+Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _fingerprint: function (text) {') + member('    _logBlocks: function (text) {') +
+    member('    defectsForSigs: function (sigs) {') + member('    _defectsLocal: function (sigs) {') + member('    _crashOf: function (sig) {') + '})'));
+JiTA.hidden = { keys: {}, isHidden: (k) => !!JiTA.hidden.keys[k] };
 Object.assign(JiTA.ocr, eval('({' + block('    LANGS: [', '\n    ],\n') + member('    _langFromLabels: function (labels) {') + '})'));
 JiTA.db.getMeta = (k) => Promise.resolve(k in meta ? meta[k] : null);
 JiTA.db.setMeta = (k, v) => { metaSets.push(k); meta[k] = v; return Promise.resolve(); };
@@ -93,12 +95,12 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     let hw = P.parseComputerInfo(CI);
     ok('the real sample: renderer, OS, GPU and driver', hw.platform === 'dx11' && hw.os === 'Windows 11' && hw.osBuild === 26100 && hw.gpu === 'NVIDIA GeForce RTX 3060 Ti' &&
         hw.gpuVendor === 'NVIDIA' && hw.driver === '32.0.16.1714' && hw.driverDate === '2026-09-17', JSON.stringify(hw));
-    ok('...switchable graphics, CPU and memory', hw.hybrid === false && hw.cpuVendor === 'AMD' && hw.cpuGen === 'AMD Zen 3' && hw.threads === 16 && hw.ghz === 3.4 &&
+    ok('...CPU and memory; switchable graphics is not read', !('hybrid' in hw) && hw.cpuVendor === 'AMD' && hw.cpuGen === 'AMD Zen 3' && hw.threads === 16 && hw.ghz === 3.4 &&
         hw.ramGB === 32 && hw.freeGB === 5.2, JSON.stringify(hw));
     const flat = P.parseComputerInfo('Reproduction Steps: undock Computer Info: ' + CI.replace(/\n/g, ' '));
     ok('the same block flattened to one line, after other text, reads the same', JSON.stringify(flat) === JSON.stringify(hw), JSON.stringify(flat));
     hw = P.parseComputerInfo(ciWith({ gpu: 'Intel(R) UHD Graphics 770', optimus: 'Yes', cpu: 'Intel64 Family 6 Model 183 Stepping 1, GenuineIntel', build: 19045 }));
-    ok('Optimus means switchable graphics; Windows 10 by build; Intel GPU', hw.hybrid === true && hw.os === 'Windows 10' && hw.gpuVendor === 'Intel', JSON.stringify(hw));
+    ok('Optimus says nothing the profile counts; Windows 10 by build; Intel GPU', !('hybrid' in hw) && hw.os === 'Windows 10' && hw.gpuVendor === 'Intel', JSON.stringify(hw));
     ok('Family 6 Model 183 GenuineIntel is Raptor Lake', hw.cpuGen === 'Intel 13th/14th gen (Raptor Lake)', hw.cpuGen);
     ok('an Intel CPU the table does not name still counts, as "Intel (other)"', P._cpuGen('Intel64 Family 6 Model 165 Stepping 5, GenuineIntel') === 'Intel (other)');
     ok('AMD families: Zen 4 from model 96, Zen 5, Zen / Zen 2', P._cpuGen('AMD64 Family 25 Model 97, AuthenticAMD') === 'AMD Zen 4' &&
@@ -108,7 +110,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('a Mac: Metal, macOS by its major version, and its build is no Windows build', hw.platform === 'metal' && hw.os === 'macOS 26' && hw.osBuild === undefined, JSON.stringify(hw));
     ok('...the Apple GPU without the driver part, which names no driver', hw.gpu === 'Apple M5 Pro' && hw.gpuVendor === 'Apple' && hw.driver === undefined &&
         hw.driverDate === undefined, JSON.stringify(hw));
-    ok('...no switchable graphics either way; an Apple CPU of the GPU\'s generation; memory', hw.hybrid === undefined && hw.cpuVendor === 'Apple' && hw.cpuGen === 'Apple M5' &&
+    ok('...an Apple CPU of the GPU\'s generation; memory', hw.cpuVendor === 'Apple' && hw.cpuGen === 'Apple M5' &&
         hw.threads === 18 && hw.ghz === 2.4 && hw.ramGB === 48 && hw.freeGB === 24, JSON.stringify(hw));
     ok('a PC whose driver part has no date keeps its driver', P.parseComputerInfo('Video Card: AMD Radeon RX 580 (Driver: 31.0.1, Released: -) Is Optimus: No').driver === '31.0.1');
     ok('no Computer Info, no hardware', P.parseComputerInfo('The undock button does nothing.') === null);
@@ -191,6 +193,9 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('...the reading has the build, the exceptions, the crash history and the hardware', rec.logs && rec.hasLog && rec.build === 3569502 && rec.exc.length === 2 &&
         rec.zip && rec.wer && rec.crashes[0].module === 'nvwgf2umx.dll' && rec.dxHw && rec.pdmHw && rec.pdmHw.gpuVendor === 'AMD', JSON.stringify(rec).slice(0, 200));
     ok('...and it is cached for the report', metaSets.indexOf('rp:EBR-1') >= 0 && meta['rp:EBR-1'] && meta['rp:EBR-1'].v === P.V);
+    ok('...naming the log files it read, by name and size', rec.logSig === 'logs.txt:2000|other_log.txt:3000' && rec.logSig === P._logSig(issue.fields.attachment), rec.logSig);
+    ok('...which changes when a log is added', P._logSig(issue.fields.attachment.concat([att('late_log.txt', 10)])) !== rec.logSig &&
+        P._logSig(issue.fields.attachment.concat([att('shot.png', 10)])) === rec.logSig);
     hints = [];
     await P._readFiles({ key: 'EBR-11', fields: { labels: ['Russian'], attachment: [att('logs.txt')] } }, null, false);
     ok('the report\'s client language goes with its logs, for their code page', hints.join() === 'rus', hints.join());
@@ -206,7 +211,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     textAnswer = (u) => (/other_log/.test(u) ? Promise.reject(new Error('timeout')) : Promise.resolve(LOG_A));
     rec = await P._readFiles(issue, null, true);
     ok('a log download that fails leaves the logs unread, to be read again next time', rec.logs === false && rec.zip === true, JSON.stringify({ logs: rec.logs, zip: rec.zip }));
-    ok('...and nothing the logs read before it said is kept', !rec.exc && !rec.build && !rec.hasLog, JSON.stringify(rec).slice(0, 150));
+    ok('...and nothing the logs read before it said is kept', !rec.exc && !rec.build && !rec.hasLog && rec.logSig === undefined, JSON.stringify(rec).slice(0, 150));
     let inFlight = 0, maxInFlight = 0;
     textAnswer = () => { inFlight++; maxInFlight = Math.max(maxInFlight, inFlight); return new Promise((r) => setImmediate(() => { inFlight--; r(LOG_A); })); };
     texts = []; bytes = [];
@@ -518,6 +523,150 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const crow = made.filter((m) => m.hasClass('jpv-row') && m.e.kids.length === 2 && /^nvwgf2umx\.dll/.test(m.e.kids[1].e.txt))[0];
     const chover = crow ? crow.e.kids[0].e.attrs.title : '';
     ok('...so does a hardware value, and a crash module', vhover === '1 report: EBR-6' && chover === '5 reports: EBR-1, EBR-2, EBR-3, EBR-4, EBR-5', vhover + ' || ' + chover);
+
+    // ================= exceptions whose defect is hidden in the Triage Assistant (v3.44.0) =================
+    // The defect a signature points at, picked as "Known defects in attached log" picks it: the same stack, else the same crash site.
+    const fpOf = (msg, frames) => JiTA.logsig._fingerprint(JiTA.logsig._logBlocks(exBlock(msg, frames))[0]);
+    const fA = fpOf('KeyError: 2', ['ui/foo.py(1) OnClick', 'ui/bar.py(2) Load', 'ui/baz.py(3) <module>']);
+    const fB = fpOf('KeyError: 2', ['ui/other.py(9) Start', 'ui/bar.py(2) Load', 'ui/baz.py(3) <module>']);
+    const fC = fpOf('ValueError: bad', ['sys/baz.py(9) Run', 'sys/qux.py(10) Go']);
+    ok('(the fixtures: two stacks of one message share their crash site; one has a "<module>" frame)', fA.sig && fA.sig !== fB.sig && fA.crashSig === fB.crashSig &&
+        /<module>/.test(fA.crashSig) && fA.crashSig !== fA.sig, JSON.stringify([fA, fB]));
+    ok('a signature gives its crash site exactly as the fingerprint does', [fA, fB, fC].every((f) => JiTA.logsig._crashOf(f.sig) === f.crashSig) && JiTA.logsig._crashOf('no frames') === null,
+        [fA, fB, fC].map((f) => JiTA.logsig._crashOf(f.sig)).join(' | '));
+    const sigIdx = { sigMap: {}, crashMap: {} };
+    sigIdx.sigMap[fA.sig] = { members: [{ key: 'EDR-2' }, { key: 'EDR-1' }] };
+    sigIdx.crashMap[fA.crashSig] = { members: [{ key: 'EDR-3' }] };
+    const wStart = once("    // A signature's crash site, from the signature alone.");
+    const W = new Function('LG_MIN', 'LG_CRASH', 'logsigCache', src.slice(wStart, src.indexOf('\n    // One load at a time', wStart)) +
+        '\nreturn { lgCrashOf: lgCrashOf, lgDefects: lgDefects };')(2, 2, sigIdx);
+    ok('...and so does the worker\'s copy', [fA, fB, fC].every((f) => W.lgCrashOf(f.sig) === f.crashSig));
+    JiTA.logsig.ensure = () => Promise.resolve(sigIdx);
+    JiTA.worker = { usable: () => false };
+    let sd = await JiTA.logsig.defectsForSigs([fA.sig, fB.sig, fC.sig]);
+    ok('the newest defect with the same stack; failing that the one with the same crash site; else none', JSON.stringify(sd) === JSON.stringify({ [fA.sig]: 'EDR-2', [fB.sig]: 'EDR-3' }), JSON.stringify(sd));
+    ok('...and the worker picks the same', JSON.stringify(W.lgDefects([fA.sig, fB.sig, fC.sig])) === JSON.stringify(sd), JSON.stringify(W.lgDefects([fA.sig, fB.sig, fC.sig])));
+    const wcalls = [];
+    JiTA.worker = { usable: () => true, call: (t, p) => { wcalls.push([t, p]); return Promise.resolve({ x: 'EDR-9' }); } };
+    sd = await JiTA.logsig.defectsForSigs([fA.sig]);
+    ok('it asks the shared worker when there is one', sd.x === 'EDR-9' && wcalls.length === 1 && wcalls[0][0] === 'logsig' && wcalls[0][1].op === 'defects' && wcalls[0][1].sigs[0] === fA.sig, JSON.stringify(wcalls));
+    JiTA.worker.call = () => Promise.reject(new Error('unknown logsig op: defects'));
+    sd = await JiTA.logsig.defectsForSigs([fA.sig]);
+    ok('...and reads the index itself when the worker cannot answer (an older worker, say)', sd[fA.sig] === 'EDR-2', JSON.stringify(sd));
+    const workerSrc = fn('function jitaWorkerBody(cfg) {');
+    ok('the worker answers the lookup', /else if \(op === 'defects'\) \{ result = lgDefects\(payload\.sigs\); \}/.test(workerSrc));
+
+    // ---- the profile ----
+    const H1 = { sig: fA.sig, msg: 'KeyError: 2' }, H2 = { sig: fB.sig, msg: 'KeyError: 2' }, V1 = { sig: fC.sig, msg: 'ValueError: bad' };
+    const H3 = { sig: 'lone|a.py:x>b.py:y', msg: 'Lone' }, K9 = { sig: 'indexerror: 1|q.py:a>r.py:b', msg: 'IndexError: 1' };
+    const hidOf = (sig) => (sig === H1.sig || sig === H3.sig ? 'EDR-2' : '');
+    const hv = [1, 2, 3, 4, 5].map((i) => mk('EBR-' + i, { exc: i === 1 ? [H1, V1] : (i === 2 ? [H1, H3] : [H1]) })).concat([mk('EBR-6', { exc: [V1] })]);
+    sm = P.summarise(hv, null);
+    ok('(not hidden, the exception 5 of 6 logs share is the pattern, and the sixth log an outlier)', sm.domExc && sm.domExc.sig === H1.sig && sm.outliers.length === 1 &&
+        sm.outliers[0].key === 'EBR-6', JSON.stringify(sm.outliers));
+    sm = P.summarise(hv, null, hidOf);
+    ok('an exception whose defect is hidden in the Triage Assistant is no pattern and makes no outlier', !sm.domExc && sm.outliers.length === 0 &&
+        sm.exc.map((e) => e.sig).join() === V1.sig, JSON.stringify(sm.exc) + ' ' + JSON.stringify(sm.outliers));
+    ok('...it is not among the shared exceptions either', sm.excGroups.length === 1 && sm.excGroups[0].msg === 'ValueError: bad' && sm.excGroups[0].count === 2, JSON.stringify(sm.excGroups));
+    ok('...it is listed apart, with the reports that have it and the defect it is hidden under', sm.hiddenExc.length === 1 && sm.hiddenExc[0].msg === 'KeyError: 2' &&
+        sm.hiddenExc[0].count === 5 && sm.hiddenExc[0].keys.join() === 'EBR-1,EBR-2,EBR-3,EBR-4,EBR-5' && sm.hiddenExc[0].defects.join() === 'EDR-2' &&
+        sm.hiddenExc[0].paths.length === 1, JSON.stringify(sm.hiddenExc));
+    ok('...and one hidden in a single log is not listed, like any exception in a single log', !sm.hiddenExc.some((g) => g.msg === 'Lone'));
+    const hv2 = [1, 2, 3, 4, 5].map((i) => mk('EBR-' + i, { exc: [H2] })).concat([mk('EBR-6', { exc: [H1] })]);
+    sm = P.summarise(hv2, null, hidOf);
+    ok('the same message by a stack whose defect is not hidden stays in the profile, as its pattern', sm.domExc && sm.domExc.sig === H2.sig && sm.excGroups.length === 1 &&
+        sm.excGroups[0].count === 5 && sm.excGroups[0].paths.length === 1, JSON.stringify(sm.excGroups));
+    ok('...and a report that has that message only by the hidden stack is no outlier', sm.outliers.length === 0, JSON.stringify(sm.outliers));
+
+    // ---- the card ----
+    sideMode = false;
+    JiTA.ui.currentKey = 'EDR-7';
+    made = [];
+    const hst = { key: 'EDR-7', total: 6, views: hv, summary: P.summarise(hv, null, hidOf), pending: 0, done: true, zip: true };
+    P._paint('EDR-7', hst);
+    const hchips = made.filter((m) => m.hasClass('jp-chip')).map((m) => m.e.txt).join(' | ');
+    ok('the card shows no chip for the hidden exception, and the next shared one instead', !/KeyError/.test(hchips) && /Exception in 2\/6 logs: ValueError: bad/.test(hchips), hchips);
+    const hxEl = made.filter((m) => m.hasClass('jp-hidden'))[0], hxTog = made.filter((m) => m.hasClass('jp-open') && /hidden exception/.test(m.e.txt))[0];
+    ok('...it is folded away under one line', hxEl && !hxEl.hasClass('open') && hxTog && hxTog.e.txt === '▸ 1 hidden exception', hxTog && hxTog.e.txt);
+    ok('...which lists it, with the defect it is hidden under and the reports behind it', hxEl && /EDR-25\/6 logs: KeyError: 2/.test(hxEl.text()) &&
+        made.some((m) => m.hasClass('jp-why') && m.e.attrs.title === '5 reports: EBR-1, EBR-2, EBR-3, EBR-4, EBR-5'), hxEl && hxEl.text());
+    hxTog.e.on.click({ preventDefault() {} });
+    ok('...a click unfolds it', hxEl.hasClass('open') && hxTog.e.txt === '▾ 1 hidden exception', hxTog.e.txt);
+    made = [];
+    P._paint('EDR-7', hst);
+    const hxEl2 = made.filter((m) => m.hasClass('jp-hidden'))[0];
+    ok('...and it stays unfolded when the card is drawn again while files are read', hxEl2 && hxEl2.hasClass('open'));
+    P._hidOpen = false;
+    made = [];
+    P._paint('EDR-7', st);
+    ok('a profile without hidden exceptions has no such line', !made.some((m) => m.hasClass('jp-hidden')));
+
+    // ---- the full profile ----
+    P._last['EDR-7'] = hst;
+    made = [];
+    P.openView('EDR-7');
+    const hvt = made.filter((m) => m.hasClass('jpv-toggle'))[0], hvh = made.filter((m) => m.hasClass('jpv-hidden'))[0];
+    ok('the full profile folds the hidden exceptions under their own heading', hvt && hvh && !hvh.hasClass('open') &&
+        hvt.e.txt === '▸ Hidden exceptions (1): their defect is hidden in the Triage Assistant' && /5\/6EDR-2KeyError: 2/.test(hvh.text()), hvt && (hvt.e.txt + ' ' + hvh.text()));
+    hvt.e.on.click();
+    ok('...which a click unfolds', hvh.hasClass('open') && /^▾ Hidden exceptions/.test(hvt.e.txt), hvt.e.txt);
+    const hotxt = overlay.text();
+    ok('...while the shared exceptions list only the others', (hotxt.match(/KeyError: 2/g) || []).length === 1 && /2\/6ValueError: bad/.test(hotxt), hotxt.slice(0, 500));
+    const onlyHidden = [1, 2, 3].map((i) => mk('EBR-' + i, { exc: [H1] }));
+    P._last['EDR-7'] = { key: 'EDR-7', total: 3, views: onlyHidden, summary: P.summarise(onlyHidden, null, hidOf), pending: 0, done: true, zip: true };
+    P.openView('EDR-7');
+    ok('with only hidden exceptions shared, the list says so instead of claiming there are none', /No exception appears in more than one log, apart from the hidden ones below\./.test(overlay.text()),
+        overlay.text().slice(0, 400));
+    P._last['EDR-7'] = st;
+
+    // ---- building: the defects of the exceptions are looked up ----
+    const lookupMs = P.LOOKUP_MS;
+    P.LOOKUP_MS = 30;
+    P._reports = () => Promise.resolve({ issues: [1, 2, 3].map((i) => ({ key: 'EBR-' + i, fields: { description: ciWith({}), created: '2026-09-2' + i + 'T00:00:00.000+0000', attachment: [] } })), total: 3 });
+    meta = { 'rp:EBR-1': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], zip: true, wer: false }, 'rp:EBR-2': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], zip: true, wer: false } };
+    P._readFiles = (iss, r, z) => Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: true, exc: [H1, V1, K9], zip: z, wer: false });
+    let asked = [], answer = (sigs) => Promise.resolve(sigs.indexOf(H1.sig) >= 0 ? { [H1.sig]: 'EDR-2' } : {});
+    JiTA.logsig.defectsForSigs = (sigs) => { asked.push(sigs.slice()); return answer(sigs); };
+    JiTA.hidden.keys = { 'EDR-2': true };
+    let hstates = [];
+    const lastOf = () => hstates[hstates.length - 1];
+    await P.build('EDR-20', (s) => { hstates.push(s); }, () => true);
+    ok('the defects of the cached exceptions are looked up, each signature once, before the profile is first drawn', asked.length === 2 &&
+        asked[0].join() === [H1.sig, V1.sig].join() && hstates[0].summary.hiddenExc.length === 1 && hstates[0].summary.hiddenExc[0].count === 2,
+        JSON.stringify(asked) + ' ' + JSON.stringify(hstates[0] && hstates[0].summary.hiddenExc));
+    ok('...a report read later has only its new exceptions looked up', asked[1].join() === K9.sig, JSON.stringify(asked[1]));
+    ok('...and the finished profile sets the hidden one apart', lastOf().done && lastOf().summary.hiddenExc[0].count === 3 && lastOf().summary.exc.every((e) => e.sig !== H1.sig),
+        JSON.stringify(lastOf().summary.exc));
+    JiTA.hidden.keys = {};
+    hstates = [];
+    await P.build('EDR-20', (s) => { hstates.push(s); }, () => true);
+    ok('unhidden in the Triage Assistant, it is part of the profile again', lastOf().summary.hiddenExc.length === 0 && lastOf().summary.exc.some((e) => e.sig === H1.sig && e.count === 3),
+        JSON.stringify(lastOf().summary.exc));
+    JiTA.hidden.keys = { 'EDR-2': true };
+    asked = []; hstates = [];
+    let release = null;
+    answer = (sigs) => (asked.length === 1 ? new Promise((r) => { release = () => r({ [H1.sig]: 'EDR-2' }); }) : Promise.resolve({}));
+    const lateBuild = P.build('EDR-21', (s) => { hstates.push(s); }, () => true);
+    await new Promise((r) => setTimeout(r, 80));
+    await Promise.race([lateBuild, new Promise((r) => setTimeout(r, 1000))]);   // a build that waits for the lookup would hold here
+    ok('a slow lookup does not hold the profile back: it is drawn without it at first', hstates.length >= 1 && hstates[0].summary.hiddenExc.length === 0 &&
+        hstates[0].summary.exc.some((e) => e.sig === H1.sig), JSON.stringify(hstates.map((s) => s.summary.hiddenExc.length)));
+    const before = hstates.length;
+    release();
+    await flush();
+    ok('...and drawn again once the lookup lands, with the hidden exception set apart', hstates.length === before + 1 && lastOf().summary.hiddenExc.length === 1 && lastOf().done,
+        hstates.length + ' ' + JSON.stringify(lastOf().summary.hiddenExc));
+    asked = []; hstates = [];
+    answer = (sigs) => (asked.length === 1 ? Promise.reject(new Error('worker down')) : Promise.resolve({ [H1.sig]: 'EDR-2' }));
+    await P.build('EDR-22', (s) => { hstates.push(s); }, () => true);
+    ok('a failed lookup does not stop the profile, and its exceptions are asked about again', hstates[0].summary.hiddenExc.length === 0 && asked.length === 2 &&
+        asked[1].indexOf(H1.sig) >= 0 && lastOf().summary.hiddenExc.length === 1, JSON.stringify(asked));
+    JiTA.logsig.defectsForSigs = () => { throw new Error('no logsig'); };
+    hstates = [];
+    await P.build('EDR-23', (s) => { hstates.push(s); }, () => true);
+    ok('...nor does a lookup that throws', hstates.length >= 2 && lastOf().done && lastOf().summary.hiddenExc.length === 0, String(hstates.length));
+    P.LOOKUP_MS = lookupMs;
+    JiTA.hidden.keys = {};
 
     // ================= wiring =================
     ok('renderReports draws the section on a defect', member('    renderReports: function (key, background) {').indexOf('JiTA.profile.renderSection(key, background);') >= 0);

@@ -191,7 +191,7 @@ const translate = async (r) => { results = r.slice(); alerts = []; logs = []; co
     global.JiTA = { triage: { _open: false, open: () => { opened++; } } };
     let t = 5000000;
     Date.now = () => t;
-    (0, eval)('(function () {\n' + cut('        var lastLt = 0, lastGt = 0, lastHash = 0;', '\n    })();') + '\n})();');
+    (0, eval)('(function () {\n' + cut('        var lastLt = 0, lastGt = 0, lastHash = 0, lastPlus = 0;', '\n    })();') + '\n})();');
     const key = (k, extra) => keydown(Object.assign({ key: k, target: { tagName: 'DIV' } }, extra || {}));
     key('<'); t += 150; key('<');
     ok('two taps of < open Triage mode (control)', opened === 1, String(opened));

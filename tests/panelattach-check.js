@@ -80,7 +80,7 @@ const log0 = console.log;
 
     // ================= the defect-side Attach =================
     let attaches = [], drops = [], fades = 0, dropFails = false;
-    Object.assign(JiTA.ui, eval('({' + member('    _assigneeCache: {},', uiStart).replace(/,\n$/, ',') + '\n' + member('    _getAssignee: function (key) {', uiStart) + member('    _attachReportButton: function (reportKey) {', uiStart) + member('    _markDupButton: function (defectKey) {', uiStart) + '})'));
+    Object.assign(JiTA.ui, eval('({' + member('    _assigneeCache: {},', uiStart).replace(/,\n$/, ',') + '\n' + member('    _getAssignee: function (key) {', uiStart) + member('    _attachReportButton: function (reportKey, opts) {', uiStart) + member('    _markDupButton: function (defectKey) {', uiStart) + '})'));
     Object.assign(JiTA.ui, { currentKey: 'EDR-1', toast: (m) => { toasts.push(m); }, _hideTip() {}, softRefreshStatus() {}, _fadeOutAndReplace: () => { fades++; },
         // Every report still open; livestatus-check.js covers the real status lookup and an attach refused by it.
         _liveStatus: (keys) => Promise.resolve(keys.reduce((o, k) => { o[k] = 'Open'; return o; }, {})), _isOpenStatus: (s) => !!s && !/closed|attached/i.test(s) });
