@@ -49,16 +49,17 @@ global.JiTA = {
     util: {}, logsig: {}, db: {}, sync: {}, profile: { CACHE_PREFIX: 'rp:', V: 3 },
     ui: { currentKey: null, scheduleRender: () => { renders++; }, _isReportsKey: (k) => /^(EDR|EO|PLAT)-/.test(k), _logExc: {} },
     trend: { badge: () => null },
-    excfind: { WAIT_MS: 0 }
+    excfind: { WAIT_MS: 0, SCOPE: 'project = EBR AND statusCategory != Done AND <not the launcher\'s>' }   // the real one: excfind-check
 };
 Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    staleFactor: function (brCreatedIso, resolutionDateIso) {') +
     member('    humanizeAge: function (days) {') + member('    isClosedStatus: function (status) {') + member('    teamId: function (v) {') +
     member('    isGmTeam: function (v) {') + member('    jqlSince: function (iso, now) {') + '})'));
 JiTA.util.fmtDate = (s) => (s ? String(s).slice(0, 10) : '');
-JiTA.util.delay = () => Promise.resolve();
+let delays = [];
+JiTA.util.delay = (ms) => { delays.push(ms); return Promise.resolve(); };
 Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _crashOf: function (sig) {') +
     member('    holding: function (sigs) {') + member('    _holdingLocal: function (sigs) {') + member('    sigsOf: function (key) {') + member('    _sigsOfLocal: function (key) {') + '})'));
-JiTA.profile._usable = eval('({' + member('    _usable: function (rec) {') + '})')._usable;
+Object.assign(JiTA.profile, eval('({' + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') + '})'));
 ['_boostMap', '_boostRow', '_withBoost', '_fuse', '_hybridResults', '_pickMode', 'suggestBest', 'suggestEbrBest'].forEach((n) => {
     (0, eval)(cut('JiTA.rank.' + n + ' = function (', '\n};\n'));
 });
@@ -407,7 +408,8 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     JiTA.excfind._read = (item) => { readsDone.push(item.key); items[item.key] = item; const s = readScript[item.key] || 'download'; return s === 'fail' ? Promise.reject(new Error('x'))
         : Promise.resolve({ rec: { logs: s !== 'nolog' }, cached: s === 'cached' }); };
     const iss = (key, extra) => ({ key: key, fields: Object.assign({ status: { name: 'Open' }, labels: ['Russian'], attachment: [{ filename: 'logs.txt', size: 9, content: 'u', id: 1 }] }, extra || {}) });
-    function setup() { posted = []; readsDone = []; stamped = {}; readScript = {}; meta = {}; renders = 0; }
+    function setup() { posted = []; readsDone = []; stamped = {}; readScript = {}; meta = {}; renders = 0; delays = []; }
+    const gaps = () => delays.filter((ms) => ms === LR.GAP_MS).length;
     const log0 = console.log;
     console.log = () => {};
 
@@ -416,12 +418,13 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     readScript = { 'EBR-4': 'cached' };
     JiTA.ui = saved.ui; JiTA.ui.currentKey = 'EDR-5';
     let n = await LR.prepare();
-    ok('the first pass lists every open report, newest first', posted.length === 2 && posted[0].jql === JiTA.EBR_SCOPE + ' ORDER BY created DESC' && posted[1].nextPageToken === 't1', JSON.stringify(posted.map((p) => p.jql)));
+    ok('the first pass lists every report the exception search looks in (not the launcher\'s), newest first', posted.length === 2 && posted[0].jql === JiTA.excfind.SCOPE + ' ORDER BY created DESC' && posted[1].nextPageToken === 't1', JSON.stringify(posted.map((p) => p.jql)));
     ok('...asks for what the reader needs', JSON.stringify(posted[0].fields) === JSON.stringify(['status', 'labels', 'attachment', 'customfield_10001']));
     ok('...reads the open ones, not a closed status nor the GM team\'s', readsDone.join() === 'EBR-1,EBR-4', readsDone.join());
     ok('...hands the reader each one\'s labels and attachments', JSON.stringify(items['EBR-1'].fields) === JSON.stringify({ labels: ['Russian'], attachment: [{ filename: 'logs.txt', size: 9, content: 'u' }] }),
         JSON.stringify(items['EBR-1']));
     ok('...counts what it downloaded, not what was cached', n === 1, String(n));
+    ok('...and spaces out the downloads only', gaps() === 1, delays.join());
     ok('...and, having read them all, marks when it began', typeof stamped.logreadAt === 'string' && !isNaN(Date.parse(stamped.logreadAt)), JSON.stringify(stamped));
     ok('...a defect on screen ranks its reports again', renders === 1);
 
@@ -431,8 +434,17 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     readScript = { 'EBR-9': 'cached' };
     JiTA.ui.currentKey = 'EDR-5';
     n = await LR.prepare();
-    ok('a later pass lists only the reports updated since the last complete one', /^project = EBR AND statusCategory != Done AND updated >= "-6\dm" ORDER BY created DESC$/.test(posted[0].jql), posted[0].jql);
+    ok('a later pass lists only the reports updated since the last complete one', posted[0].jql.indexOf(JiTA.excfind.SCOPE + ' AND updated >= "') === 0 &&
+        /updated >= "-6\dm" ORDER BY created DESC$/.test(posted[0].jql), posted[0].jql);
     ok('...and with nothing downloaded, ranks nothing again', n === 0 && renders === 0);
+
+    setup();
+    JiTA.ui.currentKey = 'EDR-5';
+    pages = [{ issues: [iss('EBR-1', { attachment: [] }), iss('EBR-2', { attachment: [{ filename: 'screenshot.png', size: 9, content: 'u', id: 2 }] })], isLast: true }];
+    n = await LR.prepare();
+    ok('a report with no log file attached is read, but nothing was downloaded: no count, no wait', readsDone.slice().sort().join() === 'EBR-1,EBR-2' && n === 0 && gaps() === 0,
+        n + ' / ' + delays.join());
+    ok('...so nothing ranks again, and the pass still counts as complete', renders === 0 && typeof stamped.logreadAt === 'string', JSON.stringify(stamped));
 
     setup();
     pages = [{ issues: [iss('EBR-1'), iss('EBR-2')], isLast: true }];

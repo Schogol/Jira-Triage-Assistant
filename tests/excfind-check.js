@@ -362,8 +362,12 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     let st = fresh();
     st.targets = [Object.assign({}, tA, { def: true })]; st.on[A.sig] = true;
     await X._sweep(st);
-    ok('every open report is listed, newest first, a page at a time', bodies.length === 2 && bodies[0].jql === JiTA.EBR_SCOPE + ' ORDER BY created DESC' && !bodies[0].nextPageToken &&
+    ok('every open report is listed, newest first, a page at a time', bodies.length === 2 && bodies[0].jql === X.SCOPE + ' ORDER BY created DESC' && !bodies[0].nextPageToken &&
         bodies[1].nextPageToken === 't2' && bodies[0].fields.indexOf('attachment') >= 0 && bodies[0].fields.indexOf('description') >= 0, JSON.stringify(bodies.map((b) => b.nextPageToken)));
+    ok('...the open ones', X.SCOPE.indexOf(JiTA.EBR_SCOPE + ' AND ') === 0, X.SCOPE);
+    ok('...less those filed in the launcher, by the label the backlog filter leaves out; one with no labels stays (a bare "not in" drops it)',
+        / AND \(labels is EMPTY OR labels not in \("Launcher"\)\)/.test(X.SCOPE));
+    ok('...and by the component; one with no component stays', / AND \(component is EMPTY OR component not in \("Launcher"\)\)/.test(X.SCOPE));
     ok('...a report already attached left out, a report listed twice read once', st.n === 5 && readsStarted.join() === 'EBR-1,EBR-4,EBR-5,EBR-9', st.n + ' ' + readsStarted.join());
     ok('...and the Team field no longer asked for', bodies[0].fields.indexOf('customfield_10001') < 0);
     ok('...a cached report is not read again', readsStarted.indexOf('EBR-3') < 0 && st.cached === 1);

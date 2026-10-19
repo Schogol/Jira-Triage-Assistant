@@ -14821,7 +14821,8 @@ JiTA.profile = {
  * and * for any text, while the rest, and the stack, must match.
  *
  * Where: every open bug report, newest first, from a live search. One whose status says it is attached or closed is left
- * out, as Matching bug reports leaves it out. Each report's logs are read by the profile's own reader, so an exception is
+ * out, as Matching bug reports leaves it out. So is one filed in the launcher (SCOPE): it has no logs.txt or igbr.zip to
+ * read, and its description is not looked at either. Each report's logs are read by the profile's own reader, so an exception is
  * the same signature on both sides, and what a report's logs held is cached: the first search downloads every report's log, later ones only those of new reports,
  * or of reports whose log files changed. igbr.zip is not read here: its logs.txt is the one attached beside it.
  * Exceptions pasted into a report's description count too.
@@ -14838,6 +14839,10 @@ JiTA.excfind = {
     WAIT_MS: 150,                // a lane with nothing to read waits this long for the next page of reports
     MSG_CUT: 200,                // a profile reading keeps this many characters of a message. KEEP IN SYNC with JiTA.profile.logExceptions
     FIELDS: ['summary', 'created', 'status', 'attachment', 'labels', 'description'],
+    // The reports looked in: the open ones, less those filed in the launcher, which have no logs.txt or igbr.zip. They are
+    // told apart as the bug hunters' backlog filter leaves them out (JiTA.triage.DEFAULT_JQL): by the label or the component
+    // Launcher. Jira's "not in" never matches an empty field, so a report with no labels or no component stays in.
+    SCOPE: JiTA.EBR_SCOPE + ' AND (labels is EMPTY OR labels not in ("Launcher")) AND (component is EMPTY OR component not in ("Launcher"))',
     _st: null,                   // the search on screen; a window opened again starts a new one
     _edits: {},                  // defect key -> { sig: edited text }: kept while the page is, across windows
     _added: {},                  // defect key -> the exceptions the user added: { typed: [{ id, text }], pasted: [{ sig, msg }], n }
@@ -15305,7 +15310,7 @@ JiTA.excfind = {
     _list: function (st, token) {
         var X = JiTA.excfind;
         if (!X._alive(st)) { return Promise.resolve(); }
-        var body = { jql: JiTA.EBR_SCOPE + ' ORDER BY created DESC', fields: X.FIELDS, maxResults: JiTA.PAGE_SIZE };
+        var body = { jql: X.SCOPE + ' ORDER BY created DESC', fields: X.FIELDS, maxResults: JiTA.PAGE_SIZE };
         if (token) { body.nextPageToken = token; }
         return JiTA.sync._apiPost('/rest/api/3/search/jql', body).then(function (r) {
             var d = (r && r.data) || {};
@@ -15746,7 +15751,8 @@ JiTA.repexc = {
 
 /* ---- Reading the open bug reports' logs in the background, for the exception boost ----------------------------------
  * On a defect, a matching bug report can only be raised by an exception once its logs have been read (JiTA.repexc). This
- * pass reads them ahead: every open bug report's logs, newest first, into the cache the exception search and the defect
+ * pass reads them ahead: the logs of every open bug report the exception search looks in (JiTA.excfind.SCOPE, which
+ * leaves out the launcher's), newest first, into the cache the exception search and the defect
  * profile read and write (JiTA.excfind._read), so a report read by any of them is not downloaded again. The first pass
  * reads them all; once a pass has listed and read everything, the next lists only the reports updated since it began,
  * so a new report, or one whose logs changed, is read and the rest are left alone. One tab at a time (a Web Lock), after
@@ -15786,7 +15792,7 @@ JiTA.logread = {
         var LR = JiTA.logread, began = new Date().toISOString();
         return JiTA.db.getMeta(LR.AT_KEY).then(null, function () { return null; }).then(function (at) {
             var since = at ? JiTA.util.jqlSince(at) : null;
-            var jql = JiTA.EBR_SCOPE + (since ? ' AND updated >= "' + since + '"' : '') + ' ORDER BY created DESC';
+            var jql = JiTA.excfind.SCOPE + (since ? ' AND updated >= "' + since + '"' : '') + ' ORDER BY created DESC';
             var queue = [], listed = false, listOk = true, next = 0, read = 0, failed = 0;
             function list(token) {
                 if (!LR.on()) { listOk = false; return Promise.resolve(); }
@@ -15817,7 +15823,8 @@ JiTA.logread = {
                     queue[next++] = null;   // let the listed report go once it is read
                     return JiTA.excfind._read(item).then(function (r) {
                         if (!(r && r.rec && r.rec.logs)) { failed++; }   // a log that did not download
-                        if (r && !r.cached) { read++; return JiTA.util.delay(LR.GAP_MS); }
+                        // Only a download counts and is spaced out: reading a report with no log file attached fetches nothing.
+                        if (r && !r.cached && JiTA.profile._logFiles(item.fields.attachment).length) { read++; return JiTA.util.delay(LR.GAP_MS); }
                     }, function () { failed++; }).then(lane);
                 }
                 if (listed) { return Promise.resolve(); }
@@ -22955,12 +22962,14 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
-        { v: '3.45.0', date: '2026-10-19', features: [
+        { v: '3.45.0', date: '2026-10-20', features: [
             'Similar defects: a defect holding an exception that is also in the bug report\'s log ranks higher, with a higher %, and its row says why: "same exception in log" for the same stack, "~ same crash site in log" for the crash site.',
             'Matching bug reports on a defect rank higher the same way when their logs hold one of the defect\'s exceptions: the ones pasted in its description, and the ones its attached reports share.',
             'An exception only confirms a match the text already found: nothing joins a list on an exception alone, since a log also holds exceptions unrelated to the bug.',
             'Triage mode ranks its matches the same way.',
             'To know what the open bug reports\' logs hold, JiTA now reads them in the background. The first run downloads a lot, later ones only new or changed reports. Settings > Triage Assistant > Read open reports\' logs switches it off.'
+        ], fixes: [
+            'Exception search (double-tap + on a defect): bug reports filed in the launcher are skipped. They have no logs.txt or igbr.zip to read, so the search gets through the open reports sooner.'
         ] },
         { v: '3.44.1', date: '2026-10-19', fixes: [
             'Exception search: the window keeps one size whatever it finds, and a report\'s description shows beside the window when you hover it, no longer over the list.'
