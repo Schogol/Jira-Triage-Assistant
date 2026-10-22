@@ -41,6 +41,11 @@ Object.assign(L, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: 
     member('    _sigsOfLocal: function (key) {') + member('    _crashOf: function (sig) {') + member('    _traceMates: function (idx, sig) {') +
     member('    _pointAt: function (idx, sig, crashSig) {') + member('    sigsOf: function (key) {') + member('    defectsForSigs: function (sigs) {') + '})'));
 L._index = null; L._dirty = true; L._building = null;
+// What counts (JiTA.excnoise), the real one (excnoise-check.js covers it; nothing here is ignored or common).
+Object.assign(L, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
+Object.assign(JiTA.util, eval('({' + member('    hash: function (str) {') + '})'));
+JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
+eval(block('JiTA.excnoise = {', '\n};\n'));
 eval(block('JiTA.profile = {', '\n    _noop: null\n};\n'));
 eval(block('JiTA.excfind = {', '\n    _noop: null\n};\n'));
 (0, eval)(block('JiTA.repexc = {', '\n    _noop: null\n};\n'));

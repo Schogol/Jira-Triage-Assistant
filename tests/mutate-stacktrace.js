@@ -159,7 +159,7 @@ const muts = [
     [XB, 'a stacktrace\'s badge styled as a loose one', "exact = kind === 'exact' || kind === 'st-exact';", "exact = kind === 'exact';"],
     [XB, 'a match by message\'s badge says nothing of the cut', "where the client cut one of the two off before its stack']", "']"],
     // ---- reading the open reports again ----
-    [XB, 'a pass by an older reader trusted', '(mark && mark.at && mark.lv === JiTA.profile.LOG_V)', '(mark && mark.at)'],
+    [XB, 'a pass by an older reader trusted', 'mark && mark.at && mark.lv === JiTA.profile.LOG_V)', 'mark && mark.at)'],
     [XB, 'a complete pass marked without its reader', '{ at: began, lv: JiTA.profile.LOG_V }', '{ at: began }']
 ];
 // Where an anchor is looked for: the whole file, or the one function named.

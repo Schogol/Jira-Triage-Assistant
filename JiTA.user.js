@@ -3235,6 +3235,13 @@ JiTA.logsig = {
     // A stacktrace signature's message part, its tag kept: what a cut one is matched by. Frames hold no "|", so the
     // message ends at the last.
     _traceKey: function (sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); },
+    // Any signature's message part, the whole of it when it has no "|": what the user ignores, at any stack (JiTA.excnoise).
+    _msgKey: function (sig) { var s = String(sig == null ? '' : sig), at = s.lastIndexOf('|'); return at < 0 ? s : s.slice(0, at); },
+    // Whether a signature is a UserError's: an exception (a stacktrace's starts with its tag) of the class UserError, its
+    // module named or not (eveexceptions.UserError). The game raises one to tell the player something (ThrottleGeneric when
+    // clicking too fast, PerformSessionChangeInProgress during a session change): no bug, so it is not indexed and does not
+    // count (JiTA.excnoise). KEEP IN SYNC with lgIsUserError in the worker.
+    isUserError: function (sig) { return /^(?:[a-z_]\w*\.)*usererror\b/.test(String(sig == null ? '' : sig)); },
 
     // Split a blob of text into individual EXCEPTION and STACKTRACE blocks: each from "EXCEPTION #" (or "STACKTRACE #")
     // up to its "EXCEPTION END" (or "STACKTRACE END"), or up to the next block of either kind. Stored descriptions have
@@ -3348,6 +3355,7 @@ JiTA.logsig = {
                 for (var b = 0; b < blocks.length; b++) {
                     var fp = L._fingerprint(blocks[b]);
                     if (!fp.sig) { continue; }
+                    if (L.isUserError(fp.sig)) { continue; }   // a message the game shows the player, no bug
                     if (L.isTrace(fp.sig)) { file(traceMsg, L._traceKey(fp.sig), member); }
                     if (L.isCut(fp.sig)) {
                         file(traceCut, L._traceKey(fp.sig), member);
@@ -3527,6 +3535,7 @@ JiTA.logsig = {
         $('<div class="jita-menu-status">Loading clusters…</div>').appendTo($sect);
         JiTA.logsig.clusters().then(function (clusters) {
             if (!document.body.contains($overlay[0])) { return; }   // closed before the build finished
+            clusters = (clusters || []).filter(function (c) { return !JiTA.excnoise.isIgnored(c.sig); });   // what the user ignores
             $sect.empty();
             if (!clusters.length) {
                 $('<div class="jita-menu-status">No exception is shared by 2+ defects yet. (Sync the defect DB first if you haven’t.)</div>').appendTo($sect);
@@ -3662,6 +3671,7 @@ JiTA.logsig = {
                     if (t2.indexOf(endLine) !== -1) { j++; break; }
                 }
                 var fp = JiTA.logsig._fingerprint(blockText), hit = JiTA.logsig._pointAt(idx, fp.sig, fp.crashSig);
+                if (hit && JiTA.excnoise && JiTA.excnoise.isIgnored(fp.sig)) { hit = null; }   // the user ignores it (JiTA.excnoise)
                 var defect = hit ? hit.key : null, loose = !!hit && hit.by !== 'stack';
                 // Mark every block row as scanned; only the anchor (first row) carries the defect key (a '~'
                 // prefix flags a loose crash-site match so a re-pass keeps the right styling).
@@ -3739,6 +3749,8 @@ JiTA.logsig = {
         }
         return blocks;
     },
+    // Each defect found also names the signatures that found it, with how often and whether only loosely ({ sig: { n, loose } }),
+    // so what the user ignores can be left out where it is shown (JiTA.ui.renderLogLink). KEEP IN SYNC with lgMatch.
     _matchTextLocal: function (text) {
         return JiTA.logsig.ensure().then(function (idx) {
             var found = {};
@@ -3747,10 +3759,12 @@ JiTA.logsig = {
                 var fp = JiTA.logsig._fingerprint(blockText), hit = JiTA.logsig._pointAt(idx, fp.sig, fp.crashSig);
                 var defect = hit ? hit.key : null, loose = !!hit && hit.by !== 'stack';
                 if (!defect) { return; }
-                if (!found[defect]) { found[defect] = { defect: defect, count: 0, msg: fp.msg || '', loose: loose }; }
+                if (!found[defect]) { found[defect] = { defect: defect, count: 0, msg: fp.msg || '', loose: loose, sigs: {} }; }
                 found[defect].count++;
                 if (!loose) { found[defect].loose = false; }   // an exact hit upgrades it from "possibly related"
                 if (!found[defect].msg && fp.msg) { found[defect].msg = fp.msg; }
+                var by = found[defect].sigs[fp.sig] || (found[defect].sigs[fp.sig] = { n: 0, loose: loose });
+                by.n++;
             }
             JiTA.logsig._logBlocks(text).forEach(tallyBlock);
             return found;
@@ -4475,6 +4489,193 @@ JiTA.hidden = {
         var m = JiTA.hidden._load(), n = 0;
         for (var k in m) { if (Object.prototype.hasOwnProperty.call(m, k)) { n++; } }
         return n;
+    }
+};
+
+
+/* ---- exceptions and stacktraces that don't count -----------------------------------------------------------------------
+ * Not every exception in a log is a bug. Many are messages the game shows the player, others noise of their own. Those
+ * raise no match (JiTA.repexc), point at no defect (JiTA.logsig) and make no pattern (the defect profile); the profile and
+ * the exception search list them apart, folded, saying why. Three rules, checked in this order (why):
+ *   user     a UserError (JiTA.logsig.isUserError): ThrottleGeneric when clicking too fast, PerformSessionChangeInProgress
+ *            during a session change, and the like. Not even indexed.
+ *   ignored  one the user ignores (IGNORE_KEY): its message at any stack.
+ *   common   a signature in COMMON_PCT or more of the open reports' logs, and in COMMON_MIN of them at least, as the
+ *            background reader last counted them (FREQ_KEY, see JiTA.logread), unless the user counts it anyway
+ *            (COUNT_KEY). So common, it says little about the bug.
+ * The saved readings keep every exception and the rules apply where they are used, so a change downloads nothing. GM keeps
+ * the user's lists, which survive an update as JiTA.hidden's do, and every tab hears a change (the listeners at boot).
+ */
+JiTA.excnoise = {
+    IGNORE_KEY: 'jitaIgnoredExc',    // GM: { message key (JiTA.logsig._msgKey): { msg, at } }
+    COUNT_KEY: 'jitaCountedExc',     // GM: { sig: at }, common ones the user counts anyway
+    FREQ_KEY: 'excFreq',             // meta: { at, n, c: { sig: count } }, the common ones of the last full count
+    TRIED_KEY: 'excFreqTried',       // meta: when a full count was last begun
+    COMMON_PCT: 0.05,
+    COMMON_MIN: 10,
+    FREQ_MS: 24 * 3600 * 1000,       // a count this old is done again, by a pass that lists every open report
+    RETRY_MS: 6 * 3600 * 1000,       // ...though not sooner than this after the last one begun
+    STALE_MS: 3 * 24 * 3600 * 1000,  // a count this old (the background reader switched off) is no longer used
+    LOAD_MS: 5 * 60 * 1000,          // how long a count read from the DB is used before it is read again
+    gen: 0,                          // goes up whenever what counts changes: what was worked out before is out of date
+    _ign: null,                      // the GM lists as read; dropped when another tab changes them
+    _cnt: null,
+    _freq: null,
+    _freqRead: 0,
+    _loading: null,
+
+    _ignored: function () {
+        var N = JiTA.excnoise;
+        if (!N._ign) { var m = gmGet(N.IGNORE_KEY, {}); N._ign = (m && typeof m === 'object') ? m : {}; }
+        return N._ign;
+    },
+    _counted: function () {
+        var N = JiTA.excnoise;
+        if (!N._cnt) { var m = gmGet(N.COUNT_KEY, {}); N._cnt = (m && typeof m === 'object') ? m : {}; }
+        return N._cnt;
+    },
+    _drop: function () { JiTA.excnoise._ign = null; JiTA.excnoise._cnt = null; },
+
+    // Why a signature does not count: 'user', 'ignored' or 'common', or '' when it counts. 'common' needs the count load()ed.
+    why: function (sig) {
+        var N = JiTA.excnoise;
+        if (!sig) { return ''; }
+        if (JiTA.logsig.isUserError(sig)) { return 'user'; }
+        if (N.isIgnored(sig)) { return 'ignored'; }
+        if (N.isCommon(sig)) { return 'common'; }
+        return '';
+    },
+    counts: function (sig) { return !JiTA.excnoise.why(sig); },
+    isIgnored: function (sig) { return !!sig && Object.prototype.hasOwnProperty.call(JiTA.excnoise._ignored(), JiTA.logsig._msgKey(sig)); },
+    // The share of the open reports' logs a signature is in, by the last count: 0 unless it is past both thresholds, or
+    // when the count is too old to go by.
+    share: function (sig) {
+        var N = JiTA.excnoise, f = N._freq, c = f && f.c && f.c[sig];
+        if (!c || !f.n || !(Date.now() - f.at < N.STALE_MS)) { return 0; }
+        return (c >= N.COMMON_MIN && c >= N.COMMON_PCT * f.n) ? c / f.n : 0;
+    },
+    isCommon: function (sig) { return !!sig && JiTA.excnoise.share(sig) > 0 && !JiTA.excnoise._counted()[sig]; },
+
+    // Read the last count, at most every LOAD_MS. Never rejects. The first read in a tab changes nothing worked out
+    // before it: what goes by the count waits for this.
+    load: function () {
+        var N = JiTA.excnoise;
+        if (N._loading) { return N._loading; }
+        if (N._freqRead && Date.now() - N._freqRead < N.LOAD_MS) { return Promise.resolve(); }
+        var first = !N._freqRead;
+        N._loading = Promise.resolve().then(function () { return JiTA.db.getMeta(N.FREQ_KEY); }).then(null, function () { return null; }).then(function (f) {
+            N._loading = null;
+            N._setFreq((f && f.c) ? f : null, first);
+        });
+        return N._loading;
+    },
+    // A new count, read or just made (JiTA.logread): when it makes other signatures common, what counts has changed.
+    _setFreq: function (f, quiet) {
+        var N = JiTA.excnoise, before = N._common().join('\n');
+        N._freq = f;
+        N._freqRead = Date.now();
+        if (!quiet && before !== N._common().join('\n')) { N._changed(); }
+    },
+    // The signatures the last count makes common, whether the user counts some of them anyway or not.
+    _common: function () {
+        var N = JiTA.excnoise, f = N._freq;
+        return (f && f.c) ? Object.keys(f.c).filter(function (s) { return N.share(s) > 0; }).sort() : [];
+    },
+    // What counts has changed, here or in another tab: what was worked out by the old rules goes, the open exception search
+    // looks again at what it offers, and the issue on screen is drawn again (a defect profile summarises again when drawn).
+    _changed: function () {
+        var N = JiTA.excnoise, X = JiTA.excfind;
+        N.gen++;
+        try { JiTA.repexc.reset(); } catch (e) { /* ignore */ }
+        try { if (JiTA.triage) { JiTA.triage._cache = {}; } } catch (e) { /* ignore */ }
+        try { JiTA.logsig.rematch(); } catch (e) { /* ignore */ }
+        try { if (X && X._st) { X._st.tsig = null; X._retarget(X._st); } } catch (e) { /* ignore */ }
+        try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }
+    },
+
+    // Ignore a signature's message, at any stack. `msg` is the message as written, for the list.
+    ignore: function (sig, msg) {
+        var N = JiTA.excnoise, k = JiTA.logsig._msgKey(sig), m = N._ignored();
+        if (!k) { return; }
+        m[k] = { msg: String(msg || '').replace(/\s+/g, ' ').trim().slice(0, 200), at: Date.now() };
+        gmSet(N.IGNORE_KEY, m);
+        N._changed();
+    },
+    // Count an ignored message again, by its key (keyOf), or every one.
+    unignore: function (key) {
+        var N = JiTA.excnoise, m = N._ignored();
+        if (!Object.prototype.hasOwnProperty.call(m, key)) { return; }
+        delete m[key];
+        gmSet(N.IGNORE_KEY, m);
+        N._changed();
+    },
+    unignoreAll: function () {
+        var N = JiTA.excnoise;
+        N._ign = {};
+        gmSet(N.IGNORE_KEY, {});
+        N._changed();
+    },
+    keyOf: function (sig) { return JiTA.logsig._msgKey(sig); },
+    // Count common signatures anyway (on), or as common again: for a real bug that is busy enough to be common.
+    countAnyway: function (sigs, on) {
+        var N = JiTA.excnoise, m = N._counted();
+        [].concat(sigs || []).forEach(function (sig) { if (on) { m[sig] = Date.now(); } else { delete m[sig]; } });
+        gmSet(N.COUNT_KEY, m);
+        N._changed();
+    },
+    // How many common ones the user counts anyway, and taking that back for all of them.
+    countedAnyway: function () { return Object.keys(JiTA.excnoise._counted()).length; },
+    uncountAll: function () {
+        var N = JiTA.excnoise;
+        N._cnt = {};
+        gmSet(N.COUNT_KEY, {});
+        N._changed();
+    },
+    // The ignored ones, the latest first: [{ key, msg, at }].
+    list: function () {
+        var m = JiTA.excnoise._ignored();
+        return Object.keys(m).map(function (k) { return { key: k, msg: (m[k] && m[k].msg) || k, at: (m[k] && m[k].at) || 0 }; })
+            .sort(function (a, b) { return b.at - a.at || (a.key < b.key ? -1 : 1); });
+    },
+    // What a reason says beside an exception set apart.
+    label: function (why, sig) {
+        if (why === 'user') { return 'UserError: a message the game shows the player'; }
+        if (why === 'ignored') { return 'ignored by you'; }
+        if (why === 'common') { return 'in ' + Math.max(1, Math.round(100 * JiTA.excnoise.share(sig))) + '% of the open reports\' logs'; }
+        return '';
+    },
+    // How the rules stand, for Settings.
+    summary: function () {
+        var N = JiTA.excnoise, n = N.list().length, f = N._freq;
+        var bits = ['UserErrors never count', n ? (n + ' ignored by you') : 'none ignored by you'];
+        if (f && f.n && Date.now() - f.at < N.STALE_MS) {
+            var common = N._common().filter(function (s) { return N.isCommon(s); }).length;
+            bits.push(common + ' common, counted ' + JiTA.util.fmtDate(new Date(f.at).toISOString()) + ' over ' + f.n + ' open reports\' logs');
+        } else {
+            bits.push('the common ones are counted once a day while Read open reports\' logs is on');
+        }
+        return bits.join(' · ') + '.';
+    },
+
+    // ---- counting them, in JiTA.logread's passes that list every open report ----
+    // A tally: in how many of the reports read each signature is, by its hash and length (a long stack's signature is long,
+    // and thousands of reports are read), the signature itself kept once it is in COMMON_MIN of them.
+    tally: function () { return { n: 0, h: {}, s: {} }; },
+    count: function (t, exc) {
+        var N = JiTA.excnoise;
+        t.n++;
+        (exc || []).forEach(function (e) {
+            var h = JiTA.util.hash(e.sig) + ':' + e.sig.length;
+            t.h[h] = (t.h[h] || 0) + 1;
+            if (t.h[h] >= N.COMMON_MIN && !t.s[h]) { t.s[h] = e.sig; }
+        });
+    },
+    // The count a pass leaves: the signatures past both thresholds, with in how many reports' logs (one is only kept once it
+    // is in COMMON_MIN of them).
+    table: function (t, at) {
+        var N = JiTA.excnoise, c = {};
+        Object.keys(t.s).forEach(function (h) { var k = t.h[h]; if (k >= N.COMMON_PCT * t.n) { c[t.s[h]] = k; } });
+        return { at: at, n: t.n, c: c };
     }
 };
 
@@ -8480,10 +8681,19 @@ JiTA.ui = {
                     }
                     function mergeFound(found) {
                         Object.keys(found || {}).forEach(function (k) {
-                            if (!merged[k]) { merged[k] = { defect: k, count: 0, msg: found[k].msg, loose: !!found[k].loose }; }
+                            if (!merged[k]) { merged[k] = { defect: k, count: 0, msg: found[k].msg, loose: !!found[k].loose, sigs: {} }; }
                             merged[k].count += found[k].count;
                             if (!found[k].loose) { merged[k].loose = false; }   // an exact hit upgrades it
                             if (!merged[k].msg && found[k].msg) { merged[k].msg = found[k].msg; }
+                            // The signatures that found it, for leaving out what the user ignores where it is shown. A result that
+                            // names none (an older worker) makes the entry one that cannot be filtered.
+                            if (!found[k].sigs) { merged[k].sigs = null; }
+                            else if (merged[k].sigs) {
+                                Object.keys(found[k].sigs).forEach(function (s) {
+                                    var a = merged[k].sigs[s], b = found[k].sigs[s];
+                                    if (!a) { merged[k].sigs[s] = { n: b.n, loose: !!b.loose }; } else { a.n += b.n; if (!b.loose) { a.loose = false; } }
+                                });
+                            }
                         });
                         if (--pending === 0) {
                             console.log('[JiTA] log scan ' + key + ': ' + Object.keys(merged).length + ' known defect(s) matched');
@@ -8503,6 +8713,25 @@ JiTA.ui = {
         });
     },
 
+    // A log scan's defects without what found them only by exceptions the user ignores (JiTA.excnoise): each one's count and
+    // "~" worked out again from the rest, and one with nothing left dropped. An entry that names no signatures (from an older
+    // worker) stays as it is. The scan itself is cached as it came, so ignoring or counting again needs no new download.
+    _counting: function (found) {
+        var out = {};
+        Object.keys(found || {}).forEach(function (k) {
+            var f = found[k], sigs = f.sigs;
+            if (!sigs) { out[k] = f; return; }
+            var n = 0, loose = true;
+            Object.keys(sigs).forEach(function (s) {
+                if (JiTA.excnoise.isIgnored(s)) { return; }
+                n += sigs[s].n;
+                if (!sigs[s].loose) { loose = false; }
+            });
+            if (n) { out[k] = { defect: k, count: n, msg: f.msg, loose: loose, sigs: sigs }; }
+        });
+        return out;
+    },
+
     // Populate the "Known defects in attached log" section of the panel (hidden unless there are hits). Each
     // entry links to the defect and reuses the same hover-preview card as the suggestions.
     renderLogLink: function (key, background) {
@@ -8515,8 +8744,9 @@ JiTA.ui = {
         if (!background) { $box.removeClass('has-hits').empty(); }
         JiTA.db.countDefectsOnly().then(function (n) {
             if (!n) { $box.removeClass('has-hits').empty(); return; }   // no defects to match the log against yet -> make sure it's clear
-            JiTA.ui.scanIssueLog(key).then(function (found) {
+            JiTA.ui.scanIssueLog(key).then(function (scanned) {
                 if (JiTA.ui.currentKey !== key) { return; }   // navigated to another issue meanwhile
+                var found = JiTA.ui._counting(scanned);
                 var keys = Object.keys(found || {});
                 keys = keys.filter(function (k) { return !JiTA.hidden.isHidden(k); });   // drop user-hidden defects from the list
                 var $b = $('#jita-sd-loglink');
@@ -9341,6 +9571,31 @@ JiTA.menu = {
             });
             $lrRow.append($lrSw);
             $ta.append($lrRow);
+
+            // Exceptions that don't count (JiTA.excnoise): how the rules stand, and the ones the user ignores, each to count
+            // again. Common ones counted anyway can be taken back as well.
+            var noise = JiTA.excnoise, ignored = noise.list(), anyway = noise.countedAnyway();
+            var $nzRow = $('<div class="jita-menu-row"></div>');
+            $('<span class="lbl">Exceptions that don\'t count</span>')
+                .append($('<span class="sub"></span>').text('They raise no match and point at no defect; the Defect Profile and ++ list them apart. ' + noise.summary()))
+                .appendTo($nzRow);
+            var $nzClr = $('<button class="jita-btn"></button>').text('Count all again').on('click', function () { noise.unignoreAll(); refreshMenu(); });
+            if (!ignored.length) { $nzClr.prop('disabled', true); }
+            $nzRow.append($nzClr);
+            $ta.append($nzRow);
+            ignored.slice(0, 50).forEach(function (x) {
+                var $r = $('<div class="jita-menu-row jita-nz-item"></div>');
+                $('<span class="lbl"></span>').append($('<span class="sub"></span>').text((JiTA.logsig.isTrace(x.key) ? 'Stacktrace: ' : '') + x.msg)
+                    .attr('title', 'Ignored ' + JiTA.util.fmtDate(new Date(x.at || 0).toISOString()))).appendTo($r);
+                $('<button class="jita-btn"></button>').text('Count again').on('click', function () { noise.unignore(x.key); refreshMenu(); }).appendTo($r);
+                $ta.append($r);
+            });
+            if (anyway) {
+                var $awRow = $('<div class="jita-menu-row"></div>');
+                $('<span class="lbl">Common ones counted anyway</span>').append($('<span class="sub"></span>').text(anyway + ' counted although common')).appendTo($awRow);
+                $('<button class="jita-btn"></button>').text('Treat as common again').on('click', function () { noise.uncountAll(); refreshMenu(); }).appendTo($awRow);
+                $ta.append($awRow);
+            }
 
             // Embedding backend (GPU vs CPU). Same flags toggleEmbedBackend() reads/writes; it reloads.
             var gpuOn = gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false);
@@ -10622,8 +10877,10 @@ function jitaWorkerBody(cfg) {
             var fp = lgFp(blockText), hit = lgPoint(idx, fp.sig, fp.crashSig);
             if (!hit) { return; }
             var defect = hit.key, loose = hit.by !== 'stack';
-            if (!found[defect]) { found[defect] = { defect: defect, count: 0, msg: fp.msg || '', loose: loose }; }
+            if (!found[defect]) { found[defect] = { defect: defect, count: 0, msg: fp.msg || '', loose: loose, sigs: {} }; }
             found[defect].count++; if (!loose) { found[defect].loose = false; } if (!found[defect].msg && fp.msg) { found[defect].msg = fp.msg; }
+            var by = found[defect].sigs[fp.sig] || (found[defect].sigs[fp.sig] = { n: 0, loose: loose });
+            by.n++;
         });
         return found;
     }
@@ -10642,6 +10899,8 @@ function jitaWorkerBody(cfg) {
     function lgIsTrace(sig) { return String(sig == null ? '' : sig).indexOf(LG_TRACE) === 0; }
     function lgIsCut(sig) { var s = String(sig == null ? '' : sig); return lgIsTrace(s) && s.charAt(s.length - 1) === '|'; }
     function lgTraceKey(sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); }
+    // A UserError's signature: a message the game shows the player, not indexed. KEEP IN SYNC with JiTA.logsig.isUserError.
+    function lgIsUserError(sig) { return /^(?:[a-z_]\w*\.)*usererror\b/.test(String(sig == null ? '' : sig)); }
     // The defects with a stacktrace of this one's message where one of the two was cut off before its stack. KEEP IN SYNC
     // with JiTA.logsig._traceMates.
     function lgMates(idx, sig) {
@@ -10979,6 +11238,7 @@ function jitaWorkerBody(cfg) {
                 for (var b = 0; b < blocks.length; b++) {
                     var fp = lgFp(blocks[b]);
                     if (!fp.sig) { continue; }
+                    if (lgIsUserError(fp.sig)) { continue; }   // a message the game shows the player, no bug
                     if (lgIsTrace(fp.sig)) { lgFile(traceMsg, lgTraceKey(fp.sig), lmember); }
                     if (lgIsCut(fp.sig)) {
                         lgFile(traceCut, lgTraceKey(fp.sig), lmember);
@@ -13495,6 +13755,7 @@ JiTA.dupfind = {
         return JiTA.logsig.clusters().then(function (clusters) {
             var pairs = [];
             for (var c = 0; c < (clusters || []).length; c++) {
+                if (JiTA.excnoise.isIgnored(clusters[c].sig)) { continue; }   // an exception the user ignores pairs nothing
                 var open = [];
                 for (var m = 0; m < clusters[c].members.length; m++) {
                     var mem = clusters[c].members[m];
@@ -14510,9 +14771,11 @@ JiTA.profile = {
     // domCrash, builds, first, last, afterFix, outliers }. A pattern (dims[].dominant, domExc, domCrash) needs DOMINANT of
     // at least MIN_N reports that say anything about it; a report that says nothing is neither for nor against it.
     // `hiddenOf(sig)`, when given, names the defect an exception is hidden under in the Triage Assistant ('' when it is
-    // not). A hidden exception is left out of the pattern and listed apart, in hiddenExc.
-    summarise: function (views, defect, hiddenOf) {
-        var P = JiTA.profile, hid = hiddenOf || function () { return ''; };
+    // not). A hidden exception is left out of the pattern and listed apart, in hiddenExc. `leftOf(sig)`, when given, says why
+    // one does not count (JiTA.excnoise.why, '' when it does): such ones are left out the same way and listed in leftExc,
+    // each group with its `why`. A hidden one is listed as hidden.
+    summarise: function (views, defect, hiddenOf, leftOf) {
+        var P = JiTA.profile, hid = hiddenOf || function () { return ''; }, left = leftOf || function () { return ''; };
         var out = { n: views.length, dims: [], exc: [], crashes: [], outliers: [], builds: null, first: null, last: null, afterFix: 0 };
         views.forEach(function (v) {
             if (!v.created) { return; }
@@ -14544,6 +14807,7 @@ JiTA.profile = {
         withLog.forEach(function (v) {
             v.exc.forEach(function (e) {
                 if (hid(e.sig)) { return; }
+                if (left(e.sig)) { return; }
                 var s = sigs[e.sig] || (sigs[e.sig] = { sig: e.sig, msg: e.msg, count: 0 });
                 s.count++;
             });
@@ -14552,8 +14816,10 @@ JiTA.profile = {
         out.exc = Object.keys(sigs).map(function (k) { return sigs[k]; }).filter(function (s) { return s.count >= 2; })
             .sort(function (a, b) { return b.count - a.count || (a.msg < b.msg ? -1 : 1); });
         out.domExc = (out.exc[0] && withLog.length >= P.MIN_N && out.exc[0].count / withLog.length >= P.DOMINANT) ? out.exc[0] : null;
-        out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig); });
+        out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig) && !left(e.sig); });
         out.hiddenExc = P._groups(withLog, function (e) { return hid(e.sig); });
+        out.leftExc = P._groups(withLog, function (e) { return !hid(e.sig) && !!left(e.sig); });
+        out.leftExc.forEach(function (g) { g.why = left(g.paths[0].sig); });
         var withWer = views.filter(function (v) { return v.crashRead === true; }), mods = {};
         withWer.forEach(function (v) {
             var own = {};
@@ -14679,7 +14945,8 @@ JiTA.profile = {
         if (job) { if (onState) { job.listeners.push(onState); } return job.promise; }
         job = P._builds[key] = { listeners: onState ? [onState] : [] };
         function emit(s) { job.listeners.forEach(function (f) { try { f(s); } catch (e) { /* ignore */ } }); }
-        job.promise = Promise.all([P._reports(key), JiTA.db.getDefect(key).then(null, function () { return null; })]).then(function (r) {
+        // What counts (JiTA.excnoise) is read first, so the first state already sets apart what does not.
+        job.promise = Promise.all([P._reports(key), JiTA.db.getDefect(key).then(null, function () { return null; }), JiTA.excnoise.load()]).then(function (r) {
             var got = r[0], defect = r[1], issues = got.issues, zip = P.zipOn();
             return Promise.all(issues.map(function (iss) { return JiTA.db.getMeta(P.CACHE_PREFIX + iss.key).then(P._usable, function () { return null; }); })).then(function (recs) {
                 var views = issues.map(function (iss, i) { return P.view(iss, recs[i]); });
@@ -14688,7 +14955,8 @@ JiTA.profile = {
                 var next = 0, left = todo.length, finished = !todo.length, def = {};
                 function hiddenOf(sig) { var d = def[sig]; return (d && JiTA.hidden.isHidden(d)) ? d : ''; }
                 function publish(done) {
-                    var s = { key: key, total: got.total, views: views.slice(), summary: P.summarise(views, defect, hiddenOf), pending: left, done: done, zip: zip };
+                    var s = { key: key, total: got.total, views: views.slice(), summary: P.summarise(views, defect, hiddenOf, JiTA.excnoise.why), pending: left, done: done, zip: zip,
+                        defect: defect, hiddenOf: hiddenOf, gen: JiTA.excnoise.gen };   // what _fresh summarises it again with
                     P._keep(key, s);
                     emit(s);
                     return s;
@@ -14779,6 +15047,18 @@ JiTA.profile = {
     _date: function (iso) { return JiTA.util.fmtDate(iso); },
     _chip: function (text, cls, title) { return $('<span class="jp-chip"></span>').addClass(cls || '').text(text).attr('title', title || text); },
     _hidOpen: false,               // the card's hidden exceptions are unfolded; kept across its redraws while files are read
+    _leftOpen: false,              // ...and its exceptions that don't count
+
+    // A state summarised before what counts changed (JiTA.excnoise.gen) is summarised again, by the rules as they stand. One
+    // without what that takes (not from build) keeps the summary it has.
+    _fresh: function (s) {
+        var N = JiTA.excnoise;
+        if (s && s.hiddenOf && s.views && s.gen !== N.gen) {
+            s.summary = JiTA.profile.summarise(s.views, s.defect, s.hiddenOf, N.why);
+            s.gen = N.gen;
+        }
+        return s;
+    },
 
     _paint: function (key, s) {
         var P = JiTA.profile;
@@ -14787,7 +15067,7 @@ JiTA.profile = {
         if (!$b.length) { return; }
         $b.empty();
         if (!s.total) { $b.removeClass('has-hits'); P._show(false); return; }
-        var sm = s.summary;
+        var sm = P._fresh(s).summary;
         $b.addClass('has-hits');
         P._show(true);
         var $h = $('<div class="jp-head"></div>').text('Attached reports: ' + s.total).appendTo($b);
@@ -14820,6 +15100,23 @@ JiTA.profile = {
             });
             $ht.on('click', function (e) { e.preventDefault(); P._hidOpen = !P._hidOpen; $hx.toggleClass('open', P._hidOpen); $ht.text(hlabel()); });
         }
+        // Exceptions and stacktraces that don't count (JiTA.excnoise): out of the pattern too, folded away the same way, each
+        // saying why.
+        var lx = sm.leftExc || [];
+        if (lx.length) {
+            var $lx = $('<div class="jp-hidden"></div>').toggleClass('open', !!P._leftOpen).appendTo($b);
+            var llabel = function () { return (P._leftOpen ? '▾ ' : '▸ ') + lx.length + ' not counted'; };
+            var $lt = $('<a class="jp-open" href="#"></a>').text(llabel())
+                .attr('title', 'Shared exceptions and stacktraces that do not count: UserErrors, ones you ignore, and ones common in the open reports\' logs')
+                .appendTo($('<div class="jp-line"></div>').appendTo($lx));
+            var $ll = $('<div class="jp-hlist"></div>').appendTo($lx);
+            lx.forEach(function (g) {
+                var $r = $('<div class="jp-out"></div>').appendTo($ll);
+                $('<span class="jp-why"></span>').text(g.count + '/' + sm.withLog + ' logs: ' + (g.msg || g.key) + ' (' + JiTA.excnoise.label(g.why, g.paths[0].sig) + ')')
+                    .attr('title', P._who(g.keys)).appendTo($r);
+            });
+            $lt.on('click', function (e) { e.preventDefault(); P._leftOpen = !P._leftOpen; $lx.toggleClass('open', P._leftOpen); $lt.text(llabel()); });
+        }
         var bits = [];
         if (sm.builds) { bits.push(sm.builds.min === sm.builds.max ? ('build ' + sm.builds.max) : ('builds ' + sm.builds.min + ' to ' + sm.builds.max)); }
         if (sm.first) { bits.push(sm.first === sm.last ? P._date(sm.first) : (P._date(sm.first) + ' to ' + P._date(sm.last))); }
@@ -14849,13 +15146,24 @@ JiTA.profile = {
         keys = keys || [];
         return keys.length ? (keys.length === 1 ? '1 report: ' : keys.length + ' reports: ') + keys.join(', ') : '';
     },
+    // Ignore an exception's message at any stack, once the user agrees (JiTA.excnoise). True when it was.
+    _ignore: function (sig, msg) {
+        if (!confirm('Ignore "' + String(msg || '').slice(0, 200) + '" everywhere, at any stack?\n\nFor every defect and bug report, it then raises no match and points at no ' +
+            'defect, and the Defect Profile and ++ list it apart. This is kept in this browser. Settings > Triage Assistant counts it again.')) { return false; }
+        JiTA.excnoise.ignore(sig, msg);
+        return true;
+    },
     openView: function (key) {
         var P = JiTA.profile, s = P._last[key];
         if (!s) { return; }
         P._injectCss();
         var ov = JiTA.menu._openOverlay({ title: 'Profile of ' + key + "'s attached reports" });
         ov.$menu.addClass('jita-profile-view');
-        var $b = $('<div class="jpv-scroll"></div>').appendTo(ov.$menu), sm = s.summary;
+        var $b = $('<div class="jpv-scroll"></div>').appendTo(ov.$menu), sm = P._fresh(s).summary;
+        // A link at a row's end that changes what counts, and draws the profile again (opening it anew replaces this one).
+        function act($r, text, title, fn) {
+            $('<a class="jpv-act" href="#"></a>').text(text).attr('title', title).on('click', function (e) { e.preventDefault(); if (fn() !== false) { P.openView(key); } }).appendTo($r);
+        }
         function sect(t) { return $('<div class="jpv-sub"></div>').text(t).appendTo($b); }
         var head = [s.total + ' report' + (s.total === 1 ? '' : 's') + ' attached'];
         if (sm.first) { head.push('filed ' + P._date(sm.first) + (sm.last !== sm.first ? ' to ' + P._date(sm.last) : '')); }
@@ -14885,6 +15193,7 @@ JiTA.profile = {
             $('<span class="jpv-count"></span>').toggleClass('dom', g.paths.some(function (p) { return p.sig === domSig; })).text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
             kind($r, g);
             $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', P._sigTip(g.paths.map(function (p) { return p.sig; }), g.msg)).appendTo($r);
+            act($r, 'ignore', 'Leave this message out for every defect, at any stack: no match, no defect pointed at', function () { return P._ignore(g.paths[0].sig, g.msg || g.key); });
             if (g.paths.length < 2) { return; }
             // Its call stacks, each by where it differs from the others.
             var labels = P._pathLabels(g.paths.map(function (p) { return P._sigParts(p.sig).frames; }));
@@ -14895,9 +15204,10 @@ JiTA.profile = {
             });
             if (g.paths.length > 5) { $('<div class="jpv-row jpv-path"></div>').text('and ' + (g.paths.length - 5) + ' more call stacks').appendTo($b); }
         });
-        var hx = sm.hiddenExc || [];
+        var hx = sm.hiddenExc || [], lx = sm.leftExc || [];
         if (!sm.excGroups.length) {
-            $('<div class="jpv-none"></div>').text(hx.length ? 'No exception or stacktrace appears in more than one log, apart from the hidden ones below.' : 'No exception or stacktrace appears in more than one log.').appendTo($b);
+            var apart = (hx.length && lx.length) ? 'the hidden ones and the ones not counted' : (hx.length ? 'the hidden ones' : 'the ones not counted');
+            $('<div class="jpv-none"></div>').text((hx.length || lx.length) ? 'No exception or stacktrace appears in more than one log, apart from ' + apart + ' below.' : 'No exception or stacktrace appears in more than one log.').appendTo($b);
         }
         // Exceptions whose defect is hidden in the Triage Assistant, folded away under their own heading.
         if (hx.length) {
@@ -14913,6 +15223,28 @@ JiTA.profile = {
                 $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', P._sigTip(g.paths.map(function (p) { return p.sig; }), g.msg)).appendTo($r);
             });
             $hh.on('click', function () { var open = !$hv.hasClass('open'); $hv.toggleClass('open', open); $hh.text(hhead(open)); });
+        }
+        // Exceptions and stacktraces that don't count (JiTA.excnoise), folded the same way, each saying why. One the user
+        // ignores can be counted again from here, a common one counted anyway.
+        if (lx.length) {
+            var $lv = $('<div class="jpv-hidden"></div>').appendTo($b);
+            var lhead = function (open) { return (open ? '▾ ' : '▸ ') + 'Not counted (' + lx.length + '): UserErrors, ones you ignore, and ones common in the open reports\' logs'; };
+            var $lh = $('<div class="jpv-toggle"></div>').text(lhead(false)).appendTo($lv);
+            var $ll = $('<div class="jpv-hlist"></div>').appendTo($lv);
+            lx.forEach(function (g) {
+                var $r = $('<div class="jpv-row"></div>').appendTo($ll), sig = g.paths[0].sig;
+                $('<span class="jpv-count"></span>').text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
+                kind($r, g);
+                $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', P._sigTip(g.paths.map(function (p) { return p.sig; }), g.msg)).appendTo($r);
+                $('<span class="jpv-why"></span>').text(JiTA.excnoise.label(g.why, sig)).appendTo($r);
+                if (g.why === 'ignored') { act($r, 'count again', 'Count this message again', function () { JiTA.excnoise.unignore(JiTA.excnoise.keyOf(sig)); }); }
+                if (g.why === 'common') {
+                    act($r, 'count anyway', 'Count it although it is common: for a real bug that many reports hold', function () {
+                        JiTA.excnoise.countAnyway(g.paths.map(function (p) { return p.sig; }), true);
+                    });
+                }
+            });
+            $lh.on('click', function () { var open = !$lv.hasClass('open'); $lv.toggleClass('open', open); $lh.text(lhead(open)); });
         }
 
         sect('EVE client crashes in the crash histories (' + sm.withWer + ' read)');
@@ -14966,6 +15298,9 @@ JiTA.profile = {
                 '.jita-profile-view .jpv-val { cursor: help; }' +
                 '.jita-profile-view .jpv-msg { color: #e6e6e6; overflow-wrap: anywhere; }' +
                 '.jita-profile-view .jpv-kind { flex: 0 0 auto; color: #9aa6b2; font-size: 10px; border: 1px solid #3a434d; border-radius: 8px; padding: 0 6px; }' +
+                '.jita-profile-view .jpv-why { flex: 0 0 auto; color: #7a8694; font-size: 11px; }' +
+                '.jita-profile-view .jpv-act { flex: 0 0 auto; margin-left: auto; color: #4c9aff; font-size: 11px; text-decoration: none; }' +
+                '.jita-profile-view .jpv-act:hover { text-decoration: underline; }' +
                 '.jita-profile-view .jpv-key { flex: 0 0 90px; color: #4c9aff; font-weight: 700; text-decoration: none; }' +
                 '.jita-profile-view .jpv-path { padding: 2px 0 2px 28px; border-bottom: none; font-size: 11px; color: #7a8694; }' +
                 '.jita-profile-view .jpv-path .jpv-count { font-size: 10px; }' +
@@ -15064,9 +15399,21 @@ JiTA.excfind = {
             t.count = e.count;
             t.of = of;
         });
+        // The shared ones that don't count (JiTA.excnoise) are offered too, set apart below the rest: as many again.
+        var apart = [];
+        ((sm && sm.leftExc) || []).forEach(function (g) {
+            (g.paths || []).forEach(function (p) { apart.push({ sig: p.sig, msg: g.msg, count: p.count }); });
+        });
+        apart.sort(function (a, b) { return b.count - a.count || (a.sig < b.sig ? -1 : 1); }).slice(0, X.MAX_SHARED).forEach(function (e) {
+            var t = add(e.sig, e.msg);
+            t.count = e.count;
+            t.of = of;
+        });
         ((one && one.exc) || []).forEach(function (e) { add(e.sig, e.msg).one = one.key; });
         ((added && added.pasted) || []).forEach(function (e) { var t = add(e.sig, e.msg); t.own = true; if (e.open) { t.open = true; } });
         out.forEach(function (t) { if (edits && edits[t.sig] != null) { X._withPattern(t, edits[t.sig]); } });
+        // Why one does not count, by the rules as they stand now (the profile's summary may be older): it is then drawn apart.
+        out.forEach(function (t) { var w = JiTA.excnoise.why(t.sig); if (w) { t.left = w; } });
         // Exceptions with the same message are told apart by where their stacks differ (`via`), as the full profile does.
         var byMsg = {}, P = JiTA.profile;
         out.forEach(function (t) { var k = P._sigParts(t.sig).msg; (byMsg[k] = byMsg[k] || []).push(t); });
@@ -15217,6 +15564,10 @@ JiTA.excfind = {
         if (whole) { fps = X._fps(text); }
         else if (stack) { var f = JiTA.logsig._fingerprint(text); if (f.sig) { fps = [{ sig: f.sig, msg: f.msg }]; } }
         fps = fps.filter(function (e) { return !!e.msg; });
+        // A stacktrace's first line on its own, with no stack ("STACKTRACE #95 Some text", the count written or not): its message,
+        // looked for at any stack as a typed one is. Its message is all a typed one is compared with.
+        var head = (!fps.length && !/\.pyx?\(\d+\)/.test(text)) ? /^\s*(?:\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)?STACKTRACE #\d*(?!\d)\s*(?:logged at \S+ \S+ :\s*)?(?!logged at )(\S(?:[^\n]*\S)?)/i.exec(text) : null;
+        if (head) { text = head[1]; stack = false; }
         if (stack && !fps.length) {
             X._addSay(st, 'No message and stack could be read from that. Paste the whole exception or stacktrace, from EXCEPTION # or STACKTRACE # on.');
             return;
@@ -15226,6 +15577,7 @@ JiTA.excfind = {
                 var have = st.targets.some(function (t) { return t.sig === e.sig; }) || A.pasted.some(function (x) { return x.sig === e.sig; });
                 if (!have) { A.pasted.push(e); }
                 st.on[e.sig] = true;
+                if (JiTA.excnoise.why(e.sig)) { st.apartOpen = true; }   // one that doesn't count is drawn apart: unfolded, to be seen
             });
         } else {
             var v = text.replace(/\s+/g, ' ');
@@ -15411,6 +15763,7 @@ JiTA.excfind = {
     _load: function (st) {
         var X = JiTA.excfind;
         X._defectText(st.key).then(function (text) { st.desc = X._fps(text); X._retarget(st); });
+        JiTA.excnoise.load().then(function () { X._retarget(st); });   // which are common: they are then set apart
         // The attached reports' shared exceptions, as the profile counts them. A build already under way for the panel is
         // joined, not started again; one started here goes on while the panel shows this defect's profile.
         try {
@@ -15461,7 +15814,7 @@ JiTA.excfind = {
         if (!X._alive(st)) { return; }
         var ts = X.targets(st.desc, st.profile, st.one, st.edit, st.added);
         st.targets = ts;
-        var sig = ts.map(function (t) { return t.sig + '|' + t.count + '/' + t.of + (st.on[t.sig] ? '+' : '-'); }).join('\n') +
+        var sig = ts.map(function (t) { return t.sig + '|' + t.count + '/' + t.of + (st.on[t.sig] ? '+' : '-') + (t.left || ''); }).join('\n') +
             '#' + (st.desc !== null) + st.profileDone;
         if (sig !== st.tsig) {
             st.tsig = sig;
@@ -15588,8 +15941,17 @@ JiTA.excfind = {
             $('<div class="jx-empty"></div>').text(pending ? 'Looking for the exceptions of ' + st.key + '…' : X._nothing(st)).appendTo($t);
             return;
         }
-        st.targets.forEach(function (t) {
-            var $row = $('<div class="jx-target"></div>').attr('title', X._tip(t)).appendTo($t);
+        // The ones that don't count (JiTA.excnoise) go below the rest, folded under a line of their own; ticked, they are looked
+        // for all the same.
+        var apart = st.targets.filter(function (t) { return !!t.left; }), $into = $t, $apart = null;
+        st.targets.filter(function (t) { return !t.left; }).concat(apart).forEach(function (t) {
+            if (t.left && !$apart) {
+                var $head = $('<div class="jx-aparthead"></div>').appendTo($t);
+                $apart = $into = $('<div class="jx-apart"></div>').toggleClass('open', !!st.apartOpen).appendTo($t);
+                var label = function () { return (st.apartOpen ? '▾ ' : '▸ ') + 'Not counted (' + apart.length + '): UserErrors, ones you ignore, and ones common in the open reports\' logs'; };
+                $head.text(label()).on('click', function () { st.apartOpen = !st.apartOpen; $apart.toggleClass('open', st.apartOpen); $head.text(label()); });
+            }
+            var $row = $('<div class="jx-target"></div>').attr('title', X._tip(t)).appendTo($into);
             var $l = $('<label class="jx-tlabel"></label>').appendTo($row);
             $('<input type="checkbox">').prop('checked', !!st.on[t.sig]).on('change', function () {
                 st.on[t.sig] = this.checked;
@@ -15604,10 +15966,11 @@ JiTA.excfind = {
                 var $m = X._marked($('<span class="jx-tmsg"></span>').toggleClass('edited', t.pat != null), X._shown(t), t.pat != null).appendTo($l);
                 if (t.via) { $('<span class="jx-via"></span>').text(' via ' + t.via).appendTo($m); }
             }
+            if (t.left) { $('<span class="jx-left"></span>').text(JiTA.excnoise.label(t.left, t.sig)).appendTo($row); }
             $('<span class="jx-tsrc"></span>').text(X._src(t)).appendTo($row);
             if (editing) {
                 $('<div class="jx-pathint"></div>').text('Put # where any number will do and * where any text will; the rest, and the stack, must match as written. ' +
-                    'Enter keeps it, Esc cancels.').appendTo($t);
+                    'A # also matches a # and a * a *, so nothing needs escaping. Enter keeps it, Esc cancels.').appendTo($into);
                 return;
             }
             if (t.typed) { X._removeLink(st, t, $row); return; }   // a typed message is removed and typed again, not edited
@@ -15617,6 +15980,7 @@ JiTA.excfind = {
                 $('<span class="jx-tedit"></span>').text('reset').attr('title', 'Look for the exception as it is again')
                     .on('click', function (e) { e.preventDefault(); X._keepEdit(st, t.sig, null); st.tsig = null; X._retarget(st); }).appendTo($row);
             }
+            X._noiseLink(t, $row);
             if (t.own && !t.desc && !t.count && !t.one) { X._removeLink(st, t, $row); }
         });
         if (st.editor) { try { st.editor.focus(); st.editor.select(); } catch (e) { /* ignore */ } }
@@ -15625,6 +15989,16 @@ JiTA.excfind = {
 
     // What hovering an exception shows: its message and stack, or for a typed message that it has none.
     _tip: function (t) { return t.typed ? 'Looked for by this message alone, at any stack' : JiTA.profile._sigTip(t.sig, t.msg); },
+    // The link that changes whether an exception counts (JiTA.excnoise): ignore one that counts, count one the user ignores
+    // again, and a common one anyway. A UserError never counts. What counts changing draws the window again.
+    _noiseLink: function (t, $row) {
+        var N = JiTA.excnoise, a = null;
+        if (!t.left) { a = ['ignore', 'Leave this message out for every defect, at any stack: no match, no defect pointed at', function () { JiTA.profile._ignore(t.sig, t.msg || t.sig); }]; }
+        else if (t.left === 'ignored') { a = ['count again', 'Count this message again', function () { N.unignore(N.keyOf(t.sig)); }]; }
+        else if (t.left === 'common') { a = ['count anyway', 'Count it although it is common: for a real bug that many reports hold', function () { N.countAnyway(t.sig, true); }]; }
+        if (!a) { return; }
+        $('<span class="jx-tedit"></span>').text(a[0]).attr('title', a[1]).on('click', function (e) { e.preventDefault(); a[2](); }).appendTo($row);
+    },
     _removeLink: function (st, t, $row) {
         $('<span class="jx-tedit"></span>').text('remove').attr('title', 'Stop looking for this exception you added')
             .on('click', function (e) { e.preventDefault(); JiTA.excfind._removeOwn(st, t.sig); }).appendTo($row);
@@ -15755,6 +16129,11 @@ JiTA.excfind = {
                 '.jita-excfind-view .jx-tmsg { flex: 1 1 auto; min-width: 0; color: #e6e6e6; font-family: Consolas, "Courier New", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-excfind-view .jx-via { color: #7a8694; }' +
                 '.jita-excfind-view .jx-kind { flex: 0 0 auto; color: #9aa6b2; font-size: 10px; border: 1px solid #3a434d; border-radius: 8px; padding: 0 6px; white-space: nowrap; }' +
+                '.jita-excfind-view .jx-aparthead { color: #9aa6b2; font-size: 12px; padding: 8px 0 4px; cursor: pointer; user-select: none; }' +
+                '.jita-excfind-view .jx-aparthead:hover { color: #e6e6e6; }' +
+                '.jita-excfind-view .jx-apart { display: none; }' +
+                '.jita-excfind-view .jx-apart.open { display: block; }' +
+                '.jita-excfind-view .jx-left { flex: 0 0 auto; color: #7a8694; font-size: 11px; white-space: nowrap; }' +
                 '.jita-excfind-view .jx-tsrc { flex: 0 0 auto; color: #7a8694; font-size: 11px; white-space: nowrap; }' +
                 '.jita-excfind-view .jx-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 7px 0; border-bottom: 1px solid #2c333a; font-size: 12px; }' +
                 '.jita-excfind-view .jx-key { flex: 0 0 88px; color: #4c9aff; font-weight: 700; text-decoration: none; }' +
@@ -15837,12 +16216,17 @@ JiTA.repexc = {
         });
     },
 
-    // The defects an exception in this bug report's log confirms: Promise of { defect key: 'exact' | 'site' }. Never
-    // rejects; a look that failed is tried again next time.
+    // Of a report's signatures, those that count (JiTA.excnoise: no UserError, none the user ignores, none common).
+    _counting: function (sigs) {
+        return JiTA.excnoise.load().then(function () { return (sigs || []).filter(JiTA.excnoise.counts); });
+    },
+
+    // The defects an exception in this bug report's log confirms: Promise of { defect key: kind }. Only exceptions that
+    // count confirm anything. Never rejects; a look that failed is tried again next time.
     forReport: function (key) {
         var R = JiTA.repexc;
         if (!R._report[key]) {
-            var p = R._report[key] = R._reportSigs(key).then(function (sigs) {
+            var p = R._report[key] = R._reportSigs(key).then(R._counting).then(function (sigs) {
                 return sigs.length ? JiTA.logsig.holding(sigs) : {};
             }).then(function (m) { return m || {}; }, function () {
                 if (R._report[key] === p) { delete R._report[key]; }
@@ -15882,12 +16266,14 @@ JiTA.repexc = {
     },
     // A defect's exceptions and stacktraces: { sigs: { sig: true }, crashes: { crash site: true }, traces: { trace key: true },
     // cuts: { trace key: true }, n }, from its description and its profile: `traces` the messages of its stacktraces (see
-    // JiTA.logsig._traceKey), `cuts` of those cut off before their stack, which are not in `sigs`. Remembers which profile
-    // exceptions were used (see profileReady).
+    // JiTA.logsig._traceKey), `cuts` of those cut off before their stack, which are not in `sigs`. Only exceptions that count
+    // (JiTA.excnoise) are taken, and their crash sites with them. Remembers which profile exceptions were used (see
+    // profileReady).
     _defectSigs: function (key) {
         var R = JiTA.repexc, L = JiTA.logsig, out = { sigs: {}, crashes: {}, traces: {}, cuts: {}, n: 0 };
         function add(sig) {
             if (!sig || out.sigs[sig] || (L.isCut(sig) && out.cuts[L._traceKey(sig)])) { return; }
+            if (!JiTA.excnoise.counts(sig)) { return; }
             out.n++;
             if (L.isTrace(sig)) { out.traces[L._traceKey(sig)] = true; }
             if (L.isCut(sig)) { out.cuts[L._traceKey(sig)] = true; return; }
@@ -15897,11 +16283,12 @@ JiTA.repexc = {
         }
         var prof = R._profileSigs(key);
         R._usedProf[key] = prof.join('\n');
-        prof.forEach(add);
-        return L.sigsOf(key).then(function (d) {
+        return JiTA.excnoise.load().then(function () {
+            prof.forEach(add);
+            return L.sigsOf(key);
+        }).then(function (d) {
             ((d && d.sigs) || []).forEach(add);
             ((d && d.cuts) || []).forEach(add);
-            ((d && d.crashes) || []).forEach(function (c) { out.crashes[c] = true; });
             return out;
         }, function () { return out; });
     },
@@ -15921,7 +16308,8 @@ JiTA.repexc = {
         return best;
     },
     // A boost for a defect's matching bug reports: asked about the candidates, it answers which of them have logs that
-    // hold one of the defect's exceptions. Local data only (readings and the logsig index), so the list waits for it.
+    // hold one of the defect's exceptions, of those that count. Local data only (readings and the logsig index), so the
+    // list waits for it.
     forDefect: function (key) {
         var R = JiTA.repexc;
         return function (keys) {
@@ -15929,7 +16317,7 @@ JiTA.repexc = {
                 if (!ds.n) { return {}; }
                 return Promise.all(keys.map(function (k) { return R._reading(k); })).then(function (reads) {
                     var out = {};
-                    keys.forEach(function (k, i) { var kind = R._kind(reads[i], ds); if (kind) { out[k] = kind; } });
+                    keys.forEach(function (k, i) { var kind = R._kind((reads[i] || []).filter(JiTA.excnoise.counts), ds); if (kind) { out[k] = kind; } });
                     return out;
                 });
             });
@@ -16003,11 +16391,18 @@ JiTA.logread = {
     // One pass: the listing runs ahead a page at a time, CONCURRENCY lanes read what it has listed. Resolves the number of
     // reports whose logs it downloaded.
     pass: function () {
-        var LR = JiTA.logread, began = new Date().toISOString();
-        return JiTA.db.getMeta(LR.AT_KEY).then(null, function () { return null; }).then(function (mark) {
+        var LR = JiTA.logread, N = JiTA.excnoise, began = new Date().toISOString(), now = Date.now();
+        function none() { return null; }
+        return Promise.all([LR.AT_KEY, N.FREQ_KEY, N.TRIED_KEY].map(function (k) { return JiTA.db.getMeta(k).then(null, none); })).then(function (got) {
+            var mark = got[0], freq = got[1], tried = got[2];
+            // Which exceptions are common is counted over every open report (JiTA.excnoise): once that count is FREQ_MS old, and
+            // the last one begun RETRY_MS ago, a pass lists every report again and counts them as it reads them.
+            var recount = !(freq && now - freq.at < N.FREQ_MS) && !(tried && now - tried < N.RETRY_MS);
             // A pass that read logs another way (an older reader, or one before the mark said) leaves every report to list again,
             // so each one's logs are read as the reader reads them now.
-            var since = (mark && mark.at && mark.lv === JiTA.profile.LOG_V) ? JiTA.util.jqlSince(mark.at) : null;
+            var since = (!recount && mark && mark.at && mark.lv === JiTA.profile.LOG_V) ? JiTA.util.jqlSince(mark.at) : null;
+            var tally = since ? null : N.tally();
+            if (tally) { JiTA.db.setMeta(N.TRIED_KEY, now).then(null, none); }
             var jql = JiTA.excfind.SCOPE + (since ? ' AND updated >= "' + since + '"' : '') + ' ORDER BY created DESC';
             var queue = [], listed = false, listOk = true, next = 0, read = 0, failed = 0;
             function list(token) {
@@ -16039,6 +16434,7 @@ JiTA.logread = {
                     queue[next++] = null;   // let the listed report go once it is read
                     return JiTA.excfind._read(item).then(function (r) {
                         if (!(r && r.rec && r.rec.logs)) { failed++; }   // a log that did not download
+                        if (tally && r && r.rec && r.rec.logs && r.rec.hasLog) { N.count(tally, r.rec.exc); }
                         // Only a download counts and is spaced out: reading a report with no log file attached fetches nothing.
                         if (r && !r.cached && JiTA.profile._logFiles(item.fields.attachment).length) { read++; return JiTA.util.delay(LR.GAP_MS); }
                     }, function () { failed++; }).then(lane);
@@ -16051,6 +16447,10 @@ JiTA.logread = {
             return Promise.all(lanes).then(function () {
                 // Only a pass that listed and read everything moves the mark on: what one missed is listed again next time.
                 var whole = listOk && !failed && LR.on() && next >= queue.length;
+                // One that listed every report leaves the count of the common ones, though some could not be read: one that never
+                // can would otherwise keep the count from ever being renewed.
+                var counted = (tally && listOk && LR.on() && next >= queue.length) ? N.table(tally, now) : null;
+                if (counted) { JiTA.db.setMeta(N.FREQ_KEY, counted).then(function () { N._setFreq(counted); }, none); }
                 return (whole ? JiTA.db.setMeta(LR.AT_KEY, { at: began, lv: JiTA.profile.LOG_V }).then(null, function () { /* listed again next time */ }) : Promise.resolve()).then(function () {
                     if (read) {
                         console.log('[JiTA] read the logs of ' + read + ' open bug report(s)');
@@ -23181,9 +23581,14 @@ JiTA.changelog = {
         { v: '3.46.0', date: '2026-10-22', features: [
             'Stacktraces in a log (STACKTRACE #) now count wherever exceptions do: double-tap + finds them, they raise a match in both lists ("same stacktrace in log"), the Defect Profile counts them, and the log parser marks their defects.',
             'The client cuts a stacktrace at 6400 characters, so a long one can lose its stack. Such a one is matched by its message alone, as a looser "~" match.',
-            'To find the stacktraces in the open bug reports\' logs, JiTA reads those logs once more in the background, as on the first run of v3.45.0. The zips are not downloaded again.'
+            'To find the stacktraces in the open bug reports\' logs, JiTA reads those logs once more in the background, as on the first run of v3.45.0. The zips are not downloaded again.',
+            'UserErrors, the messages the game shows the player (ThrottleGeneric when buttons are clicked too fast, a session change still under way), no longer raise a match, point at a defect or make a Defect Profile pattern.',
+            'Any other exception or stacktrace that is only noise can be ignored: "ignore" in the full Defect Profile or in double-tap + leaves its message out for every defect, at any stack. Settings > Triage Assistant counts it again.',
+            'One in 5% or more of the open reports\' logs (10 at least) is common and no longer raises a match. They are counted once a day while Read open reports\' logs is on. "count anyway" counts one all the same.',
+            'The Defect Profile and double-tap + list the ones that don\'t count apart, folded, each saying why. Ticked in double-tap +, they are still looked for.'
         ], fixes: [
-            'An exception cut off before its EXCEPTION END line no longer takes the stacktrace after it for more of its stack.'
+            'An exception cut off before its EXCEPTION END line no longer takes the stacktrace after it for more of its stack.',
+            'Double-tap +: a stacktrace\'s first line typed on its own, such as "STACKTRACE #95 Some text", is looked for by its message at any stack, no longer refused.'
         ] },
         { v: '3.45.0', date: '2026-10-20', features: [
             'Similar defects: a defect holding an exception that is also in the bug report\'s log ranks higher, with a higher %, and its row says why: "same exception in log" for the same stack, "~ same crash site in log" for the crash site.',
@@ -24242,6 +24647,17 @@ if (JITA_IS_WIKI) {
             GM_addValueChangeListener('sdHidden', function (name, oldV, newV, remote) {
                 JiTA.hidden._map = null;   // force a reload from storage on the next read
                 if (remote) { try { JiTA.ui._rerenderCurrent(); } catch (e) { /* ignore */ } }
+            });
+        } catch (e) { /* ignore */ }
+    }
+    // The same for what counts (JiTA.excnoise): another tab ignoring an exception, or counting one again, changes it here too.
+    if (typeof GM_addValueChangeListener === 'function') {
+        try {
+            [JiTA.excnoise.IGNORE_KEY, JiTA.excnoise.COUNT_KEY].forEach(function (k) {
+                GM_addValueChangeListener(k, function (name, oldV, newV, remote) {
+                    JiTA.excnoise._drop();   // read again from storage on the next look
+                    if (remote) { JiTA.excnoise._changed(); }
+                });
             });
         } catch (e) { /* ignore */ }
     }

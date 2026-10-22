@@ -81,7 +81,9 @@ global.JiTA = {
     leadduty: { isLead: () => lead, me: () => ({ handle: 'someone' }), ROSTER: () => ['someone'], OWNER: 'owner', pool: { CACHE_KEY: 'pool' } },
     // The editor, as buildEditor hands it over: one element, with a handler of its own (a section header's click).
     responses: { buildEditor: () => { built++; return N('<div class="jita-resp-editor">Opening & closing Responses Add section Save Restore defaults</div>').on('click', () => {}); } },
-    util: {}, changelog: {}, sync: {}, logsig: {}, logread: { KEY: 'jitaLogRead', on: () => true, prepare() {} }
+    util: {}, changelog: {}, sync: {}, logsig: {}, logread: { KEY: 'jitaLogRead', on: () => true, prepare() {} },
+    // The exceptions that don't count (excnoise-check.js covers the row itself).
+    excnoise: { list: () => [], countedAnyway: () => 0, summary: () => 'UserErrors never count.', unignoreAll() {}, unignore() {}, uncountAll() {} }
 };
 eval(block('JiTA.menu = {', '\n};\n'));
 const M = JiTA.menu;

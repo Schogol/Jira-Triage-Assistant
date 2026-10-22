@@ -61,6 +61,10 @@ Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRAS
     line('    _traceKey: function (sig) {') + member('    _crashOf: function (sig) {') + member('    _traceMates: function (idx, sig) {') +
     member('    holding: function (sigs) {') + member('    _holdingLocal: function (sigs) {') + member('    sigsOf: function (key) {') + member('    _sigsOfLocal: function (key) {') + '})'));
 Object.assign(JiTA.profile, eval('({' + line('    LOG_V: ') + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') + '})'));
+// What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
+Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
+Object.assign(JiTA.util, eval('({' + member('    hash: function (str) {') + '})'));
+(0, eval)(cut('JiTA.excnoise = {', '\n};\n'));
 ['_boostMap', '_boostRow', '_withBoost', '_fuse', '_hybridResults', '_pickMode', 'suggestBest', 'suggestEbrBest'].forEach((n) => {
     (0, eval)(cut('JiTA.rank.' + n + ' = function (', '\n};\n'));
 });
@@ -438,6 +442,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
 
     setup();
     meta.logreadAt = { at: new Date(Date.now() - 3600e3).toISOString(), lv: JiTA.profile.LOG_V };
+    meta.excFreq = { at: Date.now() - 3600e3, n: 0, c: {} };   // the common ones counted an hour ago: no recount (excnoise-check.js)
     pages = [{ issues: [iss('EBR-9')], isLast: true }];
     readScript = { 'EBR-9': 'cached' };
     JiTA.ui.currentKey = 'EDR-5';
@@ -449,6 +454,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     for (const old of [new Date(Date.now() - 3600e3).toISOString(), { at: new Date(Date.now() - 3600e3).toISOString(), lv: JiTA.profile.LOG_V - 1 }]) {
         setup();
         meta.logreadAt = old;
+        meta.excFreq = { at: Date.now() - 3600e3, n: 0, c: {} };   // fresh: only the mark decides here
         pages = [{ issues: [iss('EBR-9')], isLast: true }];
         readScript = { 'EBR-9': 'cached' };
         await LR.prepare();

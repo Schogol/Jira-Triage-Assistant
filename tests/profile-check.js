@@ -36,6 +36,9 @@ Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRAS
     member('    defectsForSigs: function (sigs) {') + member('    _defectsLocal: function (sigs) {') + member('    _crashOf: function (sig) {') +
     member('    _traceMates: function (idx, sig) {') + member('    _pointAt: function (idx, sig, crashSig) {') + '})'));
 JiTA.hidden = { keys: {}, isHidden: (k) => !!JiTA.hidden.keys[k] };
+// What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
+Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
+eval(block('JiTA.excnoise = {', '\n};\n'));
 Object.assign(JiTA.ocr, eval('({' + block('    LANGS: [', '\n    ],\n') + member('    _langFromLabels: function (labels) {') + '})'));
 JiTA.db.getMeta = (k) => Promise.resolve(k in meta ? meta[k] : null);
 JiTA.db.setMeta = (k, v) => { metaSets.push(k); meta[k] = v; return Promise.resolve(); };
@@ -633,6 +636,76 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         overlay.text().slice(0, 400));
     P._last['EDR-7'] = st;
 
+    // ---- exceptions that don't count (JiTA.excnoise): set apart in the card and the full profile ----
+    const N = JiTA.excnoise;
+    const U1 = { sig: "usererror: user error, msg=throttlegeneric, dict={'remainingtime': #}|uilib.py:checkaccelerators>evecommands.py:cmdstopship", msg: 'UserError: User error, msg=ThrottleGeneric' };
+    const nv = [1, 2, 3, 4, 5, 6].map((i) => mk('EBR-' + i, { exc: i <= 2 ? [U1, V1] : [U1] }));
+    const ns = { key: 'EDR-7', total: 6, views: nv, summary: P.summarise(nv, null, () => '', N.why), defect: null, hiddenOf: () => '', gen: N.gen, pending: 0, done: true, zip: true };
+    ok('(the UserError all 6 logs share is no pattern; the ValueError 2 share is all that counts)', !ns.summary.domExc && ns.summary.exc.length === 1 && ns.summary.exc[0].sig === V1.sig &&
+        ns.summary.leftExc.length === 1 && ns.summary.leftExc[0].why === 'user', JSON.stringify(ns.summary.leftExc));
+    made = [];
+    P._leftOpen = false;
+    P._paint('EDR-7', ns);
+    const nchips = made.filter((m) => m.hasClass('jp-chip')).map((m) => m.e.txt).join(' | ');
+    ok('the card shows no chip for what does not count, and the next shared one instead', !/UserError/.test(nchips) && /Exception in 2\/6 logs: ValueError: bad/.test(nchips), nchips);
+    const nxEl = made.filter((m) => m.hasClass('jp-hidden'))[0], nxTog = made.filter((m) => m.hasClass('jp-open') && /not counted/.test(m.e.txt))[0];
+    ok('...it is folded away under one line', nxEl && !nxEl.hasClass('open') && nxTog && nxTog.e.txt === '▸ 1 not counted', nxTog && nxTog.e.txt);
+    ok('...which lists it, saying why, with the reports behind it', nxEl && nxEl.text().indexOf('6/6 logs: UserError: User error, msg=ThrottleGeneric (UserError: a message the game shows the player)') >= 0 &&
+        made.some((m) => m.hasClass('jp-why') && m.e.attrs.title === '6 reports: EBR-1, EBR-2, EBR-3, EBR-4, EBR-5, EBR-6'), nxEl && nxEl.text());
+    nxTog.e.on.click({ preventDefault() {} });
+    ok('...a click unfolds it', nxEl.hasClass('open') && nxTog.e.txt === '▾ 1 not counted', nxTog.e.txt);
+    made = [];
+    P._paint('EDR-7', ns);
+    ok('...and it stays unfolded when the card is drawn again', made.filter((m) => m.hasClass('jp-hidden'))[0].hasClass('open'));
+    P._leftOpen = false;
+    N.ignore(V1.sig, 'ValueError: bad');
+    made = [];
+    P._paint('EDR-7', ns);
+    const nchips2 = made.filter((m) => m.hasClass('jp-chip')).map((m) => m.e.txt).join(' | '), nxTog2 = made.filter((m) => m.hasClass('jp-open') && /not counted/.test(m.e.txt))[0];
+    ok('a card drawn after what counts changed is summarised again: an exception just ignored leaves its chip for the fold', !/ValueError/.test(nchips2) && nxTog2 && nxTog2.e.txt === '▸ 2 not counted',
+        nchips2 + ' / ' + (nxTog2 && nxTog2.e.txt));
+    N.unignore(N.keyOf(V1.sig));
+    // The full profile: a shared one can be ignored there, and counted again from the fold.
+    let asks = [];
+    global.confirm = (q) => { asks.push(q); return true; };
+    P._last['EDR-7'] = ns;
+    made = [];
+    P.openView('EDR-7');
+    const ntog = made.filter((m) => m.hasClass('jpv-toggle') && /^▸ Not counted/.test(m.e.txt))[0];
+    ok('the full profile folds them under their own heading, each saying why', ntog && ntog.e.txt === '▸ Not counted (1): UserErrors, ones you ignore, and ones common in the open reports\' logs' &&
+        /6\/6UserError: User error, msg=ThrottleGeneric/.test(overlay.text()) && made.some((m) => m.hasClass('jpv-why') && m.e.txt === 'UserError: a message the game shows the player'), ntog && ntog.e.txt);
+    ok('...a UserError with no link to count it, as it never does', !made.some((m) => m.hasClass('jpv-act') && /count/.test(m.e.txt)));
+    const ign = made.filter((m) => m.hasClass('jpv-act') && m.e.txt === 'ignore');
+    ok('a shared one has an ignore link', ign.length === 1);
+    ign[0].e.on.click({ preventDefault() {} });
+    ok('...which asks first, then ignores its message and draws the profile again with it set apart', asks.length === 1 && /^Ignore "ValueError: bad" everywhere, at any stack\?\n\nFor every defect and bug report/.test(asks[0]) && N.isIgnored(V1.sig) &&
+        ns.gen === N.gen && ns.summary.excGroups.length === 0 && ns.summary.leftExc.length === 2, JSON.stringify(asks));
+    ok('...where nothing is shared now but what does not count, which it says', /No exception or stacktrace appears in more than one log, apart from the ones not counted below\./.test(overlay.text()),
+        overlay.text().slice(0, 300));
+    const again = made.filter((m) => m.hasClass('jpv-act') && m.e.txt === 'count again');
+    ok('...and it can be counted again from there', again.length === 1 && made.some((m) => m.hasClass('jpv-why') && m.e.txt === 'ignored by you'));
+    again[0].e.on.click({ preventDefault() {} });
+    ok('...which puts it back among the shared ones', !N.isIgnored(V1.sig) && ns.summary.excGroups.length === 1 && ns.summary.excGroups[0].paths[0].sig === V1.sig);
+    global.confirm = () => false;
+    made = [];
+    P.openView('EDR-7');
+    made.filter((m) => m.hasClass('jpv-act') && m.e.txt === 'ignore')[0].e.on.click({ preventDefault() {} });
+    ok('an ignore the user does not agree to changes nothing', !N.isIgnored(V1.sig) && ns.summary.excGroups.length === 1);
+    // A common one: counted anyway from the fold.
+    N._freq = { at: Date.now(), n: 100, c: { [V1.sig]: 40 } };
+    N.gen++;
+    made = [];
+    P.openView('EDR-7');
+    const anyway = made.filter((m) => m.hasClass('jpv-act') && m.e.txt === 'count anyway');
+    ok('a common one is set apart with its share, and a link to count it anyway', anyway.length === 1 && ns.summary.excGroups.length === 0 &&
+        made.some((m) => m.hasClass('jpv-why') && m.e.txt === 'in 40% of the open reports\' logs'));
+    anyway[0].e.on.click({ preventDefault() {} });
+    ok('...which counts it again', N.countedAnyway() === 1 && !N.isCommon(V1.sig) && ns.summary.excGroups.length === 1);
+    N.uncountAll();
+    N._freq = null;
+    N.gen++;
+    P._last['EDR-7'] = st;
+
     // ---- building: the defects of the exceptions are looked up ----
     const lookupMs = P.LOOKUP_MS;
     P.LOOKUP_MS = 30;
@@ -681,6 +754,16 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('...nor does a lookup that throws', hstates.length >= 2 && lastOf().done && lastOf().summary.hiddenExc.length === 0, String(hstates.length));
     P.LOOKUP_MS = lookupMs;
     JiTA.hidden.keys = {};
+    // What doesn't count is set apart by the rules as they stand, and each state keeps what summarising it again takes.
+    JiTA.logsig.defectsForSigs = () => Promise.resolve({});
+    const rpOf = (exc) => ({ v: P.V, logs: true, hasLog: true, exc: exc, lv: P.LOG_V, zip: true, wer: false });
+    meta = { 'rp:EBR-1': rpOf([U1, V1]), 'rp:EBR-2': rpOf([U1, V1]), 'rp:EBR-3': rpOf([U1]) };
+    hstates = [];
+    await P.build('EDR-24', (s) => { hstates.push(s); }, () => true);
+    ok('a profile built sets apart a UserError its reports share', lastOf().done && lastOf().summary.leftExc.length === 1 && lastOf().summary.leftExc[0].why === 'user' &&
+        lastOf().summary.leftExc[0].count === 3 && lastOf().summary.exc.every((e) => e.sig !== U1.sig) && lastOf().summary.excGroups[0].msg === 'ValueError: bad',
+        JSON.stringify(lastOf().summary.leftExc));
+    ok('...and keeps what summarising it again takes', lastOf().gen === N.gen && typeof lastOf().hiddenOf === 'function' && Array.isArray(lastOf().views) && 'defect' in lastOf());
 
     // ================= wiring =================
     ok('renderReports draws the section on a defect', member('    renderReports: function (key, background) {').indexOf('JiTA.profile.renderSection(key, background);') >= 0);

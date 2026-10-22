@@ -124,7 +124,7 @@ const muts = [
     [XF, 'a match hides its stack hint', "(h.t.via ? ' via ' + h.t.via : '')", "''"],
     [XF, 'the hover text is the raw signature', ": JiTA.profile._sigTip(t.sig, t.msg); },", ": t.sig; },"],
     [XF, 'a match has no hover text', "$msg.attr('title', X._tip(h.t)).appendTo($h);", "$msg.appendTo($h);"],
-    [XF, 'the row has no hover text', "var $row = $('<div class=\"jx-target\"></div>').attr('title', X._tip(t)).appendTo($t);", "var $row = $('<div class=\"jx-target\"></div>').appendTo($t);"],
+    [XF, 'the row has no hover text', "var $row = $('<div class=\"jx-target\"></div>').attr('title', X._tip(t)).appendTo($into);", "var $row = $('<div class=\"jx-target\"></div>').appendTo($into);"],
     [XF, 'a typed one hovers as a stack', "return t.typed ? 'Looked for by this message alone, at any stack' : JiTA.profile", "return false ? 'Looked for by this message alone, at any stack' : JiTA.profile"],
     [XF, 'the stack on one line', "            p.frames.forEach(function (f) { out.push('    ' + f.replace(':', ': ')); });", "            out.push(p.frames.join('>'));"],
     [XF, 'the message once per stack', "            if (!i) { out.push((st ? 'Stacktrace: ' : '') + (msg || (st ? p.msg.slice(L.TRACE.length) : p.msg))); }",
@@ -181,7 +181,7 @@ const muts = [
     [XF, 'the search started before anything is ticked', "        if (!st.started && X._chosen(st).length) { st.started = true; X._sweep(st); }", "        if (!st.started && ts.length) { st.started = true; X._sweep(st); }"],
     [XF, 'a closed window starts a search', "        if (!X._alive(st)) { return; }\n        var ts = X.targets(st.desc, st.profile, st.one, st.edit, st.added);", "        var ts = X.targets(st.desc, st.profile, st.one, st.edit, st.added);"],
     [XF, 'ticking does not match again', "            X._paintTargets(st);\n            X._rematch(st);\n            X._paintResults(st);", "            X._paintTargets(st);\n            X._paintResults(st);"],
-    [XF, 'a ticked box changes nothing', "return t.sig + '|' + t.count + '/' + t.of + (st.on[t.sig] ? '+' : '-'); }).join('\\n')", "return t.sig + '|' + t.count + '/' + t.of; }).join('\\n')"],
+    [XF, 'a ticked box changes nothing', "return t.sig + '|' + t.count + '/' + t.of + (st.on[t.sig] ? '+' : '-') + (t.left || ''); }).join('\\n')", "return t.sig + '|' + t.count + '/' + t.of + (t.left || ''); }).join('\\n')"],
     [XF, 'a ticked box forgotten', "                st.on[t.sig] = this.checked;\n                X._retarget(st);", "                X._retarget(st);"],
     // ---- drawing ----
     [XF, 'rows drawn anew each time', "            var row = st.rows[rep.key] || (st.rows[rep.key] = X._row(st, rep));", "            var row = (st.rows[rep.key] = X._row(st, rep));"],

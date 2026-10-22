@@ -130,7 +130,7 @@ const muts = [
     [H, 'a worker that cannot answer leaves no answer', "{ op: 'defects', sigs: sigs }).catch(function () { return JiTA.logsig._defectsLocal(sigs); }); }", "{ op: 'defects', sigs: sigs }); }"],
     // ...the profile
     [H, 'a hidden exception still makes the pattern', '                if (hid(e.sig)) { return; }\n', ''],
-    [H, 'a hidden exception stays among the shared ones', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig); });', 'out.excGroups = P._groups(withLog, function () { return true; });'],
+    [H, 'a hidden exception stays among the shared ones', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig) && !left(e.sig); });', 'out.excGroups = P._groups(withLog, function (e) { return !left(e.sig); });'],
     [H, 'hidden exceptions are not listed apart', 'out.hiddenExc = P._groups(withLog, function (e) { return hid(e.sig); });', 'out.hiddenExc = [];'],
     [H, 'a hidden exception does not name its defect', "                if (typeof hit === 'string' && g.defects.indexOf(hit) < 0) { g.defects.push(hit); }\n", ''],
     [H, 'a report with the shared message only by a hidden stack is an outlier', '!v.exc.some(function (e) { return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })',
@@ -152,7 +152,7 @@ const muts = [
     [H, 'the card does not name the hidden defect', "                g.defects.forEach(function (d) { $('<a target=\"_blank\" rel=\"noopener\"></a>')", "                [].forEach(function (d) { $('<a target=\"_blank\" rel=\"noopener\"></a>')"],
     [H, 'the full profile shows the hidden exceptions unfolded', "var $hv = $('<div class=\"jpv-hidden\"></div>').appendTo($b);", "var $hv = $('<div class=\"jpv-hidden\"></div>').addClass('open').appendTo($b);"],
     [H, 'the full profile has no hidden exceptions', '        if (hx.length) {\n            var $hv', '        if (false) {\n            var $hv'],
-    [H, 'the full profile says no exception is shared when only hidden ones are', "hx.length ? 'No exception or stacktrace appears in more than one log, apart from the hidden ones below.' :", "false ? '' :"]
+    [H, 'the full profile says no exception is shared when only hidden ones are', "(hx.length || lx.length) ? 'No exception or stacktrace appears in more than one log, apart from ' + apart + ' below.' :", "false ? '' :"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
