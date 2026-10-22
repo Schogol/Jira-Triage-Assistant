@@ -106,7 +106,8 @@ Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') +
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 JiTA.util.delay = (ms) => new Promise((r) => setTimeout(r, ms));
 let crashCalls = 0;
-Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _splitBlocks: function (text) {') + member('    _fingerprint: function (text) {') +
+Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    OPEN_CUT: ') + line('    isTrace: function (sig) {') +
+    line('    isCut: function (sig) {') + line('    _traceKey: function (sig) {') + member('    _splitBlocks: function (text) {') + member('    _fingerprint: function (text) {') +
     member('    _crashOf: function (sig) {') + '})'));
 const realCrash = JiTA.logsig._crashOf;
 JiTA.logsig._crashOf = function (s) { crashCalls++; return realCrash.call(this, s); };
@@ -315,7 +316,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     P._readFiles = (it, rec, zip) => { reads.push({ key: it.key, rec: rec, zip: zip }); return Promise.resolve({ v: P.V, key: it.key, logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'KeyError: 2' }], logSig: P._logSig(it.fields.attachment) }); };
     const att = (name, size) => ({ filename: name, size: size || 100, content: 'https://jira/att/' + name });
     const it5 = { key: 'EBR-5', desc: [], fields: { attachment: [att('logs.txt', 500)] } };
-    meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: 'logs.txt:500', zip: true, wer: true };
+    meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: 'logs.txt:500', lv: P.LOG_V, zip: true, wer: true };
     let r = await X._read(it5);
     ok('a cached reading of the same log files is used, nothing downloaded', r.cached === true && reads.length === 0 && r.rec.exc[0].sig === B.sig);
     meta['rp:EBR-5'].logSig = 'logs.txt:400';
@@ -328,6 +329,20 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     delete meta['rp:EBR-5'].logSig;
     r = await X._read(it5);
     ok('a reading from before log files were named is used as it is', r.cached === true && reads.length === 0);
+    // Read before the reader read stacktraces (it has no lv): its logs again, the zip's part kept.
+    meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: 'logs.txt:500', zip: true, wer: true };
+    r = await X._read(it5);
+    ok('a reading made before the reader read stacktraces is read again, its logs only, what the zip said kept', r.cached === false && reads.length === 1 &&
+        reads[0].rec.logs === false && reads[0].rec.exc.length === 0 && reads[0].rec.zip === true && reads[0].rec.wer === true && reads[0].zip === false, JSON.stringify(reads[0] && reads[0].rec));
+    reads = [];
+    meta['rp:EBR-5'].lv = P.LOG_V - 1;
+    r = await X._read(it5);
+    ok('...as is one made by an older reader that said so', r.cached === false && reads.length === 1 && reads[0].rec.logs === false);
+    reads = [];
+    meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: '', zip: true, hasZip: true };
+    r = await X._read({ key: 'EBR-5', desc: [], fields: { attachment: [att('igbr.zip', 900)] } });
+    ok('...but one whose log came out of its zip (the report has no log of its own) is used as it is: the zip is not read here, and reading the logs alone would lose it',
+        r.cached === true && reads.length === 0 && r.rec.exc[0].sig === B.sig);
     meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: false, zip: true };
     r = await X._read(it5);
     ok('a reading whose logs failed to download is read again', reads.length === 1 && reads[0].rec.logs === false && reads[0].rec.zip === true);
@@ -357,7 +372,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     };
     const overlay = () => { const n = new Node('div'); ROOT.appendChild(n); return n; };
     const fresh = () => { const st = X._state('EDR-77', overlay()); X._st = st; return st; };
-    meta = { 'rp:EBR-3': { v: P.V, key: 'EBR-3', logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'KeyError: 2' }], logSig: 'logs.txt:100' } };
+    meta = { 'rp:EBR-3': { v: P.V, key: 'EBR-3', logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'KeyError: 2' }], logSig: 'logs.txt:100', lv: P.LOG_V } };
     pages = { '': page(['EBR-1', 'EBR-2:att', 'EBR-3', 'EBR-4'], { nextPageToken: 't2' }), t2: page(['EBR-4', 'EBR-5:desc', 'EBR-9'], { isLast: true }) };
     let st = fresh();
     st.targets = [Object.assign({}, tA, { def: true })]; st.on[A.sig] = true;
@@ -557,6 +572,19 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     X._paintTargets(st);
     const trows = byCls(byId['jx-targets'], 'jx-target');
     ok('a * in an exception as it is shown plain, one in an edit marked', phs(trows[0]) === '' && phs(trows[1]) === '*=any text', phs(trows[0]) + ' / ' + phs(trows[1]));
+    // A stacktrace says it is one, in its box and in what a report holds (stacktrace-check.js covers its matching).
+    const stFp = JiTA.logsig._fingerprint(['STACKTRACE #1 logged at 04/12/2026 11:23:16 : Possible service deadlock detected!', 'Traced at:'].concat(frames(FA)).join('\n'));
+    const stCut = JiTA.logsig._fingerprint('STACKTRACE #2 logged at 04/12/2026 11:23:17 : Cut short!\n---- dump ----');
+    st.targets = [{ sig: stFp.sig, msg: stFp.msg }, { sig: stCut.sig, msg: stCut.msg }, { sig: A.sig, msg: 'KeyError: 2' }];
+    X._paintTargets(st);
+    const kinds = byCls(byId['jx-targets'], 'jx-target').map((n) => byCls(n, 'jx-kind').map((k) => k.textContent).join());
+    ok('a stacktrace says so in its box, and one cut off before its stack that too; an exception says nothing', JSON.stringify(kinds) === JSON.stringify(['stacktrace', 'stacktrace, stack cut off', '']),
+        JSON.stringify(kinds));
+    X._why(wr, [{ t: { sig: stFp.sig, msg: stFp.msg }, exact: false, where: 'log' }, { t: { sig: stCut.sig, msg: stCut.msg }, exact: false, bare: true, where: 'log' }]);
+    ok('...and a report holding one says how: at its trace site, or by its message with its stack cut off', /~ same trace sitePossible service deadlock detected!/.test(wr.textContent) &&
+        /~ same message, stack cut offCut short!/.test(wr.textContent), wr.textContent);
+    X._why(wr, [{ t: { sig: stFp.sig, msg: stFp.msg }, exact: true, where: 'log' }]);
+    ok('...or the same stack, as an exception\'s does', /^same stackPossible service deadlock detected!$/.test(wr.textContent), wr.textContent);
     X._retarget(Object.assign(st, { tsig: null }));
     // the Attach control's options
     const opts = built.find((b) => b.key === 'EBR-1').opts;

@@ -31,8 +31,10 @@ global.flagOn = (n) => flags[n] !== false;
 global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, triage: {}, repexc: { forget() {}, profileReady() {} } };
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isResolved: function (status, resolution) {') + '})'));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
-Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _fingerprint: function (text) {') + member('    _logBlocks: function (text) {') +
-    member('    defectsForSigs: function (sigs) {') + member('    _defectsLocal: function (sigs) {') + member('    _crashOf: function (sig) {') + '})'));
+Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    OPEN_CUT: ') + line('    isTrace: function (sig) {') +
+    line('    isCut: function (sig) {') + line('    _traceKey: function (sig) {') + member('    _fingerprint: function (text) {') + member('    _logBlocks: function (text) {') +
+    member('    defectsForSigs: function (sigs) {') + member('    _defectsLocal: function (sigs) {') + member('    _crashOf: function (sig) {') +
+    member('    _traceMates: function (idx, sig) {') + member('    _pointAt: function (idx, sig, crashSig) {') + '})'));
 JiTA.hidden = { keys: {}, isHidden: (k) => !!JiTA.hidden.keys[k] };
 Object.assign(JiTA.ocr, eval('({' + block('    LANGS: [', '\n    ],\n') + member('    _langFromLabels: function (labels) {') + '})'));
 JiTA.db.getMeta = (k) => Promise.resolve(k in meta ? meta[k] : null);
@@ -334,11 +336,11 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const issues = [1, 2, 3, 4, 5, 6].map((i) => ({ key: 'EBR-' + i, fields: { description: ciWith({}), created: '2026-09-2' + i + 'T00:00:00.000+0000', attachment: [] } }));
     P._reports = () => Promise.resolve({ issues: issues, total: 30 });
     JiTA.db.getDefect = () => Promise.resolve({ status: 'Open' });
-    meta = { 'rp:EBR-1': { v: P.V, logs: true, hasLog: false, zip: true, wer: false }, 'rp:EBR-2': { v: P.V - 1, logs: true, zip: true } };
+    meta = { 'rp:EBR-1': { v: P.V, logs: true, hasLog: false, lv: P.LOG_V, zip: true, wer: false }, 'rp:EBR-2': { v: P.V - 1, logs: true, zip: true } };
     let reads = [], hold = [];
     P._readFiles = (iss, r, z) => {
         reads.push(iss.key + (r ? '+cached' : '') + (z ? '+zip' : ''));
-        return new Promise((res) => { hold.push(() => { const rec = { v: P.V, key: iss.key, logs: true, hasLog: true, exc: [], zip: z }; meta['rp:' + iss.key] = rec; res(rec); }); });
+        return new Promise((res) => { hold.push(() => { const rec = { v: P.V, key: iss.key, logs: true, hasLog: true, exc: [], lv: P.LOG_V, zip: z }; meta['rp:' + iss.key] = rec; res(rec); }); });
     };
     let states = [], still = true;
     const done = P.build('EDR-7', (s) => { states.push(s); }, () => still);
@@ -358,14 +360,14 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('every finished read updates the profile', states.length === 4 && states.map((s) => s.pending).join() === '5,4,3,2', states.map((s) => s.pending).join());
     ok('...leaving the defect lets the started reads finish but starts no new one, and the profile is not marked done', reads.length === 3 && !states[3].done, reads.join() + ' ' + states[3].done);
     still = true; reads = []; states = [];
-    P._readFiles = (iss, r, z) => { reads.push(iss.key); return Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: false, zip: z }); };
+    P._readFiles = (iss, r, z) => { reads.push(iss.key); return Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: false, lv: P.LOG_V, zip: z }); };
     await P.build('EDR-7', (s) => { states.push(s); }, () => true);
     ok('...the next visit carries on with the reports still unread, and finishes', reads.join() === 'EBR-5,EBR-6' && states[states.length - 1].done && states[states.length - 1].pending === 0,
         reads.join() + ' ' + states.map((s) => s.pending).join());
     reads = [];
     store[P.ZIP_KEY] = false;
     meta = {};
-    P._readFiles = (iss, r, z) => { reads.push(iss.key + (z ? '+zip' : '')); return Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: false, zip: false }); };
+    P._readFiles = (iss, r, z) => { reads.push(iss.key + (z ? '+zip' : '')); return Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: false, lv: P.LOG_V, zip: false }); };
     states = [];
     await P.build('EDR-8', (s) => { states.push(s); }, () => true);
     ok('with igbr.zip switched off no zip is read', reads.length === 6 && reads.every((r) => !/\+zip/.test(r)) && states[states.length - 1].zip === false && states[states.length - 1].done, reads.join());
@@ -434,6 +436,10 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     P._paint('EDR-7', { key: 'EDR-7', total: 2, views: full.slice(0, 2), summary: P.summarise(full.slice(0, 2), null), pending: 0, done: true, zip: true });
     ok('...while something 2 reports share is still shown, unhighlighted, below a pattern\'s minimum', /Exception in 2\/2 logs/.test(box.text()) &&
         !made.some((m) => m.hasClass('strong') && /Exception in 2\/2/.test(m.e.txt)), box.text());
+    const TS = { sig: JiTA.logsig.TRACE + 'possible service deadlock detected!|a.py:x>b.py:y', msg: 'Possible service deadlock detected!' };
+    const traced = [1, 2].map((i) => mk('EBR-' + i, { exc: [TS] }));
+    P._paint('EDR-7', { key: 'EDR-7', total: 2, views: traced, summary: P.summarise(traced, null), pending: 0, done: true, zip: true });
+    ok('a shared stacktrace is shown as one', /Stacktrace in 2\/2 logs: Possible service deadlock detected!/.test(box.text()) && !/Exception in/.test(box.text()), box.text());
     P._paint('EDR-7', { key: 'EDR-7', total: 0, views: [], summary: P.summarise([], null), pending: 0, done: true });
     ok('a defect without reports shows no section', !box.hasClass('has-hits') && box.text() === '');
     JiTA.ui.currentKey = 'EDR-1';
@@ -507,7 +513,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     try { P.openView('EDR-7'); } catch (e) { threw = e; }
     const otxt = overlay ? overlay.text() : '';
     ok('the full profile opens', !threw && overlay && overlay.hasClass('jita-profile-view'), String(threw && threw.stack));
-    ok('...with every section, the outlier and its reason, and a row per report', /Hardware and language/.test(otxt) && /Exceptions shared by 2 or more logs/.test(otxt) &&
+    ok('...with every section, the outlier and its reason, and a row per report', /Hardware and language/.test(otxt) && /Exceptions and stacktraces shared by 2 or more logs/.test(otxt) &&
         /EVE client crashes/.test(otxt) && /EBR-6/.test(otxt) && /GPU vendor NVIDIA, while 5 of 6 have AMD/.test(otxt) && /no crash in nvwgf2umx\.dll/.test(otxt), otxt.slice(0, 300));
     P._last['EDR-8'] = groupedState;
     P.openView('EDR-8');
@@ -523,6 +529,14 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const crow = made.filter((m) => m.hasClass('jpv-row') && m.e.kids.length === 2 && /^nvwgf2umx\.dll/.test(m.e.kids[1].e.txt))[0];
     const chover = crow ? crow.e.kids[0].e.attrs.title : '';
     ok('...so does a hardware value, and a crash module', vhover === '1 report: EBR-6' && chover === '5 reports: EBR-1, EBR-2, EBR-3, EBR-4, EBR-5', vhover + ' || ' + chover);
+    const tv = [1, 2].map((i) => mk('EBR-' + i, { exc: [TS, X] }));
+    P._last['EDR-9'] = { key: 'EDR-9', total: 2, views: tv, summary: P.summarise(tv, null), pending: 0, done: true, zip: true };
+    made = [];
+    P.openView('EDR-9');
+    const kindTags = made.filter((m) => m.hasClass('jpv-kind')).map((m) => m.e.txt);
+    ok('the full profile marks a shared stacktrace, and only it', kindTags.join() === 'stacktrace', kindTags.join());
+    ok('...and a report\'s log counts its exceptions and its stacktraces apart', /1 exception\(s\), 1 stacktrace\(s\)/.test(overlay.text()) && !/2 exception\(s\)/.test(overlay.text()),
+        overlay.text().slice(-200));
 
     // ================= exceptions whose defect is hidden in the Triage Assistant (v3.44.0) =================
     // The defect a signature points at, picked as "Known defects in attached log" picks it: the same stack, else the same crash site.
@@ -538,7 +552,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     sigIdx.sigMap[fA.sig] = { members: [{ key: 'EDR-2' }, { key: 'EDR-1' }] };
     sigIdx.crashMap[fA.crashSig] = { members: [{ key: 'EDR-3' }] };
     const wStart = once("    // A signature's crash site, from the signature alone.");
-    const W = new Function('LG_MIN', 'LG_CRASH', 'logsigCache', src.slice(wStart, src.indexOf('\n    // One load at a time', wStart)) +
+    const W = new Function('LG_MIN', 'LG_CRASH', 'logsigCache', line('    var LG_TRACE = ') + src.slice(wStart, src.indexOf('\n    // One load at a time', wStart)) +
         '\nreturn { lgCrashOf: lgCrashOf, lgDefects: lgDefects };')(2, 2, sigIdx);
     ok('...and so does the worker\'s copy', [fA, fB, fC].every((f) => W.lgCrashOf(f.sig) === f.crashSig));
     JiTA.logsig.ensure = () => Promise.resolve(sigIdx);
@@ -615,7 +629,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const onlyHidden = [1, 2, 3].map((i) => mk('EBR-' + i, { exc: [H1] }));
     P._last['EDR-7'] = { key: 'EDR-7', total: 3, views: onlyHidden, summary: P.summarise(onlyHidden, null, hidOf), pending: 0, done: true, zip: true };
     P.openView('EDR-7');
-    ok('with only hidden exceptions shared, the list says so instead of claiming there are none', /No exception appears in more than one log, apart from the hidden ones below\./.test(overlay.text()),
+    ok('with only hidden exceptions shared, the list says so instead of claiming there are none', /No exception or stacktrace appears in more than one log, apart from the hidden ones below\./.test(overlay.text()),
         overlay.text().slice(0, 400));
     P._last['EDR-7'] = st;
 
@@ -623,8 +637,8 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const lookupMs = P.LOOKUP_MS;
     P.LOOKUP_MS = 30;
     P._reports = () => Promise.resolve({ issues: [1, 2, 3].map((i) => ({ key: 'EBR-' + i, fields: { description: ciWith({}), created: '2026-09-2' + i + 'T00:00:00.000+0000', attachment: [] } })), total: 3 });
-    meta = { 'rp:EBR-1': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], zip: true, wer: false }, 'rp:EBR-2': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], zip: true, wer: false } };
-    P._readFiles = (iss, r, z) => Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: true, exc: [H1, V1, K9], zip: z, wer: false });
+    meta = { 'rp:EBR-1': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], lv: P.LOG_V, zip: true, wer: false }, 'rp:EBR-2': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], lv: P.LOG_V, zip: true, wer: false } };
+    P._readFiles = (iss, r, z) => Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: true, exc: [H1, V1, K9], lv: P.LOG_V, zip: z, wer: false });
     let asked = [], answer = (sigs) => Promise.resolve(sigs.indexOf(H1.sig) >= 0 ? { [H1.sig]: 'EDR-2' } : {});
     JiTA.logsig.defectsForSigs = (sigs) => { asked.push(sigs.slice()); return answer(sigs); };
     JiTA.hidden.keys = { 'EDR-2': true };

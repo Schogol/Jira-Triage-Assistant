@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.45.0
+// @version     3.46.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -3206,13 +3206,18 @@ var JiTA = {
  * that share a signature form a CLUSTER, which drives both directions: flagging known exceptions in a log
  * (log -> defect) AND grouping duplicate defects (the "Same exception" / "Exception clusters" views). The
  * index rebuilds whenever the defect DB changes.
+ * A STACKTRACE block (the client's log.LogTraceback: a message and the stack it was logged from, no exception) is
+ * fingerprinted the same way, under a signature of its own kind (TRACE), so it counts wherever an exception does.
  */
 JiTA.logsig = {
     // _index: {
     //   sigMap:    { sig -> { sig, label, members:[{key,status,resolution,resolutiondate,created}] } },  // EXACT (full chain)
     //   keyToSigs: { key -> [sig,...] },
     //   crashMap:  { crashSig -> { crashSig, label, members:[...] } },  // LOOSE (crash site = message + innermost frames)
-    //   keyToCrash:{ key -> [crashSig,...] }
+    //   keyToCrash:{ key -> [crashSig,...] },
+    //   traceMsg:  { trace key -> [members] },  // every stacktrace by its message (see _traceKey), with a stack or not
+    //   traceCut:  { trace key -> [members] },  // only those cut off before their stack, matched by their message alone
+    //   keyToCut:  { key -> [cut sig,...] }
     // }
     _index: null,
     _building: null,
@@ -3220,25 +3225,55 @@ JiTA.logsig = {
     MIN_FRAMES: 2,        // need at least this many stack frames to trust a stack signature (else too generic)
     CRASH_FRAMES: 2,      // crash-site signature uses only the INNERMOST this-many frames (the throw location),
                           // so the same bug reached via a different call path still matches as "possibly related"
+    TRACE: '[stacktrace] ',   // a stacktrace's signature starts with this, so it never matches an exception's. KEEP IN SYNC with LG_TRACE
+    OPEN_CUT: 300,        // characters kept of a stacktrace message that may run on (see _fingerprint). KEEP IN SYNC with LG_OPEN
 
-    // Split a blob of text into individual EXCEPTION blocks: each from "EXCEPTION #" up to its "EXCEPTION END",
-    // or up to the next "EXCEPTION #". Stored descriptions have newlines collapsed to spaces, but both markers
-    // survive as substrings, so this works on the (collapsed) defect description and on a (re-joined) log block.
-    // Ending at EXCEPTION END matters: a STACKTRACE pasted after it used to be read as more frames of the
-    // exception, so the defect's signature matched neither the same exception in a parsed log (which the log side
-    // ends there) nor anything else. KEEP IN SYNC with lgSplit in the worker.
+    // Whether a signature is a stacktrace's; and whether it is one the client cut off before its stack, which has no frames
+    // and is matched by its message alone. KEEP IN SYNC with lgIsTrace / lgIsCut in the worker.
+    isTrace: function (sig) { return String(sig == null ? '' : sig).indexOf(JiTA.logsig.TRACE) === 0; },
+    isCut: function (sig) { var s = String(sig == null ? '' : sig); return JiTA.logsig.isTrace(s) && s.charAt(s.length - 1) === '|'; },
+    // A stacktrace signature's message part, its tag kept: what a cut one is matched by. Frames hold no "|", so the
+    // message ends at the last.
+    _traceKey: function (sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); },
+
+    // Split a blob of text into individual EXCEPTION and STACKTRACE blocks: each from "EXCEPTION #" (or "STACKTRACE #")
+    // up to its "EXCEPTION END" (or "STACKTRACE END"), or up to the next block of either kind. Stored descriptions have
+    // newlines collapsed to spaces, but the markers survive as substrings, so this works on the (collapsed) defect
+    // description and on a (re-joined) log block. Ending at the END line matters: a STACKTRACE pasted after an exception
+    // used to be read as more frames of the exception, so the defect's signature matched neither the same exception in a
+    // parsed log (which the log side ends there) nor anything else. KEEP IN SYNC with lgSplit in the worker.
     _splitBlocks: function (text) {
-        var blocks = [], re = /EXCEPTION #[\s\S]*?(?:EXCEPTION END|(?=EXCEPTION #)|$)/gi, m;
+        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\s\S]*?(?:\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m;
         while ((m = re.exec(text))) { blocks.push(m[0]); if (re.lastIndex === m.index) { re.lastIndex++; } }
         return blocks.length ? blocks : [text || ''];
     },
 
-    // Fingerprint one exception block -> { sig, msg }. `sig` is the lowercased "<message>|<frame>>...>frame>"
-    // built from the file:function chain (line numbers dropped for cross-build robustness), or null when there
-    // aren't enough frames to be distinctive; `msg` is the human "Formatted exception info" text (used as a
-    // panel / cluster label). (The "Stackhash: <n>" literal is per-user, so it is no longer extracted.)
+    // Fingerprint one exception or stacktrace block -> { sig, crashSig, msg, open }. `sig` is the lowercased
+    // "<message>|<frame>>...>frame>" built from the file:function chain (line numbers dropped for cross-build
+    // robustness), or null when there aren't enough frames to be distinctive; `msg` is the human text (used as a
+    // panel / cluster label): an exception's "Formatted exception info", a stacktrace's first line after "logged at
+    // ... :". (The "Stackhash: <n>" literal is per-user, so it is no longer extracted.)
+    // A stacktrace's signature starts with TRACE. The client logs a stacktrace as one message and cuts it at 6400
+    // characters, so a long dump ahead of "Traced at:" can take its whole stack: such a one keeps the signature
+    // "<TRACE message>|", with no frames (isCut), matched by its message alone. `open` says a stacktrace's message may
+    // run on past where it ends: in a description whose lines Jira joined, what followed its first line has become
+    // part of it, so only OPEN_CUT characters of it are kept.
     _fingerprint: function (text) {
         text = text || '';
+        var L = JiTA.logsig, si = text.search(/STACKTRACE #/i), ei = text.search(/EXCEPTION #/i), msg = '', open = false, mm;
+        // A stacktrace starts at "STACKTRACE #", or, pasted without its first line, has a "Traced at:" stack and none of an
+        // exception's markers.
+        var trace = si >= 0 ? (ei < 0 || si < ei)
+            : (ei < 0 && /\bTraced at\b/i.test(text) && !/\b(?:Formatted exception info|Caught at|Thrown at)\b/i.test(text));
+        if (trace && (mm = /STACKTRACE #\d*\s+logged at\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s*:[ \t]?/i.exec(text))) {
+            // Its message is the rest of its first line, read before the log columns are stripped below: in a pasted log
+            // whose lines were joined, the next line's columns are where the first one ended. With neither, it ends at
+            // what follows the message in a stacktrace, or the text's end, and may have run on.
+            var rest = text.slice(mm.index + mm[0].length);
+            var end = /\n|\s\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t|\b(?:Common path prefix|Traced at|Thread Locals|Stackhash|Reported from|STACKTRACE END)\b/i.exec(rest);
+            msg = rest.slice(0, end ? end.index : rest.length);
+            open = !(end && /[\n\t]/.test(end[0]));
+        }
         // Strip the EVE log-line prefix ("HH:MM:SS<TAB>facility<TAB>type<TAB>") that a DEFECT DESCRIPTION
         // carries when someone pastes the RAW log into it. Without this, the blank lines between "Formatted
         // exception info:" and "Common path prefix" leak their "timestamp facility type" prefix into the
@@ -3248,8 +3283,11 @@ JiTA.logsig = {
         // so this is a no-op there.) Not only at line starts: a stored description has its lines joined by spaces, so
         // only the first prefix was stripped and the rest leaked into the message. KEEP IN SYNC with lgFp.
         text = text.replace(/(^|\s)\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/g, '$1');
-        var msg = '', mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text);
-        if (mm) { msg = (mm[1] || '').replace(/\s+/g, ' ').trim(); }
+        if (!trace && (mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text))) {
+            msg = mm[1] || '';
+        }
+        msg = msg.replace(/\s+/g, ' ').trim();
+        if (open) { msg = msg.slice(0, L.OPEN_CUT).trim(); }
         var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.pyx?)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;   // .py OR .pyx (EVE's Cython frames)
         while ((fm = fre.exec(text))) {
             frames.push(fm[1].replace(/^.*[\/\\]/, '') + ':' + fm[3]);   // basename:function (no line number)
@@ -3274,17 +3312,16 @@ JiTA.logsig = {
             .replace(/([(\[{,]\s*)\d+/g, '$1#')        // tuple/list/dict element (leading edge: after ( [ { or ,)
             .replace(/\d+(\s*[)\]},])/g, '#$1')        // ...and trailing edge (before ) ] } or ,)
             .replace(/\b\d{4,}\b/g, '#');              // other long numeric ids (a bare scalar < 4 digits survives)
-        var sig = (frames.length >= JiTA.logsig.MIN_FRAMES)
-            ? (nmsg + '|' + frames.join('>')).toLowerCase()
-            : null;
+        if (trace) { nmsg = L.TRACE + nmsg; }
+        // A stacktrace with too few frames to trust was cut off before its stack: it keeps its message, if it has one.
+        var deep = frames.length >= L.MIN_FRAMES;
+        var sig = deep ? (nmsg + '|' + frames.join('>')).toLowerCase() : ((trace && msg) ? (nmsg + '|').toLowerCase() : null);
         // Crash-site signature: message + only the INNERMOST CRASH_FRAMES frames (where the exception was
         // actually thrown). Two defects that crash at the SAME place with the SAME message but were reached by
         // a DIFFERENT call path share this even though their full `sig` differs - it drives the looser
-        // "possibly related" hint (never an exact cluster). Same null condition as `sig` (needs >= MIN_FRAMES).
-        var crashSig = (frames.length >= JiTA.logsig.MIN_FRAMES)
-            ? (nmsg + '|' + frames.slice(-JiTA.logsig.CRASH_FRAMES).join('>')).toLowerCase()
-            : null;
-        return { sig: sig, crashSig: crashSig, msg: msg };
+        // "possibly related" hint (never an exact cluster). Needs >= MIN_FRAMES, as `sig` does.
+        var crashSig = deep ? (nmsg + '|' + frames.slice(-L.CRASH_FRAMES).join('>')).toLowerCase() : null;
+        return { sig: sig, crashSig: crashSig, msg: msg, open: open };
     },
 
     // Build (and cache) the signature index from every stored defect. Every defect exhibiting a signature is
@@ -3292,22 +3329,32 @@ JiTA.logsig = {
     // a defect can paste several exception dumps, so we fingerprint each block. Resolved defects are kept so
     // a cluster can show "already fixed in EDR-x" / regression. keyToSigs lets a single issue find its
     // cluster(s) cheaply. The (key, sig) pair is deduped so one defect counts once per signature.
+    // A stacktrace also files its defect under its message (traceMsg), and one cut off before its stack only there and
+    // in traceCut: it has no stack to cluster by.
     ensure: function () {
         if (JiTA.logsig._index && !JiTA.logsig._dirty) { return Promise.resolve(JiTA.logsig._index); }
         if (JiTA.logsig._building) { return JiTA.logsig._building; }
         JiTA.logsig._building = JiTA.db.allDefects().then(function (recs) {
-            var sigMap = {}, keyToSigs = {}, crashMap = {}, keyToCrash = {}, nSig = 0;
+            var L = JiTA.logsig, sigMap = {}, keyToSigs = {}, crashMap = {}, keyToCrash = {}, traceMsg = {}, traceCut = {}, keyToCut = {}, nSig = 0;
+            function file(map, k, member) { var list = map[k] || (map[k] = []); if (list.indexOf(member) === -1) { list.push(member); } }
             for (var i = 0; i < recs.length; i++) {
                 if (recs[i].project === 'EBR') { continue; }   // mine exception signatures from DEFECTS only, not bug reports
                 var desc = recs[i].description;
-                if (!desc || desc.indexOf('EXCEPTION #') === -1) { continue; }
+                if (!desc || (desc.indexOf('EXCEPTION #') === -1 && desc.indexOf('STACKTRACE #') === -1)) { continue; }
                 var key = recs[i].key;
                 // One member record per defect, shared (by reference) across whatever clusters it lands in.
                 var member = { key: key, status: recs[i].status || '', resolution: recs[i].resolution || null, resolutiondate: recs[i].resolutiondate || null, created: recs[i].created || null };
-                var blocks = JiTA.logsig._splitBlocks(desc);
+                var blocks = L._splitBlocks(desc);
                 for (var b = 0; b < blocks.length; b++) {
-                    var fp = JiTA.logsig._fingerprint(blocks[b]);
+                    var fp = L._fingerprint(blocks[b]);
                     if (!fp.sig) { continue; }
+                    if (L.isTrace(fp.sig)) { file(traceMsg, L._traceKey(fp.sig), member); }
+                    if (L.isCut(fp.sig)) {
+                        file(traceCut, L._traceKey(fp.sig), member);
+                        if (!keyToCut[key]) { keyToCut[key] = []; }
+                        if (keyToCut[key].indexOf(fp.sig) === -1) { keyToCut[key].push(fp.sig); }
+                        continue;
+                    }
                     // EXACT cluster: keyed on the full stack-frame chain (precise).
                     var c = sigMap[fp.sig];
                     if (!c) { c = sigMap[fp.sig] = { sig: fp.sig, label: fp.msg || '', members: [] }; nSig++; }
@@ -3341,7 +3388,9 @@ JiTA.logsig = {
             }
             Object.keys(sigMap).forEach(function (s) { sigMap[s].members.sort(memberSort); });
             Object.keys(crashMap).forEach(function (s) { crashMap[s].members.sort(memberSort); });
-            JiTA.logsig._index = { sigMap: sigMap, keyToSigs: keyToSigs, crashMap: crashMap, keyToCrash: keyToCrash };
+            Object.keys(traceMsg).forEach(function (s) { traceMsg[s].sort(memberSort); });
+            Object.keys(traceCut).forEach(function (s) { traceCut[s].sort(memberSort); });
+            JiTA.logsig._index = { sigMap: sigMap, keyToSigs: keyToSigs, crashMap: crashMap, keyToCrash: keyToCrash, traceMsg: traceMsg, traceCut: traceCut, keyToCut: keyToCut };
             JiTA.logsig._dirty = false;
             JiTA.logsig._building = null;
             var nClusters = 0;
@@ -3494,8 +3543,8 @@ JiTA.logsig = {
         });
     },
 
-    // After the main log parser renders, group rows into EXCEPTION blocks, fingerprint each, and match it to
-    // a defect by stack signature. The matched defect is flagged on the block's first (EXCEPTION #) row -
+    // After the main log parser renders, group rows into EXCEPTION and STACKTRACE blocks, fingerprint each, and match it
+    // to a defect by stack signature. The matched defect is flagged on the block's first (EXCEPTION # / STACKTRACE #) row -
     // amber accent + tooltip + [EDR-x] badge - and counted for the panel, which also lists the rest of that
     // defect's cluster. Async (the index is built from IndexedDB); safe to call right after ParseLogs - it
     // patches the already-rendered rows.
@@ -3505,6 +3554,18 @@ JiTA.logsig = {
             var rows = document.querySelectorAll('#tableContent tbody tr');
             var found = {};   // defect -> { defect, count, rows:[anchor tr,...], raw (label), cluster:[sibling members] }
             function cellText(tr) { var c = tr.lastElementChild; return c ? (c.textContent || '') : ''; }
+            // The time, facility and type a row was logged under: '' for a line without them, which goes with the one before.
+            function preOf(tr) {
+                var c = tr.cells;
+                if (!c || c.length < 4 || !c[0].textContent) { return ''; }
+                return c[0].textContent + '\t' + c[1].textContent + '\t' + c[2].textContent;
+            }
+            // What the anchor says on hover: how its block matched the defect (see _pointAt). rematch takes it off by its start.
+            function titleOf(sig, by) {
+                var st = JiTA.logsig.isTrace(sig);
+                if (by === 'stack') { return st ? 'Known stacktrace · ' : 'Known exception · '; }
+                return 'Possibly related (' + (by === 'message' ? 'same message, stack cut off' : (st ? 'same trace site' : 'same crash site')) + ') · ';
+            }
             // Every other defect that shares ANY of this defect's signatures (computed from idx, so it is
             // available on re-passes that only know the stored defect key, not the original signature).
             function siblings(defect) {
@@ -3561,11 +3622,11 @@ JiTA.logsig = {
             }
             // The badge is one element, classed so rematch() can take it off again, put in front of what the cell holds;
             // rebuilding the cell through innerHTML re-parsed everything else in it as well.
-            function markAnchor(tr, defect, loose) {
+            function markAnchor(tr, defect, loose, title) {
                 var cell = tr.lastElementChild;
                 tr.classList.add(loose ? 'sig-hit-loose' : 'sig-hit');
                 if (cell) {
-                    cell.title = (loose ? 'Possibly related (same crash site) · ' : 'Known exception · ') + defect;
+                    cell.title = title + defect;
                     var a = document.createElement('a');
                     a.className = 'jita-sig-link';
                     a.href = '/browse/' + defect;
@@ -3587,23 +3648,21 @@ JiTA.logsig = {
                     i++;
                     continue;
                 }
-                if (cellText(tr).indexOf('EXCEPTION #') === -1) { tr.setAttribute('data-jita-sig', '0'); i++; continue; }
-                // Gather the whole exception block: rows until EXCEPTION END (inclusive) or the next EXCEPTION #.
-                var blockRows = [tr], blockText = cellText(tr), j = i + 1;
+                var head = cellText(tr), trace = head.indexOf('STACKTRACE #') !== -1;
+                if (!trace && head.indexOf('EXCEPTION #') === -1) { tr.setAttribute('data-jita-sig', '0'); i++; continue; }
+                // Gather the whole block: rows until its END line (inclusive) or the next block. A stacktrace also ends at
+                // the first row logged under another time, facility or type: it is one log message, which the client may
+                // have cut before its END line (see _logBlocks).
+                var blockRows = [tr], blockText = head, j = i + 1, pre = trace ? preOf(tr) : '', endLine = trace ? 'STACKTRACE END' : 'EXCEPTION END';
                 for (; j < rows.length; j++) {
-                    var t2 = cellText(rows[j]);
-                    if (t2.indexOf('EXCEPTION #') !== -1) { break; }
+                    var t2 = cellText(rows[j]), p2 = pre && preOf(rows[j]);
+                    if (t2.indexOf('EXCEPTION #') !== -1 || t2.indexOf('STACKTRACE #') !== -1 || (p2 && p2 !== pre)) { break; }
                     blockRows.push(rows[j]);
                     blockText += '\n' + t2;
-                    if (t2.indexOf('EXCEPTION END') !== -1) { j++; break; }
+                    if (t2.indexOf(endLine) !== -1) { j++; break; }
                 }
-                var fp = JiTA.logsig._fingerprint(blockText);
-                var defect = (fp.sig && idx.sigMap[fp.sig]) ? idx.sigMap[fp.sig].members[0].key : null;
-                var loose = false;
-                if (!defect && fp.crashSig && idx.crashMap[fp.crashSig]) {   // no exact hit -> same-crash-site fallback
-                    defect = idx.crashMap[fp.crashSig].members[0].key;
-                    loose = true;
-                }
+                var fp = JiTA.logsig._fingerprint(blockText), hit = JiTA.logsig._pointAt(idx, fp.sig, fp.crashSig);
+                var defect = hit ? hit.key : null, loose = !!hit && hit.by !== 'stack';
                 // Mark every block row as scanned; only the anchor (first row) carries the defect key (a '~'
                 // prefix flags a loose crash-site match so a re-pass keeps the right styling).
                 for (var b = 0; b < blockRows.length; b++) {
@@ -3611,7 +3670,7 @@ JiTA.logsig = {
                         blockRows[b].setAttribute('data-jita-sig', (b === 0 && defect) ? ((loose ? '~' : '') + defect) : '0');
                     }
                 }
-                if (defect) { markAnchor(tr, defect, loose); tally(defect, tr, fp.msg, loose); }
+                if (defect) { markAnchor(tr, defect, loose, titleOf(fp.sig, hit.by)); tally(defect, tr, fp.msg, loose); }
                 i = j;
             }
             JiTA.logsig.renderPanel(found);
@@ -3634,7 +3693,7 @@ JiTA.logsig = {
             var links = r.querySelectorAll('a.jita-sig-link');
             for (var k = 0; k < links.length; k++) { links[k].parentNode.removeChild(links[k]); }
             var cell = r.lastElementChild;
-            if (cell && /^(Known exception|Possibly related \(same crash site\)) · /.test(cell.title || '')) { cell.removeAttribute('title'); }
+            if (cell && /^(Known (exception|stacktrace)|Possibly related \(same [^)]*\)) · /.test(cell.title || '')) { cell.removeAttribute('title'); }
         }
         JiTA.logsig.applyToTable();
     },
@@ -3644,31 +3703,36 @@ JiTA.logsig = {
     // Time<TAB>Facility<TAB>Type<TAB>Message. We MUST segment it the same way applyToTable segments the
     // rendered rows, or the fingerprints won't match: (1) work on the MESSAGE column only - otherwise the
     // timestamps/facilities and every interleaved non-exception log line pollute the stack-frame chain;
-    // (2) bound each exception block at EXCEPTION END (or the next EXCEPTION #) - otherwise one block would
-    // swallow the whole rest of the log (hundreds of unrelated `file.py(NN) func` lines) and the stack
+    // (2) bound each exception or stacktrace block at its END line (or the next block, see _logBlocks) - otherwise
+    // one block would swallow the whole rest of the log (hundreds of unrelated `file.py(NN) func` lines) and the stack
     // signature would never match the clean one in the index. Resolves to { defect -> { defect, count, msg } }.
     matchText: function (text) {
         if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'match', text: text }).catch(function () { return JiTA.logsig._matchTextLocal(text); }); }
         return JiTA.logsig._matchTextLocal(text);
     },
-    // A raw log's exception blocks, segmented as applyToTable segments the rendered rows: the MESSAGE column of every
-    // record (everything after the 3rd tab; prefix-less continuation lines as-is, as cellText() reads each rendered
-    // row), grouped from EXCEPTION # to EXCEPTION END (inclusive) or the next EXCEPTION #. Shared by the matching
-    // below and the defect profile. KEEP IN SYNC with lgMatch in the worker.
+    // A raw log's exception and stacktrace blocks, segmented as applyToTable segments the rendered rows: the MESSAGE
+    // column of every record (everything after the 3rd tab; prefix-less continuation lines as-is, as cellText() reads each
+    // rendered row), grouped from EXCEPTION # (or STACKTRACE #) to EXCEPTION END (or STACKTRACE END) inclusive, or the
+    // next block of either kind. A stacktrace is one log message, every line of it under the same time, facility and type,
+    // and the client cuts it at 6400 characters, END line and all: so one also ends at the first line logged under another.
+    // A line of fewer than four columns keeps the time it has, as the log parser shows it, and one with none goes with the
+    // line before. Shared by the matching below and the defect profile. KEEP IN SYNC with lgBlocks in the worker.
     _logBlocks: function (text) {
-        var lines = String(text || '').replace(/\r/g, '').split('\n'), messages = [], blocks = [];
+        var lines = String(text || '').replace(/\r/g, '').split('\n'), messages = [], pres = [], blocks = [];
         for (var li = 0; li < lines.length; li++) {
             var parts = lines[li].split('\t');
             messages.push(parts.length >= 4 ? parts.slice(3).join('\t') : lines[li]);
+            pres.push((parts.length > 1 && parts[0]) ? (parts.length >= 4 ? parts.slice(0, 3).join('\t') : parts[0] + '\t\t') : '');
         }
         var i = 0;
         while (i < messages.length) {
-            if (messages[i].indexOf('EXCEPTION #') === -1) { i++; continue; }
-            var blockText = messages[i], j = i + 1;
+            var trace = messages[i].indexOf('STACKTRACE #') !== -1;
+            if (!trace && messages[i].indexOf('EXCEPTION #') === -1) { i++; continue; }
+            var blockText = messages[i], j = i + 1, pre = trace ? pres[i] : '', endLine = trace ? 'STACKTRACE END' : 'EXCEPTION END';
             for (; j < messages.length; j++) {
-                if (messages[j].indexOf('EXCEPTION #') !== -1) { break; }
+                if (messages[j].indexOf('EXCEPTION #') !== -1 || messages[j].indexOf('STACKTRACE #') !== -1 || (pre && pres[j] && pres[j] !== pre)) { break; }
                 blockText += '\n' + messages[j];
-                if (messages[j].indexOf('EXCEPTION END') !== -1) { j++; break; }
+                if (messages[j].indexOf(endLine) !== -1) { j++; break; }
             }
             blocks.push(blockText);
             i = j;
@@ -3680,13 +3744,8 @@ JiTA.logsig = {
             var found = {};
             if (!idx || !text) { return found; }
             function tallyBlock(blockText) {
-                var fp = JiTA.logsig._fingerprint(blockText);
-                var defect = (fp.sig && idx.sigMap[fp.sig]) ? idx.sigMap[fp.sig].members[0].key : null;
-                var loose = false;
-                if (!defect && fp.crashSig && idx.crashMap[fp.crashSig]) {   // no exact hit -> same-crash-site fallback
-                    defect = idx.crashMap[fp.crashSig].members[0].key;
-                    loose = true;
-                }
+                var fp = JiTA.logsig._fingerprint(blockText), hit = JiTA.logsig._pointAt(idx, fp.sig, fp.crashSig);
+                var defect = hit ? hit.key : null, loose = !!hit && hit.by !== 'stack';
                 if (!defect) { return; }
                 if (!found[defect]) { found[defect] = { defect: defect, count: 0, msg: fp.msg || '', loose: loose }; }
                 found[defect].count++;
@@ -3698,9 +3757,8 @@ JiTA.logsig = {
         });
     },
 
-    // The defect each exception signature points at, picked as "Known defects in attached log" picks it: the newest
-    // defect with the same stack, else the newest with the same crash site. Resolves { sig: defect key } for the
-    // signatures that match one. KEEP IN SYNC with lgDefects in the worker.
+    // The defect each exception or stacktrace signature points at, picked as "Known defects in attached log" picks it
+    // (_pointAt). Resolves { sig: defect key } for the signatures that match one. KEEP IN SYNC with lgDefects in the worker.
     defectsForSigs: function (sigs) {
         if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'defects', sigs: sigs }).catch(function () { return JiTA.logsig._defectsLocal(sigs); }); }
         return JiTA.logsig._defectsLocal(sigs);
@@ -3709,43 +3767,43 @@ JiTA.logsig = {
         return JiTA.logsig.ensure().then(function (idx) {
             var out = {};
             (sigs || []).forEach(function (sig) {
-                var c = idx && idx.sigMap[sig], cs = JiTA.logsig._crashOf(sig), cc = cs && idx && idx.crashMap[cs];
-                if (c && c.members.length) { out[sig] = c.members[0].key; }
-                else if (cc && cc.members.length) { out[sig] = cc.members[0].key; }
+                var hit = JiTA.logsig._pointAt(idx, sig);
+                if (hit) { out[sig] = hit.key; }
             });
             return out;
         });
     },
-    // Every defect that holds one of these exceptions, for the ranking (JiTA.repexc): { defect key: 'exact' } when its
-    // description has the same stack, 'site' when only the same crash site. Every member of a cluster, not just its newest.
-    // KEEP IN SYNC with lgHolding in the worker.
+    // Every defect that holds one of these exceptions or stacktraces, for the ranking (JiTA.repexc): { defect key: kind },
+    // the kind 'exact' when its description has an exception with the same stack, 'site' when only the same crash site;
+    // for a stacktrace 'st-exact' and 'st-site', and 'st-msg' for the same message where one of the two was cut off before
+    // its stack. Each defect gets its best: by level first, then an exception before a stacktrace. Every member of a
+    // cluster, not just its newest. KEEP IN SYNC with lgHolding in the worker.
     holding: function (sigs) {
         if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'holding', sigs: sigs }).catch(function () { return JiTA.logsig._holdingLocal(sigs); }); }
         return JiTA.logsig._holdingLocal(sigs);
     },
     _holdingLocal: function (sigs) {
-        return JiTA.logsig.ensure().then(function (idx) {
+        var L = JiTA.logsig;
+        return L.ensure().then(function (idx) {
             var out = {};
             if (!idx) { return out; }
-            (sigs || []).forEach(function (sig) {
-                var c = idx.sigMap[sig];
-                if (c) { c.members.forEach(function (m) { out[m.key] = 'exact'; }); }
-            });
-            (sigs || []).forEach(function (sig) {
-                var cs = JiTA.logsig._crashOf(sig), cc = cs && idx.crashMap[cs];
-                if (cc) { cc.members.forEach(function (m) { if (!out[m.key]) { out[m.key] = 'site'; } }); }
-            });
+            var list = (sigs || []).filter(function (s) { return !L.isTrace(s); }).concat((sigs || []).filter(L.isTrace));
+            function put(members, kind) { (members || []).forEach(function (m) { if (!out[m.key]) { out[m.key] = kind; } }); }
+            list.forEach(function (sig) { var c = idx.sigMap[sig]; if (c) { put(c.members, L.isTrace(sig) ? 'st-exact' : 'exact'); } });
+            list.forEach(function (sig) { var cs = L._crashOf(sig), cc = cs && idx.crashMap[cs]; if (cc) { put(cc.members, L.isTrace(sig) ? 'st-site' : 'site'); } });
+            list.forEach(function (sig) { put(L._traceMates(idx, sig), 'st-msg'); });
             return out;
         });
     },
-    // A defect's own exceptions, the ones pasted in its description: { sigs, crashes }. KEEP IN SYNC with lgSigsOf.
+    // A defect's own exceptions and stacktraces, the ones pasted in its description: { sigs, crashes, cuts }, `cuts` the
+    // stacktraces cut off before their stack. KEEP IN SYNC with lgSigsOf.
     sigsOf: function (key) {
         if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'sigsOf', key: key }).catch(function () { return JiTA.logsig._sigsOfLocal(key); }); }
         return JiTA.logsig._sigsOfLocal(key);
     },
     _sigsOfLocal: function (key) {
         return JiTA.logsig.ensure().then(function (idx) {
-            return { sigs: (idx && idx.keyToSigs[key]) || [], crashes: (idx && idx.keyToCrash[key]) || [] };
+            return { sigs: (idx && idx.keyToSigs[key]) || [], crashes: (idx && idx.keyToCrash[key]) || [], cuts: (idx && idx.keyToCut && idx.keyToCut[key]) || [] };
         });
     },
     // A signature's crash site, as _fingerprint builds it: the message and the innermost CRASH_FRAMES frames. Frames hold
@@ -3759,6 +3817,28 @@ JiTA.logsig = {
         });
         if (frames.length < JiTA.logsig.MIN_FRAMES) { return null; }
         return s.slice(0, at) + '|' + frames.slice(-JiTA.logsig.CRASH_FRAMES).join('>');
+    },
+    // The defects whose descriptions hold a stacktrace with this one's message where one of the two was cut off before its
+    // stack, so only the message can be compared: for a cut one every stacktrace with its message, for one with a stack
+    // the cut ones. Newest first; [] for an exception. KEEP IN SYNC with lgMates in the worker.
+    _traceMates: function (idx, sig) {
+        var L = JiTA.logsig;
+        if (!idx || !L.isTrace(sig)) { return []; }
+        var map = L.isCut(sig) ? idx.traceMsg : idx.traceCut;
+        return (map && map[L._traceKey(sig)]) || [];
+    },
+    // The defect a signature points at, as every log match picks it: the newest defect whose description has the same
+    // stack, else the newest with the same crash site, else, for a stacktrace, the newest of its _traceMates.
+    // { key, by: 'stack' | 'site' | 'message' }, or null. `crashSig`, when the fingerprint has it, saves working the crash
+    // site out again. KEEP IN SYNC with lgPoint in the worker.
+    _pointAt: function (idx, sig, crashSig) {
+        var L = JiTA.logsig, c, mates;
+        if (!idx || !sig) { return null; }
+        var cs = crashSig !== undefined ? crashSig : L._crashOf(sig);
+        if ((c = idx.sigMap[sig]) && c.members.length) { return { key: c.members[0].key, by: 'stack' }; }
+        if (cs && (c = idx.crashMap[cs]) && c.members.length) { return { key: c.members[0].key, by: 'site' }; }
+        if ((mates = L._traceMates(idx, sig)).length) { return { key: mates[0].key, by: 'message' }; }
+        return null;
     },
 
     /* ---- floating "Defects in log" panel ----
@@ -10427,6 +10507,7 @@ function jitaWorkerBody(cfg) {
     var pipe = null, backend = 'none', db = null, vecCache = null, kwCache = null, logsigCache = null, BATCH = 8, embedding = false;
     var pipeP = null, dbP = null, embedAgain = false;   // the model / DB being opened, and a pass asked for while one ran
     var LG_MIN = 2, LG_CRASH = 2;   // logsig: min stack frames to trust a signature; innermost frames for the crash-site sig
+    var LG_TRACE = '[stacktrace] ', LG_OPEN = 300;   // logsig: a stacktrace signature's tag; what is kept of a message that may run on
     var K1 = 1.5, B = 0.75, STOP = {};
     ('the a an and or of to in for on with is are was were be been it this that these those as at by from we you they i he she his her its their our your not no but if then than so such can will would should could may might do does did has have had into over under out up down off about your yours').split(' ').forEach(function (w) { STOP[w] = true; });
     function tokenize(text) {
@@ -10460,20 +10541,34 @@ function jitaWorkerBody(cfg) {
 
     // ---- logsig: exception-signature mining + queries (ported from JiTA.logsig so tabs hold no logsig index) --
     function lgSplit(text) {   // KEEP IN SYNC with JiTA.logsig._splitBlocks
-        var blocks = [], re = /EXCEPTION #[\s\S]*?(?:EXCEPTION END|(?=EXCEPTION #)|$)/gi, m;
+        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\s\S]*?(?:\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m;
         while ((m = re.exec(text))) { blocks.push(m[0]); if (re.lastIndex === m.index) { re.lastIndex++; } }
         return blocks.length ? blocks : [text || ''];
     }
     function lgFp(text) {   // KEEP IN SYNC with JiTA.logsig._fingerprint
-        text = (text || '').replace(/(^|\s)\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/g, '$1');
-        var msg = '', mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text);
-        if (mm) { msg = (mm[1] || '').replace(/\s+/g, ' ').trim(); }
+        text = text || '';
+        var si = text.search(/STACKTRACE #/i), ei = text.search(/EXCEPTION #/i), msg = '', open = false, mm;
+        var trace = si >= 0 ? (ei < 0 || si < ei)
+            : (ei < 0 && /\bTraced at\b/i.test(text) && !/\b(?:Formatted exception info|Caught at|Thrown at)\b/i.test(text));
+        if (trace && (mm = /STACKTRACE #\d*\s+logged at\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s*:[ \t]?/i.exec(text))) {
+            var rest = text.slice(mm.index + mm[0].length);
+            var end = /\n|\s\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t|\b(?:Common path prefix|Traced at|Thread Locals|Stackhash|Reported from|STACKTRACE END)\b/i.exec(rest);
+            msg = rest.slice(0, end ? end.index : rest.length);
+            open = !(end && /[\n\t]/.test(end[0]));
+        }
+        text = text.replace(/(^|\s)\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/g, '$1');
+        if (!trace && (mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text))) {
+            msg = mm[1] || '';
+        }
+        msg = msg.replace(/\s+/g, ' ').trim();
+        if (open) { msg = msg.slice(0, LG_OPEN).trim(); }
         var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.pyx?)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;   // .py OR .pyx (EVE's Cython frames)
         while ((fm = fre.exec(text))) { frames.push(fm[1].replace(/^.*[\/\\]/, '') + ':' + fm[3]); }
-        var nmsg = msg.replace(/0x[0-9a-fA-F]+/g, '0x#').replace(/\b\d+L\b/g, '#').replace(/([(\[{,]\s*)\d+/g, '$1#').replace(/\d+(\s*[)\]},])/g, '#$1').replace(/\b\d{4,}\b/g, '#');
-        var sig = frames.length >= LG_MIN ? (nmsg + '|' + frames.join('>')).toLowerCase() : null;
-        var crashSig = frames.length >= LG_MIN ? (nmsg + '|' + frames.slice(-LG_CRASH).join('>')).toLowerCase() : null;
-        return { sig: sig, crashSig: crashSig, msg: msg };
+        var nmsg = (trace ? LG_TRACE : '') + msg.replace(/0x[0-9a-fA-F]+/g, '0x#').replace(/\b\d+L\b/g, '#').replace(/([(\[{,]\s*)\d+/g, '$1#').replace(/\d+(\s*[)\]},])/g, '#$1').replace(/\b\d{4,}\b/g, '#');
+        var deep = frames.length >= LG_MIN;
+        var sig = deep ? (nmsg + '|' + frames.join('>')).toLowerCase() : ((trace && msg) ? (nmsg + '|').toLowerCase() : null);
+        var crashSig = deep ? (nmsg + '|' + frames.slice(-LG_CRASH).join('>')).toLowerCase() : null;
+        return { sig: sig, crashSig: crashSig, msg: msg, open: open };
     }
     function lgSiblings(key) {
         var idx = logsigCache; if (!idx) { return []; }
@@ -10499,25 +10594,37 @@ function jitaWorkerBody(cfg) {
         out.sort(function (a, b) { if (a.newest !== b.newest) { return a.newest < b.newest ? 1 : -1; } return b.members.length - a.members.length || (a.label < b.label ? -1 : 1); });
         return out;
     }
-    function lgMatch(text) {
-        var idx = logsigCache, found = {}; if (!idx || !text) { return found; }
-        var lines = text.replace(/\r/g, '').split('\n'), messages = [];
-        for (var li = 0; li < lines.length; li++) { var parts = lines[li].split('\t'); messages.push(parts.length >= 4 ? parts.slice(3).join('\t') : lines[li]); }
-        function tally(blockText) {
-            var fp = lgFp(blockText);
-            var defect = (fp.sig && idx.sigMap[fp.sig]) ? idx.sigMap[fp.sig].members[0].key : null, loose = false;
-            if (!defect && fp.crashSig && idx.crashMap[fp.crashSig]) { defect = idx.crashMap[fp.crashSig].members[0].key; loose = true; }
-            if (!defect) { return; }
-            if (!found[defect]) { found[defect] = { defect: defect, count: 0, msg: fp.msg || '', loose: loose }; }
-            found[defect].count++; if (!loose) { found[defect].loose = false; } if (!found[defect].msg && fp.msg) { found[defect].msg = fp.msg; }
+    function lgBlocks(text) {   // KEEP IN SYNC with JiTA.logsig._logBlocks
+        var lines = String(text || '').replace(/\r/g, '').split('\n'), messages = [], pres = [], blocks = [];
+        for (var li = 0; li < lines.length; li++) {
+            var parts = lines[li].split('\t');
+            messages.push(parts.length >= 4 ? parts.slice(3).join('\t') : lines[li]);
+            pres.push((parts.length > 1 && parts[0]) ? (parts.length >= 4 ? parts.slice(0, 3).join('\t') : parts[0] + '\t\t') : '');
         }
         var i = 0;
         while (i < messages.length) {
-            if (messages[i].indexOf('EXCEPTION #') === -1) { i++; continue; }
-            var blockText = messages[i], j = i + 1;
-            for (; j < messages.length; j++) { if (messages[j].indexOf('EXCEPTION #') !== -1) { break; } blockText += '\n' + messages[j]; if (messages[j].indexOf('EXCEPTION END') !== -1) { j++; break; } }
-            tally(blockText); i = j;
+            var trace = messages[i].indexOf('STACKTRACE #') !== -1;
+            if (!trace && messages[i].indexOf('EXCEPTION #') === -1) { i++; continue; }
+            var blockText = messages[i], j = i + 1, pre = trace ? pres[i] : '', endLine = trace ? 'STACKTRACE END' : 'EXCEPTION END';
+            for (; j < messages.length; j++) {
+                if (messages[j].indexOf('EXCEPTION #') !== -1 || messages[j].indexOf('STACKTRACE #') !== -1 || (pre && pres[j] && pres[j] !== pre)) { break; }
+                blockText += '\n' + messages[j];
+                if (messages[j].indexOf(endLine) !== -1) { j++; break; }
+            }
+            blocks.push(blockText);
+            i = j;
         }
+        return blocks;
+    }
+    function lgMatch(text) {   // KEEP IN SYNC with JiTA.logsig._matchTextLocal
+        var idx = logsigCache, found = {}; if (!idx || !text) { return found; }
+        lgBlocks(text).forEach(function (blockText) {
+            var fp = lgFp(blockText), hit = lgPoint(idx, fp.sig, fp.crashSig);
+            if (!hit) { return; }
+            var defect = hit.key, loose = hit.by !== 'stack';
+            if (!found[defect]) { found[defect] = { defect: defect, count: 0, msg: fp.msg || '', loose: loose }; }
+            found[defect].count++; if (!loose) { found[defect].loose = false; } if (!found[defect].msg && fp.msg) { found[defect].msg = fp.msg; }
+        });
         return found;
     }
     // A signature's crash site, from the signature alone. KEEP IN SYNC with JiTA.logsig._crashOf.
@@ -10530,35 +10637,55 @@ function jitaWorkerBody(cfg) {
         if (frames.length < LG_MIN) { return null; }
         return s.slice(0, at) + '|' + frames.slice(-LG_CRASH).join('>');
     }
+    // A stacktrace's signature, one cut off before its stack, and its message part. KEEP IN SYNC with JiTA.logsig.isTrace,
+    // isCut and _traceKey.
+    function lgIsTrace(sig) { return String(sig == null ? '' : sig).indexOf(LG_TRACE) === 0; }
+    function lgIsCut(sig) { var s = String(sig == null ? '' : sig); return lgIsTrace(s) && s.charAt(s.length - 1) === '|'; }
+    function lgTraceKey(sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); }
+    // The defects with a stacktrace of this one's message where one of the two was cut off before its stack. KEEP IN SYNC
+    // with JiTA.logsig._traceMates.
+    function lgMates(idx, sig) {
+        if (!idx || !lgIsTrace(sig)) { return []; }
+        var map = lgIsCut(sig) ? idx.traceMsg : idx.traceCut;
+        return (map && map[lgTraceKey(sig)]) || [];
+    }
+    // The defect a signature points at: { key, by: 'stack' | 'site' | 'message' }, or null. KEEP IN SYNC with
+    // JiTA.logsig._pointAt.
+    function lgPoint(idx, sig, crashSig) {
+        var c, mates;
+        if (!idx || !sig) { return null; }
+        var cs = crashSig !== undefined ? crashSig : lgCrashOf(sig);
+        if ((c = idx.sigMap[sig]) && c.members.length) { return { key: c.members[0].key, by: 'stack' }; }
+        if (cs && (c = idx.crashMap[cs]) && c.members.length) { return { key: c.members[0].key, by: 'site' }; }
+        if ((mates = lgMates(idx, sig)).length) { return { key: mates[0].key, by: 'message' }; }
+        return null;
+    }
     // The defect each signature points at, as lgMatch picks it: { sig: defect key }. KEEP IN SYNC with JiTA.logsig._defectsLocal.
     function lgDefects(sigs) {
         var idx = logsigCache, out = {};
         if (!idx) { return out; }
         (sigs || []).forEach(function (sig) {
-            var c = idx.sigMap[sig], cs = lgCrashOf(sig), cc = cs && idx.crashMap[cs];
-            if (c && c.members.length) { out[sig] = c.members[0].key; }
-            else if (cc && cc.members.length) { out[sig] = cc.members[0].key; }
+            var hit = lgPoint(idx, sig);
+            if (hit) { out[sig] = hit.key; }
         });
         return out;
     }
-    // Every defect holding one of these exceptions: { defect key: 'exact' | 'site' }. KEEP IN SYNC with JiTA.logsig._holdingLocal.
+    // Every defect holding one of these exceptions or stacktraces: { defect key: kind }. KEEP IN SYNC with
+    // JiTA.logsig._holdingLocal.
     function lgHolding(sigs) {
         var idx = logsigCache, out = {};
         if (!idx) { return out; }
-        (sigs || []).forEach(function (sig) {
-            var c = idx.sigMap[sig];
-            if (c) { c.members.forEach(function (m) { out[m.key] = 'exact'; }); }
-        });
-        (sigs || []).forEach(function (sig) {
-            var cs = lgCrashOf(sig), cc = cs && idx.crashMap[cs];
-            if (cc) { cc.members.forEach(function (m) { if (!out[m.key]) { out[m.key] = 'site'; } }); }
-        });
+        var list = (sigs || []).filter(function (s) { return !lgIsTrace(s); }).concat((sigs || []).filter(lgIsTrace));
+        function put(members, kind) { (members || []).forEach(function (m) { if (!out[m.key]) { out[m.key] = kind; } }); }
+        list.forEach(function (sig) { var c = idx.sigMap[sig]; if (c) { put(c.members, lgIsTrace(sig) ? 'st-exact' : 'exact'); } });
+        list.forEach(function (sig) { var cs = lgCrashOf(sig), cc = cs && idx.crashMap[cs]; if (cc) { put(cc.members, lgIsTrace(sig) ? 'st-site' : 'site'); } });
+        list.forEach(function (sig) { put(lgMates(idx, sig), 'st-msg'); });
         return out;
     }
-    // A defect's own exceptions: { sigs, crashes }. KEEP IN SYNC with JiTA.logsig._sigsOfLocal.
+    // A defect's own exceptions and stacktraces: { sigs, crashes, cuts }. KEEP IN SYNC with JiTA.logsig._sigsOfLocal.
     function lgSigsOf(key) {
         var idx = logsigCache;
-        return { sigs: (idx && idx.keyToSigs[key]) || [], crashes: (idx && idx.keyToCrash[key]) || [] };
+        return { sigs: (idx && idx.keyToSigs[key]) || [], crashes: (idx && idx.keyToCrash[key]) || [], cuts: (idx && idx.keyToCut && idx.keyToCut[key]) || [] };
     }
 
     // One load at a time: the delayed embed pass and the open panel's first query both asked before the first
@@ -10830,7 +10957,8 @@ function jitaWorkerBody(cfg) {
     }
     function buildIndexes(recs) {
         var vD = [], vE = [], kD = [], kE = [], dfD = {}, dfE = {}, lenD = 0, lenE = 0;
-        var sigMap = {}, keyToSigs = {}, crashMap = {}, keyToCrash = {};   // logsig
+        var sigMap = {}, keyToSigs = {}, crashMap = {}, keyToCrash = {}, traceMsg = {}, traceCut = {}, keyToCut = {};   // logsig
+        function lgFile(map, k, member) { var list = map[k] || (map[k] = []); if (list.indexOf(member) === -1) { list.push(member); } }
         for (var i = 0; i < recs.length; i++) {
             var r = recs[i], isEbr = r.project === 'EBR';
             if (isEbr && (isClosedStatus(r.status) || isGmTeam(r.team))) { continue; }   // not ranked in the reports view
@@ -10844,13 +10972,20 @@ function jitaWorkerBody(cfg) {
             for (var j = 0; j < toks.length; j++) { var tk = toks[j]; tf[tk] = (tf[tk] || 0) + 1; if (!seen[tk]) { df[tk] = (df[tk] || 0) + 1; seen[tk] = true; } }
             var kd = { key: meta.key, project: meta.project, summary: meta.summary, status: meta.status, resolution: meta.resolution, resolutiondate: meta.resolutiondate, created: meta.created, team: meta.team, tf: tf, len: toks.length, hay: hay };
             if (isEbr) { kE.push(kd); lenE += toks.length; } else { kD.push(kd); lenD += toks.length; }
-            // logsig: mine exception signatures from DEFECT descriptions only
-            if (!isEbr && r.description && r.description.indexOf('EXCEPTION #') !== -1) {
+            // logsig: mine exception and stacktrace signatures from DEFECT descriptions only
+            if (!isEbr && r.description && (r.description.indexOf('EXCEPTION #') !== -1 || r.description.indexOf('STACKTRACE #') !== -1)) {
                 var lmember = { key: r.key, status: r.status || '', resolution: r.resolution || null, resolutiondate: r.resolutiondate || null, created: r.created || null };
                 var blocks = lgSplit(r.description);
                 for (var b = 0; b < blocks.length; b++) {
                     var fp = lgFp(blocks[b]);
                     if (!fp.sig) { continue; }
+                    if (lgIsTrace(fp.sig)) { lgFile(traceMsg, lgTraceKey(fp.sig), lmember); }
+                    if (lgIsCut(fp.sig)) {
+                        lgFile(traceCut, lgTraceKey(fp.sig), lmember);
+                        if (!keyToCut[r.key]) { keyToCut[r.key] = []; }
+                        if (keyToCut[r.key].indexOf(fp.sig) === -1) { keyToCut[r.key].push(fp.sig); }
+                        continue;
+                    }
                     var csm = sigMap[fp.sig]; if (!csm) { csm = sigMap[fp.sig] = { sig: fp.sig, label: fp.msg || '', members: [] }; }
                     if (!csm.label && fp.msg) { csm.label = fp.msg; }
                     if (!keyToSigs[r.key]) { keyToSigs[r.key] = []; }
@@ -10872,7 +11007,9 @@ function jitaWorkerBody(cfg) {
         function lgSort(a, b) { var ac = a.created || '', bc = b.created || ''; if (ac !== bc) { return ac < bc ? 1 : -1; } return a.key < b.key ? -1 : 1; }
         Object.keys(sigMap).forEach(function (s) { sigMap[s].members.sort(lgSort); });
         Object.keys(crashMap).forEach(function (s) { crashMap[s].members.sort(lgSort); });
-        logsigCache = { sigMap: sigMap, keyToSigs: keyToSigs, crashMap: crashMap, keyToCrash: keyToCrash };
+        Object.keys(traceMsg).forEach(function (s) { traceMsg[s].sort(lgSort); });
+        Object.keys(traceCut).forEach(function (s) { traceCut[s].sort(lgSort); });
+        logsigCache = { sigMap: sigMap, keyToSigs: keyToSigs, crashMap: crashMap, keyToCrash: keyToCrash, traceMsg: traceMsg, traceCut: traceCut, keyToCut: keyToCut };
     }
     // Cosine == dot product (both vectors are normalized). Return the top-N by score.
     function cosineTopN(q, entries, topN, excludeKey, filterTerms, gate) {
@@ -13931,6 +14068,8 @@ JiTA.trend = {
  */
 JiTA.profile = {
     V: 3,                          // shape of a cached report reading: bump to read every report's files again
+    LOG_V: 2,                      // how a reading's logs were read (its lv; none is 1): bump to read every report's logs again, not its
+                                   // zip unless its log is in there. 2: stacktraces as well as exceptions
     CACHE_PREFIX: 'rp:',           // meta store key per report
     ZIP_KEY: 'jitaProfileZip',     // Settings: read each report's igbr.zip (on by default)
     PAGE_SIZE: 100,                // reports per search page (every attached report is read)
@@ -13938,7 +14077,7 @@ JiTA.profile = {
     MAX_LOG_BYTES: 15 * 1024 * 1024,
     MAX_ZIP_BYTES: 40 * 1024 * 1024,
     MAX_LOGS: 3,                   // log files read per report
-    MAX_EXC: 40,                   // exceptions kept per report
+    MAX_EXC: 40,                   // exceptions kept per report, and as many stacktraces
     DOMINANT: 0.75,
     MIN_N: 5,
     MARK: /Trinity platform:|Video Card:/i,
@@ -14060,8 +14199,9 @@ JiTA.profile = {
         return m ? { version: m[1], build: +m[2] } : null;
     },
 
-    // A log's distinct exceptions as fingerprints, [{ sig, msg }]: only blocks with a full stack signature count, and
-    // an exception logged twice in one report counts once.
+    // A log's distinct exceptions and stacktraces as fingerprints, [{ sig, msg }]: only blocks with a full stack signature
+    // count, or a stacktrace cut off before its stack, by its message (JiTA.logsig.isCut); one logged twice in one report
+    // counts once.
     logExceptions: function (text) {
         var out = [], seen = {};
         JiTA.logsig._logBlocks(text).forEach(function (b) {
@@ -14084,23 +14224,30 @@ JiTA.profile = {
     },
     // Signatures as a hover text a person can read: the message once, then each stack one frame a line, innermost last
     // (where it was thrown). A signature on its own is one long lowercased line. `sigs` is one signature, or several of
-    // one message; `msg` is the message as written, which the signature has lowercased.
+    // one message; `msg` is the message as written, which the signature has lowercased. A stacktrace says it is one, and
+    // one cut off before its stack says that instead of its frames.
     _sigTip: function (sigs, msg) {
-        var P = JiTA.profile, list = [].concat(sigs || []), out = [];
+        var P = JiTA.profile, L = JiTA.logsig, list = [].concat(sigs || []), out = [];
         list.forEach(function (sig, i) {
-            var p = P._sigParts(sig);
-            if (!i) { out.push(msg || p.msg); }
-            if (!p.frames.length) { return; }
-            out.push('', (list.length > 1 ? 'Stack ' + (i + 1) + ' of ' + list.length : 'Stack') + ', innermost last:');
+            var p = P._sigParts(sig), st = L.isTrace(sig), head = list.length > 1 ? 'Stack ' + (i + 1) + ' of ' + list.length : 'Stack';
+            if (!i) { out.push((st ? 'Stacktrace: ' : '') + (msg || (st ? p.msg.slice(L.TRACE.length) : p.msg))); }
+            if (!p.frames.length) {
+                if (L.isCut(sig)) { out.push('', head + ': cut off in the log, as the client cuts a stacktrace at 6400 characters'); }
+                return;
+            }
+            out.push('', head + ', innermost last:');
             p.frames.forEach(function (f) { out.push('    ' + f.replace(':', ': ')); });
         });
         return out.join('\n');
     },
-    // Short labels for call stacks that end alike: where each one differs, up to the frames they all share.
+    // Short labels for call stacks that end alike: where each one differs, up to the frames they all share. A stacktrace
+    // cut off before its stack has none, and is labelled so.
     _pathLabels: function (chains) {
-        var cs = 0, min = Math.min.apply(null, chains.map(function (c) { return c.length; }));
-        while (cs < min && chains.every(function (c) { return c[c.length - 1 - cs] === chains[0][chains[0].length - 1 - cs]; })) { cs++; }
+        var full = chains.filter(function (c) { return c.length; });
+        var cs = 0, min = full.length ? Math.min.apply(null, full.map(function (c) { return c.length; })) : 0;
+        while (cs < min && full.every(function (c) { return c[c.length - 1 - cs] === full[0][full[0].length - 1 - cs]; })) { cs++; }
         return chains.map(function (c) {
+            if (!c.length) { return '(stack cut off)'; }
             var own = c.slice(0, c.length - cs);
             if (!own.length) { return c.slice(0, 1).join('') + (c.length > 1 ? ' > …' : ''); }   // the shortest: it starts at the shared frames
             return (own.length > 3 ? '… > ' : '') + own.slice(-3).join(' > ') + (cs ? ' > …' : '');
@@ -14258,21 +14405,42 @@ JiTA.profile = {
     _logSig: function (att) {
         return JiTA.profile._logFiles(att).map(function (a) { return (a.filename || '') + ':' + (a.size || 0); }).sort().join('|');
     },
+    // Whether a reading's log is the logs.txt inside igbr.zip: it read one, and the report has no log of its own.
+    _zipLog: function (rec, att) { return !!(rec && rec.hasLog) && !JiTA.profile._logFiles(att).length; },
+    // Whether a reading's logs were read as the reader reads them now (LOG_V). Where the zip is not read (`zip` false), one
+    // whose log came out of the zip counts as current: reading it again there would only lose that log.
+    _logsCurrent: function (rec, att, zip) { return !!rec && (rec.lv === JiTA.profile.LOG_V || (!zip && JiTA.profile._zipLog(rec, att))); },
+    // Take a reading's log part out, so _readFiles reads the logs again. What it has from the zip stays.
+    _dropLogs: function (r) {
+        r.logs = false; r.hasLog = false; r.exc = []; r.build = null; r.version = null; r.skippedLogs = false;
+        delete r.logSig;
+        delete r.lv;
+        return r;
+    },
 
     // Read a report's files and cache what they said. `rec` is its cached reading, if any: a part it already has is
     // not read again. A download that fails leaves its part unread, so the next visit tries again; a file over its
     // size cap is skipped for good.
     _readFiles: function (issue, rec, zip) {
-        var P = JiTA.profile, f = issue.fields || {}, att = f.attachment || [], jobs = Promise.resolve();
+        var P = JiTA.profile, L = JiTA.logsig, f = issue.fields || {}, att = f.attachment || [], jobs = Promise.resolve();
         var hint = (JiTA.ocr._langFromLabels(f.labels || []) || {}).code;   // the client language, for Windows' own code page
         rec = rec ? JSON.parse(JSON.stringify(rec)) : { v: P.V, key: issue.key, logs: false, zip: false };
-        // What one log says, added to `into`: the build, if none is known yet, and the exceptions it does not have yet.
+        // Logs read before the reader read them as it does now are read again, and a log out of the zip with the zip.
+        if (rec.logs && !P._logsCurrent(rec, att, zip)) {
+            if (P._zipLog(rec, att)) { rec.zip = false; }
+            P._dropLogs(rec);
+        }
+        // What one log says, added to `into`: the build, if none is known yet, and the exceptions and stacktraces it does
+        // not have yet, up to MAX_EXC of each, so a log full of stacktraces leaves room for its exceptions.
         function useLog(into, t) {
-            var seen = {}, b = P.parseBuild(t);
+            var seen = {}, n = { exc: 0, st: 0 }, b = P.parseBuild(t);
             into.exc = into.exc || [];
-            into.exc.forEach(function (e) { seen[e.sig] = true; });
+            into.exc.forEach(function (e) { seen[e.sig] = true; n[L.isTrace(e.sig) ? 'st' : 'exc']++; });
             if (b && !into.build) { into.build = b.build; into.version = b.version; }
-            P.logExceptions(t).forEach(function (e) { if (!seen[e.sig] && into.exc.length < P.MAX_EXC) { seen[e.sig] = true; into.exc.push(e); } });
+            P.logExceptions(t).forEach(function (e) {
+                var k = L.isTrace(e.sig) ? 'st' : 'exc';
+                if (!seen[e.sig] && n[k] < P.MAX_EXC) { seen[e.sig] = true; n[k]++; into.exc.push(e); }
+            });
             into.hasLog = true;
         }
         if (!rec.logs) {
@@ -14285,6 +14453,7 @@ JiTA.profile = {
                 if (li >= small.length) {
                     rec.logs = true;
                     rec.logSig = P._logSig(att);
+                    rec.lv = P.LOG_V;
                     rec.skippedLogs = logs.length > small.length;
                     if (got.hasLog) { rec.exc = got.exc; rec.build = got.build; rec.version = got.version; rec.hasLog = true; }
                     return Promise.resolve();
@@ -14404,7 +14573,7 @@ JiTA.profile = {
             // The same message through another call stack is the same error here, not an outlier, even when that stack's
             // defect is hidden.
             if (out.domExc && v.logRead === true && !v.exc.some(function (e) { return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })) {
-                why.push('its log lacks the exception ' + out.domExc.count + ' of ' + out.withLog + ' logs share');
+                why.push('its log lacks the ' + (JiTA.logsig.isTrace(out.domExc.sig) ? 'stacktrace ' : 'exception ') + out.domExc.count + ' of ' + out.withLog + ' logs share');
             }
             if (out.domCrash && v.crashRead === true && !v.crashes.some(function (c) { return c.module === out.domCrash.module; })) {
                 why.push('no crash in ' + out.domCrash.module + ', which ' + out.domCrash.count + ' of ' + out.withWer + ' crash histories show');
@@ -14470,7 +14639,7 @@ JiTA.profile = {
         } };
     },
     _usable: function (rec) { return (rec && rec.v === JiTA.profile.V) ? rec : null; },
-    _needs: function (rec, zip) { return !rec || !rec.logs || (zip && !rec.zip); },
+    _needs: function (rec, zip, att) { return !rec || !rec.logs || (zip && !rec.zip) || !JiTA.profile._logsCurrent(rec, att, zip); },
     // Remember a defect's latest state, dropping the defect looked at longest ago once KEEP are remembered. Defect keys
     // are not array indices, so the object keeps them in the order they were (re)inserted.
     _keep: function (key, s) {
@@ -14515,7 +14684,7 @@ JiTA.profile = {
             return Promise.all(issues.map(function (iss) { return JiTA.db.getMeta(P.CACHE_PREFIX + iss.key).then(P._usable, function () { return null; }); })).then(function (recs) {
                 var views = issues.map(function (iss, i) { return P.view(iss, recs[i]); });
                 var todo = [];
-                issues.forEach(function (iss, i) { if (P._needs(recs[i], zip)) { todo.push(i); } });
+                issues.forEach(function (iss, i) { if (P._needs(recs[i], zip, (iss.fields || {}).attachment)) { todo.push(i); } });
                 var next = 0, left = todo.length, finished = !todo.length, def = {};
                 function hiddenOf(sig) { var d = def[sig]; return (d && JiTA.hidden.isHidden(d)) ? d : ''; }
                 function publish(done) {
@@ -14629,7 +14798,11 @@ JiTA.profile = {
             any = true;
             P._chip(d.label + ': ' + d.dominant + ' ' + d.domCount + '/' + d.known, 'strong').appendTo($c);
         });
-        if (sm.exc[0]) { any = true; P._chip('Exception in ' + sm.exc[0].count + '/' + sm.withLog + ' logs: ' + sm.exc[0].msg, sm.domExc ? 'strong' : '', P._sigTip(sm.exc[0].sig, sm.exc[0].msg)).appendTo($c); }
+        if (sm.exc[0]) {
+            any = true;
+            P._chip((JiTA.logsig.isTrace(sm.exc[0].sig) ? 'Stacktrace in ' : 'Exception in ') + sm.exc[0].count + '/' + sm.withLog + ' logs: ' + sm.exc[0].msg,
+                sm.domExc ? 'strong' : '', P._sigTip(sm.exc[0].sig, sm.exc[0].msg)).appendTo($c);
+        }
         if (sm.crashes[0] && sm.crashes[0].count >= 2) { any = true; P._chip('Crash in ' + sm.crashes[0].module + ' ' + sm.crashes[0].count + '/' + sm.withWer, sm.domCrash ? 'strong' : '').appendTo($c); }
         if (!any) { $('<span class="jp-none"></span>').text(sm.n < P.MIN_N ? 'Too few reports for a pattern yet.' : 'No shared pattern.').appendTo($c); }
         // Exceptions whose defect is hidden in the Triage Assistant: out of the pattern, folded away under one line.
@@ -14703,11 +14876,14 @@ JiTA.profile = {
         });
         if (!sm.dims.length) { $('<div class="jpv-none"></div>').text('No report has Computer Info, dxdiag.txt or PDMData.txt to read.').appendTo($b); }
 
-        sect('Exceptions shared by 2 or more logs (' + sm.withLog + ' logs read)');
+        sect('Exceptions and stacktraces shared by 2 or more logs (' + sm.withLog + ' logs read)');
         var domSig = sm.domExc && sm.domExc.sig;
+        // A stacktrace's row says it is one (its group is keyed by its signature's message, which starts with the tag).
+        function kind($r, g) { if (JiTA.logsig.isTrace(g.key)) { $('<span class="jpv-kind"></span>').text('stacktrace').appendTo($r); } }
         sm.excGroups.slice(0, 15).forEach(function (g) {
             var $r = $('<div class="jpv-row"></div>').appendTo($b);
             $('<span class="jpv-count"></span>').toggleClass('dom', g.paths.some(function (p) { return p.sig === domSig; })).text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
+            kind($r, g);
             $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', P._sigTip(g.paths.map(function (p) { return p.sig; }), g.msg)).appendTo($r);
             if (g.paths.length < 2) { return; }
             // Its call stacks, each by where it differs from the others.
@@ -14721,7 +14897,7 @@ JiTA.profile = {
         });
         var hx = sm.hiddenExc || [];
         if (!sm.excGroups.length) {
-            $('<div class="jpv-none"></div>').text(hx.length ? 'No exception appears in more than one log, apart from the hidden ones below.' : 'No exception appears in more than one log.').appendTo($b);
+            $('<div class="jpv-none"></div>').text(hx.length ? 'No exception or stacktrace appears in more than one log, apart from the hidden ones below.' : 'No exception or stacktrace appears in more than one log.').appendTo($b);
         }
         // Exceptions whose defect is hidden in the Triage Assistant, folded away under their own heading.
         if (hx.length) {
@@ -14733,6 +14909,7 @@ JiTA.profile = {
                 var $r = $('<div class="jpv-row"></div>').appendTo($hl);
                 $('<span class="jpv-count"></span>').text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
                 g.defects.forEach(function (d) { $('<a class="jpv-key" target="_blank" rel="noopener"></a>').attr('href', '/browse/' + d).text(d).appendTo($r); });
+                kind($r, g);
                 $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', P._sigTip(g.paths.map(function (p) { return p.sig; }), g.msg)).appendTo($r);
             });
             $hh.on('click', function () { var open = !$hv.hasClass('open'); $hv.toggleClass('open', open); $hh.text(hhead(open)); });
@@ -14761,8 +14938,9 @@ JiTA.profile = {
         s.views.forEach(function (v) {
             var hw = v.hw || {}, $r = $('<tr></tr>').appendTo($tb);
             $('<td></td>').append($('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + v.key).text(v.key)).appendTo($r);
+            var nSt = v.exc.filter(function (e) { return JiTA.logsig.isTrace(e.sig); }).length;
             [P._date(v.created), hw.gpu || '', hw.os || '', hw.platform || '', hw.cpuGen || hw.cpuVendor || '', v.build || '',
-                v.logRead === null ? 'not read yet' : (v.logRead ? v.exc.length + ' exception(s)' : 'no log'),
+                v.logRead === null ? 'not read yet' : (v.logRead ? (v.exc.length - nSt) + ' exception(s)' + (nSt ? ', ' + nSt + ' stacktrace(s)' : '') : 'no log'),
                 v.crashRead === null ? (s.zip ? 'not read yet' : 'off') : (v.crashRead ? String(v.crashes.length) : 'no history')
             ].forEach(function (c) { $('<td></td>').text(c).appendTo($r); });
             if (v.hwFrom && v.hwFrom !== 'Computer Info') { $r.children().eq(2).attr('title', 'From ' + v.hwFrom); }
@@ -14787,6 +14965,7 @@ JiTA.profile = {
                 '.jita-profile-view .jpv-count { flex: 0 0 auto; background: #2c333a; color: #cfd6dd; border-radius: 8px; padding: 0 7px; cursor: help; }' +
                 '.jita-profile-view .jpv-val { cursor: help; }' +
                 '.jita-profile-view .jpv-msg { color: #e6e6e6; overflow-wrap: anywhere; }' +
+                '.jita-profile-view .jpv-kind { flex: 0 0 auto; color: #9aa6b2; font-size: 10px; border: 1px solid #3a434d; border-radius: 8px; padding: 0 6px; }' +
                 '.jita-profile-view .jpv-key { flex: 0 0 90px; color: #4c9aff; font-weight: 700; text-decoration: none; }' +
                 '.jita-profile-view .jpv-path { padding: 2px 0 2px 28px; border-bottom: none; font-size: 11px; color: #7a8694; }' +
                 '.jita-profile-view .jpv-path .jpv-count { font-size: 10px; }' +
@@ -14831,6 +15010,8 @@ JiTA.profile = {
  * that the same crash site (message and innermost frames): the two levels "Known defects in attached log" uses, though
  * that one goes by the signature, which reads some numbers as any number. Ticking an exception only matches
  * what was read again. A report someone else has says so and can still be attached; attaching it keeps its assignee.
+ * Stacktraces (STACKTRACE #) are looked for the same way, apart from exceptions: one never matches the other. The client
+ * cuts a stacktrace at 6400 characters, and one cut off before its stack is matched by its message alone, loosely.
  * Closing the window stops new reads; opening it again carries on from the cache.
  */
 JiTA.excfind = {
@@ -14848,13 +15029,14 @@ JiTA.excfind = {
     _added: {},                  // defect key -> the exceptions the user added: { typed: [{ id, text }], pasted: [{ sig, msg }], n }
 
     // ---- what to look for ---------------------------------------------------------------------------------------
-    // The exceptions with a stack in a text (a description): [{ sig, msg }], each once.
+    // The exceptions and stacktraces with a stack in a text (a description), and the stacktraces cut off before theirs:
+    // [{ sig, msg }], each once, `open: true` on a stacktrace whose message may run on (see JiTA.logsig._fingerprint).
     _fps: function (text) {
         var out = [], seen = {};
-        if (!text || String(text).indexOf('EXCEPTION #') < 0) { return out; }
+        if (!text || (String(text).indexOf('EXCEPTION #') < 0 && String(text).indexOf('STACKTRACE #') < 0)) { return out; }
         JiTA.logsig._splitBlocks(String(text)).forEach(function (b) {
             var fp = JiTA.logsig._fingerprint(b);
-            if (fp.sig && !seen[fp.sig]) { seen[fp.sig] = true; out.push({ sig: fp.sig, msg: fp.msg }); }
+            if (fp.sig && !seen[fp.sig]) { seen[fp.sig] = true; out.push(fp.open ? { sig: fp.sig, msg: fp.msg, open: true } : { sig: fp.sig, msg: fp.msg }); }
         });
         return out;
     },
@@ -14872,7 +15054,7 @@ JiTA.excfind = {
             if (!t.msg && msg) { t.msg = msg; }
             return t;
         }
-        (desc || []).forEach(function (e) { add(e.sig, e.msg).desc = true; });
+        (desc || []).forEach(function (e) { var t = add(e.sig, e.msg); t.desc = true; if (e.open) { t.open = true; } });
         ((sm && sm.excGroups) || []).forEach(function (g) {
             (g.paths || []).forEach(function (p) { shared.push({ sig: p.sig, msg: g.msg, count: p.count }); });
         });
@@ -14883,7 +15065,7 @@ JiTA.excfind = {
             t.of = of;
         });
         ((one && one.exc) || []).forEach(function (e) { add(e.sig, e.msg).one = one.key; });
-        ((added && added.pasted) || []).forEach(function (e) { add(e.sig, e.msg).own = true; });
+        ((added && added.pasted) || []).forEach(function (e) { var t = add(e.sig, e.msg); t.own = true; if (e.open) { t.open = true; } });
         out.forEach(function (t) { if (edits && edits[t.sig] != null) { X._withPattern(t, edits[t.sig]); } });
         // Exceptions with the same message are told apart by where their stacks differ (`via`), as the full profile does.
         var byMsg = {}, P = JiTA.profile;
@@ -14960,7 +15142,7 @@ JiTA.excfind = {
     // in a *, for the rest of it.
     _editText: function (t) {
         var w = String(t.msg || '').replace(/\s+/g, ' ').trim();
-        if (!w) { return t.sig.slice(0, t.sig.lastIndexOf('|')); }
+        if (!w) { return JiTA.excfind._exc(t.sig).m; }
         return w.length >= JiTA.excfind.MSG_CUT ? w + '*' : w;
     },
     // What an exception is looked for by, as the window shows it: its edit, or its message as written.
@@ -15025,18 +15207,18 @@ JiTA.excfind = {
         }).appendTo($row);
         st.editor = inp;
     },
-    // Add what the user typed or pasted in the box below the list, ticked. A whole exception pasted from a log (EXCEPTION #
-    // on, or at least its message and stack) is looked for as the other exceptions are: at its stack, and editable. Text
-    // without a stack is a message, looked for at any stack, # any number and * any text.
+    // Add what the user typed or pasted in the box below the list, ticked. A whole exception or stacktrace pasted from a log
+    // (EXCEPTION # or STACKTRACE # on, or at least its message and stack) is looked for as the others are: at its stack,
+    // and editable. Text without a stack is a message, looked for at any stack, # any number and * any text.
     _addOwn: function (st, box) {
         var X = JiTA.excfind, A = st.added, text = String(box.value || '').trim(), fps = [];
-        var stack = text.indexOf('EXCEPTION #') >= 0 || /\.pyx?\(\d+\)/.test(text);
+        var whole = text.indexOf('EXCEPTION #') >= 0 || text.indexOf('STACKTRACE #') >= 0, stack = whole || /\.pyx?\(\d+\)/.test(text);
         if (!text) { X._addSay(st, 'Type an exception\'s message, or paste one from a log.'); return; }
-        if (text.indexOf('EXCEPTION #') >= 0) { fps = X._fps(text); }
+        if (whole) { fps = X._fps(text); }
         else if (stack) { var f = JiTA.logsig._fingerprint(text); if (f.sig) { fps = [{ sig: f.sig, msg: f.msg }]; } }
         fps = fps.filter(function (e) { return !!e.msg; });
         if (stack && !fps.length) {
-            X._addSay(st, 'No exception message and stack could be read from that. Paste the whole exception, from EXCEPTION # on.');
+            X._addSay(st, 'No message and stack could be read from that. Paste the whole exception or stacktrace, from EXCEPTION # or STACKTRACE # on.');
             return;
         }
         if (fps.length) {
@@ -15070,7 +15252,7 @@ JiTA.excfind = {
         box.className = 'jx-addin';
         box.setAttribute('rows', '2');
         box.spellcheck = false;
-        box.setAttribute('placeholder', 'Add an exception: type its message to find it at any stack (# any number, * any text), or paste it from a log to find it at its stack. Enter adds.');
+        box.setAttribute('placeholder', 'Add an exception or stacktrace: type its message to find it at any stack (# any number, * any text), or paste it from a log to find it at its stack. Enter adds.');
         // Enter and Esc stop here, as in the editor: Esc empties the box, and only an empty box lets Esc through (to leave it).
         $(box).on('keydown', function (e) {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); X._addOwn(st, box); }
@@ -15105,15 +15287,14 @@ JiTA.excfind = {
             log: take(rec && rec.exc), desc: take(item.desc), m: [] };
     },
 
-    // Which of the ticked exceptions a report holds: [{ t, exact, where }], same-stack matches first. One of its exceptions
-    // with the same stack is exact; failing that, one with the same crash site is not. `where` is 'log' or 'description'.
     // One exception as matching needs it: its signature and crash site, the parts of them an edited target looks at (m: the
-    // signature's message, fr: the frames, cfr: the crash site's frames), and its message as written (raw, cut, see
-    // _asWritten). Frames hold no "|", so the signature's message ends at the last.
+    // signature's message, a stacktrace's without its tag; fr: the frames, cfr: the crash site's frames), and its message as
+    // written (raw, cut, see _asWritten). `st` for a stacktrace, which then has no frames when it was cut off before its
+    // stack. Frames hold no "|", so the signature's message ends at the last.
     _exc: function (sig, msg) {
-        var crash = JiTA.logsig._crashOf(sig), at = sig.lastIndexOf('|'), w = JiTA.excfind._asWritten(msg);
-        return { sig: sig, crash: crash, m: sig.slice(0, at), fr: sig.slice(at + 1), cfr: crash ? crash.slice(crash.lastIndexOf('|') + 1) : null,
-            raw: w ? w.raw : null, cut: !!(w && w.cut) };
+        var L = JiTA.logsig, crash = L._crashOf(sig), at = sig.lastIndexOf('|'), w = JiTA.excfind._asWritten(msg), st = L.isTrace(sig);
+        return { sig: sig, crash: crash, m: sig.slice(st ? L.TRACE.length : 0, at), fr: sig.slice(at + 1), cfr: crash ? crash.slice(crash.lastIndexOf('|') + 1) : null,
+            raw: w ? w.raw : null, cut: !!(w && w.cut), st: st };
     },
     // A message as written, as matching compares it: lowercased (_fingerprint has squashed its spacing). `cut` when it may be only its start
     // (a profile reading keeps the first MSG_CUT characters). Null without a message; the signature then decides alone.
@@ -15135,19 +15316,32 @@ JiTA.excfind = {
         if (!e.cut) { return t.rawRe.test(e.raw); }
         return t.re.test(e.m) && JiTA.excfind._tokMatch(t.toks, e.raw, true);
     },
+    // Which of the ticked exceptions a report holds: [{ t, exact, bare, where }], same-stack matches first. One of its
+    // exceptions with the same stack is exact; failing that, one with the same crash site is not; and for a stacktrace,
+    // failing that, one with the same message where one of the two was cut off before its stack (bare). An exception never
+    // matches a stacktrace, nor the other way round; a typed message matches either. `where` is 'log' or 'description'.
     match: function (rep, chosen) {
         var X = JiTA.excfind, out = [];
         (chosen || []).forEach(function (t) {
-            var hit = null, tw = X._asWritten(t.msg);
+            var hit = null, tw = X._asWritten(t.msg), tx = t.typed ? null : X._exc(t.sig, t.msg), tBare = !!tx && tx.st && !tx.fr;
+            // A stacktrace from a description whose lines Jira joined may have run on (open): its message is compared only as
+            // far as the shorter goes, as a message cut short is, and so not by its signature but at its frames.
+            if (t.open && tw) { tw.cut = true; }
             [['log', rep.log], ['description', rep.desc]].forEach(function (src) {
                 (src[1] || []).forEach(function (e) {
-                    // An edited target: its message test, and the frames of its stack or of its crash site. One as it is: its
-                    // signature, and its message as written.
-                    var re = t.re, same = re ? (e.fr === t.fr && X._fits(t, e)) : (e.sig === t.sig && X._sameMsg(e, tw));
-                    var site = re ? (!!t.cfr && e.cfr === t.cfr && X._fits(t, e)) : (!!e.crash && e.crash === t.crash && X._sameMsg(e, tw));
+                    var same = false, site = false, bare = false;
                     if (t.typed) { site = X._fits(t, e); }   // typed by hand: there is no stack to match, only the message
+                    else if (e.st === tx.st) {
+                        // An edited target: its message test, and the frames of its stack or of its crash site. One as it is:
+                        // its signature, and its message as written. With a stack cut off, the message alone.
+                        var fits = t.re ? X._fits(t, e) : X._sameMsg(e, tw);
+                        if (tBare || (e.st && !e.fr)) { bare = fits && (!!t.re || !!t.open || e.m === tx.m); }
+                        else if (t.re || t.open) { same = e.fr === tx.fr && fits; site = !!tx.cfr && e.cfr === tx.cfr && fits; }
+                        else { same = e.sig === t.sig && fits; site = !!e.crash && e.crash === t.crash && fits; }
+                    }
                     if (same) { if (!hit || !hit.exact) { hit = { t: t, exact: true, where: src[0] }; } }
-                    else if (!hit && site) { hit = { t: t, exact: false, where: src[0] }; }
+                    else if (site) { if (!hit || hit.bare) { hit = { t: t, exact: false, where: src[0] }; } }
+                    else if (bare && !hit) { hit = { t: t, exact: false, bare: true, where: src[0] }; }
                 });
             });
             if (hit) { out.push(hit); }
@@ -15338,23 +15532,18 @@ JiTA.excfind = {
         } };
     },
 
-    // A report's exceptions: its cached reading while its log files are the ones that were read, else its logs read now.
-    // Resolves { rec, cached }.
+    // A report's exceptions: its cached reading while its log files are the ones that were read, and were read as the reader
+    // reads them now (JiTA.profile.LOG_V), else its logs read now. Resolves { rec, cached }.
     _read: function (item) {
-        var P = JiTA.profile;
+        var P = JiTA.profile, att = item.fields.attachment;
         return Promise.resolve().then(function () { return JiTA.db.getMeta(P.CACHE_PREFIX + item.key); }).then(P._usable, function () { return null; }).then(function (rec) {
-            if (rec && rec.logs && (rec.logSig == null || rec.logSig === P._logSig(item.fields.attachment))) { return { rec: rec, cached: true }; }
-            if (rec && rec.logs) { rec = JiTA.excfind._unread(rec); }   // a log was added or replaced since it was read
+            if (rec && rec.logs && (rec.logSig == null || rec.logSig === P._logSig(att)) && P._logsCurrent(rec, att, false)) { return { rec: rec, cached: true }; }
+            if (rec && rec.logs) { rec = JiTA.excfind._unread(rec); }   // a log was added or replaced since it was read, or the reader has changed
             return P._readFiles(item, rec, false).then(function (r) { return { rec: r, cached: false }; });
         });
     },
     // A reading with its log part taken out, so _readFiles reads the logs again. What it has from the zip stays.
-    _unread: function (rec) {
-        var r = JSON.parse(JSON.stringify(rec));
-        r.logs = false; r.hasLog = false; r.exc = []; r.build = null; r.version = null; r.skippedLogs = false;
-        delete r.logSig;
-        return r;
-    },
+    _unread: function (rec) { return JiTA.profile._dropLogs(JSON.parse(JSON.stringify(rec))); },
 
     _add: function (st, item, r) {
         var X = JiTA.excfind, rep = X._entry(item, r && r.rec, st.pool);
@@ -15378,8 +15567,8 @@ JiTA.excfind = {
     },
     // Why there is nothing to look for, once everything is read.
     _nothing: function (st) {
-        var o = st.one, why = 'Nothing to look for: the description holds no exception with a stack trace, and ';
-        if (!o) { return why + 'no exception is shared by two or more of its attached reports\' logs.'; }
+        var o = st.one, why = 'Nothing to look for: the description holds no exception or stacktrace with its stack, and ';
+        if (!o) { return why + 'none is shared by two or more of its attached reports\' logs.'; }
         if (o.log === false) { return why + o.key + ', the one report attached, has no log.'; }
         if (o.log === null) { return why + 'the log of ' + o.key + ', the one report attached, could not be read.'; }
         return why + 'neither does the log of ' + o.key + ', the one report attached.';
@@ -15407,6 +15596,9 @@ JiTA.excfind = {
                 X._retarget(st);
             }).appendTo($l);
             var editing = st.editing === t.sig;
+            if (JiTA.logsig.isTrace(t.sig)) {   // a stacktrace says so, and one cut off before its stack that too
+                $('<span class="jx-kind"></span>').text(JiTA.logsig.isCut(t.sig) ? 'stacktrace, stack cut off' : 'stacktrace').appendTo($l);
+            }
             if (editing) { $row.addClass('editing'); X._editor(st, t, $row); }
             else {
                 var $m = X._marked($('<span class="jx-tmsg"></span>').toggleClass('edited', t.pat != null), X._shown(t), t.pat != null).appendTo($l);
@@ -15494,7 +15686,9 @@ JiTA.excfind = {
         var X = JiTA.excfind, $w = $(row).children('.jx-why').empty();
         (m || []).forEach(function (h) {
             var $h = $('<span class="jx-hit"></span>').appendTo($w);
-            $('<span class="jx-tag"></span>').addClass(h.exact ? 'exact' : 'site').text(h.exact ? 'same stack' : (h.t.typed ? 'same message' : '~ same crash site')).appendTo($h);
+            var how = h.exact ? 'same stack' : h.t.typed ? 'same message' : h.bare ? '~ same message, stack cut off'
+                : (JiTA.logsig.isTrace(h.t.sig) ? '~ same trace site' : '~ same crash site');
+            $('<span class="jx-tag"></span>').addClass(h.exact ? 'exact' : 'site').text(how).appendTo($h);
             var tail = (h.t.via ? ' via ' + h.t.via : '') + (h.where === 'description' ? ' (in its description)' : '');
             var $msg = X._marked($('<span class="jx-msg"></span>'), X._shown(h.t), h.t.pat != null);
             if (tail) { $msg.append(document.createTextNode(tail)); }
@@ -15560,6 +15754,7 @@ JiTA.excfind = {
                 '.jita-excfind-view .jx-addmsg:empty { display: none; }' +
                 '.jita-excfind-view .jx-tmsg { flex: 1 1 auto; min-width: 0; color: #e6e6e6; font-family: Consolas, "Courier New", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-excfind-view .jx-via { color: #7a8694; }' +
+                '.jita-excfind-view .jx-kind { flex: 0 0 auto; color: #9aa6b2; font-size: 10px; border: 1px solid #3a434d; border-radius: 8px; padding: 0 6px; white-space: nowrap; }' +
                 '.jita-excfind-view .jx-tsrc { flex: 0 0 auto; color: #7a8694; font-size: 11px; white-space: nowrap; }' +
                 '.jita-excfind-view .jx-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 7px 0; border-bottom: 1px solid #2c333a; font-size: 12px; }' +
                 '.jita-excfind-view .jx-key { flex: 0 0 88px; color: #4c9aff; font-weight: 700; text-decoration: none; }' +
@@ -15604,10 +15799,13 @@ JiTA.excfind = {
  * read can be raised on a defect, which is why JiTA.logread reads every open report's logs ahead.
  */
 JiTA.repexc = {
-    FACTOR: { exact: 1.3, site: 1.15 },
+    // A stacktrace (JiTA.logsig.isTrace) raises a match as an exception does: 'st-exact' for the same stack, 'st-site' for the
+    // same site, and 'st-msg' for the same message where one of the two was cut off before its stack.
+    FACTOR: { exact: 1.3, site: 1.15, 'st-exact': 1.3, 'st-site': 1.15, 'st-msg': 1.15 },
+    KINDS: ['exact', 'st-exact', 'site', 'st-site', 'st-msg'],   // best first: a candidate shows its best
     PCT_MAX: 99,
     WAIT_MS: 1500,     // how long a list waits for a report's exceptions before it is drawn without them
-    _report: {},       // report key -> Promise of { defect key: 'exact' | 'site' }, for the session (reset after a defect sync)
+    _report: {},       // report key -> Promise of { defect key: kind (FACTOR) }, for the session (reset after a defect sync)
     _reads: {},        // report key -> Promise of its cached reading's exception signatures ([] none, null logs not read)
     _usedProf: {},     // defect key -> the profile exceptions its last ranking used, so a finished profile ranks it again
 
@@ -15682,35 +15880,45 @@ JiTA.repexc = {
         });
         return out.sort();
     },
-    // A defect's exceptions: { sigs: { sig: true }, crashes: { crash site: true }, n }, from its description and its
-    // profile. Remembers which profile exceptions were used (see profileReady).
+    // A defect's exceptions and stacktraces: { sigs: { sig: true }, crashes: { crash site: true }, traces: { trace key: true },
+    // cuts: { trace key: true }, n }, from its description and its profile: `traces` the messages of its stacktraces (see
+    // JiTA.logsig._traceKey), `cuts` of those cut off before their stack, which are not in `sigs`. Remembers which profile
+    // exceptions were used (see profileReady).
     _defectSigs: function (key) {
-        var R = JiTA.repexc, out = { sigs: {}, crashes: {}, n: 0 };
+        var R = JiTA.repexc, L = JiTA.logsig, out = { sigs: {}, crashes: {}, traces: {}, cuts: {}, n: 0 };
         function add(sig) {
-            if (!sig || out.sigs[sig]) { return; }
-            out.sigs[sig] = true;
+            if (!sig || out.sigs[sig] || (L.isCut(sig) && out.cuts[L._traceKey(sig)])) { return; }
             out.n++;
-            var c = JiTA.logsig._crashOf(sig);
+            if (L.isTrace(sig)) { out.traces[L._traceKey(sig)] = true; }
+            if (L.isCut(sig)) { out.cuts[L._traceKey(sig)] = true; return; }
+            out.sigs[sig] = true;
+            var c = L._crashOf(sig);
             if (c) { out.crashes[c] = true; }
         }
         var prof = R._profileSigs(key);
         R._usedProf[key] = prof.join('\n');
         prof.forEach(add);
-        return JiTA.logsig.sigsOf(key).then(function (d) {
+        return L.sigsOf(key).then(function (d) {
             ((d && d.sigs) || []).forEach(add);
+            ((d && d.cuts) || []).forEach(add);
             ((d && d.crashes) || []).forEach(function (c) { out.crashes[c] = true; });
             return out;
         }, function () { return out; });
     },
-    // Whether a report's log exceptions hold one of the defect's: 'exact' for the same stack, else 'site' for the same
-    // crash site, else null.
+    // Whether a report's log exceptions hold one of the defect's, and how (a FACTOR kind): 'exact' for the same stack, else
+    // 'site' for the same crash site; for a stacktrace 'st-exact', 'st-site', else 'st-msg' for the same message where one
+    // of the two was cut off before its stack. The best of them (KINDS), or null.
     _kind: function (sigs, ds) {
-        var site = false;
-        for (var i = 0; i < (sigs || []).length; i++) {
-            if (ds.sigs[sigs[i]]) { return 'exact'; }
-            if (!site) { var c = JiTA.logsig._crashOf(sigs[i]); if (c && ds.crashes[c]) { site = true; } }
-        }
-        return site ? 'site' : null;
+        var R = JiTA.repexc, L = JiTA.logsig, best = null;
+        (sigs || []).forEach(function (sig) {
+            var st = L.isTrace(sig), k = null, c;
+            if (L.isCut(sig)) { k = ds.traces[L._traceKey(sig)] ? 'st-msg' : null; }
+            else if (ds.sigs[sig]) { k = st ? 'st-exact' : 'exact'; }
+            else if ((c = L._crashOf(sig)) && ds.crashes[c]) { k = st ? 'st-site' : 'site'; }
+            else if (st && ds.cuts[L._traceKey(sig)]) { k = 'st-msg'; }
+            if (k && (!best || R.KINDS.indexOf(k) < R.KINDS.indexOf(best))) { best = k; }
+        });
+        return best;
     },
     // A boost for a defect's matching bug reports: asked about the candidates, it answers which of them have logs that
     // hold one of the defect's exceptions. Local data only (readings and the logsig index), so the list waits for it.
@@ -15735,14 +15943,19 @@ JiTA.repexc = {
         if (JiTA.ui.currentKey === key) { JiTA.ui.scheduleRender(); }
     },
 
-    // The row's badge, saying why it ranks higher. `html` is the element to make it of.
+    // The row's badge, saying why it ranks higher, for each FACTOR kind: its text, and what the log holds (its hover).
+    BADGE: {
+        exact: ['same exception in log', 'an exception with the same stack as one of the defect\'s'],
+        site: ['~ same crash site in log', 'an exception with the same crash site (message and innermost frames) as one of the defect\'s'],
+        'st-exact': ['same stacktrace in log', 'a stacktrace with the same stack as one of the defect\'s'],
+        'st-site': ['~ same trace site in log', 'a stacktrace logged from the same place (message and innermost frames) as one of the defect\'s'],
+        'st-msg': ['~ same stacktrace message in log', 'a stacktrace with the same message as one of the defect\'s, where the client cut one of the two off before its stack']
+    },
+    // `html` is the element to make it of.
     badge: function (kind, html) {
-        var exact = kind === 'exact';
-        return $(html).addClass(exact ? 'exact' : 'site')
-            .text(exact ? 'same exception in log' : '~ same crash site in log')
-            .attr('title', (exact ? 'The bug report\'s log holds an exception with the same stack as one of the defect\'s'
-                : 'The bug report\'s log holds an exception with the same crash site (message and innermost frames) as one of the defect\'s') +
-                ', so it ranks higher and its % is raised');
+        var R = JiTA.repexc, b = R.BADGE[kind] || R.BADGE.site, exact = kind === 'exact' || kind === 'st-exact';
+        return $(html).addClass(exact ? 'exact' : 'site').text(b[0])
+            .attr('title', 'The bug report\'s log holds ' + b[1] + ', so it ranks higher and its % is raised');
     },
 
     _noop: null
@@ -15755,13 +15968,14 @@ JiTA.repexc = {
  * leaves out the launcher's), newest first, into the cache the exception search and the defect
  * profile read and write (JiTA.excfind._read), so a report read by any of them is not downloaded again. The first pass
  * reads them all; once a pass has listed and read everything, the next lists only the reports updated since it began,
- * so a new report, or one whose logs changed, is read and the rest are left alone. One tab at a time (a Web Lock), after
+ * so a new report, or one whose logs changed, is read and the rest are left alone. A reader that reads logs another way
+ * (JiTA.profile.LOG_V, as when stacktraces joined exceptions) lists and reads them all again. One tab at a time (a Web Lock), after
  * each bug report sync that changed something and once after a page load. Settings > Triage Assistant > Read open
  * reports' logs switches it off, and a pass under way then stops before its next download.
  */
 JiTA.logread = {
     KEY: 'jitaLogRead',          // GM: the Settings switch (on by default)
-    AT_KEY: 'logreadAt',         // meta: when the last complete pass began
+    AT_KEY: 'logreadAt',         // meta: when the last complete pass began, and how it read logs: { at, lv } (JiTA.profile.LOG_V)
     LOCK: 'jita-logread-pass',
     CONCURRENCY: 2,
     GAP_MS: 300,                 // between one lane's downloads
@@ -15790,8 +16004,10 @@ JiTA.logread = {
     // reports whose logs it downloaded.
     pass: function () {
         var LR = JiTA.logread, began = new Date().toISOString();
-        return JiTA.db.getMeta(LR.AT_KEY).then(null, function () { return null; }).then(function (at) {
-            var since = at ? JiTA.util.jqlSince(at) : null;
+        return JiTA.db.getMeta(LR.AT_KEY).then(null, function () { return null; }).then(function (mark) {
+            // A pass that read logs another way (an older reader, or one before the mark said) leaves every report to list again,
+            // so each one's logs are read as the reader reads them now.
+            var since = (mark && mark.at && mark.lv === JiTA.profile.LOG_V) ? JiTA.util.jqlSince(mark.at) : null;
             var jql = JiTA.excfind.SCOPE + (since ? ' AND updated >= "' + since + '"' : '') + ' ORDER BY created DESC';
             var queue = [], listed = false, listOk = true, next = 0, read = 0, failed = 0;
             function list(token) {
@@ -15835,7 +16051,7 @@ JiTA.logread = {
             return Promise.all(lanes).then(function () {
                 // Only a pass that listed and read everything moves the mark on: what one missed is listed again next time.
                 var whole = listOk && !failed && LR.on() && next >= queue.length;
-                return (whole ? JiTA.db.setMeta(LR.AT_KEY, began).then(null, function () { /* listed again next time */ }) : Promise.resolve()).then(function () {
+                return (whole ? JiTA.db.setMeta(LR.AT_KEY, { at: began, lv: JiTA.profile.LOG_V }).then(null, function () { /* listed again next time */ }) : Promise.resolve()).then(function () {
                     if (read) {
                         console.log('[JiTA] read the logs of ' + read + ' open bug report(s)');
                         if (JiTA.ui._isReportsKey(JiTA.ui.currentKey || '')) { JiTA.ui.scheduleRender(); }   // Matching bug reports can rank them now
@@ -22962,6 +23178,13 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.46.0', date: '2026-10-22', features: [
+            'Stacktraces in a log (STACKTRACE #) now count wherever exceptions do: double-tap + finds them, they raise a match in both lists ("same stacktrace in log"), the Defect Profile counts them, and the log parser marks their defects.',
+            'The client cuts a stacktrace at 6400 characters, so a long one can lose its stack. Such a one is matched by its message alone, as a looser "~" match.',
+            'To find the stacktraces in the open bug reports\' logs, JiTA reads those logs once more in the background, as on the first run of v3.45.0. The zips are not downloaded again.'
+        ], fixes: [
+            'An exception cut off before its EXCEPTION END line no longer takes the stacktrace after it for more of its stack.'
+        ] },
         { v: '3.45.0', date: '2026-10-20', features: [
             'Similar defects: a defect holding an exception that is also in the bug report\'s log ranks higher, with a higher %, and its row says why: "same exception in log" for the same stack, "~ same crash site in log" for the crash site.',
             'Matching bug reports on a defect rank higher the same way when their logs hold one of the defect\'s exceptions: the ones pasted in its description, and the ones its attached reports share.',

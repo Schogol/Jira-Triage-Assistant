@@ -57,9 +57,10 @@ Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, r
 JiTA.util.fmtDate = (s) => (s ? String(s).slice(0, 10) : '');
 let delays = [];
 JiTA.util.delay = (ms) => { delays.push(ms); return Promise.resolve(); };
-Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _crashOf: function (sig) {') +
+Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    isTrace: function (sig) {') + line('    isCut: function (sig) {') +
+    line('    _traceKey: function (sig) {') + member('    _crashOf: function (sig) {') + member('    _traceMates: function (idx, sig) {') +
     member('    holding: function (sigs) {') + member('    _holdingLocal: function (sigs) {') + member('    sigsOf: function (key) {') + member('    _sigsOfLocal: function (key) {') + '})'));
-Object.assign(JiTA.profile, eval('({' + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') + '})'));
+Object.assign(JiTA.profile, eval('({' + line('    LOG_V: ') + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') + '})'));
 ['_boostMap', '_boostRow', '_withBoost', '_fuse', '_hybridResults', '_pickMode', 'suggestBest', 'suggestEbrBest'].forEach((n) => {
     (0, eval)(cut('JiTA.rank.' + n + ' = function (', '\n};\n'));
 });
@@ -185,11 +186,12 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('...none for a defect with no pasted exception', none.sigs.length === 0 && none.crashes.length === 0);
     // The worker's twins, from jitaWorkerBody itself: same index, same answers.
     const wfn = (name) => { const s = once('    function ' + name + '('); return src.slice(s, src.indexOf('\n    }\n', s) + 7); };
-    const W = new Function('idx', 'var logsigCache = idx, LG_MIN = 2, LG_CRASH = 2;\n' + wfn('lgCrashOf') + wfn('lgHolding') + wfn('lgSigsOf') +
+    const LGT = line('    var LG_TRACE = ');   // the worker's stacktrace tag, and the helpers lgHolding reads it with (lgIsTrace to lgMates)
+    const W = new Function('idx', 'var logsigCache = idx, LG_MIN = 2, LG_CRASH = 2;\n' + LGT + wfn('lgCrashOf') + wfn('lgIsTrace') + wfn('lgHolding') + wfn('lgSigsOf') +
         '\nreturn { lgHolding: lgHolding, lgSigsOf: lgSigsOf };')(IDX);
     ok('the worker\'s holding agrees with the tab\'s', JSON.stringify(W.lgHolding([A, B2])) === JSON.stringify(await JiTA.logsig._holdingLocal([A, B2])), JSON.stringify(W.lgHolding([A, B2])));
     ok('...and its sigsOf too', JSON.stringify(W.lgSigsOf('EDR-3')) === JSON.stringify(await JiTA.logsig._sigsOfLocal('EDR-3')) && W.lgSigsOf('EDR-9').sigs.length === 0);
-    const W0 = new Function('idx', 'var logsigCache = idx, LG_MIN = 2, LG_CRASH = 2;\n' + wfn('lgCrashOf') + wfn('lgHolding') + wfn('lgSigsOf') +
+    const W0 = new Function('idx', 'var logsigCache = idx, LG_MIN = 2, LG_CRASH = 2;\n' + LGT + wfn('lgCrashOf') + wfn('lgIsTrace') + wfn('lgHolding') + wfn('lgSigsOf') +
         '\nreturn { lgHolding: lgHolding, lgSigsOf: lgSigsOf };')(null);
     ok('...a worker with no index yet answers nothing rather than throwing', !Object.keys(W0.lgHolding([A])).length && W0.lgSigsOf('EDR-3').sigs.length === 0);
     const opSrc = src.slice(once("            else if (type === 'logsig') {"), once("            else if (type === 'embedPass') {"));
@@ -314,6 +316,11 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     const bx = R.badge('exact', '<div class="jita-sd-exc"></div>'), bs = R.badge('site', '<span class="jt-mexc"></span>');
     ok('the badge says why', bx.text() === 'same exception in log' && bx.cls.indexOf('exact') >= 0 && /same stack/.test(bx.attr('title')) && /ranks higher/.test(bx.attr('title')), bx.text());
     ok('...for the crash site too', bs.text() === '~ same crash site in log' && bs.cls.indexOf('site') >= 0 && /same crash site/.test(bs.attr('title')), bs.text());
+    const sx = R.badge('st-exact', '<span></span>'), ss = R.badge('st-site', '<span></span>'), sm = R.badge('st-msg', '<span></span>');
+    ok('a stacktrace\'s badge says it is one: the same stack, styled as an exact match', sx.text() === 'same stacktrace in log' && sx.cls.indexOf('exact') >= 0 &&
+        /holds a stacktrace with the same stack/.test(sx.attr('title')) && /ranks higher/.test(sx.attr('title')), sx.text() + ' / ' + sx.attr('title'));
+    ok('...the same site, and the same message where one was cut off, as loose ones', ss.text() === '~ same trace site in log' && ss.cls.indexOf('site') >= 0 &&
+        sm.text() === '~ same stacktrace message in log' && sm.cls.indexOf('site') >= 0 && /cut one of the two off before its stack/.test(sm.attr('title')), ss.text() + ' / ' + sm.text());
 
     // ================= the row =================
     JiTA.ui._showTip = () => {}; JiTA.ui._hideTip = () => {};
@@ -425,11 +432,12 @@ const crash = (s) => JiTA.logsig._crashOf(s);
         JSON.stringify(items['EBR-1']));
     ok('...counts what it downloaded, not what was cached', n === 1, String(n));
     ok('...and spaces out the downloads only', gaps() === 1, delays.join());
-    ok('...and, having read them all, marks when it began', typeof stamped.logreadAt === 'string' && !isNaN(Date.parse(stamped.logreadAt)), JSON.stringify(stamped));
+    const marked = (m) => !!m && typeof m.at === 'string' && !isNaN(Date.parse(m.at)) && m.lv === JiTA.profile.LOG_V;
+    ok('...and, having read them all, marks when it began, and how it read logs', marked(stamped.logreadAt), JSON.stringify(stamped));
     ok('...a defect on screen ranks its reports again', renders === 1);
 
     setup();
-    meta.logreadAt = new Date(Date.now() - 3600e3).toISOString();
+    meta.logreadAt = { at: new Date(Date.now() - 3600e3).toISOString(), lv: JiTA.profile.LOG_V };
     pages = [{ issues: [iss('EBR-9')], isLast: true }];
     readScript = { 'EBR-9': 'cached' };
     JiTA.ui.currentKey = 'EDR-5';
@@ -437,6 +445,16 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('a later pass lists only the reports updated since the last complete one', posted[0].jql.indexOf(JiTA.excfind.SCOPE + ' AND updated >= "') === 0 &&
         /updated >= "-6\dm" ORDER BY created DESC$/.test(posted[0].jql), posted[0].jql);
     ok('...and with nothing downloaded, ranks nothing again', n === 0 && renders === 0);
+    // A mark from a pass that read logs another way: every report again, so their logs are read with stacktraces.
+    for (const old of [new Date(Date.now() - 3600e3).toISOString(), { at: new Date(Date.now() - 3600e3).toISOString(), lv: JiTA.profile.LOG_V - 1 }]) {
+        setup();
+        meta.logreadAt = old;
+        pages = [{ issues: [iss('EBR-9')], isLast: true }];
+        readScript = { 'EBR-9': 'cached' };
+        await LR.prepare();
+        ok('a pass after one by an older reader (' + (typeof old === 'string' ? 'its mark a bare date' : 'lv ' + old.lv) + ') lists every report again, and marks it anew',
+            posted[0].jql === JiTA.excfind.SCOPE + ' ORDER BY created DESC' && marked(stamped.logreadAt), posted[0].jql);
+    }
 
     setup();
     JiTA.ui.currentKey = 'EDR-5';
@@ -444,7 +462,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     n = await LR.prepare();
     ok('a report with no log file attached is read, but nothing was downloaded: no count, no wait', readsDone.slice().sort().join() === 'EBR-1,EBR-2' && n === 0 && gaps() === 0,
         n + ' / ' + delays.join());
-    ok('...so nothing ranks again, and the pass still counts as complete', renders === 0 && typeof stamped.logreadAt === 'string', JSON.stringify(stamped));
+    ok('...so nothing ranks again, and the pass still counts as complete', renders === 0 && marked(stamped.logreadAt), JSON.stringify(stamped));
 
     setup();
     pages = [{ issues: [iss('EBR-1'), iss('EBR-2')], isLast: true }];
