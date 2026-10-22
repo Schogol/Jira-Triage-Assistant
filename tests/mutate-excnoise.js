@@ -89,7 +89,7 @@ const muts = [
     [N, 'a bug report asks by all it holds', 'R._reportSigs(key).then(R._counting).then(', 'R._reportSigs(key).then(', REPEXC],
     [N, 'a defect takes every exception', '            if (!JiTA.excnoise.counts(sig)) { return; }\n', '', REPEXC],
     [N, 'a defect does not wait for the count', '        return JiTA.excnoise.load().then(function () {\n            prof.forEach(add);', '        return Promise.resolve().then(function () {\n            prof.forEach(add);', REPEXC],
-    [N, 'a candidate raises by any exception', 'R._kind((reads[i] || []).filter(JiTA.excnoise.counts), ds)', 'R._kind(reads[i] || [], ds)', REPEXC],
+    [N, 'a candidate raises by any exception', 'var sigs = (reads[i] || []).filter(JiTA.excnoise.counts), kind = R._kind(sigs, ds);', 'var sigs = reads[i] || [], kind = R._kind(sigs, ds);', REPEXC],
     // ---- the defect profile ----
     [N, 'the profile\'s pattern takes what does not count', '                if (left(e.sig)) { return; }\n', ''],
     [PC, 'the shared list holds what does not count', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig) && !left(e.sig); });', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig); });'],

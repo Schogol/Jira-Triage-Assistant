@@ -233,16 +233,21 @@ const LOG = [other('20:32:44', 'blue::Memory', 'Python memory: 902224K')].concat
     ok('the defect each one points at, for the profile', J(D) === J({ [fData.sig]: 'EDR-1', [fView.sig]: 'EDR-2', [site.sig]: 'EDR-4', [asExc.sig]: 'EDR-5', [fLock2.sig]: 'EDR-7' }), J(D));
     ok('...the worker\'s the same', J(W.defects([fData.sig, fView.sig, site.sig, asExc.sig, fLock2.sig])) === J(D));
     let H = await L._holdingLocal([fData.sig, fView.sig, site.sig]);
-    ok('every defect holding one, for the ranking: st-exact, st-msg, st-site', H['EDR-1'] === 'st-exact' && H['EDR-2'] === 'st-msg' && H['EDR-3'] === 'st-site' && H['EDR-4'] === 'st-site' &&
-        H['EDR-8'] === 'st-site' && Object.keys(H).length === 5, J(H));
+    ok('every defect holding one, for the ranking: st-exact, st-msg, st-site', H['EDR-1'].kind === 'st-exact' && H['EDR-2'].kind === 'st-msg' && H['EDR-3'].kind === 'st-site' &&
+        H['EDR-4'].kind === 'st-site' && H['EDR-8'].kind === 'st-site' && Object.keys(H).length === 5, J(H));
+    ok('...each naming the stacktrace it holds', J(H['EDR-1'].hits) === J([{ sig: fData.sig, kind: 'st-exact' }]) && J(H['EDR-2'].hits) === J([{ sig: fView.sig, kind: 'st-msg' }]) &&
+        J(H['EDR-4'].hits) === J([{ sig: site.sig, kind: 'st-site' }]), J(H));
     ok('...the worker\'s the same', J(W.holding([fData.sig, fView.sig, site.sig])) === J(H), J(W.holding([fData.sig, fView.sig, site.sig])));
     const k7 = L._fingerprint(msgCol(exception({ n: 6, time: '03:00:00', msg: 'KeyError: 7', frames: [B + 'k/a.py(1) A', B + 'k/b.py(2) B'] })).join('\n'));
     const k7site = L._fingerprint(msgCol(exception({ n: 6, time: '03:00:00', msg: 'KeyError: 7', frames: [B + 'k/z.py(1) Z', B + 'k/a.py(1) A', B + 'k/b.py(2) B'] })).join('\n'));
     H = await L._holdingLocal([fLock2.sig, k7.sig]);
-    ok('a defect held both ways shows the exception at the same level', H['EDR-7'] === 'exact', J(H));
+    ok('a defect held both ways shows the exception at the same level', H['EDR-7'].kind === 'exact' &&
+        J(H['EDR-7'].hits) === J([{ sig: k7.sig, kind: 'exact' }, { sig: fLock2.sig, kind: 'st-exact' }]), J(H));
     H = await L._holdingLocal([k7site.sig, fLock2.sig]);
-    ok('...but the better level first: the same stacktrace over the same crash site', H['EDR-7'] === 'st-exact', J(H));
-    ok('...and the worker agrees on both', W.holding([fLock2.sig, k7.sig])['EDR-7'] === 'exact' && W.holding([k7site.sig, fLock2.sig])['EDR-7'] === 'st-exact');
+    ok('...but the better level first: the same stacktrace over the same crash site', H['EDR-7'].kind === 'st-exact' &&
+        J(H['EDR-7'].hits) === J([{ sig: fLock2.sig, kind: 'st-exact' }, { sig: k7site.sig, kind: 'site' }]), J(H));
+    ok('...and the worker agrees on both', J(W.holding([fLock2.sig, k7.sig])) === J(await L._holdingLocal([fLock2.sig, k7.sig])) &&
+        J(W.holding([k7site.sig, fLock2.sig])) === J(H));
     const so = await L._sigsOfLocal('EDR-2');
     ok('a defect\'s own stacktraces, a cut one apart', so.sigs.length === 0 && J(so.cuts) === J([fView.sig]) && J(W.sigsOf('EDR-2')) === J(so), J(so));
     const m = await L._matchTextLocal(LOG);

@@ -3787,11 +3787,12 @@ JiTA.logsig = {
             return out;
         });
     },
-    // Every defect that holds one of these exceptions or stacktraces, for the ranking (JiTA.repexc): { defect key: kind },
-    // the kind 'exact' when its description has an exception with the same stack, 'site' when only the same crash site;
-    // for a stacktrace 'st-exact' and 'st-site', and 'st-msg' for the same message where one of the two was cut off before
-    // its stack. Each defect gets its best: by level first, then an exception before a stacktrace. Every member of a
-    // cluster, not just its newest. KEEP IN SYNC with lgHolding in the worker.
+    // Every defect that holds one of these exceptions or stacktraces, for the ranking (JiTA.repexc): { defect key: { kind,
+    // hits } }, the kind 'exact' when its description has an exception with the same stack, 'site' when only the same crash
+    // site; for a stacktrace 'st-exact' and 'st-site', and 'st-msg' for the same message where one of the two was cut off
+    // before its stack. Each defect gets its best: by level first, then an exception before a stacktrace. `hits` are the
+    // signatures asked about that it holds, [{ sig, kind }], each once, the best first. Every member of a cluster, not just
+    // its newest. KEEP IN SYNC with lgHolding in the worker.
     holding: function (sigs) {
         if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'holding', sigs: sigs }).catch(function () { return JiTA.logsig._holdingLocal(sigs); }); }
         return JiTA.logsig._holdingLocal(sigs);
@@ -3802,10 +3803,15 @@ JiTA.logsig = {
             var out = {};
             if (!idx) { return out; }
             var list = (sigs || []).filter(function (s) { return !L.isTrace(s); }).concat((sigs || []).filter(L.isTrace));
-            function put(members, kind) { (members || []).forEach(function (m) { if (!out[m.key]) { out[m.key] = kind; } }); }
-            list.forEach(function (sig) { var c = idx.sigMap[sig]; if (c) { put(c.members, L.isTrace(sig) ? 'st-exact' : 'exact'); } });
-            list.forEach(function (sig) { var cs = L._crashOf(sig), cc = cs && idx.crashMap[cs]; if (cc) { put(cc.members, L.isTrace(sig) ? 'st-site' : 'site'); } });
-            list.forEach(function (sig) { put(L._traceMates(idx, sig), 'st-msg'); });
+            function put(members, kind, sig) {
+                (members || []).forEach(function (m) {
+                    var o = out[m.key] || (out[m.key] = { kind: kind, hits: [] });
+                    if (!o.hits.some(function (h) { return h.sig === sig; })) { o.hits.push({ sig: sig, kind: kind }); }
+                });
+            }
+            list.forEach(function (sig) { var c = idx.sigMap[sig]; if (c) { put(c.members, L.isTrace(sig) ? 'st-exact' : 'exact', sig); } });
+            list.forEach(function (sig) { var cs = L._crashOf(sig), cc = cs && idx.crashMap[cs]; if (cc) { put(cc.members, L.isTrace(sig) ? 'st-site' : 'site', sig); } });
+            list.forEach(function (sig) { put(L._traceMates(idx, sig), 'st-msg', sig); });
             return out;
         });
     },
@@ -6532,22 +6538,24 @@ JiTA.rank._gateScored = function (cands, scope) {
 };
 
 // ---- the exception boost (see JiTA.repexc) ----
-// `boost` (optional) is asked about the candidates before the cut: boost(keys) answers, or resolves, { key: 'exact' |
-// 'site' } for the candidates an exception confirms. Never rejects: a boost that fails boosts nothing.
+// `boost` (optional) is asked about the candidates before the cut: boost(keys) answers, or resolves, { key: { kind, hits } }
+// (a kind alone from an older worker) for the candidates an exception confirms. Never rejects: a boost that fails boosts nothing.
 JiTA.rank._boostMap = function (boost, rows) {
     if (!boost) { return Promise.resolve(null); }
     var keys = [], seen = {};
     (rows || []).forEach(function (r) { if (r && r.key && !seen[r.key]) { seen[r.key] = true; keys.push(r.key); } });
     return Promise.resolve().then(function () { return boost(keys); }).then(function (m) { return m || {}; }, function () { return {}; });
 };
-// Raise a candidate an exception confirms: its score, its RRF and its shown % (capped below 100), and note why.
-JiTA.rank._boostRow = function (r, kind) {
-    var f = JiTA.repexc.FACTOR[kind];
+// Raise a candidate an exception confirms: its score, its RRF and its shown % (capped below 100), and note why: the kind
+// (excHit), and what its log holds (excHits, for the badge to name).
+JiTA.rank._boostRow = function (r, hit) {
+    var o = (hit && typeof hit === 'object') ? hit : { kind: hit, hits: null }, f = JiTA.repexc.FACTOR[o.kind];
     if (!f) { return; }
     if (typeof r.score === 'number') { r.score *= f; }
     if (typeof r.rrf === 'number') { r.rrf *= f; }
     if (typeof r.pct === 'number') { r.pct = Math.min(JiTA.repexc.PCT_MAX, Math.round(r.pct * f)); }
-    r.excHit = kind;
+    r.excHit = o.kind;
+    r.excHits = o.hits || null;
 };
 // `demote` (or nothing) followed by the boost of `map`; just `demote` when the map boosts nothing.
 JiTA.rank._withBoost = function (demote, map) {
@@ -6925,8 +6933,9 @@ JiTA.ui = {
 .jita-sd-sum { margin-top: 2px; color: #e6e6e6; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-meta { margin-top: 2px; color: #7a8694; font-size: 10px; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-date { margin-top: 2px; color: #7a8694; font-size: 10px; text-align: right; }\
-.jita-sd-exc { margin-top: 2px; color: #7fdca4; font-size: 10px; font-weight: 700; }\
+.jita-sd-exc { margin-top: 2px; color: #7fdca4; font-size: 10px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\
 .jita-sd-exc.site { color: #9aa6b2; }\
+.jita-exc-what { font-weight: 400; color: #9aa6b2; }\
 #jita-sd-loglink { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; }\
 #jita-sd-loglink.has-hits { display: block; }\
 #jita-sd-loglink .jita-sd-loglink-head { font-weight: 700; color: #ffb547; font-size: 11px; margin-bottom: 4px; }\
@@ -7051,6 +7060,7 @@ JiTA.ui = {
 #jita-side-group .jita-sd-meta, #jita-side-group .jita-sd-score, #jita-side-group .jita-sd-date { color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group .jita-sd-exc { color: var(--ds-text-success, #216e4e); }\
 #jita-side-group .jita-sd-exc.site { color: var(--ds-text-subtlest, #626f86); }\
+#jita-side-group .jita-exc-what { color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group .jita-sd-proj { background: var(--ds-background-neutral, #091e420f); color: var(--ds-text-subtle, #44546f); }\
 #jita-side-group .jita-sd-hide { color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group .jita-sd-hide:hover { color: #c9372c; }\
@@ -8540,7 +8550,7 @@ JiTA.ui = {
         action(r.key).appendTo($li);
         $('<div class="jita-sd-sum"></div>').text(r.summary || '').appendTo($li);
         if (meta) { $('<div class="jita-sd-meta"></div>').text(meta).appendTo($li); }
-        if (r.excHit) { JiTA.repexc.badge(r.excHit, '<div class="jita-sd-exc"></div>').appendTo($li); }   // why it ranks higher
+        if (r.excHit) { JiTA.repexc.badge(r.excHit, '<div class="jita-sd-exc"></div>', r.excHits).appendTo($li); }   // why it ranks higher
         var created = JiTA.util.fmtDate(r.created);
         if (created) { $('<div class="jita-sd-date"></div>').text('Created ' + created).appendTo($li); }
         return $li;
@@ -10929,16 +10939,21 @@ function jitaWorkerBody(cfg) {
         });
         return out;
     }
-    // Every defect holding one of these exceptions or stacktraces: { defect key: kind }. KEEP IN SYNC with
+    // Every defect holding one of these exceptions or stacktraces: { defect key: { kind, hits } }. KEEP IN SYNC with
     // JiTA.logsig._holdingLocal.
     function lgHolding(sigs) {
         var idx = logsigCache, out = {};
         if (!idx) { return out; }
         var list = (sigs || []).filter(function (s) { return !lgIsTrace(s); }).concat((sigs || []).filter(lgIsTrace));
-        function put(members, kind) { (members || []).forEach(function (m) { if (!out[m.key]) { out[m.key] = kind; } }); }
-        list.forEach(function (sig) { var c = idx.sigMap[sig]; if (c) { put(c.members, lgIsTrace(sig) ? 'st-exact' : 'exact'); } });
-        list.forEach(function (sig) { var cs = lgCrashOf(sig), cc = cs && idx.crashMap[cs]; if (cc) { put(cc.members, lgIsTrace(sig) ? 'st-site' : 'site'); } });
-        list.forEach(function (sig) { put(lgMates(idx, sig), 'st-msg'); });
+        function put(members, kind, sig) {
+            (members || []).forEach(function (m) {
+                var o = out[m.key] || (out[m.key] = { kind: kind, hits: [] });
+                if (!o.hits.some(function (h) { return h.sig === sig; })) { o.hits.push({ sig: sig, kind: kind }); }
+            });
+        }
+        list.forEach(function (sig) { var c = idx.sigMap[sig]; if (c) { put(c.members, lgIsTrace(sig) ? 'st-exact' : 'exact', sig); } });
+        list.forEach(function (sig) { var cs = lgCrashOf(sig), cc = cs && idx.crashMap[cs]; if (cc) { put(cc.members, lgIsTrace(sig) ? 'st-site' : 'site', sig); } });
+        list.forEach(function (sig) { put(lgMates(idx, sig), 'st-msg', sig); });
         return out;
     }
     // A defect's own exceptions and stacktraces: { sigs, crashes, cuts }. KEEP IN SYNC with JiTA.logsig._sigsOfLocal.
@@ -12685,7 +12700,7 @@ JiTA.triage = {
                     }
                     $('<span class="jt-msum"></span>').text(r.summary || '').appendTo($li);
                     if (meta) { $('<span class="jt-mmeta"></span>').text(meta).appendTo($li); }
-                    if (r.excHit) { JiTA.repexc.badge(r.excHit, '<span class="jt-mexc"></span>').appendTo($li); }   // why it ranks higher
+                    if (r.excHit) { JiTA.repexc.badge(r.excHit, '<span class="jt-mexc"></span>', r.excHits).appendTo($li); }   // why it ranks higher
                     // Feature C hover preview, same as the panel rows: the styled card with the defect's summary,
                     // full (rendered) description and status - r already carries description/created from the
                     // enrichment reads above. The tip is fixed-position at z 10001, above the overlay's 10000.
@@ -13542,8 +13557,9 @@ JiTA.triage = {
                 '.jita-triage-view .jt-pct { color: #fff; font-weight: 800; margin-left: 8px; font-size: 11px; }' +
                 '.jita-triage-view .jt-msum { display: block; color: #e6e6e6; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }' +
                 '.jita-triage-view .jt-mmeta { display: block; color: #7a8694; font-size: 10px; margin-top: 2px; }' +
-                '.jita-triage-view .jt-mexc { display: block; color: #7fdca4; font-size: 10px; font-weight: 700; margin-top: 2px; }' +
+                '.jita-triage-view .jt-mexc { display: block; color: #7fdca4; font-size: 10px; font-weight: 700; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }' +
                 '.jita-triage-view .jt-mexc.site { color: #9aa6b2; }' +
+                '.jita-triage-view .jt-mexc .jita-exc-what { font-weight: 400; color: #9aa6b2; }' +
                 '.jita-triage-view .jt-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
                 '.jita-triage-view .jt-msg { flex: 0 0 auto; padding: 8px 16px; border-top: 1px solid #3a434d; color: #9aa6b2; font-size: 12px; min-height: 31px; }' +
                 '.jita-triage-view .jt-msg.warn { color: #ffb547; font-weight: 600; }' +
@@ -16184,13 +16200,21 @@ JiTA.repexc = {
     KINDS: ['exact', 'st-exact', 'site', 'st-site', 'st-msg'],   // best first: a candidate shows its best
     PCT_MAX: 99,
     WAIT_MS: 1500,     // how long a list waits for a report's exceptions before it is drawn without them
-    _report: {},       // report key -> Promise of { defect key: kind (FACTOR) }, for the session (reset after a defect sync)
+    SAID_MAX: 300,     // characters of an exception's message a badge names
+    MORE_SHOWN: 3,     // further matches a badge's hover names
+    _report: {},       // report key -> Promise of { defect key: { kind (FACTOR), hits } }, for the session (reset after a defect sync)
     _reads: {},        // report key -> Promise of its cached reading's exception signatures ([] none, null logs not read)
+    _msgs: {},         // report key -> { sig: its message as that report's log writes it }, so a badge can name what it is for
     _usedProf: {},     // defect key -> the profile exceptions its last ranking used, so a finished profile ranks it again
 
     reset: function () { JiTA.repexc._report = {}; },
     // A report's reading was just written: what was cached from it is out of date.
-    forget: function (key) { delete JiTA.repexc._reads[key]; delete JiTA.repexc._report[key]; },
+    forget: function (key) { delete JiTA.repexc._reads[key]; delete JiTA.repexc._report[key]; delete JiTA.repexc._msgs[key]; },
+    // Keep a report's messages as its log writes them, by signature (exc: [{ sig, msg }], each signature once).
+    _keep: function (key, exc) {
+        var m = JiTA.repexc._msgs[key] = {};
+        (exc || []).forEach(function (e) { if (e && e.sig && e.msg) { m[e.sig] = e.msg; } });
+    },
 
     // A report's cached reading: the signatures of its logs' exceptions, [] when they hold none, null when its logs
     // have not been read (no reading, or one made without them).
@@ -16199,7 +16223,9 @@ JiTA.repexc = {
         if (!R._reads[key]) {
             R._reads[key] = Promise.resolve().then(function () { return JiTA.db.getMeta(P.CACHE_PREFIX + key); }).then(function (rec) {
                 rec = P._usable(rec);
-                return (rec && rec.logs) ? (rec.exc || []).map(function (e) { return e.sig; }) : null;
+                if (!(rec && rec.logs)) { return null; }
+                R._keep(key, rec.exc);
+                return (rec.exc || []).map(function (e) { return e.sig; });
             }, function () { return null; });
         }
         return R._reads[key];
@@ -16211,7 +16237,9 @@ JiTA.repexc = {
         return JiTA.repexc._reading(key).then(function (sigs) {
             if (sigs) { return sigs; }
             return JiTA.ui.scanIssueLog(key).then(function () {
-                return (JiTA.ui._logExc[key] || []).map(function (e) { return e.sig; });
+                var exc = JiTA.ui._logExc[key] || [];
+                JiTA.repexc._keep(key, exc);
+                return exc.map(function (e) { return e.sig; });
             });
         });
     },
@@ -16221,22 +16249,34 @@ JiTA.repexc = {
         return JiTA.excnoise.load().then(function () { return (sigs || []).filter(JiTA.excnoise.counts); });
     },
 
-    // The defects an exception in this bug report's log confirms: Promise of { defect key: kind }. Only exceptions that
-    // count confirm anything. Never rejects; a look that failed is tried again next time.
+    // The defects an exception in this bug report's log confirms: Promise of { defect key: { kind, hits } } (see _named).
+    // Only exceptions that count confirm anything. Never rejects; a look that failed is tried again next time.
     forReport: function (key) {
         var R = JiTA.repexc;
         if (!R._report[key]) {
             var p = R._report[key] = R._reportSigs(key).then(R._counting).then(function (sigs) {
                 return sigs.length ? JiTA.logsig.holding(sigs) : {};
-            }).then(function (m) { return m || {}; }, function () {
+            }).then(function (m) { return R._named(m, R._msgs[key]); }, function () {
                 if (R._report[key] === p) { delete R._report[key]; }
                 return {};
             });
         }
         return R._report[key];
     },
+    // The holding lookup's answer with the report's signatures each defect holds named as its log writes them (msgs):
+    // { defect key: { kind, hits: [{ sig, kind, msg }] } }, the best hit first. An older worker answers { defect key: kind },
+    // and names none.
+    _named: function (m, msgs) {
+        var out = {};
+        Object.keys(m || {}).forEach(function (k) {
+            var v = m[k], o = (v && typeof v === 'object') ? v : { kind: v, hits: [] };
+            if (!o.kind) { return; }
+            out[k] = { kind: o.kind, hits: (o.hits || []).map(function (h) { return { sig: h.sig, kind: h.kind, msg: (msgs && msgs[h.sig]) || '' }; }) };
+        });
+        return out;
+    },
 
-    // A boost for the ranking from a Promise of { key: kind }: resolves function () { return map; } when the map is known
+    // A boost for the ranking from a Promise of { key: { kind, hits } }: resolves function () { return map; } when the map is known
     // within WAIT_MS (null when it boosts nothing), else null at once - and calls onLate when the map arrives later with
     // something in it, so the list can be ranked again. Never rejects.
     soon: function (p, onLate) {
@@ -16307,9 +16347,19 @@ JiTA.repexc = {
         });
         return best;
     },
+    // Each of a report's signatures the defect holds, with how (_kind) and its message as the report's log writes it (msgs,
+    // from _msgs): [{ sig, kind, msg }], the best first, so a badge can name what it is for.
+    _hits: function (sigs, ds, msgs) {
+        var R = JiTA.repexc, out = [];
+        (sigs || []).forEach(function (sig) {
+            var k = R._kind([sig], ds);
+            if (k) { out.push({ sig: sig, kind: k, msg: (msgs && msgs[sig]) || '' }); }
+        });
+        return out.sort(function (a, b) { return R.KINDS.indexOf(a.kind) - R.KINDS.indexOf(b.kind); });   // stable: a tie keeps the log's order
+    },
     // A boost for a defect's matching bug reports: asked about the candidates, it answers which of them have logs that
-    // hold one of the defect's exceptions, of those that count. Local data only (readings and the logsig index), so the
-    // list waits for it.
+    // hold one of the defect's exceptions, of those that count: { report key: { kind, hits } }. Local data only (readings
+    // and the logsig index), so the list waits for it.
     forDefect: function (key) {
         var R = JiTA.repexc;
         return function (keys) {
@@ -16317,7 +16367,10 @@ JiTA.repexc = {
                 if (!ds.n) { return {}; }
                 return Promise.all(keys.map(function (k) { return R._reading(k); })).then(function (reads) {
                     var out = {};
-                    keys.forEach(function (k, i) { var kind = R._kind((reads[i] || []).filter(JiTA.excnoise.counts), ds); if (kind) { out[k] = kind; } });
+                    keys.forEach(function (k, i) {
+                        var sigs = (reads[i] || []).filter(JiTA.excnoise.counts), kind = R._kind(sigs, ds);
+                        if (kind) { out[k] = { kind: kind, hits: R._hits(sigs, ds, R._msgs[k]) }; }
+                    });
                     return out;
                 });
             });
@@ -16339,11 +16392,30 @@ JiTA.repexc = {
         'st-site': ['~ same trace site in log', 'a stacktrace logged from the same place (message and innermost frames) as one of the defect\'s'],
         'st-msg': ['~ same stacktrace message in log', 'a stacktrace with the same message as one of the defect\'s, where the client cut one of the two off before its stack']
     },
-    // `html` is the element to make it of.
-    badge: function (kind, html) {
+    // `html` is the element to make it of. `hits` (from _hits or _named, optional) are what the log holds: the best one is
+    // named after the badge's text, with its message and stack in the hover, and any others there by name.
+    badge: function (kind, html, hits) {
         var R = JiTA.repexc, b = R.BADGE[kind] || R.BADGE.site, exact = kind === 'exact' || kind === 'st-exact';
-        return $(html).addClass(exact ? 'exact' : 'site').text(b[0])
-            .attr('title', 'The bug report\'s log holds ' + b[1] + ', so it ranks higher and its % is raised');
+        var $b = $(html).addClass(exact ? 'exact' : 'site').text(b[0]), tip = 'The bug report\'s log holds ' + b[1] + ', so it ranks higher and its % is raised';
+        var named = (hits || []).filter(function (h) { return h && h.sig; });
+        if (named.length) {
+            $('<span class="jita-exc-what"></span>').text(': ' + R._said(named[0])).appendTo($b);
+            tip += ':\n\n' + JiTA.profile._sigTip(named[0].sig, R._said(named[0]));
+            var more = named.slice(1);
+            if (more.length) {
+                tip += '\n\nIts log also holds: ' + more.slice(0, R.MORE_SHOWN).map(function (h) { return R._said(h) + ' (' + (R.BADGE[h.kind] || R.BADGE.site)[0] + ')'; }).join('; ') +
+                    (more.length > R.MORE_SHOWN ? '; and ' + (more.length - R.MORE_SHOWN) + ' more' : '');
+            }
+        }
+        return $b.attr('title', tip);
+    },
+    // What a hit's exception or stacktrace says: its message as the log writes it, else as its signature has it, on one
+    // line and at most SAID_MAX characters.
+    _said: function (h) {
+        var R = JiTA.repexc, L = JiTA.logsig, m = h.msg;
+        if (!m) { m = JiTA.profile._sigParts(h.sig).msg; if (L.isTrace(h.sig)) { m = m.slice(L.TRACE.length); } }
+        m = String(m || '').replace(/\s+/g, ' ').trim();
+        return m.length > R.SAID_MAX ? m.slice(0, R.SAID_MAX - 1) + '…' : m;
     },
 
     _noop: null
@@ -23585,7 +23657,8 @@ JiTA.changelog = {
             'UserErrors, the messages the game shows the player (ThrottleGeneric when buttons are clicked too fast, a session change still under way), no longer raise a match, point at a defect or make a Defect Profile pattern.',
             'Any other exception or stacktrace that is only noise can be ignored: "ignore" in the full Defect Profile or in double-tap + leaves its message out for every defect, at any stack. Settings > Triage Assistant counts it again.',
             'One in 5% or more of the open reports\' logs (10 at least) is common and no longer raises a match. They are counted once a day while Read open reports\' logs is on. "count anyway" counts one all the same.',
-            'The Defect Profile and double-tap + list the ones that don\'t count apart, folded, each saying why. Ticked in double-tap +, they are still looked for.'
+            'The Defect Profile and double-tap + list the ones that don\'t count apart, folded, each saying why. Ticked in double-tap +, they are still looked for.',
+            'A match an exception raises now says which one: its badge names it ("same exception in log: KeyError: 2"), and its hover shows the message and stack, and any others the two share.'
         ], fixes: [
             'An exception cut off before its EXCEPTION END line no longer takes the stacktrace after it for more of its stack.',
             'Double-tap +: a stacktrace\'s first line typed on its own, such as "STACKTRACE #95 Some text", is looked for by its message at any stack, no longer refused.'

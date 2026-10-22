@@ -60,7 +60,8 @@ JiTA.util.delay = (ms) => { delays.push(ms); return Promise.resolve(); };
 Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    isTrace: function (sig) {') + line('    isCut: function (sig) {') +
     line('    _traceKey: function (sig) {') + member('    _crashOf: function (sig) {') + member('    _traceMates: function (idx, sig) {') +
     member('    holding: function (sigs) {') + member('    _holdingLocal: function (sigs) {') + member('    sigsOf: function (key) {') + member('    _sigsOfLocal: function (key) {') + '})'));
-Object.assign(JiTA.profile, eval('({' + line('    LOG_V: ') + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') + '})'));
+Object.assign(JiTA.profile, eval('({' + line('    LOG_V: ') + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') +
+    member('    _sigParts: function (sig) {') + member('    _sigTip: function (sigs, msg) {') + '})'));
 // What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
 Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
 Object.assign(JiTA.util, eval('({' + member('    hash: function (str) {') + '})'));
@@ -94,6 +95,16 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     r = { key: 'EDR-1', score: 10, pct: 70 };
     RK._boostRow(r, 'nonsense');
     ok('an unknown kind raises nothing and marks nothing', r.score === 10 && r.pct === 70 && !r.excHit, JSON.stringify(r));
+    r = { key: 'EDR-1', score: 10, pct: 70 };
+    RK._boostRow(r, { kind: 'site', hits: [{ sig: B2, kind: 'site', msg: 'KeyError: 3' }] });
+    ok('an answer naming what the log holds raises the same, and the row keeps the names', r.excHit === 'site' && r.pct === 81 && r.excHits.length === 1 && r.excHits[0].msg === 'KeyError: 3',
+        JSON.stringify(r));
+    r = { key: 'EDR-1', score: 10, pct: 70 };
+    RK._boostRow(r, { kind: 'nonsense', hits: [{ sig: B2 }] });
+    ok('...one of no known kind raises and names nothing', r.score === 10 && !r.excHit && !r.excHits, JSON.stringify(r));
+    r = { key: 'EDR-1', score: 10, pct: 70 };
+    RK._boostRow(r, 'exact');
+    ok('...and a kind alone (an older worker) names nothing', r.excHit === 'exact' && r.excHits === null, JSON.stringify(r));
     r = { key: 'EDR-1', score: 10 };
     RK._boostRow(r, 'exact');
     ok('a row with no % yet (the keyword path) gets none', r.pct === undefined && Math.abs(r.score - 13) < 1e-9, JSON.stringify(r));
@@ -179,9 +190,15 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     let viaWorker = 0;
     JiTA.worker.call = (type, p) => { viaWorker++; return Promise.reject(new Error('old worker')); };
     let h = await JiTA.logsig.holding([A, B2]);
-    ok('every defect with the same stack is exact, not just the newest', h['EDR-1'] === 'exact' && h['EDR-2'] === 'exact', JSON.stringify(h));
-    ok('...one with only the crash site is site, and exact wins over site', h['EDR-3'] === 'site' && h['EDR-4'] === 'site' && Object.keys(h).length === 4, JSON.stringify(h));
+    ok('every defect with the same stack is exact, not just the newest', h['EDR-1'].kind === 'exact' && h['EDR-2'].kind === 'exact', JSON.stringify(h));
+    ok('...one with only the crash site is site, and exact wins over site', h['EDR-3'].kind === 'site' && h['EDR-4'].kind === 'site' && Object.keys(h).length === 4, JSON.stringify(h));
+    ok('...each naming the exceptions asked about that it holds, and how', JSON.stringify(h['EDR-1'].hits) === JSON.stringify([{ sig: A, kind: 'exact' }]) &&
+        JSON.stringify(h['EDR-3'].hits) === JSON.stringify([{ sig: B2, kind: 'site' }]), JSON.stringify(h));
     ok('...asked of the worker first, and answered here when it cannot', viaWorker === 1);
+    h = await JiTA.logsig.holding([B2, B]);
+    ok('a defect holding several names each once, the best first, whatever order they were asked in', h['EDR-3'].kind === 'exact' &&
+        JSON.stringify(h['EDR-3'].hits) === JSON.stringify([{ sig: B, kind: 'exact' }, { sig: B2, kind: 'site' }]) && JSON.stringify(h['EDR-4'].hits) === JSON.stringify([{ sig: B2, kind: 'site' }, { sig: B, kind: 'site' }]),
+        JSON.stringify(h));
     h = await JiTA.logsig.holding([C]);
     ok('an exception no defect holds raises nothing', !Object.keys(h).length);
     const so = await JiTA.logsig.sigsOf('EDR-3');
@@ -193,7 +210,8 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     const LGT = line('    var LG_TRACE = ');   // the worker's stacktrace tag, and the helpers lgHolding reads it with (lgIsTrace to lgMates)
     const W = new Function('idx', 'var logsigCache = idx, LG_MIN = 2, LG_CRASH = 2;\n' + LGT + wfn('lgCrashOf') + wfn('lgIsTrace') + wfn('lgHolding') + wfn('lgSigsOf') +
         '\nreturn { lgHolding: lgHolding, lgSigsOf: lgSigsOf };')(IDX);
-    ok('the worker\'s holding agrees with the tab\'s', JSON.stringify(W.lgHolding([A, B2])) === JSON.stringify(await JiTA.logsig._holdingLocal([A, B2])), JSON.stringify(W.lgHolding([A, B2])));
+    ok('the worker\'s holding agrees with the tab\'s', JSON.stringify(W.lgHolding([A, B2])) === JSON.stringify(await JiTA.logsig._holdingLocal([A, B2])) &&
+        JSON.stringify(W.lgHolding([B2, B])) === JSON.stringify(await JiTA.logsig._holdingLocal([B2, B])), JSON.stringify(W.lgHolding([B2, B])));
     ok('...and its sigsOf too', JSON.stringify(W.lgSigsOf('EDR-3')) === JSON.stringify(await JiTA.logsig._sigsOfLocal('EDR-3')) && W.lgSigsOf('EDR-9').sigs.length === 0);
     const W0 = new Function('idx', 'var logsigCache = idx, LG_MIN = 2, LG_CRASH = 2;\n' + LGT + wfn('lgCrashOf') + wfn('lgIsTrace') + wfn('lgHolding') + wfn('lgSigsOf') +
         '\nreturn { lgHolding: lgHolding, lgSigsOf: lgSigsOf };')(null);
@@ -224,10 +242,17 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     await R._reading('EBR-1');
     ok('...until the reader writes a new one', reads === 1);
 
+    meta['rp:EBR-6'] = { v: 3, logs: true, exc: [{ sig: A, msg: "AttributeError: 'NoneType' object has no attribute 'typeID'" }, { sig: B2, msg: 'KeyError: 3' }, { sig: C }] };
+    await R._reading('EBR-6');
+    ok('a reading keeps how its log writes each exception, by signature', R._msgs['EBR-6'][A] === "AttributeError: 'NoneType' object has no attribute 'typeID'" &&
+        R._msgs['EBR-6'][B2] === 'KeyError: 3' && !(C in R._msgs['EBR-6']), JSON.stringify(R._msgs['EBR-6']));
+    R.forget('EBR-6');
+    ok('...forgotten with the reading', !R._msgs['EBR-6']);
     let scans = 0;
-    JiTA.ui.scanIssueLog = (k) => { scans++; JiTA.ui._logExc[k] = [{ sig: B2 }]; return Promise.resolve({}); };
+    JiTA.ui.scanIssueLog = (k) => { scans++; JiTA.ui._logExc[k] = [{ sig: B2, msg: 'KeyError: 9' }]; return Promise.resolve({}); };
     ok('a report read ahead is not scanned', JSON.stringify(await R._reportSigs('EBR-1')) === JSON.stringify([A, C]) && scans === 0);
     ok('...one that is not is scanned, as the panel scans it', JSON.stringify(await R._reportSigs('EBR-9')) === JSON.stringify([B2]) && scans === 1);
+    ok('...keeping how its log writes them too', R._msgs['EBR-9'][B2] === 'KeyError: 9', JSON.stringify(R._msgs['EBR-9']));
     JiTA.ui.scanIssueLog = (k) => { scans++; return Promise.resolve({}); };
     delete JiTA.ui._logExc['EBR-8'];
     ok('...a scan that read nothing gives nothing', JSON.stringify(await R._reportSigs('EBR-8')) === '[]');
@@ -236,7 +261,8 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     let held = [];
     JiTA.logsig.holding = (sigs) => { held.push(sigs.join('+')); return Promise.resolve({ 'EDR-1': 'exact' }); };
     m = await R.forReport('EBR-1');
-    ok('a report\'s boost: the defects that hold one of its exceptions', m['EDR-1'] === 'exact' && held[0] === A + '+' + C, JSON.stringify(held));
+    ok('a report\'s boost: the defects that hold one of its exceptions', m['EDR-1'].kind === 'exact' && held[0] === A + '+' + C, JSON.stringify(held));
+    ok('...an older worker\'s answer naming none of them', JSON.stringify(m['EDR-1'].hits) === '[]', JSON.stringify(m));
     await R.forReport('EBR-1');
     ok('...worked out once per report', held.length === 1);
     m = await R.forReport('EBR-4');
@@ -247,11 +273,17 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('...a lookup that fails boosts nothing', m && !Object.keys(m).length);
     JiTA.logsig.holding = () => Promise.resolve({ 'EDR-3': 'site' });
     m = await R.forReport('EBR-5');
-    ok('...and is tried again next time', m['EDR-3'] === 'site', JSON.stringify(m));
+    ok('...and is tried again next time', m['EDR-3'].kind === 'site', JSON.stringify(m));
     R.reset();
     JiTA.logsig.holding = () => Promise.resolve({ 'EDR-7': 'exact' });
     m = await R.forReport('EBR-5');
-    ok('a defect sync starts the reports\' boosts over', m['EDR-7'] === 'exact');
+    ok('a defect sync starts the reports\' boosts over', m['EDR-7'].kind === 'exact');
+    JiTA.logsig.holding = () => Promise.resolve({ 'EDR-1': { kind: 'exact', hits: [{ sig: A, kind: 'exact' }, { sig: B2, kind: 'site' }] }, 'EDR-2': { kind: '', hits: [] } });
+    m = await R.forReport('EBR-6');
+    ok('each defect names the exceptions of the report\'s log it holds, as the log writes them, the best first', m['EDR-1'].kind === 'exact' &&
+        JSON.stringify(m['EDR-1'].hits) === JSON.stringify([{ sig: A, kind: 'exact', msg: "AttributeError: 'NoneType' object has no attribute 'typeID'" }, { sig: B2, kind: 'site', msg: 'KeyError: 3' }]),
+        JSON.stringify(m));
+    ok('...and an answer with no kind raises nothing', !('EDR-2' in m));
 
     // soon: the list waits a moment for a report's exceptions, and is ranked again when they come late.
     R.WAIT_MS = 30;
@@ -287,12 +319,16 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('...the same crash site only is site', R._kind([B2], ds) === 'site');
     ok('...neither is nothing', R._kind([A], ds) === null && R._kind([], ds) === null && R._kind(null, ds) === null);
 
+    ok('what a report\'s log holds of the defect\'s, each once, the best first, as its log writes it', JSON.stringify(R._hits([A, B2, C], ds, { [C]: 'RuntimeError: x' })) ===
+        JSON.stringify([{ sig: C, kind: 'exact', msg: 'RuntimeError: x' }, { sig: B2, kind: 'site', msg: '' }]) && JSON.stringify(R._hits([A], ds)) === '[]' && JSON.stringify(R._hits(null, ds)) === '[]');
     meta['rp:EBR-11'] = { v: 3, logs: true, exc: [{ sig: B2 }] };
-    meta['rp:EBR-12'] = { v: 3, logs: true, exc: [{ sig: C }] };
+    meta['rp:EBR-12'] = { v: 3, logs: true, exc: [{ sig: C, msg: 'RuntimeError: dictionary changed size during iteration' }] };
     meta['rp:EBR-13'] = { v: 3, logs: true, exc: [{ sig: A }] };
     reads = 0;
     m = await R.forDefect('EDR-3')(['EBR-11', 'EBR-12', 'EBR-13', 'EBR-14']);
-    ok('a defect\'s boost: each candidate whose log holds one of its exceptions', m['EBR-11'] === 'site' && m['EBR-12'] === 'exact' && !m['EBR-13'] && !m['EBR-14'], JSON.stringify(m));
+    ok('a defect\'s boost: each candidate whose log holds one of its exceptions', m['EBR-11'].kind === 'site' && m['EBR-12'].kind === 'exact' && !m['EBR-13'] && !m['EBR-14'], JSON.stringify(m));
+    ok('...naming what its log holds, as the log writes it', JSON.stringify(m['EBR-12'].hits) === JSON.stringify([{ sig: C, kind: 'exact', msg: 'RuntimeError: dictionary changed size during iteration' }]) &&
+        JSON.stringify(m['EBR-11'].hits) === JSON.stringify([{ sig: B2, kind: 'site', msg: '' }]), JSON.stringify(m));
     ok('...read from the cached readings', reads === 4);
     reads = 0;
     JiTA.profile._last = {};
@@ -325,6 +361,22 @@ const crash = (s) => JiTA.logsig._crashOf(s);
         /holds a stacktrace with the same stack/.test(sx.attr('title')) && /ranks higher/.test(sx.attr('title')), sx.text() + ' / ' + sx.attr('title'));
     ok('...the same site, and the same message where one was cut off, as loose ones', ss.text() === '~ same trace site in log' && ss.cls.indexOf('site') >= 0 &&
         sm.text() === '~ same stacktrace message in log' && sm.cls.indexOf('site') >= 0 && /cut one of the two off before its stack/.test(sm.attr('title')), ss.text() + ' / ' + sm.text());
+    ok('a badge that knows nothing of what the log holds (an older worker) is as it was', bx.kids.length === 0 &&
+        bx.attr('title') === 'The bug report\'s log holds an exception with the same stack as one of the defect\'s, so it ranks higher and its % is raised', bx.attr('title'));
+    const D = 'valueerror: c|x.py:f>y.py:g';
+    const bn = R.badge('exact', '<div class="jita-sd-exc"></div>', [{ sig: C, kind: 'exact', msg: 'RuntimeError: dictionary changed size during iteration' },
+        { sig: B2, kind: 'site', msg: '' }, { sig: A, kind: 'site', msg: 'AttributeError: a' }, { sig: B, kind: 'site', msg: 'KeyError:\n   b' }, { sig: D, kind: 'site', msg: 'ValueError: c' }]);
+    const what = bn.kids.filter((k) => k.cls.indexOf('jita-exc-what') >= 0);
+    ok('a badge that knows names the best of it after its text, as the log writes it', bn.text() === 'same exception in log' && what.length === 1 &&
+        what[0].text() === ': RuntimeError: dictionary changed size during iteration', what[0] && what[0].text());
+    ok('...its hover the message and stack', bn.attr('title').indexOf('The bug report\'s log holds an exception with the same stack as one of the defect\'s, so it ranks higher and its % is raised:\n\n' +
+        'RuntimeError: dictionary changed size during iteration\n\nStack, innermost last:\n    sessions.py: tick\n    sessions.py: prune\n\n') === 0, bn.attr('title'));
+    ok('...then the others by name and how, three of them, one line each, a message unknown as its signature has it', / holds: keyerror: # \(~ same crash site in log\); AttributeError: a \(~ same crash site in log\); KeyError: b \(~ same crash site in log\); and 1 more$/.test(bn.attr('title')),
+        bn.attr('title'));
+    const bq = R.badge('exact', '<span></span>', [{ kind: 'exact', msg: 'no signature' }]);
+    ok('...but none without a signature', bq.kids.length === 0 && !/no signature/.test(bq.attr('title')));
+    ok('a long message is cut short, and a stacktrace known by its signature alone named without its tag', R._said({ sig: C, msg: 'x'.repeat(400) }).length === R.SAID_MAX &&
+        /…$/.test(R._said({ sig: C, msg: 'x'.repeat(400) })) && R._said({ sig: '[stacktrace] spam guard tripped|a.py:f>b.py:g' }) === 'spam guard tripped' && R._said({ sig: C, msg: 'short' }) === 'short');
 
     // ================= the row =================
     JiTA.ui._showTip = () => {}; JiTA.ui._hideTip = () => {};
@@ -332,10 +384,15 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     let row = JiTA.ui._row({ key: 'EDR-1', pct: 91, excHit: 'exact', status: 'Open' }, '_self', () => El('<span>'));
     let exc = row.kids.filter((k) => k.cls.indexOf('jita-sd-exc') >= 0);
     ok('a boosted row carries the badge', exc.length === 1 && exc[0].text() === 'same exception in log', row.kids.map((k) => k.html).join(' '));
+    row = JiTA.ui._row({ key: 'EDR-1', pct: 91, excHit: 'exact', excHits: [{ sig: C, kind: 'exact', msg: 'RuntimeError: x' }], status: 'Open' }, '_self', () => El('<span>'));
+    exc = row.kids.filter((k) => k.cls.indexOf('jita-sd-exc') >= 0);
+    ok('...naming what the log holds when the row knows', exc.length === 1 && exc[0].kids.length === 1 && exc[0].kids[0].text() === ': RuntimeError: x', exc[0] && JSON.stringify(exc[0].kids.map((k) => k._text)));
     row = JiTA.ui._row({ key: 'EDR-2', pct: 60, status: 'Open' }, '_self', () => El('<span>'));
     ok('...a plain one does not', !row.kids.some((k) => k.cls.indexOf('jita-sd-exc') >= 0));
     const css = src.slice(once("    css: '\\\n#jita-sd-panel"), once('    injectCss: function () {'));
     ok('the badge is styled in the panel and in the sidebar', /\.jita-sd-exc \{/.test(css) && /#jita-side-group \.jita-sd-exc \{/.test(css) && /\.jita-sd-exc\.site \{/.test(css));
+    ok('...the name it gives cut off where the row ends, and muted in both', /\.jita-sd-exc \{[^}]*white-space: nowrap; overflow: hidden; text-overflow: ellipsis; \}/.test(css) &&
+        /\n\.jita-exc-what \{ font-weight: 400; color: #9aa6b2; \}/.test(css) && /#jita-side-group \.jita-exc-what \{ color: var\(--ds-text-subtlest/.test(css));
 
     // ================= the panel and triage are wired to it =================
     const uiStart = once('\nJiTA.ui = {');
@@ -401,8 +458,9 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('...similar open reports: none', calls[0][0] === 'ebr' && calls[0][1].length === 5);
     Object.assign(JiTA, saved);
     const trow = src.slice(once("                    if (meta) { $('<span class=\"jt-mmeta\"></span>').text(meta).appendTo($li); }"), once('                    // Feature C hover preview, same as the panel rows:'));
-    ok('triage rows carry the badge', /if \(r\.excHit\) \{ JiTA\.repexc\.badge\(r\.excHit, '<span class="jt-mexc"><\/span>'\)\.appendTo\(\$li\); \}/.test(trow));
-    ok('...styled', /'\.jita-triage-view \.jt-mexc \{/.test(src) && /'\.jita-triage-view \.jt-mexc\.site \{/.test(src));
+    ok('triage rows carry the badge, naming what the log holds', /if \(r\.excHit\) \{ JiTA\.repexc\.badge\(r\.excHit, '<span class="jt-mexc"><\/span>', r\.excHits\)\.appendTo\(\$li\); \}/.test(trow));
+    ok('...styled, the name cut off where the row ends', /'\.jita-triage-view \.jt-mexc \{[^']*white-space: nowrap; overflow: hidden; text-overflow: ellipsis; \}'/.test(src) &&
+        /'\.jita-triage-view \.jt-mexc\.site \{/.test(src) && /'\.jita-triage-view \.jt-mexc \.jita-exc-what \{ font-weight: 400;/.test(src));
 
     // ================= the background reading of the open reports' logs =================
     ok('the reader is switched on by default', LR.on() === true);

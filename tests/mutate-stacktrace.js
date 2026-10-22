@@ -82,12 +82,12 @@ const muts = [
     [T, 'the worker clusters cut ones', '                        continue;\n', '', WIDX],
     [T, 'the worker mines no description of stacktraces alone', " || r.description.indexOf('STACKTRACE #') !== -1)", ')', WIDX],
     // ---- which defects hold one ----
-    [T, 'a stacktrace held as an exception', "put(c.members, L.isTrace(sig) ? 'st-exact' : 'exact');", "put(c.members, 'exact');", THOLD],
-    [T, 'a stacktrace\'s site held as a crash site', "put(cc.members, L.isTrace(sig) ? 'st-site' : 'site');", "put(cc.members, 'site');", THOLD],
-    [T, 'no defect held by a stacktrace\'s message', "            list.forEach(function (sig) { put(L._traceMates(idx, sig), 'st-msg'); });\n", '', THOLD],
+    [T, 'a stacktrace held as an exception', "put(c.members, L.isTrace(sig) ? 'st-exact' : 'exact', sig);", "put(c.members, 'exact', sig);", THOLD],
+    [T, 'a stacktrace\'s site held as a crash site', "put(cc.members, L.isTrace(sig) ? 'st-site' : 'site', sig);", "put(cc.members, 'site', sig);", THOLD],
+    [T, 'no defect held by a stacktrace\'s message', "            list.forEach(function (sig) { put(L._traceMates(idx, sig), 'st-msg', sig); });\n", '', THOLD],
     [T, 'a stacktrace before an exception at the same level', 'var list = (sigs || []).filter(function (s) { return !L.isTrace(s); }).concat((sigs || []).filter(L.isTrace));', 'var list = sigs || [];', THOLD],
-    [T, 'the worker holds a stacktrace as an exception', "put(c.members, lgIsTrace(sig) ? 'st-exact' : 'exact');", "put(c.members, 'exact');", WHOLD],
-    [T, 'the worker holds none by its message', "        list.forEach(function (sig) { put(lgMates(idx, sig), 'st-msg'); });\n", '', WHOLD],
+    [T, 'the worker holds a stacktrace as an exception', "put(c.members, lgIsTrace(sig) ? 'st-exact' : 'exact', sig);", "put(c.members, 'exact', sig);", WHOLD],
+    [T, 'the worker holds none by its message', "        list.forEach(function (sig) { put(lgMates(idx, sig), 'st-msg', sig); });\n", '', WHOLD],
     [T, 'a defect\'s cut ones not handed on', 'cuts: (idx && idx.keyToCut && idx.keyToCut[key]) || [] };\n        });', 'cuts: [] };\n        });'],
     [T, 'the worker hands on no cut ones', 'cuts: (idx && idx.keyToCut && idx.keyToCut[key]) || [] };\n    }', 'cuts: [] };\n    }'],
     // ---- the log parser ----

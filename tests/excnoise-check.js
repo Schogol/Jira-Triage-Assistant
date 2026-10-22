@@ -323,13 +323,14 @@ const fO2 = fpOf(TIMEOUT([B + 'packages/other/place.py(1) Elsewhere', B + 'packa
     P._last = {};
     R._reads = {};
     const boost = await R.forDefect('EDR-2')(['EBR-3', 'EBR-4']);
-    ok('...and a candidate report raises only by an exception that counts', J(boost) === J({ 'EBR-4': 'exact' }), J(boost));
+    ok('...and a candidate report raises only by an exception that counts', J(Object.keys(boost)) === J(['EBR-4']) && boost['EBR-4'].kind === 'exact' &&
+        J(boost['EBR-4'].hits.map((h) => h.sig)) === J([fK.sig]), J(boost));
     const fK2 = fpOf(exc(99, '20:33:40', 'KeyError: 1053350297975L', [B + 'eve/client/script/ui/shared/outer.py(5) Outer'].concat(FK), 'error'));
     meta['rp:EBR-5'] = { v: P.V, logs: true, exc: [{ sig: fK2.sig }] };
     L.sigsOf = () => Promise.resolve({ sigs: [fK.sig], crashes: [], cuts: [] });
     R._reads = {};
     const boost2 = await R.forDefect('EDR-1')(['EBR-5']);
-    ok('(a KeyError at another stack, at the crash site of one of the defect\'s, raises it)', fK2.sig !== fK.sig && fK2.crashSig === fK.crashSig && J(boost2) === J({ 'EBR-5': 'site' }), J(boost2));
+    ok('(a KeyError at another stack, at the crash site of one of the defect\'s, raises it)', fK2.sig !== fK.sig && fK2.crashSig === fK.crashSig && J(Object.keys(boost2)) === J(['EBR-5']) && boost2['EBR-5'].kind === 'site', J(boost2));
     N._freq = { at: Date.now(), n: 100, c: { [fK2.sig]: 50 } };
     R._reads = {};
     const boost3 = await R.forDefect('EDR-1')(['EBR-5']);
