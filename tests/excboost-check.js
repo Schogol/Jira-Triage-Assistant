@@ -366,15 +366,13 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     const D = 'valueerror: c|x.py:f>y.py:g';
     const bn = R.badge('exact', '<div class="jita-sd-exc"></div>', [{ sig: C, kind: 'exact', msg: 'RuntimeError: dictionary changed size during iteration' },
         { sig: B2, kind: 'site', msg: '' }, { sig: A, kind: 'site', msg: 'AttributeError: a' }, { sig: B, kind: 'site', msg: 'KeyError:\n   b' }, { sig: D, kind: 'site', msg: 'ValueError: c' }]);
-    const what = bn.kids.filter((k) => k.cls.indexOf('jita-exc-what') >= 0);
-    ok('a badge that knows names the best of it after its text, as the log writes it', bn.text() === 'same exception in log' && what.length === 1 &&
-        what[0].text() === ': RuntimeError: dictionary changed size during iteration', what[0] && what[0].text());
-    ok('...its hover the message and stack', bn.attr('title').indexOf('The bug report\'s log holds an exception with the same stack as one of the defect\'s, so it ranks higher and its % is raised:\n\n' +
+    ok('a badge that knows says on the card only how it matched', bn.text() === 'same exception in log' && bn.kids.length === 0, JSON.stringify(bn.kids.map((k) => k._text)));
+    ok('...its hover names the best of it, as the log writes it, with its stack', bn.attr('title').indexOf('The bug report\'s log holds an exception with the same stack as one of the defect\'s, so it ranks higher and its % is raised:\n\n' +
         'RuntimeError: dictionary changed size during iteration\n\nStack, innermost last:\n    sessions.py: tick\n    sessions.py: prune\n\n') === 0, bn.attr('title'));
     ok('...then the others by name and how, three of them, one line each, a message unknown as its signature has it', / holds: keyerror: # \(~ same crash site in log\); AttributeError: a \(~ same crash site in log\); KeyError: b \(~ same crash site in log\); and 1 more$/.test(bn.attr('title')),
         bn.attr('title'));
     const bq = R.badge('exact', '<span></span>', [{ kind: 'exact', msg: 'no signature' }]);
-    ok('...but none without a signature', bq.kids.length === 0 && !/no signature/.test(bq.attr('title')));
+    ok('...but none without a signature', bq.attr('title') === 'The bug report\'s log holds an exception with the same stack as one of the defect\'s, so it ranks higher and its % is raised', bq.attr('title'));
     ok('a long message is cut short, and a stacktrace known by its signature alone named without its tag', R._said({ sig: C, msg: 'x'.repeat(400) }).length === R.SAID_MAX &&
         /…$/.test(R._said({ sig: C, msg: 'x'.repeat(400) })) && R._said({ sig: '[stacktrace] spam guard tripped|a.py:f>b.py:g' }) === 'spam guard tripped' && R._said({ sig: C, msg: 'short' }) === 'short');
 
@@ -386,13 +384,12 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('a boosted row carries the badge', exc.length === 1 && exc[0].text() === 'same exception in log', row.kids.map((k) => k.html).join(' '));
     row = JiTA.ui._row({ key: 'EDR-1', pct: 91, excHit: 'exact', excHits: [{ sig: C, kind: 'exact', msg: 'RuntimeError: x' }], status: 'Open' }, '_self', () => El('<span>'));
     exc = row.kids.filter((k) => k.cls.indexOf('jita-sd-exc') >= 0);
-    ok('...naming what the log holds when the row knows', exc.length === 1 && exc[0].kids.length === 1 && exc[0].kids[0].text() === ': RuntimeError: x', exc[0] && JSON.stringify(exc[0].kids.map((k) => k._text)));
+    ok('...naming what the log holds in its hover when the row knows, not on the card', exc.length === 1 && exc[0].text() === 'same exception in log' && exc[0].kids.length === 0 &&
+        /:\n\nRuntimeError: x\n\nStack, innermost last:/.test(exc[0].attr('title')), exc[0] && exc[0].attr('title'));
     row = JiTA.ui._row({ key: 'EDR-2', pct: 60, status: 'Open' }, '_self', () => El('<span>'));
     ok('...a plain one does not', !row.kids.some((k) => k.cls.indexOf('jita-sd-exc') >= 0));
     const css = src.slice(once("    css: '\\\n#jita-sd-panel"), once('    injectCss: function () {'));
     ok('the badge is styled in the panel and in the sidebar', /\.jita-sd-exc \{/.test(css) && /#jita-side-group \.jita-sd-exc \{/.test(css) && /\.jita-sd-exc\.site \{/.test(css));
-    ok('...the name it gives cut off where the row ends, and muted in both', /\.jita-sd-exc \{[^}]*white-space: nowrap; overflow: hidden; text-overflow: ellipsis; \}/.test(css) &&
-        /\n\.jita-exc-what \{ font-weight: 400; color: #9aa6b2; \}/.test(css) && /#jita-side-group \.jita-exc-what \{ color: var\(--ds-text-subtlest/.test(css));
 
     // ================= the panel and triage are wired to it =================
     const uiStart = once('\nJiTA.ui = {');
@@ -459,8 +456,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     Object.assign(JiTA, saved);
     const trow = src.slice(once("                    if (meta) { $('<span class=\"jt-mmeta\"></span>').text(meta).appendTo($li); }"), once('                    // Feature C hover preview, same as the panel rows:'));
     ok('triage rows carry the badge, naming what the log holds', /if \(r\.excHit\) \{ JiTA\.repexc\.badge\(r\.excHit, '<span class="jt-mexc"><\/span>', r\.excHits\)\.appendTo\(\$li\); \}/.test(trow));
-    ok('...styled, the name cut off where the row ends', /'\.jita-triage-view \.jt-mexc \{[^']*white-space: nowrap; overflow: hidden; text-overflow: ellipsis; \}'/.test(src) &&
-        /'\.jita-triage-view \.jt-mexc\.site \{/.test(src) && /'\.jita-triage-view \.jt-mexc \.jita-exc-what \{ font-weight: 400;/.test(src));
+    ok('...styled', /'\.jita-triage-view \.jt-mexc \{/.test(src) && /'\.jita-triage-view \.jt-mexc\.site \{/.test(src));
 
     // ================= the background reading of the open reports' logs =================
     ok('the reader is switched on by default', LR.on() === true);

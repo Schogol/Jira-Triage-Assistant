@@ -6933,9 +6933,8 @@ JiTA.ui = {
 .jita-sd-sum { margin-top: 2px; color: #e6e6e6; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-meta { margin-top: 2px; color: #7a8694; font-size: 10px; overflow-wrap: anywhere; word-break: break-word; }\
 .jita-sd-date { margin-top: 2px; color: #7a8694; font-size: 10px; text-align: right; }\
-.jita-sd-exc { margin-top: 2px; color: #7fdca4; font-size: 10px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\
+.jita-sd-exc { margin-top: 2px; color: #7fdca4; font-size: 10px; font-weight: 700; }\
 .jita-sd-exc.site { color: #9aa6b2; }\
-.jita-exc-what { font-weight: 400; color: #9aa6b2; }\
 #jita-sd-loglink { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; }\
 #jita-sd-loglink.has-hits { display: block; }\
 #jita-sd-loglink .jita-sd-loglink-head { font-weight: 700; color: #ffb547; font-size: 11px; margin-bottom: 4px; }\
@@ -7060,7 +7059,6 @@ JiTA.ui = {
 #jita-side-group .jita-sd-meta, #jita-side-group .jita-sd-score, #jita-side-group .jita-sd-date { color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group .jita-sd-exc { color: var(--ds-text-success, #216e4e); }\
 #jita-side-group .jita-sd-exc.site { color: var(--ds-text-subtlest, #626f86); }\
-#jita-side-group .jita-exc-what { color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group .jita-sd-proj { background: var(--ds-background-neutral, #091e420f); color: var(--ds-text-subtle, #44546f); }\
 #jita-side-group .jita-sd-hide { color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group .jita-sd-hide:hover { color: #c9372c; }\
@@ -13557,9 +13555,8 @@ JiTA.triage = {
                 '.jita-triage-view .jt-pct { color: #fff; font-weight: 800; margin-left: 8px; font-size: 11px; }' +
                 '.jita-triage-view .jt-msum { display: block; color: #e6e6e6; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }' +
                 '.jita-triage-view .jt-mmeta { display: block; color: #7a8694; font-size: 10px; margin-top: 2px; }' +
-                '.jita-triage-view .jt-mexc { display: block; color: #7fdca4; font-size: 10px; font-weight: 700; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }' +
+                '.jita-triage-view .jt-mexc { display: block; color: #7fdca4; font-size: 10px; font-weight: 700; margin-top: 2px; }' +
                 '.jita-triage-view .jt-mexc.site { color: #9aa6b2; }' +
-                '.jita-triage-view .jt-mexc .jita-exc-what { font-weight: 400; color: #9aa6b2; }' +
                 '.jita-triage-view .jt-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
                 '.jita-triage-view .jt-msg { flex: 0 0 auto; padding: 8px 16px; border-top: 1px solid #3a434d; color: #9aa6b2; font-size: 12px; min-height: 31px; }' +
                 '.jita-triage-view .jt-msg.warn { color: #ffb547; font-weight: 600; }' +
@@ -16392,14 +16389,13 @@ JiTA.repexc = {
         'st-site': ['~ same trace site in log', 'a stacktrace logged from the same place (message and innermost frames) as one of the defect\'s'],
         'st-msg': ['~ same stacktrace message in log', 'a stacktrace with the same message as one of the defect\'s, where the client cut one of the two off before its stack']
     },
-    // `html` is the element to make it of. `hits` (from _hits or _named, optional) are what the log holds: the best one is
-    // named after the badge's text, with its message and stack in the hover, and any others there by name.
+    // `html` is the element to make it of. `hits` (from _hits or _named, optional) are what the log holds: its hover names
+    // the best one, with its message and stack, and any others by name. The card itself only says how it matched.
     badge: function (kind, html, hits) {
         var R = JiTA.repexc, b = R.BADGE[kind] || R.BADGE.site, exact = kind === 'exact' || kind === 'st-exact';
         var $b = $(html).addClass(exact ? 'exact' : 'site').text(b[0]), tip = 'The bug report\'s log holds ' + b[1] + ', so it ranks higher and its % is raised';
         var named = (hits || []).filter(function (h) { return h && h.sig; });
         if (named.length) {
-            $('<span class="jita-exc-what"></span>').text(': ' + R._said(named[0])).appendTo($b);
             tip += ':\n\n' + JiTA.profile._sigTip(named[0].sig, R._said(named[0]));
             var more = named.slice(1);
             if (more.length) {
@@ -23658,7 +23654,7 @@ JiTA.changelog = {
             'Any other exception or stacktrace that is only noise can be ignored: "ignore" in the full Defect Profile or in double-tap + leaves its message out for every defect, at any stack. Settings > Triage Assistant counts it again.',
             'One in 5% or more of the open reports\' logs (10 at least) is common and no longer raises a match. They are counted once a day while Read open reports\' logs is on. "count anyway" counts one all the same.',
             'The Defect Profile and double-tap + list the ones that don\'t count apart, folded, each saying why. Ticked in double-tap +, they are still looked for.',
-            'A match an exception raises now says which one: its badge names it ("same exception in log: KeyError: 2"), and its hover shows the message and stack, and any others the two share.'
+            'A match an exception raises now says which one: hover its badge ("same exception in log") for that exception\'s message and stack, and any others the two share.'
         ], fixes: [
             'An exception cut off before its EXCEPTION END line no longer takes the stacktrace after it for more of its stack.',
             'Double-tap +: a stacktrace\'s first line typed on its own, such as "STACKTRACE #95 Some text", is looked for by its message at any stack, no longer refused.'
