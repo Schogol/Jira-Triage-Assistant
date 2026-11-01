@@ -217,8 +217,21 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('the default role: Lead for a name with a Lead\'s word in it, whatever its prefix, else Bug Hunter', M.defaultRole('ISD BH Schogol') === 'Lead' && M.defaultRole('ISD Lookuptable') === 'Lead' &&
         M.defaultRole('ISD Solnichka-Two') === 'Lead' && M.defaultRole('ISD Distillery') === 'Bug Hunter' && M.defaultRole('ISD BH Bootloader') === 'Bug Hunter');
     const st = (role, months) => M.state(role, months);
-    ok('a Bug Hunter with 40 last month meets the minimum; with 39, or none, is below it', st('Bug Hunter', [40, 0, 0]) === 'meets' && st('Bug Hunter', [39, 50, 50]) === 'below' && st('Rookie', [0, 5, 0]) === 'below');
-    ok('...with nothing in each of the last 3 months is inactive', st('Bug Hunter', [0, 0, 0, 30]) === 'inactive' && st('Rookie', [0, 0, 0]) === 'inactive');
+    ok('an average of 40 a month meets the minimum; under it, or nothing, is below it', st('Bug Hunter', [40, 40, 40, 40, 40, 40]) === 'meets' &&
+        st('Bug Hunter', [40, 40, 40, 40, 40, 39]) === 'below' && st('Rookie', [0, 5, 0]) === 'below' && st('Bug Hunter', [40]) === 'meets' && st('Bug Hunter', [39]) === 'below');
+    ok('...judged on the average, not on last month alone', st('Bug Hunter', [39, 50, 50]) === 'meets' && st('Bug Hunter', [41, 30, 30]) === 'below' && st('Bug Hunter', [40, 0, 0]) === 'below');
+    ok('...over the months they were in the group and counted in, and no others', st('Bug Hunter', [80, 0, null, null, null, null]) === 'meets' &&
+        st('Bug Hunter', [50, undefined, 30, undefined]) === 'meets' && st('Bug Hunter', [50, undefined, 29]) === 'below');
+    ok('...with nothing in each of the last 3 months is inactive, whatever the average', st('Bug Hunter', [0, 0, 0, 30]) === 'inactive' && st('Rookie', [0, 0, 0]) === 'inactive' &&
+        st('Bug Hunter', [0, 0, 0, 200, 200, 200]) === 'inactive');
+    const wins6 = M.window('2026-11'), said = (state, months) => M.stateText({ state: state, months: months, role: 'Bug Hunter' }, wins6);
+    ok('the dot\'s hover gives the average, and what it is over', said('meets', [42, 40, 44, 41, 39, 46]) === 'Meets the minimum: 42 a month on average over the last 6 months' &&
+        said('below', [23, 40, 34, 15, 0, null]) === 'Below the minimum: 22.4 a month on average over their 5 months in the group, of the 40 a month ECAID asks for' &&
+        said('meets', [55, 50, 47, undefined, undefined, undefined]) === 'Meets the minimum: 50.7 a month on average over the 3 months counted so far' &&
+        said('below', [12, null, undefined, undefined, undefined, undefined]) === 'Below the minimum: 12 a month on average over the 1 month counted so far, of the 40 a month ECAID asks for',
+        said('meets', [55, 50, 47, undefined, undefined, undefined]));
+    ok('...rounded to a tenth', said('below', [40, 40, 39, null, null, null]) === 'Below the minimum: 39.7 a month on average over their 3 months in the group, of the 40 a month ECAID asks for',
+        said('below', [40, 40, 39, null, null, null]));
     ok('...a month before joining counts towards neither: new, and not inactive', st('Bug Hunter', [null, null]) === 'new' && st('Bug Hunter', [0, 0, null]) === 'below');
     ok('...last month not counted yet: no state', st('Bug Hunter', [undefined, 0, 0]) === '');
     ok('Leads and Seniors are judged by it too', st('Lead', [0, 0, 0]) === 'inactive' && st('Senior', [3, 0, 0]) === 'below' && st('Lead', [40]) === 'meets' && st('Senior', [null]) === 'new');
@@ -738,7 +751,8 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
         /<ac:parameter ac:name="colour">Grey<\/ac:parameter><ac:parameter ac:name="title">Left<\/ac:parameter>/.test(lastTr), lastTr);
     ok('...neither tinted nor coloured, their months of 0 notwithstanding', !/data-highlight-colour|style="color/.test(lastTr) && /<td>0<\/td>/.test(lastTr), lastTr);
     ok('...the legend saying what Left means, and where the roles come from', /<p>Left: a member who left ECAID, though their account may still be active\. Listed last, and not judged\.<\/p>/.test(html) &&
-        /Roles are the ranks on the ECAID - Team Members page, unless a Lead set another\./.test(html) && /ECAID asks for <strong>40 a month<\/strong>, of every member, Leads included\./.test(html));
+        /Roles are the ranks on the ECAID - Team Members page, unless a Lead set another\./.test(html) &&
+        /ECAID asks for <strong>40 a month<\/strong>, of every member, Leads included\. Under it on average over the months shown is Below, nothing in the last 3 months Inactive/.test(html));
     ok('...which says nothing of Left while nobody has left', !/<p>Left: /.test(M._content(M.model(props[L.ACTIVITY_KEY].value, { m: {} }, null, '2026-11'), props[L.ACTIVITY_KEY].value, true)));
     teamFail = Object.assign(new Error('HTTP 503'), { status: 503 });
     M._team = null; err = null; pageWrites = [];
@@ -781,6 +795,8 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...this month so far, saying how many to go', cell(ast, 6).text() === '4' && /4 so far this month, 36 to go for the 40/.test(cell(ast, 6).attrs.title), cell(ast, 6).attrs.title);
     ok('...a month before joining shown as - with its reason', cell(rowFor('acc-new'), 0).text() === '-' && /Not in the group yet/.test(cell(rowFor('acc-new'), 0).attrs.title));
     ok('...the state dot saying why', rowFor('acc-byte').kids[0].hasClass('inactive') && /^Inactive: nothing actioned in Aug 2026 to Oct 2026/.test(rowFor('acc-byte').kids[0].attrs.title), rowFor('acc-byte').kids[0].attrs.title);
+    ok('...a Bug Hunter\'s dot judged on their average, not on Sep\'s 40 nor Oct\'s 23 alone', ast.kids[0].hasClass('below') &&
+        ast.kids[0].attrs.title === 'Below the minimum: 22.4 a month on average over their 5 months in the group, of the 40 a month ECAID asks for', ast.kids[0].attrs.title);
     ok('the status line counts them', /5 members · \d+ meet the minimum · \d+ below · \d+ inactive/.test(status.textContent), status.textContent);
     // the filter
     const bar = body.kids.filter((k) => k.hasClass('ld-mbar'))[0], box = bar.kids.filter((k) => k.hasClass('ld-mfilter'))[0].kids[0];

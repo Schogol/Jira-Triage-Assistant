@@ -21536,7 +21536,7 @@ JiTA.leadduty.ui = {
         $f.find('input').prop('checked', U._memQuiet).on('change', function () { U._memQuiet = this.checked; U._renderMembers(true); });
         $('<span class="ld-mleg"></span>').text('Minimum: ' + M.MIN_ACTIONED + ' a month')
             .attr('title', 'ECAID asks for ' + M.MIN_ACTIONED + ' actioned a month: bug reports attached, trashed or reassigned, plus defects created, as the ISD credits leaderboard counts Total Actioned. Everyone is judged by it, Leads too, except members who left ECAID.').appendTo($bar);
-        [['meets', 'meets it', M.MIN_ACTIONED + ' or more last month'], ['below', 'below', 'under ' + M.MIN_ACTIONED + ' last month'],
+        [['meets', 'meets it', M.MIN_ACTIONED + ' or more a month on average over the months shown'], ['below', 'below', 'under ' + M.MIN_ACTIONED + ' a month on average over the months shown'],
             ['inactive', 'inactive', 'nothing in each of the last ' + M.INACTIVE_MONTHS + ' months'], ['new', 'new', 'not in the group last month']].forEach(function (s) {
             $('<span class="ld-mleg"></span>').attr('title', s[2]).append($('<span class="ld-mdot"></span>').addClass(s[0])).append(document.createTextNode(s[1])).appendTo($bar);
         });
@@ -22680,23 +22680,40 @@ JiTA.leadduty.members = {
 
     // A member's standing from their full months, newest first (a count; null for a month before they were in the group;
     // undefined for one not counted yet): 'inactive' with nothing in each of the last INACTIVE_MONTHS, 'below' under
-    // MIN_ACTIONED last month, 'meets' at or over it, 'new' when not in the group last month, '' while last month is not
-    // counted - and 'left' for someone who left ECAID, who is not judged by it.
+    // MIN_ACTIONED a month on average over the months they were counted in (Schogol 2026-11-01: not last month alone),
+    // 'meets' at or over it, 'new' when not in the group last month, '' while last month is not counted - and 'left' for
+    // someone who left ECAID, who is not judged by it.
     state: function (role, months) {
-        var M = JiTA.leadduty.members, last = months[0], empty = 0;
+        var M = JiTA.leadduty.members, last = months[0], empty = 0, a;
         if (!M.JUDGED[role]) { return role === M.LEFT ? 'left' : ''; }
         if (last === undefined) { return ''; }
         if (last === null) { return 'new'; }
         for (var i = 0; i < M.INACTIVE_MONTHS; i++) { if (months[i] === 0) { empty++; } }
         if (empty === M.INACTIVE_MONTHS) { return 'inactive'; }
-        return last >= M.MIN_ACTIONED ? 'meets' : 'below';
+        a = M.average(months);
+        return a.sum >= M.MIN_ACTIONED * a.n ? 'meets' : 'below';
+    },
+    // The average of the months a member was counted in (a count: not null, not undefined): { sum, n, avg }.
+    average: function (months) {
+        var sum = 0, n = 0;
+        months.forEach(function (x) { if (typeof x === 'number') { sum += x; n++; } });
+        return { sum: sum, n: n, avg: n ? sum / n : 0 };
+    },
+    // Which months an average is over, for a hover: the last MONTHS, the member's months in the group, or the months
+    // counted so far.
+    _span: function (months, n) {
+        var M = JiTA.leadduty.members, many = n + ' month' + (n === 1 ? '' : 's');
+        if (n >= M.MONTHS) { return 'the last ' + M.MONTHS + ' months'; }
+        return months.indexOf(undefined) < 0 ? ('their ' + many + ' in the group') : ('the ' + many + ' counted so far');
     },
     // What a row's state means, for its dot's hover.
     stateText: function (r, wins) {
-        var M = JiTA.leadduty.members;
+        var M = JiTA.leadduty.members, a = M.average(r.months), avg = Math.round(a.avg * 10) / 10;
         if (r.state === 'inactive') { return 'Inactive: nothing actioned in ' + M._mon(wins[M.INACTIVE_MONTHS - 1]) + ' to ' + M._mon(wins[0]); }
-        if (r.state === 'below') { return 'Below the minimum: ' + r.months[0] + ' actioned in ' + M._mon(wins[0]) + ', of the ' + M.MIN_ACTIONED + ' a month ECAID asks for'; }
-        if (r.state === 'meets') { return 'Meets the minimum: ' + r.months[0] + ' actioned in ' + M._mon(wins[0]); }
+        if (r.state === 'below') {
+            return 'Below the minimum: ' + avg + ' a month on average over ' + M._span(r.months, a.n) + ', of the ' + M.MIN_ACTIONED + ' a month ECAID asks for';
+        }
+        if (r.state === 'meets') { return 'Meets the minimum: ' + avg + ' a month on average over ' + M._span(r.months, a.n); }
         if (r.state === 'new') { return 'New: not in the group yet in ' + M._mon(wins[0]); }
         if (r.state === 'left') { return 'Left ECAID, so not judged by the minimum' + (r.roleSet ? '' : ': the ECAID - Team Members page says so'); }
         return M._mon(wins[0]) + ' has not been counted yet';
@@ -23023,8 +23040,9 @@ JiTA.leadduty.members = {
         var left = rows.some(function (r) { return r.state === 'left'; });
         return '<p>Every ISD member with what they actioned in each of the last ' + M.MONTHS + ' full months: bug reports attached, ' +
             'trashed or reassigned, plus defects created, as the ISD credits leaderboard counts Total Actioned. ECAID asks for <strong>' +
-            M.MIN_ACTIONED + ' a month</strong>, of every member, Leads included. Under it last month is Below, with nothing in ' + M.INACTIVE_MONTHS +
-            ' months Inactive, and New when not in the group last month. A month shown as - is one before the member joined.' +
+            M.MIN_ACTIONED + ' a month</strong>, of every member, Leads included. Under it on average over the months shown is Below, nothing in the last ' +
+            M.INACTIVE_MONTHS + ' months Inactive, and not in the group last month New. A month shown as - is one before the member joined, and is ' +
+            'not in their average.' +
             (L.TEAM_PAGE ? ' Roles are the ranks on the ECAID - Team Members page, unless a Lead set another.' : '') + '</p>' +
             (left ? ('<p>Left: a member who left ECAID, though their account may still be active. Listed last, and not judged.</p>') : '') +
             (gm ? ('<p>* includes GM handoffs made the old way (the Team field set to EO - GameMasters), counted before ' +
@@ -24704,7 +24722,7 @@ JiTA.changelog = {
     ENTRIES: [
         { v: '3.48.0', date: '2026-11-01', features: [
             'Lead duties has a Members tab, for Leads only: every ISD member with what they actioned in each of the last 6 full months and this month so far, counted as the ISD credits leaderboard counts Total Actioned.',
-            'ECAID asks for 40 actioned a month of every member, Leads included. A month under it is amber, and 0 is red. A dot says who meets it, who is below it, who has actioned nothing in 3 months and who is new.',
+            'ECAID asks for 40 actioned a month of every member, Leads included. A month under it is amber, and 0 is red. A dot says who meets it on average over the 6 months, who is below it, who has actioned nothing in 3 months and who is new.',
             'Roles come from the ranks on the ECAID - Team Members page (Lead, Snr Bughunter, Bughunter, Rookie). One list by role, then name; "Only below the minimum or inactive" leaves just those. Each member has a note every Lead shares.',
             'Picking another role in the tab asks whether to change the Team Members page too: OK changes only that member\'s Rank cell there, Cancel keeps the role in the tab alone. A ? marks anyone missing from that page.',
             'Someone who left ECAID but whose account is still active can be set to Left ECAID: greyed out at the bottom of the tab, last on the productivity page with a grey Left lozenge, never judged, and if you agree, off the Team Members page.',
