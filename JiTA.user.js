@@ -18414,6 +18414,9 @@ JiTA.leadduty = {
     // "ECAID Member Productivity (past 6 months)": the Members tab publishes its table here, replacing the body (the page
     // history keeps what was there). Every Lead needs EDIT on it; empty switches publishing off.
     MEMBERS_PAGE: '199754526',
+    // "ECAID - Team Members": the Members tab takes each member's role from its Rank column (Lead, Snr Bughunter,
+    // Bughunter, ...), matched by the account @mentioned in its Name column. Read, never written; empty switches it off.
+    TEAM_PAGE: '199758834',
     // Subtrees that need no maintenance review. Each id and EVERY page beneath it is dropped from the pool
     // (ancestry is walked through parentId, so a page added under one of these later is excluded too).
     EXCLUDE_PAGES: {
@@ -21502,11 +21505,14 @@ JiTA.leadduty.ui = {
     _memProg: '',        // what a count is doing, or why it stopped: kept across the redraws it causes
 
     _loadMembers: function (force) {
-        var L = JiTA.leadduty, U = L.ui;
+        var L = JiTA.leadduty, U = L.ui, M = L.members;
         U._status('Reading the members…');
         if (!U._mem || force) { U._body().empty().append($('<div class="ld-empty">Reading the counted months from the Confluence ledger…</div>')); }
-        L.members.gather().then(function (st) {
+        var team = M.team(force).then(null, function (e) { return { error: String(e && e.message || e) }; });
+        Promise.all([M.gather(), team]).then(function (r) {
+            var st = r[0];
             if (!U.isOpen() || U._tab !== 'members') { return; }
+            st.team = r[1];
             U._mem = st;
             U._memVer = { ledgerVersion: st.memVersion || 0 };
             U._renderMembers(!force);
@@ -21522,13 +21528,13 @@ JiTA.leadduty.ui = {
     _renderMembers: function (keep) {
         var L = JiTA.leadduty, U = L.ui, M = L.members, st = U._mem;
         if (!st || !U.isOpen() || U._tab !== 'members') { return; }
-        var $b = U._body(), top = keep ? $b.scrollTop() : 0, wins = M.window(st.cur), rows = M.model(st.act, st.mem, st.live, st.cur);
+        var $b = U._body(), top = keep ? $b.scrollTop() : 0, wins = M.window(st.cur), rows = M.model(st.act, st.mem, st.live, st.cur, st.team);
         $b.empty();
         var $bar = $('<div class="ld-mbar"></div>').appendTo($b);
         var $f = $('<label class="ld-mfilter"><input type="checkbox"> Only below the minimum or inactive</label>').appendTo($bar);
         $f.find('input').prop('checked', U._memQuiet).on('change', function () { U._memQuiet = this.checked; U._renderMembers(true); });
         $('<span class="ld-mleg"></span>').text('Minimum: ' + M.MIN_ACTIONED + ' a month')
-            .attr('title', 'ECAID asks for ' + M.MIN_ACTIONED + ' actioned a month: bug reports attached, trashed or reassigned, plus defects created, as the ISD credits leaderboard counts Total Actioned. Bug Hunters and Rookies are judged by it, Leads and Seniors are not.').appendTo($bar);
+            .attr('title', 'ECAID asks for ' + M.MIN_ACTIONED + ' actioned a month: bug reports attached, trashed or reassigned, plus defects created, as the ISD credits leaderboard counts Total Actioned. Everyone is judged by it, Leads too, except members who left ECAID.').appendTo($bar);
         [['meets', 'meets it', M.MIN_ACTIONED + ' or more last month'], ['below', 'below', 'under ' + M.MIN_ACTIONED + ' last month'],
             ['inactive', 'inactive', 'nothing in each of the last ' + M.INACTIVE_MONTHS + ' months'], ['new', 'new', 'not in the group last month']].forEach(function (s) {
             $('<span class="ld-mleg"></span>').attr('title', s[2]).append($('<span class="ld-mdot"></span>').addClass(s[0])).append(document.createTextNode(s[1])).appendTo($bar);
@@ -21544,6 +21550,7 @@ JiTA.leadduty.ui = {
         $('<span class="ld-mprog" id="ld-mprog"></span>').text(U._memProg).appendTo($bar);
         var $h = $('<div class="ld-row ld-mrow ld-mhead"></div>').appendTo($b);
         $('<span class="ld-mdot none"></span>').appendTo($h);
+        $('<span class="ld-mhint"></span>').appendTo($h);
         $('<span class="ld-mname"></span>').text('Name').appendTo($h);
         $('<span class="ld-mrolehd"></span>').text('Role').appendTo($h);
         $('<span class="ld-mnote"></span>').text('Note').appendTo($h);
@@ -21555,9 +21562,11 @@ JiTA.leadduty.ui = {
         if (!rows.length) {
             $('<div class="ld-empty"></div>').text(missing.length ? 'No month has been counted yet. Count fills the table, one month at a time.' : 'Nobody to list.').appendTo($b);
         } else if (!shown.length) { $('<div class="ld-empty">Nobody is below the minimum or inactive.</div>').appendTo($b); }
-        var n = { meets: 0, below: 0, inactive: 0 };
-        rows.forEach(function (r) { if (n[r.state] != null) { n[r.state]++; } });
-        U._status([rows.length + ' members', n.meets + ' meet the minimum', n.below + ' below', n.inactive + ' inactive',
+        var n = { meets: 0, below: 0, inactive: 0, left: 0 }, off = 0, team = st.team;
+        rows.forEach(function (r) { if (n[r.state] != null) { n[r.state]++; } if (r.onTeam === false && r.state !== 'left') { off++; } });
+        U._status([(rows.length - n.left) + ' members', n.meets + ' meet the minimum', n.below + ' below', n.inactive + ' inactive',
+            n.left ? (n.left + ' left ECAID') : '', off ? (off + ' not on the team page') : '',
+            (team && team.error) ? (team.error + ', so its ranks are not used') : '',
             missing.length ? (missing.length + ' month' + (missing.length === 1 ? '' : 's') + ' not counted yet') : '', L._dry() ? 'DRY RUN' : '',
             M.lastLine()].filter(function (x) { return !!x; }).join(' · '));
         $b.scrollTop(top);
@@ -21568,9 +21577,15 @@ JiTA.leadduty.ui = {
         var $r = $('<div class="ld-row ld-mrow"></div>').attr('data-key', r.acc);
         if (r.state) { $r.addClass('ld-m-' + r.state); }
         $('<span class="ld-mdot"></span>').addClass(r.state || 'none').attr('title', M.stateText(r, wins)).appendTo($r);
+        var $hint = $('<span class="ld-mhint"></span>').appendTo($r);
+        if (r.onTeam === false && r.state !== 'left') {
+            $hint.text('?').attr('title', 'Not on the ECAID - Team Members page. If they left ECAID, set their role to ' + M.LEFT + '.');
+        }
         $('<a class="ld-title ld-mname" target="_blank" rel="noopener"></a>').attr('href', JiTA.HOST + '/jira/people/' + encodeURIComponent(r.acc))
             .text(r.name).attr('title', r.name).appendTo($r);
-        var $sel = $('<select class="ld-mrole"></select>').attr('title', r.roleSet ? 'Set by a Lead' : ('The default, ' + r.role + ': change it, and every Lead sees the same'));
+        var why = r.roleSet ? 'Set by a Lead' : ((r.rank && r.rank === r.role) ? 'From the ECAID - Team Members page' : ('The default, ' + r.role));
+        if (r.roleSet && r.rank && r.rank !== r.role) { why += '. The ECAID - Team Members page says ' + r.rank + ': pick that to follow the page again'; }
+        var $sel = $('<select class="ld-mrole"></select>').attr('title', r.roleSet ? why : (why + ': change it, and every Lead sees the same'));
         M.ROLES.forEach(function (role) { $('<option></option>').attr('value', role).text(role).prop('selected', role === r.role).appendTo($sel); });
         $sel.on('change', function () { U._setMemberRole(this, r, $(this).val()); }).appendTo($r);
         $('<span class="ld-mnote"></span>').toggleClass('empty', !r.note).text(r.note ? r.note.split('\n')[0] : 'Add a note')
@@ -21600,7 +21615,7 @@ JiTA.leadduty.ui = {
     _setMemberRole: function (sel, r, role) {
         var L = JiTA.leadduty, U = L.ui;
         $(sel).prop('disabled', true);
-        L.members.setRole(r.acc, role, r.name).then(function (w) {
+        L.members.setRole(r.acc, role, r.name, r.rank).then(function (w) {
             var v = U._adopt(U._memVer, w);
             if (v && U._mem) { U._mem.mem = v; }
             U._renderMembers(true);
@@ -21619,7 +21634,7 @@ JiTA.leadduty.ui = {
                 var v = U._adopt(U._memVer, w);
                 if (v && U._mem) { U._mem.mem = v; }
                 if (!U._mem) { return; }
-                var fresh = M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur).filter(function (x) { return x.acc === r.acc; })[0];
+                var fresh = M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team).filter(function (x) { return x.acc === r.acc; })[0];
                 if (fresh) { U._swapRow(r.acc, U._memberRow(fresh, wins, cur)); }
             }, function (e) { U._status('Not saved - ' + (e && e.message || e)); });
         });
@@ -21779,7 +21794,11 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-mdot.below { background: #f0b429; }' +
                 '.jita-leadduty-view .ld-mdot.inactive { background: #ff8f8f; }' +
                 '.jita-leadduty-view .ld-mdot.new { background: #7a8694; }' +
+                '.jita-leadduty-view .ld-mdot.left { box-shadow: inset 0 0 0 1px #7a8694; }' +
                 '.jita-leadduty-view .ld-mrow { gap: 10px; }' +
+                '.jita-leadduty-view .ld-m-left { opacity: .5; }' +
+                '.jita-leadduty-view .ld-m-left:hover { opacity: .85; }' +
+                '.jita-leadduty-view .ld-mhint { flex: 0 0 8px; margin: 0 -4px; text-align: center; color: #f0b429; font-weight: 700; cursor: help; }' +
                 '.jita-leadduty-view .ld-mhead, .jita-leadduty-view .ld-mhead .ld-mname, .jita-leadduty-view .ld-mhead .ld-mnote, .jita-leadduty-view .ld-mhead .ld-mnum { color: #7a8694; font-size: 11px; font-weight: 600; cursor: default; }' +
                 '.jita-leadduty-view .ld-mname { flex: 0 0 170px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-mrole, .jita-leadduty-view .ld-mrolehd { flex: 0 0 104px; }' +
@@ -22355,16 +22374,21 @@ JiTA.leadduty.apps = {
  * A finished month is counted ONCE for all Leads and frozen in the ledger (ACTIVITY_KEY), first writer wins, as the QC
  * month is: three Leads do not each crawl six months. Once a month is over the credits scheduler gives its cache a final
  * count anyway, and gather() records that without a crawl; a month nobody has counted is counted from the tab's Count
- * button. Roles and notes are the Leads' own (MEMBERS_KEY), shared the same way, and the table is published to
- * MEMBERS_PAGE with the ledger page's election. Leads only, like the rest of Lead duties.
+ * button. A member's role is their rank on TEAM_PAGE (the ECAID - Team Members page) unless a Lead set another; Left
+ * ECAID marks someone who left though their account was never deactivated. Roles and notes the Leads set (MEMBERS_KEY)
+ * are shared the same way, and the table is published to MEMBERS_PAGE with the ledger page's election. Leads only,
+ * like the rest of Lead duties.
  */
 JiTA.leadduty.members = {
     MONTHS: 6,                    // full months shown, before the current one
     MIN_ACTIONED: 40,             // ECAID's monthly minimum
     INACTIVE_MONTHS: 3,           // full months with nothing actioned before a member counts as inactive
     GM_SWITCH: '2026-08-21',      // the first day GM handoffs went through CCP's Convert to Support (JiTA v3.1.0)
-    ROLES: ['Lead', 'Senior', 'Bug Hunter', 'Rookie'],   // rank order, which is the table's order
-    JUDGED: { 'Bug Hunter': true, 'Rookie': true },      // the roles the minimum and the states apply to
+    LEFT: 'Left ECAID',           // the role of someone who left ECAID, though their account may still be active
+    ROLES: ['Lead', 'Senior', 'Bug Hunter', 'Rookie', 'Left ECAID'],   // rank order, which is the table's order
+    // The roles the minimum and the states apply to: everyone but those who left (Leads too, Schogol 2026-11-01).
+    JUDGED: { 'Lead': true, 'Senior': true, 'Bug Hunter': true, 'Rookie': true },
+    TEAM_TTL_MS: 10 * 60 * 1000,  // the team page's ranks are read again after this long
     CLAIM_MS: 30 * 60 * 1000,     // a month another Lead's tab is counting is left to it this long
     BUSY_POLL_MS: 10 * 1000,      // how often a count waiting for an ISD credits count looks again...
     BUSY_MAX_MS: 20 * 60 * 1000,  // ...and for how long
@@ -22372,10 +22396,12 @@ JiTA.leadduty.members = {
     PUB_BUSY_MAX_MS: 120000,      // past this a publish is presumed hung (as report.BUSY_MAX_MS)
     TINT: { meets: '#e3fcef', below: '#fffae6', inactive: '#ffebe6' },   // the page's row colours
     INK: { low: '#974f0c', zero: '#ae2a19' },                            // the page's colours for a month below the minimum
-    LOZENGE: { meets: ['Green', 'Meets'], below: ['Yellow', 'Below'], inactive: ['Red', 'Inactive'], 'new': ['Grey', 'New'] },
+    LOZENGE: { meets: ['Green', 'Meets'], below: ['Yellow', 'Below'], inactive: ['Red', 'Inactive'], 'new': ['Grey', 'New'], left: ['Grey', 'Left'] },
     MON: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     _gather: null,
     _count: null,
+    _team: null,                  // the team page's ranks as last read: { at, value }
+    _teamP: null,                 // ...and a read of it in flight
     _pubBusy: false,
     _pubAt: 0,
     _pubAgain: false,
@@ -22421,20 +22447,118 @@ JiTA.leadduty.members = {
     },
 
     // The role a member has unless a Lead set one: Lead for a name with any word in JiTA.credits.LEADS (the rule the
-    // worker's crComputeExtra gives the lead bonus by - KEEP IN SYNC), else Bug Hunter. Senior and Rookie are set by hand.
-    defaultRole: function (name) {
-        var leads = JiTA.credits.LEADS || {}, toks = String(name || '').toLowerCase().replace(/-/g, ' ').split(/\s+/);
-        for (var i = 0; i < toks.length; i++) { if (toks[i] && leads[toks[i]]) { return 'Lead'; } }
-        return 'Bug Hunter';
+    // worker's crComputeExtra gives the lead bonus by - KEEP IN SYNC), else their rank on the team page (a role, as
+    // rankRole gives it), else Bug Hunter.
+    defaultRole: function (name, rank) {
+        var leads = JiTA.credits.LEADS || {}, own = Object.prototype.hasOwnProperty, toks = String(name || '').toLowerCase().replace(/-/g, ' ').split(/\s+/);
+        for (var i = 0; i < toks.length; i++) { if (toks[i] && own.call(leads, toks[i]) && leads[toks[i]]) { return 'Lead'; } }
+        return rank || 'Bug Hunter';
     },
 
-    // A Bug Hunter's or Rookie's standing from their full months, newest first (a count; null for a month before they were
-    // in the group; undefined for one not counted yet): 'inactive' with nothing in each of the last INACTIVE_MONTHS, 'below'
-    // under MIN_ACTIONED last month, 'meets' at or over it, 'new' when not in the group last month, '' while last month is
-    // not counted - and always '' for a Lead or Senior, who is not judged by it.
+    // ---- the team page (TEAM_PAGE): each member's rank ----
+    // The role a rank on the team page stands for, or '' for a rank that is none of them.
+    rankRole: function (text) {
+        var t = String(text || '').toLowerCase();
+        if (/\b(left|former)\b/.test(t)) { return JiTA.leadduty.members.LEFT; }
+        if (/\b(lead|coordinator|manager)\b/.test(t)) { return 'Lead'; }
+        if (/\b(senior|snr|sr)\b/.test(t)) { return 'Senior'; }
+        if (/\b(rookie|trainee|cadet)\b/.test(t)) { return 'Rookie'; }
+        if (/bug\s*hunter/.test(t)) { return 'Bug Hunter'; }
+        return '';
+    },
+    // A name as the team page may have it typed: lower case, letters and digits only, without "ISD" and "BH".
+    _nameKey: function (name) {
+        return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(' ')
+            .filter(function (t) { return t && t !== 'isd' && t !== 'bh'; }).join(' ');
+    },
+    // A member's rank on the team page (a role, or '' for a rank that is none), found by their account, else by their
+    // name; undefined when the page does not list them.
+    _rankOf: function (team, acc, name) {
+        var own = Object.prototype.hasOwnProperty, k = JiTA.leadduty.members._nameKey(name);
+        if (own.call(team.ranks, acc)) { return team.ranks[acc]; }
+        return (k && own.call(team.names, k)) ? team.names[k] : undefined;
+    },
+    // The team page's ranks, read again after TEAM_TTL_MS (or when forced): { ranks: { accountId: role }, names:
+    // { nameKey: role }, n, version }, null when no team page is set. A page that cannot be read, or lists nobody,
+    // rejects, saying which. Single-flight; Leads only.
+    team: function (force) {
+        var L = JiTA.leadduty, M = L.members, page = String(L.TEAM_PAGE || '');
+        if (!L.isLead()) { return Promise.reject(M._notLead()); }
+        if (!page) { return Promise.resolve(null); }
+        if (!force && M._team && Date.now() - M._team.at < M.TEAM_TTL_MS) { return Promise.resolve(M._team.value); }
+        if (M._teamP) { return M._teamP; }
+        var p = M._teamP = JiTA.conf.getPage(page, true).then(function (pg) {
+            var t = M._parseTeam(pg.body);
+            if (!t.tables) { throw new Error('The ECAID - Team Members page has no table with a Name and a Rank column'); }
+            if (!t.n) { throw new Error('The ECAID - Team Members page names nobody in its Name column'); }
+            t.version = pg.version;
+            M._team = { at: Date.now(), value: t };
+            return t;
+        }, function (e) {
+            throw new Error('Could not read the ECAID - Team Members page (' + (e && e.message || e) + ')');
+        });
+        var clear = function () { if (M._teamP === p) { M._teamP = null; } };
+        p.then(clear, clear);
+        return p;
+    },
+    // Every table of a storage body with a Name and a Rank column (found by its header row): each row's members, the
+    // accounts @mentioned in its Name cell (or the name typed there), with the role its rank stands for. The first row
+    // naming someone wins. { ranks, names, n (the members found), tables (the tables used) }.
+    _parseTeam: function (html) {
+        var M = JiTA.leadduty.members, out = { ranks: {}, names: {}, n: 0, tables: 0 }, own = Object.prototype.hasOwnProperty;
+        var tables = String(html || '').match(/<table\b[\s\S]*?<\/table>/gi) || [];
+        tables.forEach(function (table) {
+            var name = -1, rank = -1;
+            M._grid(table).forEach(function (row) {
+                if (rank < 0) {
+                    var ni = -1, ri = -1;
+                    row.forEach(function (c, i) {
+                        var h = c.text.toLowerCase().replace(/[^a-z]/g, '');
+                        if (h === 'name' && ni < 0) { ni = i; }
+                        if (h === 'rank' && ri < 0) { ri = i; }
+                    });
+                    if (ni >= 0 && ri >= 0) { name = ni; rank = ri; out.tables++; }
+                    return;
+                }
+                var who = row[name], role = M.rankRole(row[rank] ? row[rank].text : '');
+                if (!who || who === row[rank]) { return; }   // no Name cell, or a divider row: one cell across both
+                if (who.accs.length) {
+                    who.accs.forEach(function (a) { if (!own.call(out.ranks, a)) { out.ranks[a] = role; out.n++; } });
+                    return;
+                }
+                var k = M._nameKey(who.text);
+                if (k && !own.call(out.names, k)) { out.names[k] = role; out.n++; }
+            });
+        });
+        return out;
+    },
+    // A table's rows as arrays of cells { text, accs }: a cell spanning rows or columns is in each place it covers.
+    _grid: function (table) {
+        var rows = [], carry = [], tr, trRe = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+        while ((tr = trRe.exec(table))) {
+            var row = [], col = 0, td, tdRe = /<t([dh])\b([^>]*?)(?:\/>|>([\s\S]*?)<\/t\1>)/gi;
+            for (;;) {
+                while (carry[col] && carry[col].left > 0) { carry[col].left--; row[col] = carry[col].cell; col++; }
+                if (!(td = tdRe.exec(tr[1]))) { break; }
+                var rs = parseInt((/rowspan="(\d+)"/i.exec(td[2]) || [])[1], 10) || 1;
+                var cs = parseInt((/colspan="(\d+)"/i.exec(td[2]) || [])[1], 10) || 1;
+                var inner = td[3] || '', cell = { text: JiTA.leadduty.apps._text(inner).replace(/\s+/g, ' '), accs: [] }, a, accRe = /ri:account-id="([^"]+)"/g;
+                while ((a = accRe.exec(inner))) { if (cell.accs.indexOf(a[1]) < 0) { cell.accs.push(a[1]); } }
+                for (var k = 0; k < cs; k++) { row[col] = cell; carry[col] = rs > 1 ? { cell: cell, left: rs - 1 } : null; col++; }
+            }
+            rows.push(row);
+        }
+        return rows;
+    },
+
+    // A member's standing from their full months, newest first (a count; null for a month before they were in the group;
+    // undefined for one not counted yet): 'inactive' with nothing in each of the last INACTIVE_MONTHS, 'below' under
+    // MIN_ACTIONED last month, 'meets' at or over it, 'new' when not in the group last month, '' while last month is not
+    // counted - and 'left' for someone who left ECAID, who is not judged by it.
     state: function (role, months) {
         var M = JiTA.leadduty.members, last = months[0], empty = 0;
-        if (!M.JUDGED[role] || last === undefined) { return ''; }
+        if (!M.JUDGED[role]) { return role === M.LEFT ? 'left' : ''; }
+        if (last === undefined) { return ''; }
         if (last === null) { return 'new'; }
         for (var i = 0; i < M.INACTIVE_MONTHS; i++) { if (months[i] === 0) { empty++; } }
         if (empty === M.INACTIVE_MONTHS) { return 'inactive'; }
@@ -22447,30 +22571,33 @@ JiTA.leadduty.members = {
         if (r.state === 'below') { return 'Below the minimum: ' + r.months[0] + ' actioned in ' + M._mon(wins[0]) + ', of the ' + M.MIN_ACTIONED + ' a month ECAID asks for'; }
         if (r.state === 'meets') { return 'Meets the minimum: ' + r.months[0] + ' actioned in ' + M._mon(wins[0]); }
         if (r.state === 'new') { return 'New: not in the group yet in ' + M._mon(wins[0]); }
-        return M.JUDGED[r.role] ? (M._mon(wins[0]) + ' has not been counted yet') : (r.role + 's are not judged by the minimum');
+        if (r.state === 'left') { return 'Left ECAID, so not judged by the minimum' + (r.roleSet ? '' : ': the ECAID - Team Members page says so'); }
+        return M._mon(wins[0]) + ' has not been counted yet';
     },
 
-    // The rows, by role rank and then by name (without "ISD "): { acc, name, role, roleSet, note, noteBy, noteAt,
-    // months[MONTHS] (as state() takes them), gm[MONTHS] (old-way GM handoffs inside each), cur (this month so far: a count,
-    // null when not in the group, undefined when not counted in this browser), last (the newest month anything was
-    // actioned in, or ''), state }. act and mem are the two properties' values (or null), live this browser's credits result
-    // for the current month (or null), cur the current month.
-    model: function (act, mem, live, cur) {
-        var M = JiTA.leadduty.members, wins = M.window(cur);
+    // The rows, by role rank and then by name (without "ISD "): { acc, name, role, roleSet, rank (the role the team page
+    // gives them, '' for a rank that is none, undefined when it does not list them), onTeam (whether it lists them; null
+    // when it was not read), note, noteBy, noteAt, months[MONTHS] (as state() takes them), gm[MONTHS] (old-way GM handoffs
+    // inside each), cur (this month so far: a count, null when not in the group, undefined when not counted in this
+    // browser), last (the newest month anything was actioned in, or ''), state }. act and mem are the two properties'
+    // values (or null), live this browser's credits result for the current month (or null), cur the current month, team
+    // the team page's ranks as team() gives them (anything else: none).
+    model: function (act, mem, live, cur, team) {
+        var M = JiTA.leadduty.members, wins = M.window(cur), tm = (team && team.ranks) ? team : null;
         var frozen = (act && act.frozen) || {}, a = (act && act.a) || {}, g = (act && act.g) || {};
         var roster = (act && act.roster && act.roster.n) || {}, people = (mem && mem.m) || {};
         var lv = (live && live.ym === cur) ? M.fromCredits(live) : null, accs = {};
         Object.keys(roster).forEach(function (k) { accs[k] = true; });
         if (lv) { Object.keys(lv.names).forEach(function (k) { accs[k] = true; }); }
         var rows = Object.keys(accs).map(function (acc) {
-            var name = (lv && lv.names[acc]) || roster[acc] || acc, p = people[acc] || {};
-            var set = !!(p.role && M.ROLES.indexOf(p.role) >= 0), role = set ? p.role : M.defaultRole(name);
+            var name = (lv && lv.names[acc]) || roster[acc] || acc, p = people[acc] || {}, rank = tm ? M._rankOf(tm, acc, name) : undefined;
+            var set = !!(p.role && M.ROLES.indexOf(p.role) >= 0), role = set ? p.role : M.defaultRole(name, rank);
             var months = wins.map(function (ym) { return frozen[ym] ? ((a[acc] && a[acc][ym] != null) ? a[acc][ym] : null) : undefined; });
             var gm = wins.map(function (ym) { return (g[acc] && g[acc][ym]) || 0; });
             var now = lv ? (lv.counts[acc] != null ? lv.counts[acc] : null) : undefined, last = now > 0 ? cur : '';
             for (var i = 0; !last && i < wins.length; i++) { if (months[i] > 0) { last = wins[i]; } }
-            return { acc: acc, name: name, role: role, roleSet: set, note: p.note || '', noteBy: p.by || '', noteAt: p.at || '',
-                months: months, gm: gm, cur: now, last: last, state: M.state(role, months) };
+            return { acc: acc, name: name, role: role, roleSet: set, rank: rank, onTeam: tm ? rank !== undefined : null,
+                note: p.note || '', noteBy: p.by || '', noteAt: p.at || '', months: months, gm: gm, cur: now, last: last, state: M.state(role, months) };
         });
         var key = function (r) { return r.name.replace(/^isd\s+/i, '').toLowerCase(); };
         return rows.sort(function (x, y) {
@@ -22648,13 +22775,14 @@ JiTA.leadduty.members = {
         return attempt();
     },
 
-    // A member's role and note, kept in MEMBERS_KEY: only a role other than the default is stored, an empty note deletes
-    // it, and an entry with nothing left goes. Resolve the mutate result; a real change republishes the page. Leads only.
-    setRole: function (acc, role, name) {
+    // A member's role and note, kept in MEMBERS_KEY: only a role other than the default (from their name and their rank on
+    // the team page) is stored, so picking the page's rank follows the page again; an empty note deletes it, and an entry
+    // with nothing left goes. Resolve the mutate result; a real change republishes the page. Leads only.
+    setRole: function (acc, role, name, rank) {
         var L = JiTA.leadduty, M = L.members;
         if (!L.isLead()) { return Promise.reject(M._notLead()); }
         if (M.ROLES.indexOf(role) < 0) { return Promise.reject(new Error('Unknown role: ' + role)); }
-        var want = role === M.defaultRole(name) ? '' : role;
+        var want = role === M.defaultRole(name, rank) ? '' : role;
         return M._person(acc, function (e) {
             if ((e.role || '') === want) { return false; }
             if (want) { e.role = want; } else { delete e.role; }
@@ -22690,7 +22818,8 @@ JiTA.leadduty.members = {
     // Rewrite MEMBERS_PAGE from the ledger when its content changed, by report.publish's rules: the content is hashed (the
     // stamp is not), the hash and the publishing build are kept in MEMBERS_KEY (pub), and an older build never overwrites
     // a newer one. Coloured rows and numbers first; if Confluence refuses them (HTTP 400) the page is written plain, and
-    // stays plain. Resolves { written, skipped, version }; Leads only.
+    // stays plain. The roles take the team page's ranks, so a team page that cannot be read fails the publish rather than
+    // write every Senior as a Bug Hunter. Resolves { written, skipped, version }; Leads only.
     publish: function (force) {
         var L = JiTA.leadduty, M = L.members, page = String(L.MEMBERS_PAGE || '');
         if (!L.isLead()) { return Promise.resolve({ skipped: 'not a Lead' }); }
@@ -22704,11 +22833,11 @@ JiTA.leadduty.members = {
         var rerun = function () { if (M._pubAgain) { M._pubAgain = false; M._tap({ written: true }); } };
         var done = function (v) { M._pubBusy = false; M._last = { at: Date.now(), result: v }; rerun(); return v; };
         var fail = function (e) { M._pubBusy = false; M._last = { at: Date.now(), error: String(e && e.message || e) }; rerun(); throw e; };
-        return Promise.all([L.ledger.read(L.ACTIVITY_KEY), L.ledger.read(L.MEMBERS_KEY)]).then(function (r) {
+        return Promise.all([L.ledger.read(L.ACTIVITY_KEY), L.ledger.read(L.MEMBERS_KEY), M.team()]).then(function (r) {
             var act = r[0].value, mem = r[1].value, pub = (mem && mem.pub) || null;
             if (!act || !act.frozen || !Object.keys(act.frozen).length) { return { skipped: 'no month counted yet' }; }
             if (pub && pub.plain) { M._plain = true; }
-            var rows = M.model(act, mem, null, L._ym()), body = M._content(rows, act, !M._plain), hash = JiTA.util.hash(body);
+            var rows = M.model(act, mem, null, L._ym(), r[2]), body = M._content(rows, act, !M._plain), hash = JiTA.util.hash(body);
             if (!force && pub && pub.hash === hash) { return { skipped: 'unchanged' }; }
             if (pub && pub.v && JiTA.SCRIPT_VERSION && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, pub.v) < 0) {
                 return { skipped: 'this tab runs v' + JiTA.SCRIPT_VERSION + ' and the page was last published by v' + pub.v +
@@ -22764,11 +22893,13 @@ JiTA.leadduty.members = {
         });
         var late = wins.filter(function (ym) { return frozen[ym] && frozen[ym].late; });
         var gm = rows.some(function (r) { return r.gm.some(function (n) { return n > 0; }); });
+        var left = rows.some(function (r) { return r.state === 'left'; });
         return '<p>Every ISD member with what they actioned in each of the last ' + M.MONTHS + ' full months: bug reports attached, ' +
             'trashed or reassigned, plus defects created, as the ISD credits leaderboard counts Total Actioned. ECAID asks for <strong>' +
-            M.MIN_ACTIONED + ' a month</strong>. A Bug Hunter or Rookie under it last month is Below, with nothing in ' + M.INACTIVE_MONTHS +
-            ' months Inactive, and New when not in the group last month. Leads and Seniors are not judged by it. A month shown as - ' +
-            'is one before the member joined.</p>' +
+            M.MIN_ACTIONED + ' a month</strong>, of every member, Leads included. Under it last month is Below, with nothing in ' + M.INACTIVE_MONTHS +
+            ' months Inactive, and New when not in the group last month. A month shown as - is one before the member joined.' +
+            (L.TEAM_PAGE ? ' Roles are the ranks on the ECAID - Team Members page, unless a Lead set another.' : '') + '</p>' +
+            (left ? ('<p>Left: a member who left ECAID, though their account may still be active. Listed last, and not judged.</p>') : '') +
             (gm ? ('<p>* includes GM handoffs made the old way (the Team field set to EO - GameMasters), counted before ' +
                 R._txt(M.GM_SWITCH) + ', when Convert to Support took over.</p>') : '') +
             (late.length ? ('<p>Counted late: ' + late.map(function (ym) { return R._txt(M._mon(ym) + ' (on ' + String(frozen[ym].at).slice(0, 10) + ')'); }).join(', ') +
@@ -22780,7 +22911,8 @@ JiTA.leadduty.members = {
         var L = JiTA.leadduty, me = L.members._meName();
         return '<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant (v' + (JiTA.SCRIPT_VERSION || '?') +
             (me ? (' on ' + me + "'s tab") : '') + ') on ' + L.report._when(new Date().toISOString()) + ' UTC. Anything typed on this page by ' +
-            'hand is replaced on the next update - set roles and notes in the Members tab of Lead duties in Jira instead.</em></p>';
+            'hand is replaced on the next update: ranks come from the ECAID - Team Members page, and a Lead sets another role or a note in ' +
+            'the Members tab of Lead duties in Jira.</em></p>';
     },
 
     // The scheduler's part (leadduty.sched): record what the caches finished, then bring the page in step. Never crawls.
@@ -24445,8 +24577,9 @@ JiTA.changelog = {
     ENTRIES: [
         { v: '3.48.0', date: '2026-11-01', features: [
             'Lead duties has a Members tab, for Leads only: every ISD member with what they actioned in each of the last 6 full months and this month so far, counted as the ISD credits leaderboard counts Total Actioned.',
-            'ECAID asks for 40 actioned a month. A Bug Hunter\'s or Rookie\'s month under it is amber, and 0 is red. A dot says who meets it, who is below it, who has actioned nothing in 3 months and who is new. Leads and Seniors are not judged.',
-            'Each member has a role and a note that every Lead shares, in one list by role (Lead, Senior, Bug Hunter, Rookie), then by name. "Only below the minimum or inactive" leaves just those.',
+            'ECAID asks for 40 actioned a month of every member, Leads included. A month under it is amber, and 0 is red. A dot says who meets it, who is below it, who has actioned nothing in 3 months and who is new.',
+            'Roles come from the ECAID - Team Members page (Lead, Senior, Bug Hunter, Rookie), and a Lead can set another, or a note, that every Lead shares. One list by role, then name. "Only below the minimum or inactive" leaves just those.',
+            'Someone who left ECAID but whose account is still active can be set to Left ECAID: greyed out at the bottom of the tab, listed last on the page with a grey Left lozenge, and never judged. A ? marks anyone missing from the Team Members page.',
             'Each finished month is counted once for all Leads and kept in the Lead Ledger. A month nobody has counted yet is counted with the tab\'s Count button, a few minutes each.',
             'GM handoffs made before 21 Aug 2026, when Convert to Support took over, are counted the old way: the reports a member handed to the GameMasters team.',
             'The table is published to the ECAID Member Productivity (past 6 months) page in Confluence, coloured like the tab, and kept in step. The wiki review never assigns that page.'

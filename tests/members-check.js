@@ -1,17 +1,20 @@
 // members-check.js - the Lead duties Members tab (v3.48.0): every ISD member with what they actioned in each of the last 6
 // full months (the ISD credits leaderboard's Total Actioned, GM handoffs made the old way added before the switch) and this
-// month so far, against ECAID's 40 a month, with a role and a note every Lead shares, published to its own Confluence page.
-// Evals the real JiTA.conf, JiTA.leadduty, JiTA.leadduty.members and JiTA.leadduty.ui against a stubbed Confluence (an
-// in-memory property store and page), stubbed credits caches and counts, and a fake jQuery big enough for the tab. Time is
-// held at 1 Nov 2026, so the window (May to Oct 2026) and the GM switch (21 Aug 2026) stay where the checks expect them.
+// month so far, against ECAID's 40 a month (Leads too), with a role from the ECAID - Team Members page's ranks or one a Lead
+// set, Left ECAID for someone who left, and a note every Lead shares, published to its own Confluence page.
+// Evals the real JiTA.conf, JiTA.leadduty, JiTA.leadduty.apps (its text reader), JiTA.leadduty.members and JiTA.leadduty.ui
+// against a stubbed Confluence (an in-memory property store and pages), stubbed credits caches and counts, and a fake jQuery
+// big enough for the tab. Time is held at 1 Nov 2026, so the window (May to Oct 2026) and the GM switch (21 Aug 2026) stay
+// where the checks expect them.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cs = src.indexOf('JiTA.conf = {'), ce = src.indexOf('/* ---- ISD Lead duties', cs);
 const em = '\n    _noop: null\n};';
 const ls = src.indexOf('JiTA.leadduty = {'), le = src.indexOf(em, ls);
+const as = src.indexOf('JiTA.leadduty.apps = {'), ae = src.indexOf(em, as);
 const ms = src.indexOf('JiTA.leadduty.members = {'), me = src.indexOf(em, ms);
 const us = src.indexOf('JiTA.leadduty.ui = {'), ue = src.indexOf('\n};', src.indexOf('_injectCss: function ()', us)) + 3;
-if ([cs, ce, ls, le, ms, me, us].some((x) => x < 0)) { throw new Error('could not slice JiTA.conf / JiTA.leadduty / members / ui'); }
+if ([cs, ce, ls, le, as, ae, ms, me, us].some((x) => x < 0)) { throw new Error('could not slice JiTA.conf / JiTA.leadduty / apps / members / ui'); }
 const member = (head) => { const s = src.indexOf(head); if (s < 0) { throw new Error('could not slice ' + head); } return src.slice(s, src.indexOf('\n    },', s) + 7); };
 
 let fail = 0;
@@ -120,6 +123,7 @@ Object.assign(JiTA.util, eval('({' + member('    hash: function (str) {') + '})'
 JiTA.worker._verCmp = eval('(' + member('    _verCmp: function (a, b) {').replace(/^\s*_verCmp: /, '').replace(/,\s*$/, '') + ')');
 eval(src.slice(cs, ce));
 eval(src.slice(ls, le + em.length));
+eval(src.slice(as, ae + em.length));
 eval(src.slice(ms, me + em.length));
 eval(src.slice(us, ue));
 const L = JiTA.leadduty, M = L.members, U = L.ui;
@@ -139,8 +143,24 @@ JiTA.conf.saveProperty = (p, key, value, prop) => {
     props[key] = { id: key, key: key, value: clone(value), version: (prop ? prop.version : 0) + 1 };
     return Promise.resolve(clone(props[key]));
 };
-let pages = {}, pageWrites = [], refuseRich = false, failPage = null;
-JiTA.conf.getPage = (id) => Promise.resolve({ id: id, title: 'page ' + id, version: (pages[id] && pages[id].version) || 1, status: 'current' });
+// the ECAID - Team Members page, as Confluence stores it: a table of @mentions and their ranks
+const mention = (acc) => '<ac:link><ri:user ri:account-id="' + acc + '" ri:local-id="' + acc + '-l" /></ac:link>';
+const teamRow = (who, rank) => '<tr><td><p>' + who + ' </p></td><td><p>' + rank + '</p></td><td><p /></td><td><p>CET</p></td></tr>';
+const teamPage = (rows) => '<p>The team.</p><table data-layout="default" ac:local-id="t1"><colgroup><col style="width: 200px;" /><col /></colgroup><tbody>' +
+    '<tr><th><p><strong>Name</strong></p></th><th><p><strong>Rank</strong></p></th><th><p><strong>Notes</strong></p></th><th><p><strong>Timezone</strong></p></th></tr>' +
+    rows.join('') + '</tbody></table>';
+// everyone as they stand without it: the one Lead, the rest Bug Hunters
+const TEAM0 = teamPage([teamRow(mention('acc-me'), 'Lead'), teamRow(mention('acc-dist'), 'Bughunter'), teamRow(mention('acc-ast'), 'Bughunter'),
+    teamRow(mention('acc-byte'), 'Bughunter'), teamRow(mention('acc-new'), 'Bughunter')]);
+let pages = {}, pageWrites = [], refuseRich = false, failPage = null, teamBody = TEAM0, teamFail = null, teamReads = 0;
+JiTA.conf.getPage = (id, withBody) => {
+    if (id === L.TEAM_PAGE) {
+        teamReads++;
+        if (teamFail) { const e = teamFail; teamFail = null; return Promise.reject(e); }
+        return Promise.resolve({ id: id, title: 'ECAID - Team Members', version: 7, status: 'current', body: withBody ? teamBody : '' });
+    }
+    return Promise.resolve({ id: id, title: 'page ' + id, version: (pages[id] && pages[id].version) || 1, status: 'current' });
+};
 JiTA.conf.savePageBody = (page, html) => {
     if (failPage) { const e = failPage; failPage = null; return Promise.reject(e); }
     if (refuseRich && /data-highlight-colour|style="color/.test(html)) { return Promise.reject(Object.assign(new Error('HTTP 400'), { status: 400 })); }
@@ -189,7 +209,10 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...with nothing in each of the last 3 months is inactive', st('Bug Hunter', [0, 0, 0, 30]) === 'inactive' && st('Rookie', [0, 0, 0]) === 'inactive');
     ok('...a month before joining counts towards neither: new, and not inactive', st('Bug Hunter', [null, null]) === 'new' && st('Bug Hunter', [0, 0, null]) === 'below');
     ok('...last month not counted yet: no state', st('Bug Hunter', [undefined, 0, 0]) === '');
-    ok('Leads and Seniors are never judged by it', st('Lead', [0, 0, 0]) === '' && st('Senior', [3, 0, 0]) === '');
+    ok('Leads and Seniors are judged by it too', st('Lead', [0, 0, 0]) === 'inactive' && st('Senior', [3, 0, 0]) === 'below' && st('Lead', [40]) === 'meets' && st('Senior', [null]) === 'new');
+    ok('...but not someone who left ECAID, whatever they actioned: they are left', st(M.LEFT, [0, 0, 0]) === 'left' && st(M.LEFT, [55, 50, 47]) === 'left' && st(M.LEFT, [undefined]) === 'left');
+    ok('...and a role that is none of the five has no state', st('Overlord', [0, 0, 0]) === '');
+    ok('Left ECAID is the last role, after the Rookies', M.ROLES.indexOf(M.LEFT) === M.ROLES.length - 1 && M.ROLES.indexOf('Rookie') === M.ROLES.length - 2);
     const act0 = { frozen: { '2026-10': { at: 'x' }, '2026-09': { at: 'x' }, '2026-08': { at: 'x' } },
         a: { 'acc-dist': { '2026-10': 55, '2026-09': 50, '2026-08': 47 }, 'acc-ast': { '2026-10': 0, '2026-09': 0, '2026-08': 0 }, 'acc-me': { '2026-10': 12 }, 'acc-new': {} },
         g: { 'acc-dist': { '2026-08': 3 } },
@@ -207,7 +230,9 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...Last active the newest month with anything in it, this month first', byAcc['acc-dist'].last === '2026-11' && byAcc['acc-ast'].last === '' && byAcc['acc-me'].last === '2026-11');
     ok('...a role a Lead set, a note and who set it; the default otherwise', byAcc['acc-sen'].role === 'Senior' && byAcc['acc-sen'].roleSet && byAcc['acc-sen'].note === 'Health issues\nback in Jan' &&
         byAcc['acc-sen'].noteBy === 'solnichka' && byAcc['acc-dist'].role === 'Bug Hunter' && !byAcc['acc-dist'].roleSet && byAcc['acc-me'].role === 'Lead');
-    ok('...and the states: inactive, meets, new, and none for a Lead', byAcc['acc-ast'].state === 'inactive' && byAcc['acc-dist'].state === 'meets' && byAcc['acc-new'].state === 'new' && byAcc['acc-me'].state === '');
+    ok('...and the states: inactive, meets, new, and below for a Lead under 40', byAcc['acc-ast'].state === 'inactive' && byAcc['acc-dist'].state === 'meets' && byAcc['acc-new'].state === 'new' &&
+        byAcc['acc-me'].state === 'below', byAcc['acc-me'].state);
+    ok('...and without the team page nobody has a rank, nor a say on being on it', rows.every((r) => r.rank === undefined && r.onTeam === null));
     rows = M.model(act0, mem0, null, '2026-11');
     ok('without this month\'s count in this browser, its column says so (undefined), and the roster still lists everyone', rows.length === 5 && rows.every((r) => r.cur === undefined));
     ok('...nor is another month\'s count taken for this one', M.model(act0, mem0, live0, '2026-12').every((r) => r.cur === undefined));
@@ -221,6 +246,55 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...a stored role that is not one of the four is not taken', byS.a.role === 'Bug Hunter' && !byS.a.roleSet);
     ok('...someone only in this month\'s count is listed, and those it leaves out are not in the group this month (null)',
         !!byS.z && byS.z.cur === 1 && byS.b.cur === null && byS.c.cur === null, J([byS.z && byS.z.cur, byS.b.cur, byS.c.cur]));
+
+    // ================= the team page's ranks =================
+    ok('a rank stands for its role: Lead, Snr Bughunter a Senior, Bughunter a Bug Hunter, Rookie or Trainee a Rookie, Left or Former left ECAID',
+        M.rankRole('Lead') === 'Lead' && M.rankRole(' Snr Bughunter ') === 'Senior' && M.rankRole('Senior Bug Hunter') === 'Senior' && M.rankRole('Sr. Bughunter') === 'Senior' &&
+        M.rankRole('Bughunter') === 'Bug Hunter' && M.rankRole('Bug Hunter (Mentor)') === 'Bug Hunter' && M.rankRole('Rookie Bughunter') === 'Rookie' && M.rankRole('Trainee') === 'Rookie' &&
+        M.rankRole('Left') === M.LEFT && M.rankRole('Former Bughunter') === M.LEFT && M.rankRole('ECAID Coordinator') === 'Lead' && M.rankRole('Cadet') === 'Rookie');
+    ok('...and a rank that is none of them, or none at all, no role', M.rankRole('Mentor') === '' && M.rankRole('') === '' && M.rankRole(null) === '' && M.rankRole('Misleading') === '');
+    const TEAMX = '<table><tbody><tr><td><p>Timezones</p></td></tr><tr><th>Name</th><th>Timezone</th></tr><tr><td>' + mention('x-tz') + '</td><td>CET</td></tr></tbody></table>' +   // no Rank column
+        '<table><tbody>' +
+        '<tr><td colspan="3"><p>ECAID team</p></td></tr>' +                                                          // a title row above the header
+        '<tr><td><p><strong>Name</strong></p></td><td><p><strong>Notes</strong></p></td><td><p><strong>Rank:</strong></p></td></tr>' +   // a header of plain cells
+        '<tr><td><p>' + mention('x-lead1') + '</p></td><td><p /></td><td rowspan="2"><p>Lead</p></td></tr>' +            // a rank merged over two rows...
+        '<tr><td><p>' + mention('x-lead2') + '</p></td><td><p>Mentor</p></td></tr>' +
+        '<tr><td><p>' + mention('x-snr') + ' ' + mention('x-snr2') + '</p></td><td /><td><p>Snr&nbsp;Bughunter</p></td></tr>' +   // ...and no further; two in one cell, an empty cell
+        '<tr><td colspan="3"><p>Bughunters</p></td></tr>' +                                                              // a divider row
+        '<tr><td><p>ISD BH Typed&nbsp;Name</p></td><td><p>(Mentor)</p></td><td><p>Rookie</p></td></tr>' +               // a name typed, not @mentioned
+        '<tr><td><p>Typed Name</p></td><td /><td><p>Lead</p></td></tr>' +                                                 // ...and again: the first row wins
+        '<tr><td><p /></td><td /><td><p>Bughunter</p></td></tr>' +                                                         // nobody in the Name cell
+        '<tr><td><p>' + mention('x-lead1') + '</p></td><td /><td><p>Bughunter</p></td></tr>' +                           // listed again: the first row wins
+        '<tr><td><p>' + mention('x-odd') + '</p></td><td /><td><p>Mentor</p></td></tr>' +                                 // a rank that is no role
+        '</tbody></table>';
+    const tx = M._parseTeam(TEAMX);
+    ok('the team page: the members of each table with a Name and a Rank column, by their @mention, with the role their rank stands for',
+        J(tx.ranks) === J({ 'x-lead1': 'Lead', 'x-lead2': 'Lead', 'x-snr': 'Senior', 'x-snr2': 'Senior', 'x-odd': '' }), J(tx.ranks));
+    ok('...a name typed instead of @mentioned kept by its name, without "ISD" and "BH"', J(tx.names) === J({ 'typed name': 'Rookie' }), J(tx.names));
+    ok('...a table with no Rank column, the rows above the header and a divider row left out, and each member counted once', tx.tables === 1 && tx.n === 6 && !('x-tz' in tx.ranks), J(tx));
+    const tz = M._parseTeam('<table><tbody><tr><td>Name</td><td>Rank</td></tr><tr><td>' + mention('y-a') + '</td><td>Snr Bughunter</td></tr></tbody></table>' +
+        '<table><tbody><tr><th>Name</th><th>Rank</th></tr><tr><td>' + mention('y-b') + '</td><td>Rookie</td></tr><tr><td>' + mention('y-a') + '</td><td>Rookie</td></tr></tbody></table>');
+    ok('...every such table read, the first one naming someone winning', J(tz.ranks) === J({ 'y-a': 'Senior', 'y-b': 'Rookie' }) && tz.tables === 2, J(tz));
+    ok('...and a page with no such table has nobody', M._parseTeam('<p>Name</p><p>Rank</p>').n === 0 && M._parseTeam('').tables === 0 && M._parseTeam(null).n === 0 &&
+        M._parseTeam('<table><tbody><tr><th>Who</th><th>Rank</th></tr><tr><td>' + mention('y-c') + '</td><td>Lead</td></tr></tbody></table>').tables === 0);
+    ok('the default role takes the team page\'s rank, a Lead\'s name staying a Lead whatever it says, and no rank meaning Bug Hunter',
+        M.defaultRole('ISD Distillery', 'Senior') === 'Senior' && M.defaultRole('ISD BH Schogol', 'Bug Hunter') === 'Lead' && M.defaultRole('ISD Distillery', '') === 'Bug Hunter' &&
+        M.defaultRole('ISD Distillery', M.LEFT) === M.LEFT);
+    const teamM = { ranks: { 'acc-dist': 'Senior', 'acc-me': 'Bug Hunter', 'acc-sen': 'Rookie', 'acc-new': '' }, names: { astaris: M.LEFT }, n: 5, tables: 1 };
+    rows = M.model(act0, mem0, live0, '2026-11', teamM);
+    const byT = {};
+    rows.forEach((r) => { byT[r.acc] = r; });
+    ok('with the team page, a member\'s rank is their role, and not one a Lead set', byT['acc-dist'].role === 'Senior' && !byT['acc-dist'].roleSet && byT['acc-dist'].rank === 'Senior' && byT['acc-dist'].onTeam === true);
+    ok('...a role a Lead set wins over it, and a Lead\'s name stays a Lead', byT['acc-sen'].role === 'Senior' && byT['acc-sen'].roleSet && byT['acc-sen'].rank === 'Rookie' && byT['acc-me'].role === 'Lead');
+    ok('...a name typed on the page found by its name: left ECAID, listed last', byT['acc-ast'].role === M.LEFT && byT['acc-ast'].state === 'left' && byT['acc-ast'].onTeam === true &&
+        rows[rows.length - 1].acc === 'acc-ast', J(rows.map((r) => r.role + ':' + r.name)));
+    ok('...their dot saying the page says so', M.stateText(byT['acc-ast'], M.window('2026-11')) === 'Left ECAID, so not judged by the minimum: the ECAID - Team Members page says so',
+        M.stateText(byT['acc-ast'], M.window('2026-11')));
+    ok('...a rank that is no role still on the page, and the states judging Seniors too', byT['acc-new'].rank === '' && byT['acc-new'].onTeam === true && byT['acc-dist'].state === 'meets');
+    rows = M.model({ frozen: {}, roster: { at: 'x', n: { q: 'ISD Constructor', w: 'ISD Nobody' } } }, null, null, '2026-11', { ranks: {}, names: { somebody: 'Senior' }, n: 1, tables: 1 });
+    ok('...and someone it does not list is not on it, even with a name every object has a property of', rows.every((r) => r.onTeam === false && r.rank === undefined && r.role === 'Bug Hunter'),
+        J(rows.map((r) => [r.name, r.onTeam, String(r.role)])));
+    ok('...a team page that could not be read is no team page', M.model(act0, mem0, live0, '2026-11', { error: 'HTTP 404' }).every((r) => r.onTeam === null));
 
     // ================= recording what the caches give, without a crawl =================
     caches['2026-10'] = result('2026-10', '2026-11-01T00:20:00.000Z', PEOPLE(23));
@@ -385,7 +459,7 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     let mv = props[L.MEMBERS_KEY].value;
     ok('another role is stored, with who set it and when', w.written && mv.m['acc-dist'].role === 'Senior' && mv.m['acc-dist'].by === 'schogol' && /^\d{4}-\d\d-\d\d$/.test(mv.m['acc-dist'].at), J(mv));
     await later();
-    ok('...and brings the page in step', pubs === 1 && pageWrites.length === 1 && pageWrites[0].id === L.MEMBERS_PAGE && /<td>Senior<\/td><td>ISD Distillery<\/td>/.test(pageWrites[0].html),
+    ok('...and brings the page in step', pubs === 1 && pageWrites.length === 1 && pageWrites[0].id === L.MEMBERS_PAGE && /<td[^>]*>Senior<\/td><td[^>]*>ISD Distillery<\/td>/.test(pageWrites[0].html),
         pubs + ' publishes, ' + pageWrites.length + ' writes');
     w = await M.setNote('acc-dist', '  Ask   for update?  \n\n\n\nOn leave  ');
     mv = props[L.MEMBERS_KEY].value;
@@ -416,10 +490,45 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await M.count().catch((e) => refused.push(e.message));
     await M.setRole('acc-ast', 'Senior', 'ISD Astaris').catch((e) => refused.push(e.message));
     await M.setNote('acc-ast', 'x').catch((e) => refused.push(e.message));
+    teamReads = 0;
+    await M.team(true).catch((e) => refused.push(e.message));
     const pr = await M.publish(true), tk = await M.tick();
-    ok('a non-Lead can read, count, change and publish nothing', refused.length === 4 && refused.every((m) => /Leads only/.test(m)) && pr.skipped === 'not a Lead' && tk === null, J(refused));
+    ok('a non-Lead can read, count, change and publish nothing, nor read the team page', refused.length === 5 && refused.every((m) => /Leads only/.test(m)) && pr.skipped === 'not a Lead' &&
+        tk === null && teamReads === 0, J(refused));
     gm.leadDutyMe = { accountId: 'acc-me', displayName: 'ISD BH Schogol', handle: 'schogol', isLead: true };
     L._me = null;
+
+    // ================= reading the team page =================
+    await later();
+    M._team = null; teamReads = 0;
+    const t1 = M.team(), t2 = M.team();
+    ok('the team page is read once for two asks at once', t1 === t2);
+    let tv = await t1;
+    ok('...its ranks taken, with its version', tv.ranks['acc-dist'] === 'Bug Hunter' && tv.ranks['acc-me'] === 'Lead' && tv.n === 5 && tv.version === 7 && teamReads === 1, J(tv));
+    await M.team();
+    ok('...and not read again for TEAM_TTL_MS', teamReads === 1, String(teamReads));
+    M._team.at = NOW - M.TEAM_TTL_MS - 1;
+    await M.team();
+    ok('...but after it', teamReads === 2, String(teamReads));
+    await M.team(true);
+    ok('...or when asked to', teamReads === 3, String(teamReads));
+    teamFail = Object.assign(new Error('HTTP 404'), { status: 404 });
+    M._team = null; err = null;
+    await M.team().catch((e) => { err = e; });
+    ok('a team page that cannot be read rejects, saying which page and why', err && err.message === 'Could not read the ECAID - Team Members page (HTTP 404)', err && err.message);
+    tv = await M.team();
+    ok('...and is read again on the next ask, not remembered as failed', tv && tv.n === 5 && teamReads === 5, String(teamReads));
+    teamBody = '<p>Name, Rank</p>'; M._team = null; err = null;
+    await M.team().catch((e) => { err = e; });
+    ok('a team page with no table with a Name and a Rank column rejects, saying so', err && err.message === 'The ECAID - Team Members page has no table with a Name and a Rank column', err && err.message);
+    teamBody = teamPage([]); M._team = null; err = null;
+    await M.team().catch((e) => { err = e; });
+    ok('...and one that names nobody', err && err.message === 'The ECAID - Team Members page names nobody in its Name column' && M._team === null, err && err.message);
+    teamBody = TEAM0;
+    const teamId = L.TEAM_PAGE;
+    L.TEAM_PAGE = ''; teamReads = 0;
+    ok('with no team page set there are no ranks, and nothing is read', (await M.team(true)) === null && teamReads === 0);
+    L.TEAM_PAGE = teamId;
 
     // ================= the page =================
     await M.setNote('acc-ast', 'Ask for <update>?\nTwice & more');
@@ -434,8 +543,8 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...rows by rank: the Lead first, then the Bug Hunters by name', html.indexOf('ISD BH Schogol') < html.indexOf('ISD Astaris') && html.indexOf('ISD Astaris') < html.indexOf('ISD Byteghost') &&
         html.indexOf('ISD Byteghost') < html.indexOf('ISD Distillery'));
     ok('...a note escaped, its lines kept', html.indexOf('Ask for &lt;update&gt;?<br />Twice &amp; more') >= 0);
-    ok('...a Bug Hunter\'s month below 40 coloured, 0 in red, a GM month starred; a 40 and a Lead\'s plain', /<span style="color: #974f0c;">34\*<\/span>/.test(html) && /<span style="color: #ae2a19;">0<\/span>/.test(html) &&
-        /<td>12<\/td>/.test(html) && !/<span[^>]*>12<\/span>/.test(html) && /<td[^>]*>40<\/td>/.test(html) && !/<span[^>]*>40<\/span>/.test(html));
+    ok('...a month below 40 coloured, a Lead\'s too, 0 in red, a GM month starred; a 40 plain', /<span style="color: #974f0c;">34\*<\/span>/.test(html) && /<span style="color: #ae2a19;">0<\/span>/.test(html) &&
+        /<span style="color: #974f0c;">12<\/span>/.test(html) && /<td[^>]*>40<\/td>/.test(html) && !/<span[^>]*>40<\/span>/.test(html));
     ok('...a month before joining shown as -', /<td[^>]*>-<\/td>/.test(html));
     const oddName = M._content([{ role: 'Bug Hunter', name: 'ISD <b>Bold</b> & Co', note: '', months: [1, 2, 3, 4, 5, 6], gm: [0, 0, 0, 0, 0, 0], last: '', state: '' }], { frozen: {} }, true);
     ok('...a name escaped too', oddName.indexOf('ISD &lt;b&gt;Bold&lt;/b&gt; &amp; Co') >= 0 && oddName.indexOf('<b>Bold') < 0);
@@ -504,6 +613,32 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     pageWrites = [];
     const tk2 = await M.tick();
     ok('the scheduler\'s tick brings the page in step with a change made elsewhere', tk2 && tk2.written && pageWrites.length === 1 && /four times/.test(pageWrites[0].html), J(tk2));
+    // the team page's ranks on the page, someone who left, and a team page that cannot be read
+    teamBody = teamPage([teamRow(mention('acc-me'), 'Lead'), teamRow(mention('acc-dist'), 'Snr Bughunter'), teamRow(mention('acc-ast'), 'Bughunter')]);
+    M._team = null;
+    await later();
+    pageWrites = [];
+    w = await M.setRole('acc-byte', M.LEFT, 'ISD Byteghost');
+    await later();
+    html = pageWrites.length ? pageWrites[pageWrites.length - 1].html : '';
+    const trs = html.split('<tr>').slice(2), lastTr = trs[trs.length - 1] || '';
+    ok('the page takes each member\'s role from the team page\'s rank', w.written && pageWrites.length === 1 && /<td[^>]*>Senior<\/td><td[^>]*>ISD Distillery<\/td>/.test(html), html.slice(0, 300));
+    ok('...someone who left listed last, with a grey Left lozenge', /ISD Byteghost/.test(lastTr) && /<td>Left ECAID<\/td>/.test(lastTr) &&
+        /<ac:parameter ac:name="colour">Grey<\/ac:parameter><ac:parameter ac:name="title">Left<\/ac:parameter>/.test(lastTr), lastTr);
+    ok('...neither tinted nor coloured, their months of 0 notwithstanding', !/data-highlight-colour|style="color/.test(lastTr) && /<td>0<\/td>/.test(lastTr), lastTr);
+    ok('...the legend saying what Left means, and where the roles come from', /<p>Left: a member who left ECAID, though their account may still be active\. Listed last, and not judged\.<\/p>/.test(html) &&
+        /Roles are the ranks on the ECAID - Team Members page, unless a Lead set another\./.test(html) && /ECAID asks for <strong>40 a month<\/strong>, of every member, Leads included\./.test(html));
+    ok('...which says nothing of Left while nobody has left', !/<p>Left: /.test(M._content(M.model(props[L.ACTIVITY_KEY].value, { m: {} }, null, '2026-11'), props[L.ACTIVITY_KEY].value, true)));
+    teamFail = Object.assign(new Error('HTTP 503'), { status: 503 });
+    M._team = null; err = null; pageWrites = [];
+    props[L.MEMBERS_KEY].value.m['acc-dist'].note = 'Set in another browser, five times';
+    await M.publish(false).catch((e) => { err = e; });
+    ok('a team page that cannot be read fails the publish rather than write the roles without it, and the tab says so', err && err.message === 'Could not read the ECAID - Team Members page (HTTP 503)' &&
+        pageWrites.length === 0 && /publishing the members page FAILED .*Could not read the ECAID - Team Members page/.test(M.lastLine()), M.lastLine());
+    teamBody = TEAM0; M._team = null;
+    await M.setRole('acc-byte', 'Bug Hunter', 'ISD Byteghost', 'Bug Hunter');
+    await later();
+    ok('back to the page\'s rank, the role set goes', !props[L.MEMBERS_KEY].value.m['acc-byte'], J(props[L.MEMBERS_KEY].value.m['acc-byte']));
 
     // ================= the wiki pool and the scheduler =================
     const pool = L.pool._applyExclusions({ rootId: 'root', pages: [{ id: '199754526', parentId: 'root' }, { id: 'child', parentId: '199754526' }, { id: 'other', parentId: 'root' }],
@@ -530,7 +665,8 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
         /34 actioned in Aug 2026, of the 40 a month ECAID asks for\nincl\. 4 handed to the GMs the old way/.test(cell(ast, 2).attrs.title) && cell(rowFor('acc-byte'), 0).hasClass('zero'), cell(ast, 2).attrs.title);
     ok('...a 40 is not', cell(ast, 1).text() === '40' && !cell(ast, 1).hasClass('low'), cell(ast, 1).text());
     const lead = rowFor('acc-me');
-    ok('...a Lead\'s is not, and has no state', !cell(lead, 0).hasClass('low') && !cell(lead, 0).hasClass('zero') && lead.kids[0].hasClass('none'));
+    ok('...a Lead\'s too, Leads being judged by it as well', cell(lead, 0).hasClass('low') && lead.kids[0].hasClass('below') &&
+        /^12 actioned in Oct 2026, of the 40 a month ECAID asks for/.test(cell(lead, 0).attrs.title), cell(lead, 0).attrs.title);
     ok('...this month so far, saying how many to go', cell(ast, 6).text() === '4' && /4 so far this month, 36 to go for the 40/.test(cell(ast, 6).attrs.title), cell(ast, 6).attrs.title);
     ok('...a month before joining shown as - with its reason', cell(rowFor('acc-new'), 0).text() === '-' && /Not in the group yet/.test(cell(rowFor('acc-new'), 0).attrs.title));
     ok('...the state dot saying why', rowFor('acc-byte').kids[0].hasClass('inactive') && /^Inactive: nothing actioned in Aug 2026 to Oct 2026/.test(rowFor('acc-byte').kids[0].attrs.title), rowFor('acc-byte').kids[0].attrs.title);
@@ -538,7 +674,7 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     // the filter
     const bar = body.kids.filter((k) => k.hasClass('ld-mbar'))[0], box = bar.kids.filter((k) => k.hasClass('ld-mfilter'))[0].kids[0];
     box.checked = true; box.fire('change');
-    ok('"Only below the minimum or inactive" leaves just those: the one below it and the one inactive', J(rowsOf().map((r) => r.attrs['data-key'])) === J(['acc-ast', 'acc-byte']) &&
+    ok('"Only below the minimum or inactive" leaves just those: the two below it, a Lead among them, and the one inactive', J(rowsOf().map((r) => r.attrs['data-key'])) === J(['acc-me', 'acc-ast', 'acc-byte']) &&
         rowFor('acc-ast').hasClass('ld-m-below') && rowFor('acc-byte').hasClass('ld-m-inactive'), J(rowsOf().map((r) => r.cls.join('.'))));
     box.checked = false; box.fire('change');
     // a role
@@ -587,6 +723,61 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await settle(60);
     const prog = all(body).filter((k) => k.id === 'ld-mprog')[0];
     ok('a Count that stops says why on the bar', /^Counting stopped: worker said no/.test(U._memProg) && prog && /^Counting stopped: worker said no/.test(prog.text()), U._memProg);
+
+    // the team page in the tab: its ranks, someone who left, someone missing from it
+    await later();
+    teamBody = teamPage([teamRow(mention('acc-me'), 'Lead'), teamRow(mention('acc-dist'), 'Snr Bughunter'), teamRow(mention('acc-ast'), 'Bughunter')]);
+    props[L.MEMBERS_KEY].value.m['acc-byte'] = { role: M.LEFT, by: 'lookuptable', at: '2026-11-01' };
+    teamReads = 0;
+    U._loadMembers(true);   // a forced load reads the team page again
+    await settle();
+    const roleOf = (r) => r.kids.filter((k) => k.hasClass('ld-mrole'))[0], picked = (r) => roleOf(r).kids.filter((o) => o.props.selected)[0].attrs.value;
+    const hintOf = (r) => r.kids.filter((k) => k.hasClass('ld-mhint'))[0], byteRow = rowFor('acc-byte'), newRow = rowFor('acc-new');
+    ok('the tab reads the team page again when forced, and takes its ranks', teamReads === 1 && picked(rowFor('acc-dist')) === 'Senior', teamReads + ' reads, ' + picked(rowFor('acc-dist')));
+    ok('the header keeps a place for the ?, so the columns line up', body.kids.filter((k) => k.hasClass('ld-mhead'))[0].kids[1].hasClass('ld-mhint'));
+    ok('the CSS greys out someone who left, rings their dot, and colours the ?', /'\.jita-leadduty-view \.ld-m-left \{ opacity: \.5; \}'/.test(src) &&
+        /\.ld-mdot\.left \{ box-shadow: inset 0 0 0 1px #7a8694; \}/.test(src) && /\.ld-mhint \{[^}]*color: #f0b429;/.test(src));
+    ok('someone who left is greyed out and listed last, their dot saying why', rowsOf()[rowsOf().length - 1] === byteRow && byteRow.hasClass('ld-m-left') && byteRow.kids[0].hasClass('left') &&
+        byteRow.kids[0].attrs.title === 'Left ECAID, so not judged by the minimum', byteRow.kids[0].attrs.title);
+    ok('...their months of 0 not marked', cell(byteRow, 0).text() === '0' && !cell(byteRow, 0).hasClass('zero') && !cell(byteRow, 0).hasClass('low') && !/of the 40 a month/.test(cell(byteRow, 0).attrs.title),
+        cell(byteRow, 0).cls.join('.'));
+    ok('someone missing from the team page gets a ? saying so; someone who left, or is on it, none', hintOf(newRow).text() === '?' &&
+        hintOf(newRow).attrs.title === 'Not on the ECAID - Team Members page. If they left ECAID, set their role to Left ECAID.' && hintOf(byteRow).text() === '' && hintOf(rowFor('acc-dist')).text() === '',
+        hintOf(newRow).text() + ' / ' + hintOf(byteRow).text());
+    ok('...and the status line counts both, leaving those who left out of the members', /^4 members · .* · 1 left ECAID · 1 not on the team page · /.test(status.textContent), status.textContent);
+    ok('a role a Lead set over the page\'s rank says what the page says', roleOf(rowFor('acc-ast')).attrs.title === 'Set by a Lead. The ECAID - Team Members page says Bug Hunter: pick that to follow the page again',
+        roleOf(rowFor('acc-ast')).attrs.title);
+    ok('...one from the page says so', /^From the ECAID - Team Members page: change it/.test(roleOf(rowFor('acc-dist')).attrs.title), roleOf(rowFor('acc-dist')).attrs.title);
+    ok('...and Left ECAID is one to pick', roleOf(rowFor('acc-ast')).kids.map((o) => o.attrs.value).join(',') === 'Lead,Senior,Bug Hunter,Rookie,Left ECAID');
+    const astSel = roleOf(rowFor('acc-ast'));
+    astSel.value = 'Bug Hunter'; astSel.fire('change');
+    await settle();
+    ok('picking the page\'s rank follows the page again: the role set goes, the note stays', !('role' in props[L.MEMBERS_KEY].value.m['acc-ast']) && !!props[L.MEMBERS_KEY].value.m['acc-ast'].note,
+        J(props[L.MEMBERS_KEY].value.m['acc-ast']));
+    const distSel = () => roleOf(rowFor('acc-dist'));
+    distSel().value = 'Rookie'; distSel().fire('change');
+    await settle();
+    const wasSet = (props[L.MEMBERS_KEY].value.m['acc-dist'] || {}).role;
+    distSel().value = 'Senior'; distSel().fire('change');
+    await settle();
+    ok('...a rank that is not the default by name too', wasSet === 'Rookie' && !!props[L.MEMBERS_KEY].value.m['acc-dist'] && !('role' in props[L.MEMBERS_KEY].value.m['acc-dist']) &&
+        picked(rowFor('acc-dist')) === 'Senior', J(props[L.MEMBERS_KEY].value.m['acc-dist']));
+    answer = 'Promoted in October';
+    rowFor('acc-dist').kids.filter((k) => k.hasClass('ld-mnote'))[0].fire('click');
+    await settle();
+    ok('a note saved draws its row again with the team page\'s rank', props[L.MEMBERS_KEY].value.m['acc-dist'].note === 'Promoted in October' && picked(rowFor('acc-dist')) === 'Senior',
+        picked(rowFor('acc-dist')));
+    const sel2 = roleOf(rowFor('acc-new'));
+    sel2.value = 'Left ECAID'; sel2.fire('change');
+    await settle();
+    ok('someone set to Left ECAID in the tab is greyed out and last at once, and their ? goes', props[L.MEMBERS_KEY].value.m['acc-new'].role === M.LEFT && rowFor('acc-new').hasClass('ld-m-left') &&
+        hintOf(rowFor('acc-new')).text() === '' && rowsOf()[rowsOf().length - 1].attrs['data-key'] === 'acc-new', J(rowsOf().map((r) => r.attrs['data-key'])));
+    // a team page that cannot be read: no ranks, nobody marked, and the status line says why
+    teamFail = Object.assign(new Error('HTTP 503'), { status: 503 });
+    U._loadMembers(true);
+    await settle();
+    ok('a team page that cannot be read leaves its ranks out and marks nobody, saying why', rowsOf().every((r) => hintOf(r).text() === '') && picked(rowFor('acc-dist')) === 'Bug Hunter' &&
+        /Could not read the ECAID - Team Members page \(HTTP 503\), so its ranks are not used/.test(status.textContent), status.textContent);
 
     Date.now = realNow;
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'members checks passed.'));
