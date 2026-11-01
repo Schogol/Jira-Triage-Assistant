@@ -320,6 +320,15 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...and someone it does not list is not on it, even with a name every object has a property of', rows.every((r) => r.onTeam === false && r.rank === undefined && r.role === 'Bug Hunter'),
         J(rows.map((r) => [r.name, r.onTeam, String(r.role)])));
     ok('...a team page that could not be read is no team page', M.model(act0, mem0, live0, '2026-11', { error: 'HTTP 404' }).every((r) => r.onTeam === null));
+    // a month counted late lists the group as it was when counted: someone who joined since has a 0 in it
+    const actL = { frozen: { '2026-10': { at: 'x' }, '2026-09': { at: 'x' }, '2026-08': { at: 'y', late: true }, '2026-07': { at: 'y', late: true }, '2026-06': { at: 'z' } },
+        a: { j: { '2026-10': 0, '2026-08': 0, '2026-07': 3, '2026-06': 0 }, k: { '2026-10': 5, '2026-09': 2, '2026-08': 0, '2026-07': 0 } },
+        roster: { at: 'x', n: { j: 'ISD Joiner', k: 'ISD Keeper' } } };
+    const byL = {};
+    M.model(actL, null, null, '2026-11').forEach((r) => { byL[r.acc] = r; });
+    ok('a 0 in a month counted late, for someone a newer month shows was not in the group yet, is a month before they joined', J(byL.j.months.slice(0, 3)) === J([0, null, null]), J(byL.j.months));
+    ok('...while actions in a late month, a 0 counted on time, and a late 0 with no newer month out of the group all stay',
+        byL.j.months[3] === 3 && byL.j.months[4] === 0 && J(byL.k.months.slice(0, 5)) === J([5, 2, 0, 0, null]), J([byL.j.months, byL.k.months]));
 
     // ================= recording what the caches give, without a crawl =================
     caches['2026-10'] = result('2026-10', '2026-11-01T00:20:00.000Z', PEOPLE(23));
@@ -675,7 +684,8 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...the State as a lozenge, the row tinted by it', /<ac:parameter ac:name="colour">Red<\/ac:parameter><ac:parameter ac:name="title">Inactive<\/ac:parameter>/.test(html) &&
         /<td class="highlight-#ffebe6" data-highlight-colour="#ffebe6">ISD Byteghost/.test(html.replace(/<td[^>]*>Bug Hunter<\/td>/g, '')) || /data-highlight-colour="#ffebe6"/.test(html), html.slice(0, 200));
     ok('...the minimum, the GM rule and the stamp said', /ECAID asks for <strong>40 a month<\/strong>/.test(html) && /\* includes GM handoffs made the old way/.test(html) && /<em>Generated from the shared lead-duty ledger/.test(html));
-    ok('...and the months counted late footnoted', /Counted late: Aug 2026 \(on 2026-11-01\), Jul 2026 \(on 2026-11-01\)/.test(html), (html.match(/Counted late:[^<]*/) || [''])[0]);
+    ok('...and the months counted late footnoted', /Counted late: Aug 2026 \(on 2026-11-01\), Jul 2026 \(on 2026-11-01\)/.test(html) &&
+        /someone who joined since shows 0 for it, or - when a newer month shows they had not joined yet\./.test(html), (html.match(/Counted late:[^<]*/) || [''])[0]);
     res = await M.publish(false);
     ok('nothing changed: nothing written', res.skipped === 'unchanged' && pageWrites.length === 1, J(res));
     props[L.MEMBERS_KEY].value.pub.v = '9.0.0';

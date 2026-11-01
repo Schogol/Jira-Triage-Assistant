@@ -22737,6 +22737,11 @@ JiTA.leadduty.members = {
             var name = (lv && lv.names[acc]) || roster[acc] || acc, p = people[acc] || {}, rank = tm ? M._rankOf(tm, acc, name) : undefined;
             var set = !!(p.role && M.ROLES.indexOf(p.role) >= 0), role = set ? p.role : M.defaultRole(name, rank);
             var months = wins.map(function (ym) { return frozen[ym] ? ((a[acc] && a[acc][ym] != null) ? a[acc][ym] : null) : undefined; });
+            // A month counted late lists the group as it was when counted, not as it was in that month: its 0 for someone a
+            // newer month shows was not in the group yet is someone who had not joined then either.
+            for (var j = 0, out = false; j < months.length; j++) {
+                if (months[j] === null) { out = true; } else if (out && months[j] === 0 && frozen[wins[j]].late) { months[j] = null; }
+            }
             var gm = wins.map(function (ym) { return (g[acc] && g[acc][ym]) || 0; });
             var now = lv ? (lv.counts[acc] != null ? lv.counts[acc] : null) : undefined, last = now > 0 ? cur : '';
             for (var i = 0; !last && i < wins.length; i++) { if (months[i] > 0) { last = wins[i]; } }
@@ -23048,7 +23053,8 @@ JiTA.leadduty.members = {
             (gm ? ('<p>* includes GM handoffs made the old way (the Team field set to EO - GameMasters), counted before ' +
                 R._txt(M.GM_SWITCH) + ', when Convert to Support took over.</p>') : '') +
             (late.length ? ('<p>Counted late: ' + late.map(function (ym) { return R._txt(M._mon(ym) + ' (on ' + String(frozen[ym].at).slice(0, 10) + ')'); }).join(', ') +
-                '. A month counted late lists the group as it was when counted, so someone who joined since shows 0 for it.</p>') : '') +
+                '. A month counted late lists the group as it was when counted: someone who joined since shows 0 for it, or - when a ' +
+                'newer month shows they had not joined yet.</p>') : '') +
             R._table(['Role', 'Name', 'Notes'].concat(wins.map(M._mon)).concat(['Last active', 'State']), body, tints);
     },
     // The line above the content, outside the hash (it names the time, which changes on every look).

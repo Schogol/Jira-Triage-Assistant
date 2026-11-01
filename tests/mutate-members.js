@@ -180,6 +180,11 @@ const muts = [
     [MB, 'another month\'s count is taken for this one', 'var lv = (live && live.ym === cur) ? M.fromCredits(live) : null', 'var lv = live ? M.fromCredits(live) : null'],
     [MB, 'Last active ignores this month', "last = now > 0 ? cur : '';", "last = '';"],
     [MB, 'the roster is not listed', '        Object.keys(roster).forEach(function (k) { accs[k] = true; });\n', '', MODEL],
+    [MB, 'a late 0 before joining shows as 0', ' else if (out && months[j] === 0 && frozen[wins[j]].late) { months[j] = null; }', ''],
+    [MB, 'a 0 counted on time before a month out shows as -', 'out && months[j] === 0 && frozen[wins[j]].late', 'out && months[j] === 0'],
+    [MB, 'actions in a late month before a month out show as -', 'out && months[j] === 0 && frozen[wins[j]].late', 'out && frozen[wins[j]].late'],
+    [MB, 'a late 0 shows as - with no newer month out', 'out && months[j] === 0 && frozen[wins[j]].late', 'months[j] === 0 && frozen[wins[j]].late'],
+    [MB, 'a month out is looked for oldest first', 'for (var j = 0, out = false; j < months.length; j++) {', 'for (var j = months.length - 1, out = false; j >= 0; j--) {'],
     [MB, 'someone only in this month\'s count is not listed', '        if (lv) { Object.keys(lv.names).forEach(function (k) { accs[k] = true; }); }\n', '', MODEL],
     // ---- recording ----
     [MB, 'a month recorded is recorded again', 'if (!f || v.frozen[ym]) { return; }', 'if (!f) { return; }'],
