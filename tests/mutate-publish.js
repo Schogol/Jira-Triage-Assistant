@@ -20,7 +20,12 @@ const muts = [
     // ---- the QC back-off ----
     [S, 'a failing QC sample reruns the refresh every poll', '            if (!ready && !S._elapsed(S.QC_FAIL_KEY, S.FAIL_MS)) { return; }\n', ''],
     [S, 'a QC failure is not remembered', '                gmSet(S.QC_FAIL_KEY, Date.now());\n', ''],
-    [S, 'a drawn sample keeps the failure', '                gmSet(S.QC_FAIL_KEY, 0);\n', '']
+    [S, 'a drawn sample keeps the failure', '                gmSet(S.QC_FAIL_KEY, 0);\n', ''],
+    // ---- the Members page, after the ledger page ----
+    [S, 'the Members page is never brought in step', '            return Promise.resolve().then(function () { return L.members.tick(); }).catch(function () { /* cosmetic - never fails the tick */ });\n', ''],
+    [S, 'a failing Members tick fails the whole tick', 'return L.members.tick(); }).catch(function () { /* cosmetic - never fails the tick */ });', 'return L.members.tick(); });'],
+    [S, 'a Members tick that throws fails the whole tick', 'return Promise.resolve().then(function () { return L.members.tick(); }).catch(', 'return L.members.tick().catch('],
+    [S, 'the tick is done before the Members page is', '            return Promise.resolve().then(function () { return L.members.tick(); })', '            Promise.resolve().then(function () { return L.members.tick(); })']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

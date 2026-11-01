@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.47.0
+// @version     3.48.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -10244,7 +10244,9 @@ JiTA.credits = {
     // A multi-minute crawl needs live feedback, shown solely in the fixed bottom-right pill. _pill updates the
     // pill; _log also breadcrumbs to the console; _flash shows a brief pill message even during a quiet
     // background run. Use _pill for every-item ticks (smooth), _log for phase milestones.
+    onProgress: null,     // fn(msg): hears every progress line of this tab's crawl, quiet or not (the Lead duties Members tab)
     _pill: function (msg) {
+        if (JiTA.credits.onProgress) { try { JiTA.credits.onProgress(msg); } catch (e) { /* ignore */ } }
         if (JiTA.credits._quiet) { return; }   // scheduled background runs stay silent
         if (JiTA.credits._flashTimer) { clearTimeout(JiTA.credits._flashTimer); JiTA.credits._flashTimer = null; }   // cancel a pending flash auto-clear
         try {
@@ -10326,6 +10328,39 @@ JiTA.credits = {
             else { JiTA.credits._clearProgress(); }   // a pill a manual Refresh made it draw would otherwise stay up
             throw e;
         });
+    },
+
+    // ---- for the Lead duties Members tab (JiTA.leadduty.members) -------------------------------------------
+    // Whether a full count is running: in this tab, or in another one that holds the scheduler's fresh full-crawl lease.
+    busy: function () {
+        var S = JiTA.credits.sched, l = gmGet(S.FULL_LEASE_KEY, null);
+        return JiTA.credits.running || !!(l && l.ts && (Date.now() - l.ts) <= S.FULL_TTL_MS && l.tabId !== JiTA.sched.tabId);
+    },
+    // A month counted as refresh() counts it, quietly (the tab shows its progress), under the scheduler's full-crawl
+    // lease, so this browser's scheduled count waits for it rather than queueing its own ahead of it. Rejects with
+    // err.busy when a count already runs, here or in another tab.
+    refreshLeased: function (y, m) {
+        var C = JiTA.credits, S = C.sched;
+        var busy = function () { var err = new Error('An ISD credits count is already running'); err.busy = true; return err; };
+        if (C.running || !S._lease(S.FULL_LEASE_KEY, S.FULL_TTL_MS)) { return Promise.reject(busy()); }
+        var hb = setInterval(function () { gmSet(S.FULL_LEASE_KEY, { tabId: JiTA.sched.tabId, ts: Date.now() }); }, S.HEARTBEAT_MS);
+        var end = function () { clearInterval(hb); S._release(S.FULL_LEASE_KEY); };
+        C._quiet = true;
+        return C.refresh(y, m).then(function (res) {
+            end();
+            if (!res) { throw busy(); }   // refresh() found one running after all
+            return res;
+        }, function (e) { end(); throw e; });
+    },
+    // GM handoffs made the old way, before CCP's Convert to Support (see crGmOld in the worker), in [first of the month,
+    // cut): { ym, cut, byAcc: { accountId: count } }. Worker-only, like computeMonth, and queued behind any count there.
+    computeGmOld: function (y, m, cut) {
+        var C = JiTA.credits;
+        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.reject(new Error('credits: worker unavailable')); }
+        var tag = (JiTA.sched.tabId) + ':' + (++C._tagSeq);
+        C._workerTag = tag;
+        return JiTA.worker.call('creditsGmOld', { y: y, m: m, cut: cut, tag: tag }, { timeoutMs: C.WORKER_TIMEOUT_MS })
+            .then(function (res) { C._workerTag = null; return res; }, function (err) { C._workerTag = null; throw err; });
     },
 
     // ---- self-only compute (cheap; the badge / your card refresh on this every ~2 min) ------------------
@@ -11921,6 +11956,75 @@ function jitaWorkerBody(cfg) {
         });
     }
 
+    // ---- Lead duties Members tab: GM handoffs made the old way ---------------------------------------------
+    // Before CCP's Convert to Support, "Assign to GM" set the Team field to EO - GameMasters (id 38) and unassigned the
+    // report, both as the member, and the report stayed Open: the count above never sees those. payload = { y, m, cut }:
+    // [first of the month, cut) is searched. Resolves { ym, cut, byAcc: { accountId: count } } for the group's active
+    // members: a report counts once for a member who, inside the window, set its Team field to the GM team. The CHANGED
+    // operator takes no custom field, so the way in is the assignee the old flow always cleared.
+    function crGmOld(payload) {
+        payload = payload || {};
+        var b = crMonthBounds(payload.y, payload.m), ym = b.start.slice(0, 7);
+        var cut = (payload.cut && payload.cut < b.end) ? payload.cut : b.end, byAcc = {};
+        if (cut <= b.start) { return Promise.resolve({ ym: ym, cut: cut, byAcc: byAcc }); }
+        var win = 'DURING ("' + b.start + '", "' + cut + '")';
+        crProgress(ym + ': GM handoffs made the old way, resolving group members…');
+        return crGroupMembers().then(function (members) {
+            var accs = members.filter(function (x) { return x.active !== false; }).map(function (x) { return x.accountId; }).sort();
+            var keysOf = {}, hist = {}, done = 0;
+            return crParallel(accs, crc.CONCURRENCY, function (acc) {
+                return crAllKeys('project = ' + crc.EBR + ' AND assignee CHANGED BY "' + acc + '" ' + win).then(function (keys) {
+                    keysOf[acc] = Object.keys(keys);
+                    done++; crTick(done - 1, accs.length, ym + ': GM handoffs, members ' + done + '/' + accs.length);
+                });
+            }).then(function () {
+                var all = {};
+                accs.forEach(function (acc) { keysOf[acc].forEach(function (k) { all[k] = true; }); });
+                var keys = Object.keys(all).sort(), n = 0;
+                return crParallel(keys, crc.CONCURRENCY, function (k) {
+                    return crAllHistories(k).then(function (h) { hist[k] = h; n++; crTick(n - 1, keys.length, ym + ': GM handoffs, reports ' + n + '/' + keys.length); });
+                });
+            }).then(function () {
+                accs.forEach(function (acc) {
+                    var c = keysOf[acc].filter(function (k) { return crSetGm(hist[k], acc, b.start, cut); }).length;
+                    if (c) { byAcc[acc] = c; }
+                });
+                return { ym: ym, cut: cut, byAcc: byAcc };
+            });
+        });
+    }
+    // Whether `acc` set the Team field to the GM team in [start, end): dates, compared as crEffectiveActioner does.
+    function crSetGm(histories, acc, start, end) {
+        for (var i = 0; i < (histories || []).length; i++) {
+            var h = histories[i], day = (h.created || '').slice(0, 10);
+            if (!h.author || h.author.accountId !== acc || day < start || day >= end) { continue; }
+            var items = h.items || [];
+            for (var j = 0; j < items.length; j++) {
+                var it = items[j];
+                if ((it.field === 'Team' || it.fieldId === 'customfield_10001') && (isGmTeam(it.to) || /gamemasters/i.test(it.toString || ''))) { return true; }
+            }
+        }
+        return false;
+    }
+    // Queued behind any count running or queued (as runCreditsMonth queues), so it never runs alongside one; a request
+    // for the same window joins the one already there.
+    function runGmOld(payload) {
+        payload = payload || {};
+        var key = 'gmold:' + payload.y + '-' + payload.m + ':' + (payload.cut || ''), tag = payload.tag || null;
+        if (crLast && crLast.key === key) {
+            if (tag && crLast.tags.indexOf(tag) === -1) { crLast.tags.push(tag); }
+            return crLast.promise;
+        }
+        var prev = crLast ? crLast.promise : Promise.resolve();
+        var run = { key: key, tags: tag ? [tag] : [], promise: null };
+        var begin = function () { crActiveTags = run.tags; return crGmOld(payload); };
+        run.promise = prev.then(begin, begin);
+        crLast = run;
+        var settle = function () { if (crLast === run) { crLast = null; } if (crActiveTags === run.tags) { crActiveTags = []; } };
+        run.promise.then(settle, settle);
+        return run.promise;
+    }
+
     // Single-flight so two tabs (e.g. a scheduled run + a manual Refresh) never crawl the same month at once:
     // a same-month caller COALESCES onto the in-flight crawl (one crawl, one result, one clean progress stream for
     // all of them); a different-month request is queued behind it. Without this, concurrent crawls doubled the REST
@@ -11978,6 +12082,7 @@ function jitaWorkerBody(cfg) {
                 // so two tabs never crawl the same month at once; progress streams as tagged 'creditsProgress' events.
                 result = await runCreditsMonth(payload);
             }
+            else if (type === 'creditsGmOld') { result = await runGmOld(payload); }   // the Members tab's old-way GM handoffs, queued like a count
             else if (type === 'creditsSelf') {
                 // Cheap, self-scoped. The tab's SELF lease already gates cadence to one tab per ~2 min and refreshSelf
                 // is guarded by the shared running flag, so no cross-tab coalescing is needed here (unlike creditsMonth).
@@ -18298,12 +18403,17 @@ JiTA.leadduty = {
     LEDGER_KEY: 'jita_leadduty_v1',
     QC_LEDGER_KEY: 'jita_leadduty_qc_v1',
     PROBE_KEY: 'jita_leadduty_probe',
+    ACTIVITY_KEY: 'jita_leadduty_activity_v1',   // Members tab: each month's counts, counted once for all Leads
+    MEMBERS_KEY: 'jita_leadduty_members_v1',     // Members tab: roles and notes, and who published the members page
 
     // ---- fixed configuration -------------------------------------------------------------------------
     // Hardcoded on purpose: these are properties of the ISD space, not of the person running the script, and
     // every Lead must resolve the SAME values or the shared ledger splits in two. Change them here.
     ROOT_PAGE: '199758317',      // root of the documentation section the Leads own
     LEDGER_PAGE: '3214901257',   // "ECAID Lead Ledger" - holds the shared JSON; every Lead needs EDIT on it
+    // "ECAID Member Productivity (past 6 months)": the Members tab publishes its table here, replacing the body (the page
+    // history keeps what was there). Every Lead needs EDIT on it; empty switches publishing off.
+    MEMBERS_PAGE: '199754526',
     // Subtrees that need no maintenance review. Each id and EVERY page beneath it is dropped from the pool
     // (ancestry is walked through parentId, so a page added under one of these later is excluded too).
     EXCLUDE_PAGES: {
@@ -18571,8 +18681,8 @@ JiTA.leadduty = {
                 next = L._prune(next);
                 var size = JSON.stringify(next).length;
                 if (size > L.MAX_PROP_BYTES) {
-                    throw new Error('The lead-duty ledger is full (' + size + ' bytes, cap ' + L.MAX_PROP_BYTES +
-                        '). The wiki pool has outgrown a single Confluence property - raise the issue rather than losing history.');
+                    throw new Error('The lead-duty ledger (' + key + ') is full (' + size + ' bytes, cap ' + L.MAX_PROP_BYTES +
+                        '). It has outgrown a single Confluence property - raise the issue rather than losing history.');
                 }
                 if (L._dry()) {
                     if (window.console) {
@@ -18740,11 +18850,11 @@ JiTA.leadduty = {
             // the difference is invisible, because both read as "excluded by nothing" and the page quietly
             // joins the rotation. That is how the February 2025 newsletter kept being assigned: its chain
             // runs through a folder, so one absent node is all it takes. Count them instead of guessing.
-            var root = String(rec.rootId == null ? '' : rec.rootId), holes = 0;
+            var root = String(rec.rootId == null ? '' : rec.rootId), holes = 0, members = String(L.MEMBERS_PAGE || '');
             function excluded(id) {
                 var cur = id, hops = 0;
                 while (cur && hops++ < 64) {          // hop cap: a malformed parent chain can't spin forever
-                    if (ex[cur]) { return true; }
+                    if (ex[cur] || (members && cur === members)) { return true; }   // the members page is JiTA's own, rewritten every few hours: never reviewed
                     if (cur === root) { return false; }   // reached the top of the tree cleanly
                     cur = parents[cur];
                 }
@@ -19995,14 +20105,15 @@ JiTA.leadduty = {
         },
 
         // PUT the body, retrying once against a re-read version: two Leads publishing in the same second is
-        // rare but entirely possible, and the loser just needs the newer version number.
-        _write: function (html, retry) {
-            var L = JiTA.leadduty;
+        // rare but entirely possible, and the loser just needs the newer version number. `pageId` is the ledger page
+        // unless given (the Members tab publishes its own).
+        _write: function (html, retry, pageId) {
+            var L = JiTA.leadduty, id = pageId || L.ledgerPage();
             var msg = 'JiTA lead duties ' + new Date().toISOString().slice(0, 10);
-            return JiTA.conf.getPage(L.ledgerPage(), false).then(function (page) {
+            return JiTA.conf.getPage(id, false).then(function (page) {
                 return JiTA.conf.savePageBody(page, html, msg);
             }).catch(function (e) {
-                if (!retry && JiTA.conf.isConflict(e)) { return L.report._write(html, true); }
+                if (!retry && JiTA.conf.isConflict(e)) { return L.report._write(html, true, pageId); }
                 throw e;
             });
         },
@@ -20018,13 +20129,16 @@ JiTA.leadduty = {
             return '<a href="' + JiTA.conf.esc(JiTA.conf.pageUrl(id)) + '">' + JiTA.conf.esc(title || ('page ' + id)) + '</a>';
         },
         _when: function (iso) { return iso ? JiTA.conf.esc(String(iso).replace('T', ' ').slice(0, 16)) : ''; },
-        _table: function (headers, rows) {
+        // `tints` (optional) colours whole rows: tints[r] a hex colour, or nothing for a plain row - the cell highlight the
+        // Confluence editor writes.
+        _table: function (headers, rows, tints) {
             var h = '<table><tbody><tr>';
             for (var i = 0; i < headers.length; i++) { h += '<th>' + JiTA.conf.esc(headers[i]) + '</th>'; }
             h += '</tr>';
             for (var r = 0; r < rows.length; r++) {
+                var tint = tints && tints[r], td = tint ? ('<td class="highlight-' + tint + '" data-highlight-colour="' + tint + '">') : '<td>';
                 h += '<tr>';
-                for (var c = 0; c < rows[r].length; c++) { h += '<td>' + (rows[r][c] == null ? '' : rows[r][c]) + '</td>'; }
+                for (var c = 0; c < rows[r].length; c++) { h += td + (rows[r][c] == null ? '' : rows[r][c]) + '</td>'; }
                 h += '</tr>';
             }
             return h + '</tbody></table>';
@@ -20260,6 +20374,7 @@ JiTA.leadduty.ui = {
         $('<button class="ld-tab" data-tab="qc">Quality control</button>').appendTo($tabs);
         $('<button class="ld-tab" data-tab="flags" title="Everything any Lead flagged during quality control and nobody has closed out yet">Follow-ups</button>').appendTo($tabs);
         $('<button class="ld-tab" data-tab="apps" title="Read the applications waiting in VMS here instead of clicking through the site. Read-only - acting on one still happens in VMS.">Applications</button>').appendTo($tabs);
+        $('<button class="ld-tab" data-tab="members" title="Every member with what they actioned in each of the last 6 months, against the 40 a month ECAID asks for, with a role and a note every Lead shares">Members</button>').appendTo($tabs);
         $tabs.on('click', '.ld-tab', function () { U._tab = $(this).attr('data-tab'); U._render(); });
         $('<div class="ld-scroll" id="ld-body"></div>').appendTo(ov.$menu);
         var $foot = $('<div class="ld-foot"></div>').appendTo(ov.$menu);
@@ -20285,6 +20400,7 @@ JiTA.leadduty.ui = {
         // flag another Lead has resolved since, would stay on screen until a Refresh.
         U._qc = null;
         U._qcWarm = null;
+        U._mem = null;   // the members are read again on every open, like the QC month
         U._render();   // which loads the selected tab - loading it again here ran every tab's load twice
         // Resolve the QC month alongside the wiki queue rather than waiting for the tab to be clicked, so
         // both halves of the month are ready together and switching tabs just paints.
@@ -20321,6 +20437,7 @@ JiTA.leadduty.ui = {
         if (U._tab === 'wiki') { U._loadWiki(force); }
         else if (U._tab === 'flags') { U._loadFlags(force); }
         else if (U._tab === 'apps') { U._loadApps(force); }
+        else if (U._tab === 'members') { U._loadMembers(force); }
         else { U._loadQc(force); }
     },
 
@@ -21266,7 +21383,8 @@ JiTA.leadduty.ui = {
     _drafts: {},
 
     // The dialog a Flag or a Resolve asks for its note in: a text area that takes several lines, over the Lead duties
-    // window. o: { title, hint, save (the Save button's label), draft (its _drafts key) }. then(note) runs on Save;
+    // window. o: { title, hint, save (the Save button's label), draft (its _drafts key), value (the note being edited,
+    // which a draft still wins over) }. then(note) runs on Save;
     // Cancel and Esc close it without saving. What was typed stays in _drafts either way, and the caller drops it once
     // the write lands. While it is open every key stays in it: Esc must not reach the window behind and close that,
     // and none of Jira's shortcuts may fire from it.
@@ -21292,7 +21410,7 @@ JiTA.leadduty.ui = {
         var ta = el('textarea', 'ldn-ta');
         ta.rows = 6;
         ta.maxLength = L.NOTE_MAX;
-        ta.value = U._drafts[o.draft] || '';
+        ta.value = U._drafts[o.draft] || o.value || '';
         box.appendChild(ta);
         var foot = el('div', 'ldn-foot'), count = el('span', 'ldn-count');
         foot.appendChild(el('span', 'ldn-keys', 'Ctrl+Enter saves · Esc cancels'));
@@ -21374,6 +21492,148 @@ JiTA.leadduty.ui = {
                 after(r.error ? null : r, note, gone ? false : null);
                 try { L.reminder.mount(); } catch (e2) { /* ignore */ }
             });
+        });
+    },
+
+    // ---- Members (JiTA.leadduty.members) -------------------------------------------------------------------
+    _mem: null,          // what gather() resolved: { act, mem, live, missing, cur, actVersion, memVersion }
+    _memQuiet: false,    // "Only below the minimum or inactive", for the session
+    _memVer: null,       // the members property's version the tab last took (see _adopt)
+    _memProg: '',        // what a count is doing, or why it stopped: kept across the redraws it causes
+
+    _loadMembers: function (force) {
+        var L = JiTA.leadduty, U = L.ui;
+        U._status('Reading the members…');
+        if (!U._mem || force) { U._body().empty().append($('<div class="ld-empty">Reading the counted months from the Confluence ledger…</div>')); }
+        L.members.gather().then(function (st) {
+            if (!U.isOpen() || U._tab !== 'members') { return; }
+            U._mem = st;
+            U._memVer = { ledgerVersion: st.memVersion || 0 };
+            U._renderMembers(!force);
+        }, function (e) {
+            if (!U.isOpen() || U._tab !== 'members') { return; }
+            U._body().empty().append($('<div class="ld-empty"></div>').text('Could not read the members from the ledger: ' + (e && e.message || e)));
+            U._status('');
+        });
+    },
+
+    // The table: a bar (the filter, what the colours mean, the Count button), a header row, and one row per member,
+    // by role rank and then by name. keep holds the scroll position (a role change can move its row).
+    _renderMembers: function (keep) {
+        var L = JiTA.leadduty, U = L.ui, M = L.members, st = U._mem;
+        if (!st || !U.isOpen() || U._tab !== 'members') { return; }
+        var $b = U._body(), top = keep ? $b.scrollTop() : 0, wins = M.window(st.cur), rows = M.model(st.act, st.mem, st.live, st.cur);
+        $b.empty();
+        var $bar = $('<div class="ld-mbar"></div>').appendTo($b);
+        var $f = $('<label class="ld-mfilter"><input type="checkbox"> Only below the minimum or inactive</label>').appendTo($bar);
+        $f.find('input').prop('checked', U._memQuiet).on('change', function () { U._memQuiet = this.checked; U._renderMembers(true); });
+        $('<span class="ld-mleg"></span>').text('Minimum: ' + M.MIN_ACTIONED + ' a month')
+            .attr('title', 'ECAID asks for ' + M.MIN_ACTIONED + ' actioned a month: bug reports attached, trashed or reassigned, plus defects created, as the ISD credits leaderboard counts Total Actioned. Bug Hunters and Rookies are judged by it, Leads and Seniors are not.').appendTo($bar);
+        [['meets', 'meets it', M.MIN_ACTIONED + ' or more last month'], ['below', 'below', 'under ' + M.MIN_ACTIONED + ' last month'],
+            ['inactive', 'inactive', 'nothing in each of the last ' + M.INACTIVE_MONTHS + ' months'], ['new', 'new', 'not in the group last month']].forEach(function (s) {
+            $('<span class="ld-mleg"></span>').attr('title', s[2]).append($('<span class="ld-mdot"></span>').addClass(s[0])).append(document.createTextNode(s[1])).appendTo($bar);
+        });
+        var missing = st.missing || [];
+        if (missing.length) {
+            var worker = !!(JiTA.worker && JiTA.worker.usable());
+            $('<button class="jita-btn ld-mini ld-mcount"></button>').text(M._count ? 'Counting…' : ('Count ' + missing.length + ' month' + (missing.length === 1 ? '' : 's')))
+                .attr('title', worker ? ('Not counted yet: ' + missing.map(M._mon).join(', ') + '. Each is a full ISD credits count of a few minutes, counted once for every Lead.')
+                    : 'Counting needs the background worker JiTA runs on Jira pages: open Lead duties on a Jira page to count.')
+                .prop('disabled', !worker || !!M._count).on('click', function () { U._countMembers(this); }).appendTo($bar);
+        }
+        $('<span class="ld-mprog" id="ld-mprog"></span>').text(U._memProg).appendTo($bar);
+        var $h = $('<div class="ld-row ld-mrow ld-mhead"></div>').appendTo($b);
+        $('<span class="ld-mdot none"></span>').appendTo($h);
+        $('<span class="ld-mname"></span>').text('Name').appendTo($h);
+        $('<span class="ld-mrolehd"></span>').text('Role').appendTo($h);
+        $('<span class="ld-mnote"></span>').text('Note').appendTo($h);
+        wins.forEach(function (ym) { $('<span class="ld-mnum"></span>').text(M._mon(ym).slice(0, 3)).attr('title', M._mon(ym)).appendTo($h); });
+        $('<span class="ld-mnum ld-mcur"></span>').text(M._mon(st.cur).slice(0, 3) + ' so far').appendTo($h);
+        $('<span class="ld-mlast"></span>').text('Last active').appendTo($h);
+        var shown = rows.filter(function (r) { return !U._memQuiet || r.state === 'below' || r.state === 'inactive'; });
+        shown.forEach(function (r) { $b.append(U._memberRow(r, wins, st.cur)); });
+        if (!rows.length) {
+            $('<div class="ld-empty"></div>').text(missing.length ? 'No month has been counted yet. Count fills the table, one month at a time.' : 'Nobody to list.').appendTo($b);
+        } else if (!shown.length) { $('<div class="ld-empty">Nobody is below the minimum or inactive.</div>').appendTo($b); }
+        var n = { meets: 0, below: 0, inactive: 0 };
+        rows.forEach(function (r) { if (n[r.state] != null) { n[r.state]++; } });
+        U._status([rows.length + ' members', n.meets + ' meet the minimum', n.below + ' below', n.inactive + ' inactive',
+            missing.length ? (missing.length + ' month' + (missing.length === 1 ? '' : 's') + ' not counted yet') : '', L._dry() ? 'DRY RUN' : '',
+            M.lastLine()].filter(function (x) { return !!x; }).join(' · '));
+        $b.scrollTop(top);
+    },
+
+    _memberRow: function (r, wins, cur) {
+        var L = JiTA.leadduty, U = L.ui, M = L.members, judged = !!M.JUDGED[r.role];
+        var $r = $('<div class="ld-row ld-mrow"></div>').attr('data-key', r.acc);
+        if (r.state) { $r.addClass('ld-m-' + r.state); }
+        $('<span class="ld-mdot"></span>').addClass(r.state || 'none').attr('title', M.stateText(r, wins)).appendTo($r);
+        $('<a class="ld-title ld-mname" target="_blank" rel="noopener"></a>').attr('href', JiTA.HOST + '/jira/people/' + encodeURIComponent(r.acc))
+            .text(r.name).attr('title', r.name).appendTo($r);
+        var $sel = $('<select class="ld-mrole"></select>').attr('title', r.roleSet ? 'Set by a Lead' : ('The default, ' + r.role + ': change it, and every Lead sees the same'));
+        M.ROLES.forEach(function (role) { $('<option></option>').attr('value', role).text(role).prop('selected', role === r.role).appendTo($sel); });
+        $sel.on('change', function () { U._setMemberRole(this, r, $(this).val()); }).appendTo($r);
+        $('<span class="ld-mnote"></span>').toggleClass('empty', !r.note).text(r.note ? r.note.split('\n')[0] : 'Add a note')
+            .attr('title', r.note ? (r.note + (r.noteBy ? ('\n\nSet by ' + r.noteBy + (r.noteAt ? (' on ' + r.noteAt) : '')) : '')) : 'Add a note on this member, shared with every Lead')
+            .on('click', function () { U._editMemberNote(r, wins, cur); }).appendTo($r);
+        wins.forEach(function (ym, i) {
+            var n = r.months[i], $c = $('<span class="ld-mnum"></span>').appendTo($r);
+            if (n === undefined) { $c.text('…').addClass('dim').attr('title', M._mon(ym) + ' has not been counted yet'); return; }
+            if (n === null) { $c.text('-').addClass('dim').attr('title', 'Not in the group yet in ' + M._mon(ym)); return; }
+            $c.text(String(n));
+            if (judged && n < M.MIN_ACTIONED) { $c.addClass(n === 0 ? 'zero' : 'low'); }
+            $c.attr('title', n + ' actioned in ' + M._mon(ym) + ((judged && n < M.MIN_ACTIONED) ? (', of the ' + M.MIN_ACTIONED + ' a month ECAID asks for') : '') +
+                (r.gm[i] ? ('\nincl. ' + r.gm[i] + ' handed to the GMs the old way') : ''));
+        });
+        var $cur = $('<span class="ld-mnum ld-mcur"></span>').appendTo($r);
+        if (r.cur === undefined) { $cur.text('…').addClass('dim').attr('title', 'This month has not been counted in this browser yet: the ISD credits count does it every 15 minutes while it is on.'); }
+        else if (r.cur === null) { $cur.text('-').addClass('dim').attr('title', 'Not in the group at this month\'s last count'); }
+        else {
+            $cur.text(String(r.cur)).attr('title', r.cur + ' so far this month' +
+                ((judged && r.cur < M.MIN_ACTIONED) ? (', ' + (M.MIN_ACTIONED - r.cur) + ' to go for the ' + M.MIN_ACTIONED) : ''));
+        }
+        $('<span class="ld-mlast"></span>').text(r.last ? M._mon(r.last) : 'not in 6 months').appendTo($r);
+        return $r;
+    },
+
+    // A role picked in a row: written, then the list drawn again where it was (the row may change places).
+    _setMemberRole: function (sel, r, role) {
+        var L = JiTA.leadduty, U = L.ui;
+        $(sel).prop('disabled', true);
+        L.members.setRole(r.acc, role, r.name).then(function (w) {
+            var v = U._adopt(U._memVer, w);
+            if (v && U._mem) { U._mem.mem = v; }
+            U._renderMembers(true);
+        }, function (e) {
+            U._renderMembers(true);
+            U._status('Not saved - ' + (e && e.message || e));
+        });
+    },
+
+    // A row's note, edited in the note dialog: written, then only that row drawn again.
+    _editMemberNote: function (r, wins, cur) {
+        var L = JiTA.leadduty, U = L.ui, M = L.members, draft = 'member:' + r.acc;
+        U._askNote({ title: 'Note on ' + r.name, hint: 'Shared with every Lead, and shown on the ECAID Member Productivity page.', save: 'Save note', draft: draft, value: r.note }, function (note) {
+            M.setNote(r.acc, note).then(function (w) {
+                delete U._drafts[draft];
+                var v = U._adopt(U._memVer, w);
+                if (v && U._mem) { U._mem.mem = v; }
+                if (!U._mem) { return; }
+                var fresh = M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur).filter(function (x) { return x.acc === r.acc; })[0];
+                if (fresh) { U._swapRow(r.acc, U._memberRow(fresh, wins, cur)); }
+            }, function (e) { U._status('Not saved - ' + (e && e.message || e)); });
+        });
+    },
+
+    // The Count button: the missing months, one at a time, the table read again as each lands.
+    _countMembers: function (btn) {
+        var L = JiTA.leadduty, U = L.ui, M = L.members;
+        $(btn).prop('disabled', true).text('Counting…');
+        var say = function (msg) { U._memProg = msg; var el = document.getElementById('ld-mprog'); if (el) { el.textContent = msg; } };
+        var reload = function () { if (U.isOpen() && U._tab === 'members') { U._loadMembers(false); } };
+        M.count(say, reload).then(function () { U._memProg = ''; reload(); }, function (e) {
+            U._memProg = 'Counting stopped: ' + (e && e.message || e);
+            reload();
         });
     },
 
@@ -21508,7 +21768,31 @@ JiTA.leadduty.ui = {
                 // scanned; this is the only part anybody actually reads at length.
                 '.jita-leadduty-view .ld-a { color: #e6e6e6; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; background: #1b2025; border: 1px solid #2c333a; border-radius: 5px; padding: 10px 12px; }' +
                 '.jita-leadduty-view .ld-msg { width: 100%; box-sizing: border-box; min-height: 120px; margin: 2px 0 8px; padding: 8px 10px; background: #14181b; color: #cfd6dd; border: 1px solid #3a434d; border-radius: 5px; font: 12px/1.5 Consolas, "Courier New", monospace; resize: vertical; }' +
-                '.jita-leadduty-view .ld-msg:focus { outline: none; border-color: #4c9aff; }'
+                '.jita-leadduty-view .ld-msg:focus { outline: none; border-color: #4c9aff; }' +
+                // Members: fixed columns with only the note elastic, the numbers right-aligned so the months line up.
+                '.jita-leadduty-view .ld-mbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 0 0 8px; color: #9aa6b2; font-size: 11px; }' +
+                '.jita-leadduty-view .ld-mfilter { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; color: #cfd6dd; }' +
+                '.jita-leadduty-view .ld-mleg { display: inline-flex; align-items: center; gap: 5px; cursor: default; }' +
+                '.jita-leadduty-view .ld-mprog { flex: 1 1 200px; min-width: 0; }' +
+                '.jita-leadduty-view .ld-mdot { flex: 0 0 8px; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: transparent; }' +
+                '.jita-leadduty-view .ld-mdot.meets { background: #4caf7d; }' +
+                '.jita-leadduty-view .ld-mdot.below { background: #f0b429; }' +
+                '.jita-leadduty-view .ld-mdot.inactive { background: #ff8f8f; }' +
+                '.jita-leadduty-view .ld-mdot.new { background: #7a8694; }' +
+                '.jita-leadduty-view .ld-mrow { gap: 10px; }' +
+                '.jita-leadduty-view .ld-mhead, .jita-leadduty-view .ld-mhead .ld-mname, .jita-leadduty-view .ld-mhead .ld-mnote, .jita-leadduty-view .ld-mhead .ld-mnum { color: #7a8694; font-size: 11px; font-weight: 600; cursor: default; }' +
+                '.jita-leadduty-view .ld-mname { flex: 0 0 170px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
+                '.jita-leadduty-view .ld-mrole, .jita-leadduty-view .ld-mrolehd { flex: 0 0 104px; }' +
+                '.jita-leadduty-view .ld-mrole { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 2px 4px; font-size: 11px; color-scheme: dark; }' +
+                '.jita-leadduty-view .ld-mnote { flex: 1 1 auto; min-width: 0; color: #cfd6dd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }' +
+                '.jita-leadduty-view .ld-mnote.empty { color: #55606b; font-style: italic; }' +
+                '.jita-leadduty-view .ld-mrow:not(.ld-mhead) .ld-mnote:hover { color: #4c9aff; }' +
+                '.jita-leadduty-view .ld-mnum { flex: 0 0 46px; text-align: right; font-variant-numeric: tabular-nums; color: #e6e6e6; cursor: default; }' +
+                '.jita-leadduty-view .ld-mnum.low { color: #f0b429; font-weight: 700; }' +
+                '.jita-leadduty-view .ld-mnum.zero { color: #ff8f8f; font-weight: 700; }' +
+                '.jita-leadduty-view .ld-mnum.dim { color: #55606b; }' +
+                '.jita-leadduty-view .ld-mcur { flex-basis: 64px; color: #9aa6b2; }' +
+                '.jita-leadduty-view .ld-mlast { flex: 0 0 96px; text-align: right; color: #7a8694; font-size: 11px; white-space: nowrap; }'
             );
         } catch (e) { /* ignore */ }
     }
@@ -22062,6 +22346,454 @@ JiTA.leadduty.apps = {
 };
 
 
+/* ---- Lead duties: the Members tab ---------------------------------------------------------------------
+ * Every ISD member with what they actioned in each of the last MONTHS full months and this month so far, to spot the
+ * ones who have gone quiet: the old Confluence chart "ECAID Member Productivity", kept by JiTA. "Actioned" is the ISD
+ * credits leaderboard's Total Actioned (bug reports attached, trashed or reassigned, plus defects created), read from the
+ * credits count's own table; before GM_SWITCH the GM handoffs made the old way are added (see crGmOld in the worker).
+ *
+ * A finished month is counted ONCE for all Leads and frozen in the ledger (ACTIVITY_KEY), first writer wins, as the QC
+ * month is: three Leads do not each crawl six months. Once a month is over the credits scheduler gives its cache a final
+ * count anyway, and gather() records that without a crawl; a month nobody has counted is counted from the tab's Count
+ * button. Roles and notes are the Leads' own (MEMBERS_KEY), shared the same way, and the table is published to
+ * MEMBERS_PAGE with the ledger page's election. Leads only, like the rest of Lead duties.
+ */
+JiTA.leadduty.members = {
+    MONTHS: 6,                    // full months shown, before the current one
+    MIN_ACTIONED: 40,             // ECAID's monthly minimum
+    INACTIVE_MONTHS: 3,           // full months with nothing actioned before a member counts as inactive
+    GM_SWITCH: '2026-08-21',      // the first day GM handoffs went through CCP's Convert to Support (JiTA v3.1.0)
+    ROLES: ['Lead', 'Senior', 'Bug Hunter', 'Rookie'],   // rank order, which is the table's order
+    JUDGED: { 'Bug Hunter': true, 'Rookie': true },      // the roles the minimum and the states apply to
+    CLAIM_MS: 30 * 60 * 1000,     // a month another Lead's tab is counting is left to it this long
+    BUSY_POLL_MS: 10 * 1000,      // how often a count waiting for an ISD credits count looks again...
+    BUSY_MAX_MS: 20 * 60 * 1000,  // ...and for how long
+    LATE_DAYS: 7,                 // a month counted later than this after its end is footnoted as counted late
+    PUB_BUSY_MAX_MS: 120000,      // past this a publish is presumed hung (as report.BUSY_MAX_MS)
+    TINT: { meets: '#e3fcef', below: '#fffae6', inactive: '#ffebe6' },   // the page's row colours
+    INK: { low: '#974f0c', zero: '#ae2a19' },                            // the page's colours for a month below the minimum
+    LOZENGE: { meets: ['Green', 'Meets'], below: ['Yellow', 'Below'], inactive: ['Red', 'Inactive'], 'new': ['Grey', 'New'] },
+    MON: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+    _gather: null,
+    _count: null,
+    _pubBusy: false,
+    _pubAt: 0,
+    _pubAgain: false,
+    _last: null,                  // the last publish's outcome, for lastLine()
+    _plain: false,                // Confluence refused the coloured page: it is written plain from then on
+
+    _notLead: function () { return new Error('The Members tab is for Leads only.'); },
+    _mon: function (ym) { var p = JiTA.leadduty._ymParts(ym); return JiTA.leadduty.members.MON[p.m - 1] + ' ' + p.y; },
+    _today: function () { return new Date().toISOString().slice(0, 10); },
+    _meName: function () { var me = JiTA.leadduty.me(); return (me && me.handle) || ''; },
+
+    // The months shown: the MONTHS full months before `ym` (the current UTC month), newest first.
+    window: function (ym) {
+        var L = JiTA.leadduty, out = [], cur = ym || L._ym();
+        for (var i = 0; i < L.members.MONTHS; i++) { cur = L._prevYm(cur); out.push(cur); }
+        return out;
+    },
+    // Whether a cached credits result counts its whole month: computed on or after the first day after it, the credits
+    // scheduler's own rule for its final count.
+    isFinal: function (res, ym) { return !!(res && res.ym === ym && String(res.computedAt || '') >= JiTA.leadduty._bounds(ym).end); },
+    // The end of the stretch of `ym` before the GM switch, in which handoffs made the old way are counted: the month's end,
+    // the switch day, or null for a month entirely after it.
+    gmCut: function (ym) {
+        var b = JiTA.leadduty._bounds(ym), sw = JiTA.leadduty.members.GM_SWITCH;
+        if (b.start >= sw) { return null; }
+        return b.end <= sw ? b.end : sw;
+    },
+
+    // A credits result as the tab needs it: { counts: { accountId: Total Actioned }, names: { accountId: name } }. Total
+    // Actioned is the leaderboard's own column, found by name; the fallback adds its parts up. The Total row is left out,
+    // and a name with no account (an old-domain one alone). Two members of one display name are one row, as in the count.
+    fromCredits: function (res) {
+        var out = { counts: {}, names: {} };
+        if (!res || !res.table || !res.nameToAcc) { return out; }
+        var col = (res.header || []).indexOf('Total Actioned');
+        res.table.slice(0, -1).forEach(function (row) {
+            var name = row[0], acc = res.nameToAcc[name], r = (res.rows && res.rows[name]) || {};
+            if (!acc) { return; }
+            out.counts[acc] = col >= 0 ? (Number(row[col]) || 0) : ((r.attached || 0) + (r.trashed || 0) + (r.reassigned || 0) + (r.created || 0));
+            out.names[acc] = name;
+        });
+        return out;
+    },
+
+    // The role a member has unless a Lead set one: Lead for a name with any word in JiTA.credits.LEADS (the rule the
+    // worker's crComputeExtra gives the lead bonus by - KEEP IN SYNC), else Bug Hunter. Senior and Rookie are set by hand.
+    defaultRole: function (name) {
+        var leads = JiTA.credits.LEADS || {}, toks = String(name || '').toLowerCase().replace(/-/g, ' ').split(/\s+/);
+        for (var i = 0; i < toks.length; i++) { if (toks[i] && leads[toks[i]]) { return 'Lead'; } }
+        return 'Bug Hunter';
+    },
+
+    // A Bug Hunter's or Rookie's standing from their full months, newest first (a count; null for a month before they were
+    // in the group; undefined for one not counted yet): 'inactive' with nothing in each of the last INACTIVE_MONTHS, 'below'
+    // under MIN_ACTIONED last month, 'meets' at or over it, 'new' when not in the group last month, '' while last month is
+    // not counted - and always '' for a Lead or Senior, who is not judged by it.
+    state: function (role, months) {
+        var M = JiTA.leadduty.members, last = months[0], empty = 0;
+        if (!M.JUDGED[role] || last === undefined) { return ''; }
+        if (last === null) { return 'new'; }
+        for (var i = 0; i < M.INACTIVE_MONTHS; i++) { if (months[i] === 0) { empty++; } }
+        if (empty === M.INACTIVE_MONTHS) { return 'inactive'; }
+        return last >= M.MIN_ACTIONED ? 'meets' : 'below';
+    },
+    // What a row's state means, for its dot's hover.
+    stateText: function (r, wins) {
+        var M = JiTA.leadduty.members;
+        if (r.state === 'inactive') { return 'Inactive: nothing actioned in ' + M._mon(wins[M.INACTIVE_MONTHS - 1]) + ' to ' + M._mon(wins[0]); }
+        if (r.state === 'below') { return 'Below the minimum: ' + r.months[0] + ' actioned in ' + M._mon(wins[0]) + ', of the ' + M.MIN_ACTIONED + ' a month ECAID asks for'; }
+        if (r.state === 'meets') { return 'Meets the minimum: ' + r.months[0] + ' actioned in ' + M._mon(wins[0]); }
+        if (r.state === 'new') { return 'New: not in the group yet in ' + M._mon(wins[0]); }
+        return M.JUDGED[r.role] ? (M._mon(wins[0]) + ' has not been counted yet') : (r.role + 's are not judged by the minimum');
+    },
+
+    // The rows, by role rank and then by name (without "ISD "): { acc, name, role, roleSet, note, noteBy, noteAt,
+    // months[MONTHS] (as state() takes them), gm[MONTHS] (old-way GM handoffs inside each), cur (this month so far: a count,
+    // null when not in the group, undefined when not counted in this browser), last (the newest month anything was
+    // actioned in, or ''), state }. act and mem are the two properties' values (or null), live this browser's credits result
+    // for the current month (or null), cur the current month.
+    model: function (act, mem, live, cur) {
+        var M = JiTA.leadduty.members, wins = M.window(cur);
+        var frozen = (act && act.frozen) || {}, a = (act && act.a) || {}, g = (act && act.g) || {};
+        var roster = (act && act.roster && act.roster.n) || {}, people = (mem && mem.m) || {};
+        var lv = (live && live.ym === cur) ? M.fromCredits(live) : null, accs = {};
+        Object.keys(roster).forEach(function (k) { accs[k] = true; });
+        if (lv) { Object.keys(lv.names).forEach(function (k) { accs[k] = true; }); }
+        var rows = Object.keys(accs).map(function (acc) {
+            var name = (lv && lv.names[acc]) || roster[acc] || acc, p = people[acc] || {};
+            var set = !!(p.role && M.ROLES.indexOf(p.role) >= 0), role = set ? p.role : M.defaultRole(name);
+            var months = wins.map(function (ym) { return frozen[ym] ? ((a[acc] && a[acc][ym] != null) ? a[acc][ym] : null) : undefined; });
+            var gm = wins.map(function (ym) { return (g[acc] && g[acc][ym]) || 0; });
+            var now = lv ? (lv.counts[acc] != null ? lv.counts[acc] : null) : undefined, last = now > 0 ? cur : '';
+            for (var i = 0; !last && i < wins.length; i++) { if (months[i] > 0) { last = wins[i]; } }
+            return { acc: acc, name: name, role: role, roleSet: set, note: p.note || '', noteBy: p.by || '', noteAt: p.at || '',
+                months: months, gm: gm, cur: now, last: last, state: M.state(role, months) };
+        });
+        var key = function (r) { return r.name.replace(/^isd\s+/i, '').toLowerCase(); };
+        return rows.sort(function (x, y) {
+            var rx = M.ROLES.indexOf(x.role), ry = M.ROLES.indexOf(y.role), kx = key(x), ky = key(y);
+            if (rx !== ry) { return rx - ry; }
+            return kx < ky ? -1 : (kx > ky ? 1 : (x.acc < y.acc ? -1 : 1));
+        });
+    },
+
+    // What was counted, written into the activity value v (a clone, or null): each month of `freezes` ({ ym: { at, counts,
+    // gm } }) not frozen yet - first writer wins - marked late when counted more than LATE_DAYS after its end; the roster
+    // ({ at, names }) when it comes from a newer count and names a different set; claims gone stale dropped; months that
+    // left the window dropped with their counts. Returns null when nothing changed, so nothing is written.
+    _apply: function (v, freezes, roster, me, now) {
+        var L = JiTA.leadduty, M = L.members, changed = false;
+        now = now || Date.now();
+        v = v || { v: 1 };
+        v.frozen = v.frozen || {}; v.a = v.a || {}; v.g = v.g || {}; v.crawl = v.crawl || {};
+        Object.keys(freezes || {}).sort().forEach(function (ym) {
+            var f = freezes[ym], rec;
+            if (!f || v.frozen[ym]) { return; }
+            rec = { at: f.at, by: me || '', n: Object.keys(f.counts || {}).length };
+            if (Date.parse(f.at) - Date.parse(L._bounds(ym).end + 'T00:00:00Z') > M.LATE_DAYS * 86400000) { rec.late = true; }
+            v.frozen[ym] = rec;
+            Object.keys(f.counts || {}).forEach(function (acc) { (v.a[acc] = v.a[acc] || {})[ym] = f.counts[acc]; });
+            Object.keys(f.gm || {}).forEach(function (acc) { if (f.gm[acc]) { (v.g[acc] = v.g[acc] || {})[ym] = f.gm[acc]; } });
+            delete v.crawl[ym];
+            changed = true;
+        });
+        var names = function (n) { return Object.keys(n || {}).sort().map(function (k) { return k + '=' + n[k]; }).join('\n'); };
+        if (roster && roster.names && Object.keys(roster.names).length && (!v.roster || String(roster.at) > String(v.roster.at || '')) &&
+            names(roster.names) !== names(v.roster && v.roster.n)) {
+            v.roster = { at: roster.at, n: roster.names };
+            changed = true;
+        }
+        Object.keys(v.crawl).forEach(function (ym) {
+            var c = v.crawl[ym];
+            if (!c || !(now - Date.parse(c.at) < M.CLAIM_MS)) { delete v.crawl[ym]; changed = true; }
+        });
+        var keep = {};
+        M.window(L._ym(new Date(now))).forEach(function (ym) { keep[ym] = true; });
+        Object.keys(v.frozen).forEach(function (ym) {
+            if (keep[ym]) { return; }
+            delete v.frozen[ym];
+            changed = true;
+            [v.a, v.g].forEach(function (map) {
+                Object.keys(map).forEach(function (acc) {
+                    delete map[acc][ym];
+                    if (!Object.keys(map[acc]).length) { delete map[acc]; }
+                });
+            });
+        });
+        return changed ? v : null;
+    },
+    // Used as .then(M._tap) on a write: a real change brings the page in step.
+    _tap: function (w) {
+        if (w && w.written) { setTimeout(function () { JiTA.leadduty.members.publish(false).catch(function () { /* in _last */ }); }, 0); }
+        return w;
+    },
+
+    // Read both properties and this browser's credits caches, and record what the caches give without a crawl: each month
+    // after the GM switch whose cache counted all of it, and the newest roster. Resolves { act, mem, live, missing, cur,
+    // actVersion, memVersion } - missing the months nobody has counted yet, newest first. Single-flight; Leads only.
+    gather: function () {
+        var L = JiTA.leadduty, M = L.members, C = JiTA.credits;
+        if (!L.isLead()) { return Promise.reject(M._notLead()); }
+        if (M._gather) { return M._gather; }
+        var cur = L._ym(), wins = M.window(cur);
+        var p = M._gather = Promise.all(wins.concat([cur]).map(function (ym) {
+            return C.getCached(ym).then(null, function () { return null; });
+        })).then(function (caches) {
+            var live = caches[wins.length], freezes = {}, newest = null;
+            caches.forEach(function (res, i) {
+                if (res && res.table && (!newest || String(res.computedAt || '') > String(newest.computedAt || ''))) { newest = res; }
+                var ym = wins[i];
+                if (ym && !M.gmCut(ym) && M.isFinal(res, ym)) { freezes[ym] = { at: res.computedAt, counts: M.fromCredits(res).counts, gm: {} }; }
+            });
+            var roster = newest ? { at: newest.computedAt, names: M.fromCredits(newest).names } : null;
+            return Promise.all([
+                L.ledger.mutate(L.ACTIVITY_KEY, function (v) { return M._apply(v, freezes, roster, M._meName()); }).then(M._tap),
+                L.ledger.read(L.MEMBERS_KEY)
+            ]).then(function (r) {
+                var act = r[0].value || null, frozen = (act && act.frozen) || {};
+                return { act: act, mem: r[1].value || null, live: (live && live.ym === cur) ? live : null, cur: cur,
+                    actVersion: (r[0].prop && r[0].prop.version) || 0, memVersion: (r[1].prop && r[1].prop.version) || 0,
+                    missing: wins.filter(function (ym) { return !frozen[ym]; }) };
+            });
+        });
+        var clear = function () { if (M._gather === p) { M._gather = null; } };
+        p.then(clear, clear);
+        return p;
+    },
+
+    // Count the months nobody has counted yet, newest first and one at a time - each a full ISD credits count of a few
+    // minutes, and before the GM switch its old-way handoffs too - recording each as it lands. onStep(msg) hears the
+    // progress, onMonth(ym) each month recorded. A month another Lead's tab is counting is left to it, and each is tried
+    // once per run. A failure releases its month and rejects. Single-flight; Leads only, where the shared worker runs.
+    count: function (onStep, onMonth) {
+        var L = JiTA.leadduty, M = L.members, C = JiTA.credits;
+        if (!L.isLead()) { return Promise.reject(M._notLead()); }
+        if (M._count) { return M._count; }
+        if (!(JiTA.worker && JiTA.worker.usable())) {
+            return Promise.reject(new Error('Counting needs the background worker JiTA runs on Jira pages: open Lead duties on a Jira page to count.'));
+        }
+        var say = function (s) { try { if (onStep) { onStep(s); } } catch (e) { /* ignore */ } }, hook = C.onProgress, tried = {};
+        C.onProgress = say;
+        var next = function () {
+            return L.ledger.read(L.ACTIVITY_KEY).then(function (r) {
+                var v = r.value || {}, frozen = v.frozen || {}, crawl = v.crawl || {}, now = Date.now();
+                var todo = M.window(L._ym()).filter(function (ym) {
+                    var c = crawl[ym];
+                    return !frozen[ym] && !tried[ym] && !(c && c.tab !== JiTA.sched.tabId && now - Date.parse(c.at) < M.CLAIM_MS);
+                });
+                if (!todo.length) { return null; }
+                tried[todo[0]] = true;
+                return M._countOne(todo[0], say).then(function (recorded) {
+                    if (recorded) { try { if (onMonth) { onMonth(todo[0]); } } catch (e) { /* ignore */ } }
+                    return next();
+                });
+            });
+        };
+        var p = M._count = next();
+        var end = function () { C.onProgress = hook; if (M._count === p) { M._count = null; } };
+        p.then(end, end);
+        return p;
+    },
+    // One month: claim it (unless another Lead counted it meanwhile), count it and record it. Resolves true when it was
+    // recorded, false when there was nothing to do; on a failure its claim goes.
+    _countOne: function (ym, say) {
+        var L = JiTA.leadduty, M = L.members, C = JiTA.credits, p = L._ymParts(ym), cut = M.gmCut(ym), tab = JiTA.sched.tabId, me = M._meName();
+        return L.ledger.mutate(L.ACTIVITY_KEY, function (v) {
+            v = v || { v: 1 };
+            v.crawl = v.crawl || {};
+            if (v.frozen && v.frozen[ym]) { return null; }
+            v.crawl[ym] = { by: me, tab: tab, at: new Date().toISOString() };
+            return v;
+        }).then(function (w) {
+            if (w.value && w.value.frozen && w.value.frozen[ym]) { return false; }   // counted meanwhile
+            say('Counting ' + M._mon(ym) + '…');
+            return M._crawl(p.y, p.m, say).then(function (res) {
+                if (!cut) { return { res: res, gm: {} }; }
+                say('Counting ' + M._mon(ym) + '\'s GM handoffs made the old way…');
+                return C.computeGmOld(p.y, p.m, cut).then(function (g) { return { res: res, gm: (g && g.byAcc) || {} }; });
+            }).then(function (out) {
+                var fc = M.fromCredits(out.res), gm = {}, freezes = {};
+                Object.keys(out.gm).forEach(function (acc) {
+                    if (fc.counts[acc] != null && out.gm[acc]) { fc.counts[acc] += out.gm[acc]; gm[acc] = out.gm[acc]; }
+                });
+                freezes[ym] = { at: out.res.computedAt, counts: fc.counts, gm: gm };
+                return L.ledger.mutate(L.ACTIVITY_KEY, function (v) { return M._apply(v, freezes, { at: out.res.computedAt, names: fc.names }, me); })
+                    .then(M._tap).then(function () { return true; });
+            }).catch(function (e) {
+                return L.ledger.mutate(L.ACTIVITY_KEY, function (v) {
+                    if (!v || !v.crawl || !v.crawl[ym] || v.crawl[ym].tab !== tab) { return null; }
+                    delete v.crawl[ym];
+                    return v;
+                }).then(function () { throw e; }, function () { throw e; });
+            });
+        });
+    },
+    // A month's full ISD credits count, waiting while one already runs (here or in another tab), for up to BUSY_MAX_MS.
+    _crawl: function (y, m, say) {
+        var M = JiTA.leadduty.members, C = JiTA.credits, t0 = Date.now();
+        var wait = function () {
+            if (Date.now() - t0 > M.BUSY_MAX_MS) {
+                return Promise.reject(new Error('An ISD credits count has been running for over ' + Math.round(M.BUSY_MAX_MS / 60000) + ' minutes. Try again later.'));
+            }
+            say('Waiting for the ISD credits count that is running to finish…');
+            return new Promise(function (r) { setTimeout(r, M.BUSY_POLL_MS); }).then(attempt);
+        };
+        var attempt = function () {
+            if (C.busy()) { return wait(); }
+            return C.refreshLeased(y, m).catch(function (e) { if (e && e.busy) { return wait(); } throw e; });
+        };
+        return attempt();
+    },
+
+    // A member's role and note, kept in MEMBERS_KEY: only a role other than the default is stored, an empty note deletes
+    // it, and an entry with nothing left goes. Resolve the mutate result; a real change republishes the page. Leads only.
+    setRole: function (acc, role, name) {
+        var L = JiTA.leadduty, M = L.members;
+        if (!L.isLead()) { return Promise.reject(M._notLead()); }
+        if (M.ROLES.indexOf(role) < 0) { return Promise.reject(new Error('Unknown role: ' + role)); }
+        var want = role === M.defaultRole(name) ? '' : role;
+        return M._person(acc, function (e) {
+            if ((e.role || '') === want) { return false; }
+            if (want) { e.role = want; } else { delete e.role; }
+            return true;
+        });
+    },
+    setNote: function (acc, note) {
+        var L = JiTA.leadduty, M = L.members;
+        if (!L.isLead()) { return Promise.reject(M._notLead()); }
+        var want = L._note(note);
+        return M._person(acc, function (e) {
+            if ((e.note || '') === want) { return false; }
+            if (want) { e.note = want; } else { delete e.note; }
+            return true;
+        });
+    },
+    // Change one member's entry: change(e) edits it and says whether anything changed.
+    _person: function (acc, change) {
+        var L = JiTA.leadduty, M = L.members;
+        return L.ledger.mutate(L.MEMBERS_KEY, function (v) {
+            v = v || { v: 1 };
+            v.m = v.m || {};
+            var e = v.m[acc] || {};
+            if (!change(e)) { return null; }
+            if (!e.role && !e.note) { delete v.m[acc]; return v; }
+            e.by = M._meName();
+            e.at = M._today();
+            v.m[acc] = e;
+            return v;
+        }).then(M._tap);
+    },
+
+    // Rewrite MEMBERS_PAGE from the ledger when its content changed, by report.publish's rules: the content is hashed (the
+    // stamp is not), the hash and the publishing build are kept in MEMBERS_KEY (pub), and an older build never overwrites
+    // a newer one. Coloured rows and numbers first; if Confluence refuses them (HTTP 400) the page is written plain, and
+    // stays plain. Resolves { written, skipped, version }; Leads only.
+    publish: function (force) {
+        var L = JiTA.leadduty, M = L.members, page = String(L.MEMBERS_PAGE || '');
+        if (!L.isLead()) { return Promise.resolve({ skipped: 'not a Lead' }); }
+        if (L._dry()) { return Promise.resolve({ skipped: 'dry run' }); }
+        if (!page) { return Promise.resolve({ skipped: 'no members page is set' }); }
+        if (page === String(L.ledgerPage())) { return Promise.resolve({ skipped: 'the members page is the ledger page' }); }
+        if (M._pubBusy && (Date.now() - M._pubAt) < M.PUB_BUSY_MAX_MS) { M._pubAgain = true; return Promise.resolve({ skipped: 'already publishing' }); }
+        M._pubBusy = true;
+        M._pubAt = Date.now();
+        M._pubAgain = false;
+        var rerun = function () { if (M._pubAgain) { M._pubAgain = false; M._tap({ written: true }); } };
+        var done = function (v) { M._pubBusy = false; M._last = { at: Date.now(), result: v }; rerun(); return v; };
+        var fail = function (e) { M._pubBusy = false; M._last = { at: Date.now(), error: String(e && e.message || e) }; rerun(); throw e; };
+        return Promise.all([L.ledger.read(L.ACTIVITY_KEY), L.ledger.read(L.MEMBERS_KEY)]).then(function (r) {
+            var act = r[0].value, mem = r[1].value, pub = (mem && mem.pub) || null;
+            if (!act || !act.frozen || !Object.keys(act.frozen).length) { return { skipped: 'no month counted yet' }; }
+            if (pub && pub.plain) { M._plain = true; }
+            var rows = M.model(act, mem, null, L._ym()), body = M._content(rows, act, !M._plain), hash = JiTA.util.hash(body);
+            if (!force && pub && pub.hash === hash) { return { skipped: 'unchanged' }; }
+            if (pub && pub.v && JiTA.SCRIPT_VERSION && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, pub.v) < 0) {
+                return { skipped: 'this tab runs v' + JiTA.SCRIPT_VERSION + ' and the page was last published by v' + pub.v +
+                    ' - an older build does not overwrite a newer one. Reload this tab to pick up the update.' };
+            }
+            return L.report._write(M._stamp() + '\n' + body, false, page).catch(function (e) {
+                if (M._plain || !e || e.status !== 400) { throw e; }
+                M._plain = true;   // Confluence would not take the colours: the lozenges carry the state alone
+                body = M._content(rows, act, false);
+                hash = JiTA.util.hash(body);
+                return L.report._write(M._stamp() + '\n' + body, false, page);
+            }).then(function (res) {
+                return L.ledger.mutate(L.MEMBERS_KEY, function (v) {
+                    v = v || { v: 1 };
+                    v.pub = { hash: hash, v: JiTA.SCRIPT_VERSION || '', by: M._meName(), at: new Date().toISOString() };
+                    if (M._plain) { v.pub.plain = true; }
+                    return v;
+                }).then(function () { return { written: true, version: res.version }; }, function () { return { written: true, version: res.version }; });
+            });
+        }).then(done, fail);
+    },
+    // What the last publish from this tab did, for the tab's status line: '' when there is nothing worth saying.
+    lastLine: function () {
+        var l = JiTA.leadduty.members._last;
+        if (!l) { return ''; }
+        var when = new Date(l.at).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+        if (l.error) { return 'publishing the members page FAILED (' + when + '): ' + l.error; }
+        return (l.result && l.result.written) ? ('members page published ' + when) : '';
+    },
+
+    // The page's content, which is hashed: the legend, the one table, and the footnotes. rich colours the rows and the
+    // months below the minimum; the State column carries a status lozenge either way.
+    _content: function (rows, act, rich) {
+        var L = JiTA.leadduty, M = L.members, R = L.report, wins = M.window(L._ym()), frozen = (act && act.frozen) || {}, tints = [];
+        var lozenge = function (st) {
+            var lz = M.LOZENGE[st];
+            return lz ? ('<ac:structured-macro ac:name="status" ac:schema-version="1"><ac:parameter ac:name="colour">' + lz[0] +
+                '</ac:parameter><ac:parameter ac:name="title">' + lz[1] + '</ac:parameter></ac:structured-macro>') : '';
+        };
+        var body = rows.map(function (r) {
+            var judged = !!M.JUDGED[r.role], cells = [R._txt(r.role), R._txt(r.name), R._lines(r.note)];
+            tints.push(rich ? (M.TINT[r.state] || null) : null);
+            r.months.forEach(function (n, i) {
+                if (n === undefined) { cells.push(''); return; }
+                if (n === null) { cells.push('-'); return; }
+                var txt = R._txt(String(n) + (r.gm[i] ? '*' : ''));
+                var ink = (rich && judged && n < M.MIN_ACTIONED) ? (n === 0 ? M.INK.zero : M.INK.low) : '';
+                cells.push(ink ? ('<span style="color: ' + ink + ';">' + txt + '</span>') : txt);
+            });
+            cells.push(R._txt(r.last ? M._mon(r.last) : ''));
+            cells.push(lozenge(r.state));
+            return cells;
+        });
+        var late = wins.filter(function (ym) { return frozen[ym] && frozen[ym].late; });
+        var gm = rows.some(function (r) { return r.gm.some(function (n) { return n > 0; }); });
+        return '<p>Every ISD member with what they actioned in each of the last ' + M.MONTHS + ' full months: bug reports attached, ' +
+            'trashed or reassigned, plus defects created, as the ISD credits leaderboard counts Total Actioned. ECAID asks for <strong>' +
+            M.MIN_ACTIONED + ' a month</strong>. A Bug Hunter or Rookie under it last month is Below, with nothing in ' + M.INACTIVE_MONTHS +
+            ' months Inactive, and New when not in the group last month. Leads and Seniors are not judged by it. A month shown as - ' +
+            'is one before the member joined.</p>' +
+            (gm ? ('<p>* includes GM handoffs made the old way (the Team field set to EO - GameMasters), counted before ' +
+                R._txt(M.GM_SWITCH) + ', when Convert to Support took over.</p>') : '') +
+            (late.length ? ('<p>Counted late: ' + late.map(function (ym) { return R._txt(M._mon(ym) + ' (on ' + String(frozen[ym].at).slice(0, 10) + ')'); }).join(', ') +
+                '. A month counted late lists the group as it was when counted, so someone who joined since shows 0 for it.</p>') : '') +
+            R._table(['Role', 'Name', 'Notes'].concat(wins.map(M._mon)).concat(['Last active', 'State']), body, tints);
+    },
+    // The line above the content, outside the hash (it names the time, which changes on every look).
+    _stamp: function () {
+        var L = JiTA.leadduty, me = L.members._meName();
+        return '<p><em>Generated from the shared lead-duty ledger by the Jira Triage Assistant (v' + (JiTA.SCRIPT_VERSION || '?') +
+            (me ? (' on ' + me + "'s tab") : '') + ') on ' + L.report._when(new Date().toISOString()) + ' UTC. Anything typed on this page by ' +
+            'hand is replaced on the next update - set roles and notes in the Members tab of Lead duties in Jira instead.</em></p>';
+    },
+
+    // The scheduler's part (leadduty.sched): record what the caches finished, then bring the page in step. Never crawls.
+    tick: function () {
+        var L = JiTA.leadduty, M = L.members;
+        if (!L.isLead()) { return Promise.resolve(null); }
+        return M.gather().then(function () { return M.publish(false); });
+    },
+
+    _noop: null
+};
+
+
 /* ---- Lead duties: the ambient monthly reminder -------------------------------------------------------
  * A chip that stays in the corner and says what is left this month - or that everything is done. It used to
  * vanish once the month was finished, but a chip that disappears looks exactly like one that broke, and "all
@@ -22299,6 +23031,10 @@ JiTA.leadduty.sched = {
             // Keep the readable page in step with the ledger even when nobody opens the overlay. publish()
             // is a no-op when nothing changed, so an idle month costs one hash comparison, not a page version.
             return L.report.publish(false).catch(function () { /* cosmetic - never fails the tick */ });
+        }).then(function () {
+            // The Members tab's page too: what the credits caches finished since is recorded, and the page brought in step.
+            // It never crawls - a month nobody has counted is counted from the tab.
+            return Promise.resolve().then(function () { return L.members.tick(); }).catch(function () { /* cosmetic - never fails the tick */ });
         }).then(function () {
             gmSet(S.LAST_KEY, Date.now());
             gmSet(S.FAIL_KEY, 0);
@@ -23707,6 +24443,14 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.48.0', date: '2026-11-01', features: [
+            'Lead duties has a Members tab, for Leads only: every ISD member with what they actioned in each of the last 6 full months and this month so far, counted as the ISD credits leaderboard counts Total Actioned.',
+            'ECAID asks for 40 actioned a month. A Bug Hunter\'s or Rookie\'s month under it is amber, and 0 is red. A dot says who meets it, who is below it, who has actioned nothing in 3 months and who is new. Leads and Seniors are not judged.',
+            'Each member has a role and a note that every Lead shares, in one list by role (Lead, Senior, Bug Hunter, Rookie), then by name. "Only below the minimum or inactive" leaves just those.',
+            'Each finished month is counted once for all Leads and kept in the Lead Ledger. A month nobody has counted yet is counted with the tab\'s Count button, a few minutes each.',
+            'GM handoffs made before 21 Aug 2026, when Convert to Support took over, are counted the old way: the reports a member handed to the GameMasters team.',
+            'The table is published to the ECAID Member Productivity (past 6 months) page in Confluence, coloured like the tab, and kept in step. The wiki review never assigns that page.'
+        ] },
         { v: '3.47.0', date: '2026-11-01', features: [
             'Similar defects, Matching bug reports and Triage mode\'s matches: each card ends in one row of small symbols with its date at the right. The status shows as a dot in Jira\'s colours, ≡ means the same exception in the log, ≈ a looser match.',
             'More symbols: ▲ and a count for a trending defect, ◷ for one fixed long before the report, and ↑ → ↓ ★ for the trend on trending rows. Hover any symbol for what it says. The status, exception and Created lines are gone.',

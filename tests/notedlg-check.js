@@ -157,5 +157,15 @@ ok('...and without a draft key it keeps no draft', JSON.stringify(U._drafts) ===
 e = key('Escape');
 ok('with no dialog open, keys are left alone', !e.prevented && !e.stopped && win.keys.length === 0);
 
+// ---- editing a note that is already there (the Members tab) ----
+ask({ title: 'Note on ISD Astaris', save: 'Save note', draft: 'member:a', value: 'Ask for update?' });
+ok('a note being edited opens with its text', ta().value === 'Ask for update?' && part('ldn-count').textContent === '15 / ' + L.NOTE_MAX, ta().value);
+type('Ask for update? Twice');
+key('Escape');
+ask({ title: 'Note on ISD Astaris', save: 'Save note', draft: 'member:a', value: 'Ask for update?' });
+ok('...while a draft typed since still wins over it', ta().value === 'Ask for update? Twice', ta().value);
+key('Escape');
+delete U._drafts['member:a'];
+
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'note dialog checks passed.'));
 process.exit(fail ? 1 : 0);
