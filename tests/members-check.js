@@ -79,7 +79,9 @@ global.document = {
     getElementById: (id) => (id === 'ld-status' ? status : (all(body).filter((k) => k.id === id)[0] || null)),
     createTextNode: (t) => ({ data: t })
 };
-global.confirm = () => true;
+let confirmAnswer = false;   // declined unless a check agrees: a role picked then stays in the tab
+const confirmAsked = [];
+global.confirm = (m) => { confirmAsked.push(m); return confirmAnswer; };
 global.GM_addStyle = () => {};
 global.window = {};
 
@@ -153,15 +155,25 @@ const teamPage = (rows) => '<p>The team.</p><table data-layout="default" ac:loca
 const TEAM0 = teamPage([teamRow(mention('acc-me'), 'Lead'), teamRow(mention('acc-dist'), 'Bughunter'), teamRow(mention('acc-ast'), 'Bughunter'),
     teamRow(mention('acc-byte'), 'Bughunter'), teamRow(mention('acc-new'), 'Bughunter')]);
 let pages = {}, pageWrites = [], refuseRich = false, failPage = null, teamBody = TEAM0, teamFail = null, teamReads = 0;
+let teamVersion = 7, teamWrites = [], teamConflicts = 0, teamRefuse = null, afterTeamSave = null;
 JiTA.conf.getPage = (id, withBody) => {
     if (id === L.TEAM_PAGE) {
         teamReads++;
         if (teamFail) { const e = teamFail; teamFail = null; return Promise.reject(e); }
-        return Promise.resolve({ id: id, title: 'ECAID - Team Members', version: 7, status: 'current', body: withBody ? teamBody : '' });
+        return Promise.resolve({ id: id, title: 'ECAID - Team Members', version: teamVersion, status: 'current', body: withBody ? teamBody : '' });
     }
     return Promise.resolve({ id: id, title: 'page ' + id, version: (pages[id] && pages[id].version) || 1, status: 'current' });
 };
-JiTA.conf.savePageBody = (page, html) => {
+JiTA.conf.savePageBody = (page, html, message) => {
+    if (page.id === L.TEAM_PAGE) {   // saved at its next version only, as Confluence does; teamConflicts has someone else save first
+        if (teamConflicts > 0) { teamConflicts--; teamVersion++; return Promise.reject(Object.assign(new Error('HTTP 409'), { status: 409 })); }
+        if (teamRefuse) { const e = teamRefuse; teamRefuse = null; return Promise.reject(e); }
+        if (page.version !== teamVersion) { return Promise.reject(Object.assign(new Error('HTTP 409'), { status: 409 })); }
+        teamWrites.push({ html: html, message: message, from: page.version });
+        teamBody = html; teamVersion = page.version + 1;
+        if (afterTeamSave) { const f = afterTeamSave; afterTeamSave = null; f(); }
+        return Promise.resolve({ id: page.id, version: teamVersion });
+    }
     if (failPage) { const e = failPage; failPage = null; return Promise.reject(e); }
     if (refuseRich && /data-highlight-colour|style="color/.test(html)) { return Promise.reject(Object.assign(new Error('HTTP 400'), { status: 400 })); }
     pageWrites.push({ id: page.id, html: html });
@@ -492,8 +504,9 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await M.setNote('acc-ast', 'x').catch((e) => refused.push(e.message));
     teamReads = 0;
     await M.team(true).catch((e) => refused.push(e.message));
+    await M.setRank('acc-ast', 'Senior', 'ISD Astaris').catch((e) => refused.push(e.message));
     const pr = await M.publish(true), tk = await M.tick();
-    ok('a non-Lead can read, count, change and publish nothing, nor read the team page', refused.length === 5 && refused.every((m) => /Leads only/.test(m)) && pr.skipped === 'not a Lead' &&
+    ok('a non-Lead can read, count, change and publish nothing, nor read or change the team page', refused.length === 6 && refused.every((m) => /Leads only/.test(m)) && pr.skipped === 'not a Lead' &&
         tk === null && teamReads === 0, J(refused));
     gm.leadDutyMe = { accountId: 'acc-me', displayName: 'ISD BH Schogol', handle: 'schogol', isLead: true };
     L._me = null;
@@ -528,7 +541,105 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     const teamId = L.TEAM_PAGE;
     L.TEAM_PAGE = ''; teamReads = 0;
     ok('with no team page set there are no ranks, and nothing is read', (await M.team(true)) === null && teamReads === 0);
+    err = null;
+    await M.setRank('acc-ast', 'Senior', 'ISD Astaris').catch((e) => { err = e; });
+    ok('...nor anything changed there', err && err.message === 'no team page is set' && teamReads === 0, err && err.message);
     L.TEAM_PAGE = teamId;
+
+    // ================= changing the team page =================
+    ok('a cell rewritten keeps its tags: its text alone becomes the word', M._rewriteCell('<p>Bughunter</p>', 'Snr Bughunter') === '<p>Snr Bughunter</p>' &&
+        M._rewriteCell('<p local-id="a1"><strong>Lead</strong></p>', 'Snr Bughunter') === '<p local-id="a1"><strong>Snr Bughunter</strong></p>' &&
+        M._rewriteCell('<p>Snr <em>Bug</em>hunter</p>', 'Lead') === '<p>Lead<em></em></p>', M._rewriteCell('<p>Snr <em>Bug</em>hunter</p>', 'Lead'));
+    ok('...a cell without text gets it in its empty paragraph, or in a new one', M._rewriteCell('<p />', 'Rookie') === '<p>Rookie</p>' &&
+        M._rewriteCell('<p local-id="b" />', 'Rookie') === '<p local-id="b">Rookie</p>' && M._rewriteCell('<p></p>', 'Rookie') === '<p>Rookie</p>' && M._rewriteCell('', 'Rookie') === '<p>Rookie</p>');
+    ok('...the spaces around its paragraph kept, and the word escaped', M._rewriteCell('\n<p>Lead</p>\n', 'Rookie') === '\n<p>Rookie</p>\n' && M._rewriteCell('<p>x</p>', 'R&D <1>') === '<p>R&amp;D &lt;1&gt;</p>',
+        J(M._rewriteCell('\n<p>Lead</p>\n', 'Rookie')));
+    const rowsW = [teamRow(mention('acc-me'), 'Lead'), teamRow(mention('acc-dist'), 'Bughunter'), teamRow(mention('acc-ast'), 'Bughunter'), teamRow(mention('acc-byte'), 'Bughunter')];
+    const pageW = teamPage(rowsW);
+    ok('a rank changed rewrites that member\'s Rank cell alone, every other byte of the page as it was',
+        M._withRank(pageW, 'acc-dist', 'Senior') === teamPage([rowsW[0], teamRow(mention('acc-dist'), 'Snr Bughunter'), rowsW[2], rowsW[3]]));
+    ok('...in the page\'s own words for each rank', M._withRank(pageW, 'acc-ast', 'Rookie') === teamPage([rowsW[0], rowsW[1], teamRow(mention('acc-ast'), 'Rookie'), rowsW[3]]) &&
+        M._withRank(pageW, 'acc-me', 'Bug Hunter') === teamPage([teamRow(mention('acc-me'), 'Bughunter'), rowsW[1], rowsW[2], rowsW[3]]) &&
+        M._withRank(pageW, 'acc-ast', 'Lead') === teamPage([rowsW[0], rowsW[1], teamRow(mention('acc-ast'), 'Lead'), rowsW[3]]));
+    ok('someone who left has their whole row removed, and nothing else', M._withRank(pageW, 'acc-byte', M.LEFT) === teamPage(rowsW.slice(0, 3)) &&
+        M._withRank(pageW, 'acc-me', M.LEFT) === teamPage(rowsW.slice(1)));
+    ok('someone listed twice is changed in the first row naming them, the one their rank is read from',
+        M._withRank(teamPage([rowsW[1], teamRow(mention('acc-dist'), 'Rookie')]), 'acc-dist', 'Senior') === teamPage([teamRow(mention('acc-dist'), 'Snr Bughunter'), teamRow(mention('acc-dist'), 'Rookie')]));
+    const pageT = '<p>Intro &amp; more</p><table><tbody><tr><th><p>Name</p></th><th><p>Notes</p></th><th><p>Rank</p></th></tr>' +
+        '<tr><td><p>' + mention('t-a') + '</p></td><td><p /></td><td rowspan="2" data-highlight-colour="#e3fcef"><p>Lead</p></td></tr>' +    // a rank merged over two rows
+        '<tr><td><p>' + mention('t-b') + '</p></td><td><p>Mentor</p></td></tr>' +
+        '<tr><td><p>' + mention('t-c') + ' ' + mention('t-d') + '</p></td><td /><td><p>Bughunter</p></td></tr>' +                              // two in one Name cell
+        '<tr><td><p>' + mention('t-e') + '</p></td><td /><td><p><ac:structured-macro ac:name="status"><ac:parameter ac:name="title">Snr</ac:parameter></ac:structured-macro></p></td></tr>' +
+        '<tr><td><p>' + mention('t-f') + '</p></td><td><p>(Mentor)</p></td><td class="x" /></tr>' +                                           // an empty Rank cell
+        '<tr><td><p>' + mention('t-g') + '</p></td><td><p>Notes stay</p></td><td data-highlight-colour="#fffae6"><p><strong>Bughunter</strong></p></td></tr>' +
+        '<tr><td><p>' + mention('t-h') + '</p></td><td colspan="2"><p>Bughunter, and notes</p></td></tr>' +                                 // a Rank cell across two columns
+        '<tr><td><p>' + mention('t-i') + '</p></td></tr>' +                                                                                     // no Rank cell at all
+        '</tbody></table><p>Outro</p>';
+    const tw = (acc, role) => { try { return M._withRank(pageT, acc, role); } catch (e) { return 'THROWS ' + e.message; } };
+    ok('a Rank cell merged over several rows is left alone, saying why: changing it would change the others too',
+        tw('t-a', 'Senior') === 'THROWS their Rank cell is merged with other cells' && tw('t-b', 'Senior') === 'THROWS their Rank cell is merged with other cells', tw('t-b', 'Senior'));
+    ok('...nor is either row under it removed', tw('t-a', M.LEFT) === 'THROWS their row shares a merged cell with other rows' && tw('t-b', M.LEFT) === 'THROWS their row shares a merged cell with other rows',
+        tw('t-b', M.LEFT));
+    ok('...nor a row naming two people, nor a Rank cell holding a macro', tw('t-c', 'Senior') === 'THROWS their Name cell names someone else too' &&
+        tw('t-d', M.LEFT) === 'THROWS their Name cell names someone else too' && tw('t-e', 'Senior') === 'THROWS their Rank cell holds a macro', tw('t-e', 'Senior'));
+    ok('...nor anyone not @mentioned on it', tw('nobody', 'Senior') === 'THROWS they are not @mentioned on it');
+    ok('...nor a Rank cell across two columns, nor a row with no Rank cell, though both rows can go', tw('t-h', 'Senior') === 'THROWS their Rank cell is merged with other cells' &&
+        tw('t-i', 'Senior') === 'THROWS their row has no Rank cell' && tw('t-h', M.LEFT).indexOf('"t-h"') < 0 && tw('t-i', M.LEFT).indexOf('"t-i"') < 0 &&
+        tw('t-i', M.LEFT).indexOf('"t-h"') > 0 && /<tr><td><p><ac:link><ri:user ri:account-id="t-h"[^<]*<\/ac:link><\/p><\/td><td colspan="2">/.test(tw('t-i', M.LEFT)),
+        J([tw('t-h', 'Senior'), tw('t-i', 'Senior')]));
+    ok('an empty Rank cell gets the word, and a cell keeps its own attributes and formatting', tw('t-f', 'Rookie') === pageT.replace('<td class="x" />', '<td class="x"><p>Rookie</p></td>') &&
+        tw('t-g', 'Senior') === pageT.replace('<p><strong>Bughunter</strong></p>', '<p><strong>Snr Bughunter</strong></p>'), tw('t-f', 'Rookie').slice(-260));
+    ok('...and a row whose Rank cell holds a macro can still be removed', tw('t-e', M.LEFT) === pageT.replace(/<tr><td><p><ac:link><ri:user ri:account-id="t-e"[\s\S]*?<\/tr>/, ''));
+    const stuckT = M._parseTeam(pageT).stuck;
+    ok('the team page\'s read says whose row cannot be changed on its own, and why', stuckT['t-b'].rank === 'their Rank cell is merged with other cells' &&
+        stuckT['t-c'].row === 'their Name cell names someone else too' && stuckT['t-e'].rank === 'their Rank cell holds a macro' && stuckT['t-e'].row === '' &&
+        J(stuckT['t-g']) === J({ rank: '', row: '' }), J(stuckT));
+    // setRank: read, changed, written at the next version; read again and tried once more when changed meanwhile
+    teamBody = pageW; teamVersion = 20; teamWrites = [];
+    M._team = { at: NOW, value: { ranks: {}, names: {}, n: 1 } };
+    let sr = await M.setRank('acc-dist', 'Senior', 'ISD Distillery');
+    ok('setRank writes the page changed, at its next version, saying what changed', sr.written && sr.version === 21 && teamWrites.length === 1 && teamWrites[0].from === 20 &&
+        teamBody === teamPage([rowsW[0], teamRow(mention('acc-dist'), 'Snr Bughunter'), rowsW[2], rowsW[3]]) &&
+        teamWrites[0].message === 'Set ISD Distillery\'s rank to Snr Bughunter (JiTA Members tab)', J(teamWrites.map((x) => x.message)));
+    ok('...and lets go of the ranks it read, so they are read again', M._team === null);
+    teamConflicts = 1; teamWrites = [];
+    sr = await M.setRank('acc-byte', M.LEFT, 'ISD Byteghost');
+    ok('a page changed meanwhile is read again and the change made on that', sr.written && teamWrites.length === 1 && teamBody.indexOf('acc-byte') < 0 && teamBody.indexOf('acc-ast') > 0 &&
+        teamWrites[0].message === 'Removed ISD Byteghost, who left ECAID (JiTA Members tab)', J(teamWrites.map((x) => x.message)));
+    teamConflicts = 2; teamWrites = []; err = null;
+    await M.setRank('acc-ast', 'Rookie', 'ISD Astaris').catch((e) => { err = e; });
+    ok('...but once only: changed again, it gives up, saying so', err && err.status === 409 && teamWrites.length === 0, err && err.message);
+    teamConflicts = 0;
+    teamBody = pageT; teamWrites = []; err = null;
+    await M.setRank('t-a', 'Senior', 'ISD A').catch((e) => { err = e; });
+    ok('a row that cannot be changed on its own is not written, saying why', err && err.message === 'their Rank cell is merged with other cells' && teamWrites.length === 0, err && err.message);
+    err = null;
+    await M.setRank('t-g', 'Overlord', 'ISD G').catch((e) => { err = e; });
+    ok('...nor a role that is none of the five', err && /Unknown role/.test(err.message) && teamWrites.length === 0);
+    gm.leadDutyDryRun = true;
+    sr = await M.setRank('t-g', 'Senior', 'ISD G');
+    gm.leadDutyDryRun = false;
+    ok('a dry run changes nothing', sr.skipped === 'dry run' && teamWrites.length === 0);
+    // pageChange: what a role picked would do to the team page
+    const tmP = M._parseTeam(pageT + teamPage([teamRow(mention('acc-ast'), 'Bughunter'), teamRow('ISD BH Typed', 'Bughunter')]));
+    const pc = (acc, name, rank, onTeam, role) => M.pageChange({ acc: acc, name: name, rank: rank, onTeam: onTeam }, role, tmP);
+    ok('picking the rank the team page gives asks nothing', J(pc('acc-ast', 'ISD Astaris', 'Bug Hunter', true, 'Bug Hunter')) === '{}');
+    ok('...another asks to change it there, in the page\'s words', pc('acc-ast', 'ISD Astaris', 'Bug Hunter', true, 'Senior').ask ===
+        'Change ISD Astaris\'s rank on the ECAID - Team Members page to Snr Bughunter too?\n\nOK: the page and the tab. Cancel: the tab only.', pc('acc-ast', 'ISD Astaris', 'Bug Hunter', true, 'Senior').ask);
+    ok('...and Left ECAID asks to remove them from it', pc('acc-ast', 'ISD Astaris', 'Bug Hunter', true, M.LEFT).ask ===
+        'Remove ISD Astaris from the ECAID - Team Members page too? Their whole row goes; the page history keeps it.\n\nOK: the page and the tab. Cancel: the tab only.');
+    ok('someone not on it: their rank cannot be changed there, and there is nothing to remove', pc('nobody', 'ISD Nobody', undefined, false, 'Senior').why === 'they are not on the ECAID - Team Members page' &&
+        J(pc('nobody', 'ISD Nobody', undefined, false, M.LEFT)) === '{}');
+    ok('...someone on it by a typed name only is changed there by hand', pc('acc-typed', 'ISD BH Typed', 'Bug Hunter', true, 'Senior').why ===
+        'they are on the ECAID - Team Members page without an @mention, so change their rank there by hand' &&
+        pc('acc-typed', 'ISD BH Typed', 'Bug Hunter', true, M.LEFT).why === 'they are on the ECAID - Team Members page without an @mention, so remove them there by hand');
+    ok('...and a row that cannot be changed on its own says why, asking nothing', pc('t-a', 'ISD A', 'Lead', true, 'Senior').why ===
+        'their Rank cell is merged with other cells on the ECAID - Team Members page, so change their rank there by hand' && !pc('t-a', 'ISD A', 'Lead', true, 'Senior').ask &&
+        pc('t-c', 'ISD C', 'Bug Hunter', true, M.LEFT).why === 'their Name cell names someone else too on the ECAID - Team Members page, so remove them there by hand');
+    ok('...one whose Rank cell holds a macro can still be removed', !!pc('t-e', 'ISD E', 'Senior', true, M.LEFT).ask);
+    ok('...and without the team page nothing is asked', J(M.pageChange({ acc: 'acc-ast', name: 'x', rank: undefined, onTeam: null }, 'Senior', null)) === '{}' &&
+        J(M.pageChange({ acc: 'acc-ast', name: 'x' }, 'Senior', { error: 'HTTP 503' })) === '{}');
+    teamBody = TEAM0; teamVersion = 7; M._team = null;
 
     // ================= the page =================
     await M.setNote('acc-ast', 'Ask for <update>?\nTwice & more');
@@ -778,6 +889,51 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await settle();
     ok('a team page that cannot be read leaves its ranks out and marks nobody, saying why', rowsOf().every((r) => hintOf(r).text() === '') && picked(rowFor('acc-dist')) === 'Bug Hunter' &&
         /Could not read the ECAID - Team Members page \(HTTP 503\), so its ranks are not used/.test(status.textContent), status.textContent);
+    confirmAsked.length = 0;
+    roleOf(rowFor('acc-dist')).value = 'Rookie'; roleOf(rowFor('acc-dist')).fire('change');
+    await settle();
+    ok('...and a role picked meanwhile asks nothing about it, and is kept in the tab', confirmAsked.length === 0 && props[L.MEMBERS_KEY].value.m['acc-dist'].role === 'Rookie', J(confirmAsked));
+
+    // picking a role asks to change the team page too
+    await later();
+    teamBody = teamPage([teamRow(mention('acc-me'), 'Lead'), teamRow(mention('acc-dist'), 'Bughunter'), teamRow(mention('acc-ast'), 'Bughunter'), teamRow(mention('acc-byte'), 'Bughunter')]);
+    teamVersion = 30; teamWrites = []; confirmAsked.length = 0; confirmAnswer = true;
+    delete props[L.MEMBERS_KEY].value.m['acc-byte'];   // not left any more
+    U._loadMembers(true);
+    await settle();
+    roleOf(rowFor('acc-dist')).value = 'Senior'; roleOf(rowFor('acc-dist')).fire('change');
+    await settle();
+    ok('a role picked that the team page does not give asks first, and agreed, changes their Rank cell there', confirmAsked.length === 1 &&
+        /^Change ISD Distillery's rank on the ECAID - Team Members page to Snr Bughunter too\?/.test(confirmAsked[0]) && teamWrites.length === 1 &&
+        teamBody.indexOf(teamRow(mention('acc-dist'), 'Snr Bughunter')) >= 0, J(confirmAsked));
+    ok('...the tab then following the page, with no role of its own stored', picked(rowFor('acc-dist')) === 'Senior' && !('role' in (props[L.MEMBERS_KEY].value.m['acc-dist'] || {})) &&
+        U._mem.team.ranks['acc-dist'] === 'Senior', J(props[L.MEMBERS_KEY].value.m['acc-dist']));
+    confirmAnswer = false; confirmAsked.length = 0; teamWrites = [];
+    roleOf(rowFor('acc-ast')).value = 'Rookie'; roleOf(rowFor('acc-ast')).fire('change');
+    await settle();
+    ok('...declined, the role is kept in the tab only and the page left alone', confirmAsked.length === 1 && teamWrites.length === 0 && props[L.MEMBERS_KEY].value.m['acc-ast'].role === 'Rookie' &&
+        picked(rowFor('acc-ast')) === 'Rookie' && teamBody.indexOf(teamRow(mention('acc-ast'), 'Bughunter')) >= 0, J(props[L.MEMBERS_KEY].value.m['acc-ast']));
+    confirmAnswer = true; confirmAsked.length = 0; teamWrites = [];
+    roleOf(rowFor('acc-byte')).value = M.LEFT; roleOf(rowFor('acc-byte')).fire('change');
+    await settle();
+    ok('Left ECAID asks to remove them from the team page; agreed, their row goes and the tab keeps them as left', confirmAsked.length === 1 &&
+        /^Remove ISD Byteghost from the ECAID - Team Members page too\?/.test(confirmAsked[0]) && teamWrites.length === 1 && teamBody.indexOf('acc-byte') < 0 &&
+        props[L.MEMBERS_KEY].value.m['acc-byte'].role === M.LEFT && rowFor('acc-byte').hasClass('ld-m-left') && hintOf(rowFor('acc-byte')).text() === '', J(confirmAsked));
+    confirmAsked.length = 0; teamWrites = [];
+    roleOf(rowFor('acc-new')).value = 'Senior'; roleOf(rowFor('acc-new')).fire('change');
+    await settle();
+    ok('someone not on the team page is not asked about: their role is kept in the tab only, saying why', confirmAsked.length === 0 && teamWrites.length === 0 &&
+        props[L.MEMBERS_KEY].value.m['acc-new'].role === 'Senior' && /Saved in the tab only: they are not on the ECAID - Team Members page$/.test(status.textContent), status.textContent);
+    afterTeamSave = () => { teamFail = Object.assign(new Error('HTTP 503'), { status: 503 }); };   // changed, then not read back
+    roleOf(rowFor('acc-ast')).value = 'Lead'; roleOf(rowFor('acc-ast')).fire('change');
+    await settle();
+    ok('a team page changed but not read back: the role is stored, so the tab still shows it', teamWrites.length === 1 && teamBody.indexOf(teamRow(mention('acc-ast'), 'Lead')) >= 0 &&
+        props[L.MEMBERS_KEY].value.m['acc-ast'].role === 'Lead' && picked(rowFor('acc-ast')) === 'Lead', J(props[L.MEMBERS_KEY].value.m['acc-ast']));
+    teamRefuse = Object.assign(new Error('HTTP 403'), { status: 403 }); confirmAsked.length = 0; teamWrites = [];
+    roleOf(rowFor('acc-me')).value = 'Senior'; roleOf(rowFor('acc-me')).fire('change');
+    await settle();
+    ok('a team page that will not take the change: the role is kept in the tab only, saying why', confirmAsked.length === 1 && teamWrites.length === 0 &&
+        props[L.MEMBERS_KEY].value.m['acc-me'].role === 'Senior' && /Saved in the tab only: the ECAID - Team Members page was not changed \(HTTP 403\)$/.test(status.textContent), status.textContent);
 
     Date.now = realNow;
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'members checks passed.'));
