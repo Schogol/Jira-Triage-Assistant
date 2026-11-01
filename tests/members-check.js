@@ -527,9 +527,10 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     teamReads = 0;
     await M.team(true).catch((e) => refused.push(e.message));
     await M.setRank('acc-ast', 'Senior', 'ISD Astaris').catch((e) => refused.push(e.message));
+    await M.addToTeam('acc-ast', 'Senior', 'ISD Astaris', () => '').catch((e) => refused.push(e.message));
     const pr = await M.publish(true), tk = await M.tick();
-    ok('a non-Lead can read, count, change and publish nothing, nor read or change the team page', refused.length === 6 && refused.every((m) => /Leads only/.test(m)) && pr.skipped === 'not a Lead' &&
-        tk === null && teamReads === 0, J(refused));
+    ok('a non-Lead can read, count, change and publish nothing, nor read, change or add to the team page', refused.length === 7 && refused.every((m) => /Leads only/.test(m)) &&
+        pr.skipped === 'not a Lead' && tk === null && teamReads === 0, J(refused));
     gm.leadDutyMe = { accountId: 'acc-me', displayName: 'ISD BH Schogol', handle: 'schogol', isLead: true };
     L._me = null;
 
@@ -565,7 +566,9 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('with no team page set there are no ranks, and nothing is read', (await M.team(true)) === null && teamReads === 0);
     err = null;
     await M.setRank('acc-ast', 'Senior', 'ISD Astaris').catch((e) => { err = e; });
-    ok('...nor anything changed there', err && err.message === 'no team page is set' && teamReads === 0, err && err.message);
+    let err2 = null;
+    await M.addToTeam('acc-ast', 'Senior', 'ISD Astaris', () => '').catch((e) => { err2 = e; });
+    ok('...nor anything changed or added there', err && err.message === 'no team page is set' && err2 && err2.message === 'no team page is set' && teamReads === 0, err && err.message);
     L.TEAM_PAGE = teamId;
 
     // ================= changing the team page =================
@@ -642,6 +645,63 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     sr = await M.setRank('t-g', 'Senior', 'ISD G');
     gm.leadDutyDryRun = false;
     ok('a dry run changes nothing', sr.skipped === 'dry run' && teamWrites.length === 0);
+    // adding someone missing from it
+    const namesA = { 'a-lead': 'ISD BH Schogol', 'a-snr': 'ISD Distillery', 'a-ast': 'ISD Astaris', 'a-cq': 'ISD BH CodeQuality', 'a-gh': 'ISD Glitchhound' };
+    const rowsA = [teamRow(mention('a-lead'), 'Lead'), teamRow(mention('a-snr'), 'Snr Bughunter'), teamRow(mention('a-ast'), 'Bughunter'), teamRow(mention('a-cq'), 'Bughunter'),
+        teamRow(mention('a-gh'), 'Bughunter')];
+    const pageA = teamPage(rowsA), nameOfA = (acc) => namesA[acc] || '';
+    const added = (acc, word) => '<tr><td><p><ac:link><ri:user ri:account-id="' + acc + '" /></ac:link></p></td><td><p>' + word + '</p></td><td><p /></td><td><p /></td></tr>';
+    ok('someone added goes among the rows of their rank, in order of name without "ISD" and "BH": their @mention, their rank, every other column empty',
+        M._withMember(pageA, 'n-1', 'Bug Hunter', 'ISD Bugcord', nameOfA) === teamPage([rowsA[0], rowsA[1], rowsA[2], added('n-1', 'Bughunter'), rowsA[3], rowsA[4]]),
+        M._withMember(pageA, 'n-1', 'Bug Hunter', 'ISD Bugcord', nameOfA).slice(-700));
+    ok('...after the last of them when their name comes last, before the first when it comes first',
+        M._withMember(pageA, 'n-2', 'Senior', 'ISD Zed', nameOfA) === teamPage([rowsA[0], rowsA[1], added('n-2', 'Snr Bughunter'), rowsA[2], rowsA[3], rowsA[4]]) &&
+        M._withMember(pageA, 'n-3', 'Senior', 'ISD BH Aaron', nameOfA) === teamPage([rowsA[0], added('n-3', 'Snr Bughunter')].concat(rowsA.slice(1))));
+    ok('...after the last row when nobody has their rank yet', M._withMember(pageA, 'n-4', 'Rookie', 'ISD Newbie', nameOfA) === teamPage(rowsA.concat([added('n-4', 'Rookie')])));
+    ok('...and before the first row when theirs comes first of all', M._withMember(pageA, 'n-9', 'Lead', 'ISD BH Aaron', nameOfA) === teamPage([added('n-9', 'Lead')].concat(rowsA)));
+    ok('...passing over a row whose name is not known, and going by a name typed in a row',
+        M._withMember(teamPage([rowsA[2], teamRow(mention('x-unknown'), 'Bughunter'), teamRow('ISD Frostline', 'Bughunter')]), 'n-5', 'Bug Hunter', 'ISD Dupl', nameOfA) ===
+        teamPage([rowsA[2], teamRow(mention('x-unknown'), 'Bughunter'), added('n-5', 'Bughunter'), teamRow('ISD Frostline', 'Bughunter')]));
+    const twoT = teamPage([rowsA[0]]) + teamPage([rowsA[2]]);
+    ok('...in the first table holding their rank, else the first table', M._withMember(twoT, 'n-6', 'Bug Hunter', 'ISD Zed', nameOfA) === teamPage([rowsA[0]]) + teamPage([rowsA[2], added('n-6', 'Bughunter')]) &&
+        M._withMember(twoT, 'n-7', 'Rookie', 'ISD Zed', nameOfA) === teamPage([rowsA[0], added('n-7', 'Rookie')]) + teamPage([rowsA[2]]));
+    const twoCols = (acc, word) => '<tr><td><p><ac:link><ri:user ri:account-id="' + acc + '" /></ac:link></p></td><td><p>' + word + '</p></td></tr>';
+    const mergedLeads = '<p>The team.</p><table><tbody><tr><th><p>Name</p></th><th><p>Rank</p></th></tr>' +
+        '<tr><td><p>' + mention('m-a') + '</p></td><td rowspan="2"><p>Lead</p></td></tr><tr><td><p>' + mention('m-c') + '</p></td></tr>' +
+        '<tr><td><p>' + mention('m-d') + '</p></td><td><p>Bughunter</p></td></tr></tbody></table>';
+    const namesM = { 'm-a': 'ISD Alpha', 'm-c': 'ISD Charlie', 'm-d': 'ISD Delta' };
+    ok('...never between two rows a merged cell spans: after them instead', M._withMember(mergedLeads, 'm-b', 'Lead', 'ISD Bravo', (a) => namesM[a] || '') ===
+        mergedLeads.replace('<tr><td><p>' + mention('m-d'), twoCols('m-b', 'Lead') + '<tr><td><p>' + mention('m-d')));
+    const headOnly = '<table><tbody><tr><th><p>Name</p></th><th><p>Rank</p></th></tr></tbody></table>';
+    ok('...right under the header of a table with no rows yet', M._withMember(headOnly, 'h-1', 'Rookie', 'ISD H', () => '') ===
+        '<table><tbody><tr><th><p>Name</p></th><th><p>Rank</p></th></tr>' + twoCols('h-1', 'Rookie') + '</tbody></table>');
+    const wide = '<table><tbody><tr><th><p>Rank</p></th><th><p>Name</p></th><th colspan="2"><p>Languages</p></th></tr>' +
+        '<tr><td><p>Bughunter</p></td><td><p>' + mention('w-a') + '</p></td><td><p>DE</p></td><td><p>FR</p></td><td><p>extra</p></td></tr></tbody></table>';
+    ok('...with a cell for every column, in whatever order the columns are, the widest row counting', M._withMember(wide, 'w-b', 'Bug Hunter', 'ISD Zulu', () => 'ISD Alpha') ===
+        wide.replace('</tbody>', '<tr><td><p>Bughunter</p></td><td><p><ac:link><ri:user ri:account-id="w-b" /></ac:link></p></td><td><p /></td><td><p /></td><td><p /></td></tr></tbody>'));
+    let threw = null;
+    try { M._withMember('<p>none</p>', 'z', 'Lead', 'ISD Z', () => ''); } catch (e) { threw = e.message; }
+    ok('...and a page with no rank table is not changed, saying so', threw === 'it has no table with a Name and a Rank column', threw);
+    teamBody = pageA; teamVersion = 40; teamWrites = [];
+    M._team = { at: NOW, value: { ranks: {}, names: {}, n: 1 } };
+    sr = await M.addToTeam('n-1', 'Bug Hunter', 'ISD Bugcord', nameOfA);
+    ok('addToTeam writes the row at the next version, saying who was added and as what', sr.written && sr.version === 41 && teamWrites.length === 1 && teamWrites[0].from === 40 &&
+        teamBody === teamPage([rowsA[0], rowsA[1], rowsA[2], added('n-1', 'Bughunter'), rowsA[3], rowsA[4]]) &&
+        teamWrites[0].message === 'Added ISD Bugcord as Bughunter (JiTA Members tab)' && M._team === null, J(teamWrites.map((x) => x.message)));
+    teamWrites = [];
+    M._team = { at: NOW, value: { ranks: {}, names: {}, n: 1 } };
+    sr = await M.addToTeam('n-1', 'Bug Hunter', 'ISD Bugcord', nameOfA);
+    ok('...someone already on it is not added twice, and its ranks are read again', sr.skipped === 'already on it' && teamWrites.length === 0 && M._team === null, J(sr));
+    teamConflicts = 1; teamWrites = [];
+    sr = await M.addToTeam('n-2', 'Senior', 'ISD Zed', nameOfA);
+    ok('...a page changed meanwhile is read again and added to', sr.written && teamWrites.length === 1 && teamBody.indexOf('"n-2"') > 0 && teamBody.indexOf('"n-1"') > 0, J(sr));
+    err = null;
+    await M.addToTeam('n-3', M.LEFT, 'ISD Q', nameOfA).catch((e) => { err = e; });
+    ok('...nobody is added as Left ECAID', err && /Unknown role/.test(err.message) && teamWrites.length === 1);
+    gm.leadDutyDryRun = true; teamWrites = [];
+    sr = await M.addToTeam('n-4', 'Rookie', 'ISD R', nameOfA);
+    gm.leadDutyDryRun = false;
+    ok('...and a dry run adds nobody', sr.skipped === 'dry run' && teamWrites.length === 0);
     // pageChange: what a role picked would do to the team page
     const tmP = M._parseTeam(pageT + teamPage([teamRow(mention('acc-ast'), 'Bughunter'), teamRow('ISD BH Typed', 'Bughunter')]));
     const pc = (acc, name, rank, onTeam, role) => M.pageChange({ acc: acc, name: name, rank: rank, onTeam: onTeam }, role, tmP);
@@ -879,7 +939,8 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...their months of 0 not marked', cell(byteRow, 0).text() === '0' && !cell(byteRow, 0).hasClass('zero') && !cell(byteRow, 0).hasClass('low') && !/of the 40 a month/.test(cell(byteRow, 0).attrs.title),
         cell(byteRow, 0).cls.join('.'));
     ok('someone missing from the team page gets a ? saying so; someone who left, or is on it, none', hintOf(newRow).text() === '?' &&
-        hintOf(newRow).attrs.title === 'Not on the ECAID - Team Members page. If they left ECAID, set their role to Left ECAID.' && hintOf(byteRow).text() === '' && hintOf(rowFor('acc-dist')).text() === '',
+        hintOf(newRow).attrs.title === 'Not on the ECAID - Team Members page: click to add them there as Bughunter. If they left ECAID, set their role to Left ECAID instead.' &&
+        hintOf(byteRow).text() === '' && hintOf(rowFor('acc-dist')).text() === '',
         hintOf(newRow).text() + ' / ' + hintOf(byteRow).text());
     ok('...and the status line counts both, leaving those who left out of the members', /^4 members · .* · 1 left ECAID · 1 not on the team page · /.test(status.textContent), status.textContent);
     ok('a role a Lead set over the page\'s rank says what the page says', roleOf(rowFor('acc-ast')).attrs.title === 'Set by a Lead. The ECAID - Team Members page says Bug Hunter: pick that to follow the page again',
@@ -960,6 +1021,33 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await settle();
     ok('a team page that will not take the change: the role is kept in the tab only, saying why', confirmAsked.length === 1 && teamWrites.length === 0 &&
         props[L.MEMBERS_KEY].value.m['acc-me'].role === 'Senior' && /Saved in the tab only: the ECAID - Team Members page was not changed \(HTTP 403\)$/.test(status.textContent), status.textContent);
+
+    // the ? of someone missing from the team page adds them there, once agreed
+    await later();
+    teamBody = teamPage([teamRow(mention('acc-dist'), 'Snr Bughunter'), teamRow(mention('acc-me'), 'Snr Bughunter'), teamRow(mention('acc-ast'), 'Bughunter')]);
+    U._loadMembers(true);
+    await settle();
+    ok('a ? says a click adds them to the team page, as their role', hintOf(rowFor('acc-new')).text() === '?' && hintOf(rowFor('acc-new')).hasClass('add') &&
+        hintOf(rowFor('acc-new')).attrs.title === 'Not on the ECAID - Team Members page: click to add them there as Snr Bughunter. If they left ECAID, set their role to Left ECAID instead.',
+        hintOf(rowFor('acc-new')).attrs.title);
+    confirmAnswer = false; confirmAsked.length = 0; teamWrites = [];
+    hintOf(rowFor('acc-new')).fire('click');
+    await settle();
+    ok('...declined, nobody is added', confirmAsked.length === 1 && teamWrites.length === 0 &&
+        confirmAsked[0] === 'Add ISD Newcomer to the ECAID - Team Members page as Snr Bughunter?\n\nTheir row goes among the others of that rank, with their @mention and rank. Its other columns are left empty, to fill in on the page.',
+        J(confirmAsked));
+    confirmAnswer = true; teamRefuse = Object.assign(new Error('HTTP 403'), { status: 403 });
+    hintOf(rowFor('acc-new')).fire('click');
+    await settle();
+    ok('...a page that will not take them adds nobody, saying why', teamWrites.length === 0 && status.textContent === 'Not added to the ECAID - Team Members page: HTTP 403' &&
+        hintOf(rowFor('acc-new')).text() === '?', status.textContent);
+    hintOf(rowFor('acc-new')).fire('click');
+    await settle();
+    ok('...agreed, their row is added among the Senior ones by name, and their ? goes', teamWrites.length === 1 &&
+        teamBody.indexOf('"acc-dist"') < teamBody.indexOf('"acc-new"') && teamBody.indexOf('"acc-new"') < teamBody.indexOf('"acc-me"') &&
+        teamWrites[0].message === 'Added ISD Newcomer as Snr Bughunter (JiTA Members tab)' && hintOf(rowFor('acc-new')).text() === '', J(teamWrites.map((x) => x.message)));
+    ok('...and the role set to the same goes, the page now giving it', !('role' in (props[L.MEMBERS_KEY].value.m['acc-new'] || {})) && picked(rowFor('acc-new')) === 'Senior',
+        J(props[L.MEMBERS_KEY].value.m['acc-new']));
 
     Date.now = realNow;
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'members checks passed.'));

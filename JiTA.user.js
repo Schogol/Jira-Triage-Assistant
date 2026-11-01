@@ -21580,7 +21580,8 @@ JiTA.leadduty.ui = {
         $('<span class="ld-mdot"></span>').addClass(r.state || 'none').attr('title', M.stateText(r, wins)).appendTo($r);
         var $hint = $('<span class="ld-mhint"></span>').appendTo($r);
         if (r.onTeam === false && r.state !== 'left') {
-            $hint.text('?').attr('title', 'Not on the ECAID - Team Members page. If they left ECAID, set their role to ' + M.LEFT + '.');
+            $hint.text('?').addClass('add').attr('title', 'Not on the ECAID - Team Members page: click to add them there as ' + M.RANK_WORDS[r.role] +
+                '. If they left ECAID, set their role to ' + M.LEFT + ' instead.').on('click', function () { U._addMember(r); });
         }
         $('<a class="ld-title ld-mname" target="_blank" rel="noopener"></a>').attr('href', JiTA.HOST + '/jira/people/' + encodeURIComponent(r.acc))
             .text(r.name).attr('title', r.name).appendTo($r);
@@ -21636,6 +21637,30 @@ JiTA.leadduty.ui = {
         }, function (e) {
             return tabOnly('the ECAID - Team Members page was not changed (' + (e && e.message || e) + ')');
         }).catch(failed);
+    },
+
+    // The ? of someone missing from the team page, clicked: once the Lead agrees, a row is added for them there as their
+    // role, the ranks read again and the list drawn again where it was.
+    _addMember: function (r) {
+        var L = JiTA.leadduty, U = L.ui, M = L.members, names = {}, word = M.RANK_WORDS[r.role];
+        if (!word || !U._mem || !confirm('Add ' + r.name + ' to the ECAID - Team Members page as ' + word + '?\n\nTheir row goes among the others of that ' +
+            'rank, with their @mention and rank. Its other columns are left empty, to fill in on the page.')) { return; }
+        M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur).forEach(function (x) { names[x.acc] = x.name; });
+        U._status('Adding ' + r.name + ' to the ECAID - Team Members page…');
+        M.addToTeam(r.acc, r.role, r.name, function (acc) { return names[acc] || ''; }).then(function () {
+            // the page says their rank now: read it again, and a role set to the same goes
+            return M.team(true).then(function (t) {
+                if (U._mem) { U._mem.team = t; }
+                return M.setRole(r.acc, r.role, r.name, M._rankOf(t, r.acc, r.name));
+            }, function () { return null; });
+        }).then(function (w) {
+            var v = w && U._adopt(U._memVer, w);
+            if (v && U._mem) { U._mem.mem = v; }
+            U._renderMembers(true);
+        }, function (e) {
+            U._renderMembers(true);
+            U._status('Not added to the ECAID - Team Members page: ' + (e && e.message || e));
+        });
     },
 
     // A row's note, edited in the note dialog: written, then only that row drawn again.
@@ -21812,6 +21837,8 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-m-left { opacity: .5; }' +
                 '.jita-leadduty-view .ld-m-left:hover { opacity: .85; }' +
                 '.jita-leadduty-view .ld-mhint { flex: 0 0 8px; margin: 0 -4px; text-align: center; color: #f0b429; font-weight: 700; cursor: help; }' +
+                '.jita-leadduty-view .ld-mhint.add { cursor: pointer; }' +
+                '.jita-leadduty-view .ld-mhint.add:hover { color: #ffd27a; }' +
                 '.jita-leadduty-view .ld-mhead, .jita-leadduty-view .ld-mhead .ld-mname, .jita-leadduty-view .ld-mhead .ld-mnote, .jita-leadduty-view .ld-mhead .ld-mnum { color: #7a8694; font-size: 11px; font-weight: 600; cursor: default; }' +
                 '.jita-leadduty-view .ld-mname { flex: 0 0 170px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-mrole, .jita-leadduty-view .ld-mrolehd { flex: 0 0 104px; }' +
@@ -22539,15 +22566,15 @@ JiTA.leadduty.members = {
         });
         return out;
     },
-    // The tables of a storage body with a Name and a Rank column, found by their header row: { rows (those under the
-    // header, as _grid gives them, placed in the body), name, rank (the two columns) }.
+    // The tables of a storage body with a Name and a Rank column, found by their header row: { head (that row), rows
+    // (those under it), both as _grid gives them, placed in the body, name, rank (the two columns) }.
     _tables: function (body) {
         var M = JiTA.leadduty.members, out = [], re = /<table\b[\s\S]*?<\/table>/gi, m;
         body = String(body || '');
         while ((m = re.exec(body))) {
             var rows = M._grid(m[0], m.index), h = null, i;
             for (i = 0; i < rows.length && !h; i++) { h = M._header(rows[i]); }
-            if (h) { out.push({ rows: rows.slice(i), name: h[0], rank: h[1] }); }
+            if (h) { out.push({ head: rows[i - 1], rows: rows.slice(i), name: h[0], rank: h[1] }); }
         }
         return out;
     },
@@ -22637,28 +22664,84 @@ JiTA.leadduty.members = {
             '</t' + c.tag + '>' + body.slice(c.src[1]);
     },
     // Change one member on the team page, leaving every other byte of it as it was: their Rank cell's text becomes the
-    // role's word (RANK_WORDS), or for Left ECAID their row goes. When the page changed meanwhile it is read again and the
-    // change tried once more. Resolves { written, version }; rejects saying why when their row cannot be changed on its
-    // own. Leads only; a dry run writes nothing.
+    // role's word (RANK_WORDS), or for Left ECAID their row goes. Resolves { written, version } (see _editTeam); rejects
+    // saying why when their row cannot be changed on its own. Leads only; a dry run writes nothing.
     setRank: function (acc, role, name) {
-        var L = JiTA.leadduty, M = L.members, page = String(L.TEAM_PAGE || '');
+        var L = JiTA.leadduty, M = L.members;
         if (!L.isLead()) { return Promise.reject(M._notLead()); }
-        if (!page) { return Promise.reject(new Error('no team page is set')); }
+        if (!L.TEAM_PAGE) { return Promise.reject(new Error('no team page is set')); }
         if (role !== M.LEFT && !M.RANK_WORDS[role]) { return Promise.reject(new Error('Unknown role: ' + role)); }
         if (L._dry()) { return Promise.resolve({ skipped: 'dry run' }); }
         var what = role === M.LEFT ? ('Removed ' + name + ', who left ECAID') : ('Set ' + name + '\'s rank to ' + M.RANK_WORDS[role]);
+        return M._editTeam(function (body) { return M._withRank(body, acc, role); }, what + ' (JiTA Members tab)');
+    },
+    // Add a member to the team page as `role` (see _withMember), unless a row there @mentions them already. Resolves
+    // { written, version } or { skipped } (see _editTeam). Leads only; a dry run writes nothing.
+    addToTeam: function (acc, role, name, nameOf) {
+        var L = JiTA.leadduty, M = L.members;
+        if (!L.isLead()) { return Promise.reject(M._notLead()); }
+        if (!L.TEAM_PAGE) { return Promise.reject(new Error('no team page is set')); }
+        if (!M.RANK_WORDS[role]) { return Promise.reject(new Error('Unknown role: ' + role)); }
+        if (L._dry()) { return Promise.resolve({ skipped: 'dry run' }); }
+        return M._editTeam(function (body) {
+            return M._locate(body, acc) ? { skipped: 'already on it' } : M._withMember(body, acc, role, name, nameOf);
+        }, 'Added ' + name + ' as ' + M.RANK_WORDS[role] + ' (JiTA Members tab)');
+    },
+    // Read the team page, change(body) it - the new body, or what to resolve instead of writing - and save it at its next
+    // version. When the page changed meanwhile it is read again and the change tried once more. Resolves { written,
+    // version } or change's answer; the ranks read before are let go either way.
+    _editTeam: function (change, message) {
+        var M = JiTA.leadduty.members, page = String(JiTA.leadduty.TEAM_PAGE);
         var attempt = function (again) {
             return JiTA.conf.getPage(page, true).then(function (pg) {
-                return JiTA.conf.savePageBody(pg, M._withRank(pg.body, acc, role), what + ' (JiTA Members tab)');
+                var body = change(pg.body);
+                if (typeof body !== 'string') { return body; }
+                return JiTA.conf.savePageBody(pg, body, message).then(function (res) { return { written: true, version: res.version }; });
             }).then(function (res) {
                 M._team = null;   // read again on the next look
-                return { written: true, version: res.version };
+                return res;
             }, function (e) {
                 if (again && JiTA.conf.isConflict(e)) { return attempt(false); }
                 throw e;
             });
         };
         return attempt(true);
+    },
+    // The team page's body with a row added for acc as `role` (see _newRow). It goes among the rows of that rank, in
+    // order of name without "ISD" and "BH" (a row's name being the one nameOf(account) gives for the first account it
+    // @mentions, or the name typed in it; a row with neither is passed over), never between two rows a merged cell
+    // spans; with no row of that rank, after the last row. Throws when the page has no rank table.
+    _withMember: function (body, acc, role, name, nameOf) {
+        var M = JiTA.leadduty.members, tables = M._tables(body), key = M._nameKey(name), before = -1, last = -1;
+        if (!tables.length) { throw new Error('it has no table with a Name and a Rank column'); }
+        var ofRole = function (t, row) { var who = row[t.name], rank = row[t.rank]; return !!who && who !== rank && M.rankRole(rank ? rank.text : '') === role; };
+        var t = tables.filter(function (x) { return x.rows.some(function (row) { return ofRole(x, row); }); })[0] || tables[0];
+        t.rows.forEach(function (row, i) {
+            if (!ofRole(t, row)) { return; }
+            last = i;
+            var who = row[t.name], theirs = M._nameKey(who.accs.length ? nameOf(who.accs[0]) : who.text);
+            if (before < 0 && theirs && theirs > key) { before = i; }
+        });
+        var at = before >= 0 ? before : (last >= 0 ? last + 1 : t.rows.length);   // the place the new row takes among t.rows
+        while (at < t.rows.length && M._spans(at ? t.rows[at - 1] : t.head, t.rows[at])) { at++; }
+        var where = at < t.rows.length ? t.rows[at].at[0] : (t.rows.length ? t.rows[t.rows.length - 1].at[1] : t.head.at[1]);
+        return body.slice(0, where) + M._newRow(t, acc, role) + body.slice(where);
+    },
+    // Whether a merged cell runs from row a on into row b.
+    _spans: function (a, b) {
+        for (var k = 0; k < b.length; k++) { if (a.indexOf(b[k]) >= 0) { return true; } }
+        return false;
+    },
+    // A team page row for acc: their @mention in the Name column, role's word in the Rank column, every other column of
+    // table t empty.
+    _newRow: function (t, acc, role) {
+        var M = JiTA.leadduty.members, cols = t.head.length, out = '<tr>';
+        t.rows.forEach(function (row) { cols = Math.max(cols, row.length); });
+        for (var c = 0; c < cols; c++) {
+            out += c === t.name ? ('<td><p><ac:link><ri:user ri:account-id="' + JiTA.conf.esc(acc) + '" /></ac:link></p></td>') :
+                (c === t.rank ? ('<td><p>' + JiTA.conf.esc(M.RANK_WORDS[role]) + '</p></td>') : '<td><p /></td>');
+        }
+        return out + '</tr>';
     },
     // What picking `role` for row r would do to the team page (team as team() gives it): { ask } the question to put
     // before changing it, { why } why it cannot be changed with it, or {} when the page is not concerned: it was not read,
@@ -24730,7 +24813,7 @@ JiTA.changelog = {
             'Lead duties has a Members tab, for Leads only: every ISD member with what they actioned in each of the last 6 full months and this month so far, counted as the ISD credits leaderboard counts Total Actioned.',
             'ECAID asks for 40 actioned a month of every member, Leads included. A month under it is amber, and 0 is red. A dot says who meets it on average over the 6 months, who is below it, who has actioned nothing in 3 months and who is new.',
             'Roles come from the ranks on the ECAID - Team Members page (Lead, Snr Bughunter, Bughunter, Rookie). One list by role, then name; "Only below the minimum or inactive" leaves just those. Each member has a note every Lead shares.',
-            'Picking another role in the tab asks whether to change the Team Members page too: OK changes only that member\'s Rank cell there, Cancel keeps the role in the tab alone. A ? marks anyone missing from that page.',
+            'Picking another role in the tab asks whether to change the Team Members page too: OK changes only that member\'s Rank cell, Cancel keeps it in the tab. A ? marks anyone missing from that page: click it to add them there.',
             'Someone who left ECAID but whose account is still active can be set to Left ECAID: greyed out at the bottom of the tab, last on the productivity page with a grey Left lozenge, never judged, and if you agree, off the Team Members page.',
             'Each finished month is counted once for all Leads and kept in the Lead Ledger. A month nobody has counted yet is counted with the tab\'s Count button, a few minutes each.',
             'GM handoffs made before 21 Aug 2026, when Convert to Support took over, are counted the old way: the reports a member handed to the GameMasters team.',
