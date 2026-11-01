@@ -24809,15 +24809,8 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
-        { v: '3.48.0', date: '2026-11-01', features: [
-            'Lead duties has a Members tab, for Leads only: every ISD member with what they actioned in each of the last 6 full months and this month so far, counted as the ISD credits leaderboard counts Total Actioned.',
-            'ECAID asks for 40 actioned a month of every member, Leads included. A month under it is amber, and 0 is red. A dot says who meets it on average over the 6 months, who is below it, who has actioned nothing in 3 months and who is new.',
-            'Roles come from the ranks on the ECAID - Team Members page (Lead, Snr Bughunter, Bughunter, Rookie). One list by role, then name; "Only below the minimum or inactive" leaves just those. Each member has a note every Lead shares.',
-            'Picking another role in the tab asks whether to change the Team Members page too: OK changes only that member\'s Rank cell, Cancel keeps it in the tab. A ? marks anyone missing from that page: click it to add them there.',
-            'Someone who left ECAID but whose account is still active can be set to Left ECAID: greyed out at the bottom of the tab, last on the productivity page with a grey Left lozenge, never judged, and if you agree, off the Team Members page.',
-            'Each finished month is counted once for all Leads and kept in the Lead Ledger. A month nobody has counted yet is counted with the tab\'s Count button, a few minutes each.',
-            'GM handoffs made before 21 Aug 2026, when Convert to Support took over, are counted the old way: the reports a member handed to the GameMasters team.',
-            'The table is published to the ECAID Member Productivity (past 6 months) page in Confluence, coloured like the tab, and kept in step. The wiki review never assigns that page.'
+        { v: '3.48.0', date: '2026-11-01', fixes: [
+            'Small improvements behind the scenes.'
         ] },
         { v: '3.47.0', date: '2026-11-01', features: [
             'Similar defects, Matching bug reports and Triage mode\'s matches: each card ends in one row of small symbols with its date at the right. The status shows as a dot in Jira\'s colours, ≡ means the same exception in the log, ≈ a looser match.',
