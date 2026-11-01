@@ -109,8 +109,8 @@ const muts = [
     [X, 'Matching bug reports get no boost', 'return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(key)).then(function (out) {',
         'return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms).then(function (out) {'],
     [X, 'the slid-in report gets no boost', 'JiTA.rank.suggestEbrBest(text, defectKey, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(defectKey))', 'JiTA.rank.suggestEbrBest(text, defectKey, JiTA.ui.modeOverride, terms)'],
-    [X, 'the panel row has no badge', "        if (r.excHit) { JiTA.repexc.badge(r.excHit, '<div class=\"jita-sd-exc\"></div>', r.excHits).appendTo($li); }   // why it ranks higher\n", ''],
-    [X, 'the panel row\'s badge names nothing', "JiTA.repexc.badge(r.excHit, '<div class=\"jita-sd-exc\"></div>', r.excHits)", "JiTA.repexc.badge(r.excHit, '<div class=\"jita-sd-exc\"></div>')"],
+    [X, 'the card has no mark', "        if (r.excHit) { JiTA.repexc.badge(r.excHit, '<span class=\"jita-mark\"></span>', r.excHits).appendTo($f); }   // why it ranks higher\n", ''],
+    [X, 'the card\'s mark names nothing', "JiTA.repexc.badge(r.excHit, '<span class=\"jita-mark\"></span>', r.excHits)", "JiTA.repexc.badge(r.excHit, '<span class=\"jita-mark\"></span>')"],
     [X, 'the scan keeps no exceptions', '                            keepExc(txt);\n', ''],
     [X, 'the scan forgets what it kept', '                            JiTA.ui._logExc[key] = exc;\n', ''],
     [X, 'a fingerprinting error hangs the scan', '                        } catch (e) { /* the matching below still runs */ }', '                        } catch (e) { throw e; }'],
@@ -119,8 +119,7 @@ const muts = [
     [X, 'triage\'s report matches get no boost', 'JiTA.ui.modeOverride, terms, upgrade, boost);', 'JiTA.ui.modeOverride, terms, upgrade);'],
     [X, 'triage\'s defect matches get no boost', 'terms, upgrade, JiTA.repexc.forDefect(key)); }', 'terms, upgrade); }'],
     [X, 'triage never ranks a late boost', 'JiTA.repexc.soon(JiTA.repexc.forReport(key), upgrade)', 'JiTA.repexc.soon(JiTA.repexc.forReport(key), null)'],
-    [X, 'triage rows have no badge', "                    if (r.excHit) { JiTA.repexc.badge(r.excHit, '<span class=\"jt-mexc\"></span>', r.excHits).appendTo($li); }   // why it ranks higher\n", ''],
-    [X, 'triage rows\' badges name nothing', "JiTA.repexc.badge(r.excHit, '<span class=\"jt-mexc\"></span>', r.excHits)", "JiTA.repexc.badge(r.excHit, '<span class=\"jt-mexc\"></span>')"],
+    [X, 'triage rows have no footer, and so no mark', "                    JiTA.ui._foot(r, { score: view === 'trending' }).appendTo($li);", ''],
 
     // ---- the background reader ----
     [X, 'the reader off by default', '    on: function () { return gmGet(JiTA.logread.KEY, true) !== false; },', '    on: function () { return !!gmGet(JiTA.logread.KEY, false); },'],

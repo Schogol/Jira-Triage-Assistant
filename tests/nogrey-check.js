@@ -35,17 +35,20 @@ global.JiTA = {
     worker: { _started: true, usable: () => true },
     embed: { WARM_WAIT_MS: 1500 },
     rank: { CAND: 50 },
-    trend: { badge: () => null },
+    trend: { badge: () => null, AFTER_FIX_MIN: 2 },
     ui: { _showTip: () => {}, _hideTip: () => {} },
     util: {}
 };
-Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    staleFactor: function (brCreatedIso, resolutionDateIso) {') +
-    member('    humanizeAge: function (days) {') + cut('    fmtDate: function (iso) {', '\n    }\n};') + '\n    }' + '})'));   // the last member: no comma after it
+Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    isClosedStatus: function (status) {') +
+    member('    staleFactor: function (brCreatedIso, resolutionDateIso) {') + member('    humanizeAge: function (days) {') +
+    cut('    fmtDate: function (iso) {', '\n    }\n};') + '\n    }' + '})'));   // fmtDate and shortDate, the last member: no comma after it
 (0, eval)(cut('JiTA.rank._pickMode = function (', '\n};\n') + '\n};');
 ['_boostMap', '_boostRow', '_withBoost'].forEach((n) => { (0, eval)(cut('JiTA.rank.' + n + ' = function (', '\n};\n') + '\n};'); });
 JiTA.repexc = { FACTOR: { exact: 1.3, site: 1.15 }, PCT_MAX: 99 };   // excboost-check.js covers the boost itself
 (0, eval)(cut('JiTA.rank.suggestBest = function (', '\n};\n') + '\n};');
-Object.assign(JiTA.ui, eval('({' + member('    _row: function (r, target, action, opts) {') + member('    _reporterRow: function (r) {') + '})'));
+const line = (head) => { const s = src.indexOf(head); return src.slice(s, src.indexOf('\n', s) + 1); };
+Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + member('    _statusCat: function (r) {') +
+    member('    _meta: function (r, withDate) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + member('    _reporterRow: function (r) {') + '})'));
 
 const REPORT = '2026-09-01T00:00:00.000Z';
 const fixedLongAgo = () => ({ key: 'EDR-1', status: 'Closed', resolution: 'Fixed', resolutiondate: '2024-09-01T00:00:00.000Z', summary: 'old fix' });
@@ -76,10 +79,11 @@ const flagged = (r) => ['stale', 'closed'].filter((k) => k in r);
 
     // ================= the panel row =================
     const li = (row) => row.el;
-    const meta = (row) => (row.el.kids.filter((k) => /jita-sd-meta/.test(k.el.html))[0] || { el: { txt: '' } }).el.txt;
+    const all = (j) => [j].concat(...j.el.kids.map(all));
+    const staleTip = (row) => (all(row).filter((k) => k.el.classes['jita-mark-stale'])[0] || { el: { attrs: {} } }).el.attrs.title || '';
     let row = JiTA.ui._row(old, '_self', () => El('<span>'));
     ok('a demoted defect\'s row is not greyed', Object.keys(li(row).classes).length === 0, Object.keys(li(row).classes).join());
-    ok('...and its meta line still carries the note', /fixed 2y before report/.test(meta(row)), meta(row));
+    ok('...and its footer still says how long before the report it was fixed', /^Fixed 2y before report, so it ranks lower$/.test(staleTip(row)), staleTip(row));
     row = JiTA.ui._reporterRow({ key: 'EBR-5', status: 'Closed', closed: true, summary: 'their older report' });
     ok('a closed report in the reporter\'s list is still greyed', li(row).classes['jita-sd-closed'] === true, Object.keys(li(row).classes).join());
     row = JiTA.ui._reporterRow({ key: 'EBR-6', status: 'Open', closed: false, summary: 'their open report' });
