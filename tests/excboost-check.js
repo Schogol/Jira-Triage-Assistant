@@ -17,6 +17,7 @@ function once(head, from) {
 }
 const member = (head, from) => { const s = once(head, from); return src.slice(s, src.indexOf('\n    },', s) + 7); };
 const line = (head) => { const s = once(head); return src.slice(s, src.indexOf('\n', s) + 1); };
+const object = (head) => { const s = once(head); return src.slice(s, src.indexOf(' },\n', s) + 4); };   // a property over several lines, ending " },"
 const cut = (head, end) => { const s = once(head); return src.slice(s, src.indexOf(end, s) + end.length); };
 const tick = () => new Promise((r) => setImmediate(r));
 const flush = async (n) => { for (let i = 0; i < (n || 20); i++) { await tick(); } };
@@ -381,7 +382,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     // ================= the row =================
     JiTA.ui._showTip = () => {}; JiTA.ui._hideTip = () => {};
     JiTA.util.shortDate = () => '';   // cardfoot-check.js covers the footer's date
-    Object.assign(JiTA.ui, eval('({' + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + member('    _statusCat: function (r) {') +
+    Object.assign(JiTA.ui, eval('({' + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + object('    STATUS_CAT: {') + member('    _statusCat: function (r) {') +
         member('    _meta: function (r, withDate) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + '})'));
     const all = (j) => [j].concat(...j.kids.map(all));
     const marksOf = (row) => all(row).filter((k) => k.cls.indexOf('jita-mark') >= 0 && (k.cls.indexOf('exact') >= 0 || k.cls.indexOf('site') >= 0));
@@ -396,7 +397,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('...a plain one does not', marksOf(row).length === 0);
     const css = src.slice(once("    css: '\\\n#jita-sd-panel"), once('    injectCss: function () {'));
     ok('the marks are coloured in the panel and in the sidebar', /\n\.jita-mark\.exact, \.jita-mark-down \{ color: #7fdca4; \}/.test(css) && /\n\.jita-mark\.site, \.jita-mark-stale, \.jita-mark-steady \{ color: #9aa6b2; \}/.test(css) &&
-        /#jita-side-group \.jita-foot-st\.done \.jita-foot-dot, #jita-side-group \.jita-mark\.exact, #jita-side-group \.jita-mark-down \{ color: var\(--ds-icon-success/.test(css) &&
+        /#jita-side-group \.jita-foot-st\.todo \.jita-foot-dot, #jita-side-group \.jita-mark\.exact, #jita-side-group \.jita-mark-down \{ color: var\(--ds-icon-success/.test(css) &&
         /#jita-side-group \.jita-mark\.site, #jita-side-group \.jita-mark-stale, #jita-side-group \.jita-mark-steady \{ color: var\(--ds-icon-subtle/.test(css));
 
     // ================= the panel and triage are wired to it =================

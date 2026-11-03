@@ -47,7 +47,8 @@ Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, r
 JiTA.repexc = { FACTOR: { exact: 1.3, site: 1.15 }, PCT_MAX: 99 };   // excboost-check.js covers the boost itself
 (0, eval)(cut('JiTA.rank.suggestBest = function (', '\n};\n') + '\n};');
 const line = (head) => { const s = src.indexOf(head); return src.slice(s, src.indexOf('\n', s) + 1); };
-Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + member('    _statusCat: function (r) {') +
+const object = (head) => { const s = src.indexOf(head); return src.slice(s, src.indexOf(' },\n', s) + 4); };   // a property over several lines, ending " },"
+Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + object('    STATUS_CAT: {') + member('    _statusCat: function (r) {') +
     member('    _meta: function (r, withDate) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + member('    _reporterRow: function (r) {') + '})'));
 
 const REPORT = '2026-09-01T00:00:00.000Z';
