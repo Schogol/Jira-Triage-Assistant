@@ -61,6 +61,9 @@ global.JiTA = {
     },
     ui: { _showTip() {}, _hideTip() {} }
 };
+// The cards' symbols (JiTA.ui.SYM), the real line: the badge and the note take theirs from it.
+const symAt = src.indexOf('    SYM: {');
+Object.assign(global.JiTA.ui, eval('({' + src.slice(symAt, src.indexOf('\n', symAt)) + '})'));
 eval(src.slice(s, e + em.length));
 const T = global.JiTA.trend;
 
@@ -139,7 +142,7 @@ const rep = (created, links) => ({ key: 'EBR-' + Math.floor(Math.random() * 1e6)
     ok('...nor without a resolution date', T.afterFix({ status: 'Closed', resolution: 'Fixed', resolutiondate: null, times: times }) === 0);
     ok('the note names a new defect', T.note({ trend: 'new', base: 0, afterFix: 0 }) === 'new: none in the 28 days before', T.note({ trend: 'new', base: 0, afterFix: 0 }));
     const n2 = T.note({ trend: 'up', base: 6, afterFix: 2 });
-    ok('the note says which way it is going, and warns at two after the fix', n2 === 'rising · ⚠ 2 filed after the fix', n2);
+    ok('the note says which way it is going, and warns at two after the fix', n2 === 'rising · ⚠\uFE0E 2 filed after the fix', n2);
     ok('a steady defect reads as just that', T.note({ trend: 'steady', base: 6, afterFix: 0 }) === 'steady', T.note({ trend: 'steady', base: 6, afterFix: 0 }));
     ok('...and a falling one', T.note({ trend: 'down', base: 60, afterFix: 0 }) === 'falling', T.note({ trend: 'down', base: 60, afterFix: 0 }));
     ok('...but not at one', !/after the fix/.test(T.note({ trend: 'steady', base: 6, afterFix: 1 })));
@@ -148,7 +151,7 @@ const rep = (created, links) => ({ key: 'EBR-' + Math.floor(Math.random() * 1e6)
     T._data = data;
     ok('a trending defect gets its count', T.countFor('EDR-22') === 9);
     ok('an unknown key gets none', T.countFor('EBR-1') === 0);
-    ok('a badge reads "🔥 9"', T.badge('EDR-22') && T.badge('EDR-22')._text === '🔥 9');
+    ok('a badge reads "▲9": a symbol CSS colours, not an emoji', T.badge('EDR-22') && T.badge('EDR-22')._text === '▲9', T.badge('EDR-22') && T.badge('EDR-22')._text);
     ok('no badge below MIN', T.badge('EDR-20') === null);
     now = NOW + T.STALE_MS + 1;
     ok('no badge from a count more than a day old', T.countFor('EDR-22') === 0);

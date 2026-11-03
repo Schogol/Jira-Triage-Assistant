@@ -52,6 +52,8 @@ eval('Object.assign(global.JiTA.ui, {' + [
     slice('_closeFilterMenu: function () {')
 ].join('\n') + '\n});');
 const U = global.JiTA.ui;
+const symAt = src.indexOf('    SYM: {');   // the cards' symbols (the trending switch is labelled with ▲)
+Object.assign(U, eval('({' + src.slice(symAt, src.indexOf('\n', symAt)) + '})'));
 U._hideTip = () => {};
 U._syncFilterBtn = () => { panelSynced++; };
 U._rerenderCurrent = () => { panelRendered++; };

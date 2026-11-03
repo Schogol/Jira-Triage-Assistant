@@ -24,8 +24,9 @@ global.$ = () => chain;
 let progressEl = { textContent: '' };
 global.document = { getElementById: (id) => (id === 'jt-progress' ? progressEl : null) };
 let msgs = [];
+let foots = 0;   // footers drawn: a row that throws half-way is swallowed by _render's catch, so count them
 global.JiTA = {
-    ui: { _hideTip() {}, _filterTerms: () => [], _filtersActive: () => false },
+    ui: { _hideTip() {}, _filterTerms: () => [], _filtersActive: () => false, _meta: () => '', _foot: () => { foots++; return chain; } },
     util: { fmtDate: () => '', isClosedStatus: () => false, effectiveText: () => 'text' },
     db: { getDefect: () => Promise.resolve(null), deleteDefects: () => Promise.resolve() },
     sync: { _ebrRemoved() {} },
@@ -59,6 +60,7 @@ Object.assign(T, {
     await flush();
     ok('two quick presses while it ranks arm nothing', armed.length === 0 && msgs.filter((m) => /Still ranking/.test(m)).length === 2, armed.length + ' armed / ' + msgs.join(' | '));
     ok('once the ranking lands its list counts as shown', T._shownKey === 'EBR-1', String(T._shownKey));
+    ok('...and its match is drawn whole, with its footer', foots === 1, String(foots));
     T._armAttach(1, '1');
     await flush();
     ok('...and a press then arms the attach (control)', armed.length === 1 && armed[0].matchKey === 'EDR-9', JSON.stringify(armed));

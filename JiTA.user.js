@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.46.0
+// @version     3.47.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -4419,11 +4419,18 @@ JiTA.util = {
     // month keeps it unambiguous across locales (no DD/MM vs MM/DD confusion). Returns '' for missing /
     // invalid input so callers can skip rendering it.
     fmtDate: function (iso) {
+        if (!iso) { return ''; }   // new Date(null) is the epoch: no date read as 01 Jan 1970
         var d = new Date(iso);
         if (isNaN(d.getTime())) { return ''; }
         var MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         function p(n) { return (n < 10 ? '0' : '') + n; }
         return p(d.getDate()) + ' ' + MON[d.getMonth()] + ' ' + d.getFullYear();
+    },
+    // A card's date: "12 Jun" in the current year, "06 Mar 25" before it, '' when there is none. `now` is for tests.
+    shortDate: function (iso, now) {
+        var full = JiTA.util.fmtDate(iso);
+        if (!full) { return ''; }
+        return full.slice(-4) === String((now || new Date()).getFullYear()) ? full.slice(0, 6) : full.slice(0, 7) + full.slice(-2);
     }
 };
 
@@ -6890,7 +6897,7 @@ JiTA.ui = {
 #jita-sd-collapse { cursor: pointer; padding: 0 4px; font-weight: 700; }\
 #jita-sd-status { padding: 6px 10px; color: #aab3bd; border-bottom: 1px solid #2c333a; }\
 #jita-sd-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; }\
-#jita-sd-list li { padding: 7px 10px; border-bottom: 1px solid #2c333a; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }\
+#jita-sd-list li { padding: 7px 10px; border-bottom: 1px solid #2c333a; min-width: 0; overflow-wrap: anywhere; word-break: break-word; display: flex; flex-direction: column; }\
 #jita-sd-list a { color: #4c9aff; font-weight: 700; text-decoration: none; overflow-wrap: anywhere; }\
 #jita-sd-list a:hover { text-decoration: underline; }\
 .jita-sd-proj { font-size: 10px; background: #3a434d; padding: 0 5px; border-radius: 7px; margin-left: 6px; }\
@@ -6930,11 +6937,23 @@ JiTA.ui = {
 #jita-sd-filtermenu .jita-fm-view:hover { color: #fff; border-color: #4c9aff; }\
 #jita-sd-filtermenu .jita-fm-view.on { background: #4c9aff; color: #fff; font-weight: 700; border-color: #4c9aff; }\
 #jita-sd-list li.jita-sd-closed { opacity: .6; }\
+.jita-sd-top { display: flow-root; }\
 .jita-sd-sum { margin-top: 2px; color: #e6e6e6; overflow-wrap: anywhere; word-break: break-word; }\
-.jita-sd-meta { margin-top: 2px; color: #7a8694; font-size: 10px; overflow-wrap: anywhere; word-break: break-word; }\
-.jita-sd-date { margin-top: 2px; color: #7a8694; font-size: 10px; text-align: right; }\
-.jita-sd-exc { margin-top: 2px; color: #7fdca4; font-size: 10px; font-weight: 700; }\
-.jita-sd-exc.site { color: #9aa6b2; }\
+/* The footer sits at the bottom of the card (margin-top:auto in the flex column; padding, not margin, keeps it off the\
+   summary), so in the sidebar grid the footers of a row line up. Symbols in Jira-like colours, the date at the right. */\
+.jita-foot { display: flex; align-items: center; gap: 7px; margin-top: auto; padding-top: 4px; min-width: 0; color: #7a8694; font-size: 10px; line-height: 14px; }\
+.jita-foot:empty { display: none; }\
+.jita-foot-st { display: inline-flex; align-items: center; gap: 3px; min-width: 0; overflow: hidden; cursor: default; }\
+.jita-foot-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\
+.jita-foot-dot { flex: 0 0 auto; font-size: 10px; }\
+.jita-foot-st.todo .jita-foot-dot { color: #4caf7d; }\
+.jita-foot-st.prog .jita-foot-dot { color: #f5cd47; }\
+.jita-foot-st.done .jita-foot-dot { color: #f87168; }\
+.jita-mark { flex: 0 0 auto; font-size: 13px; font-weight: 700; white-space: nowrap; cursor: default; }\
+.jita-mark.exact, .jita-mark-down { color: #7fdca4; }\
+.jita-mark.site, .jita-mark-stale, .jita-mark-steady { color: #9aa6b2; }\
+.jita-mark-up, .jita-mark-new, .jita-mark-warn { color: #ffb547; }\
+.jita-foot-date { flex: 0 0 auto; margin-left: auto; white-space: nowrap; cursor: default; }\
 #jita-sd-loglink { display: none; padding: 6px 10px; border-bottom: 1px solid #2c333a; background: #20262b; }\
 #jita-sd-loglink.has-hits { display: block; }\
 #jita-sd-loglink .jita-sd-loglink-head { font-weight: 700; color: #ffb547; font-size: 11px; margin-bottom: 4px; }\
@@ -7047,18 +7066,21 @@ JiTA.ui = {
    there; 180px fits two columns (2*180 + 14px gap) in that width while still collapsing to one on a narrow\
    laptop. align-items:stretch so both cards in a row share the height of the taller one (columns line up). */\
 #jita-side-group #jita-sd-list { overflow: visible; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); column-gap: 14px; align-items: stretch; }\
-/* Each card is position:relative + bottom padding so the created date can be pinned to the bottom-right\
-   (absolute) of the STRETCHED cell - so the dates line up across the two columns even when one card has\
-   less content than the other (the short card no longer floats its date mid-card with a gap below it). */\
-#jita-side-group #jita-sd-list li { position: relative; padding: 7px 0 22px; border-bottom: 1px solid var(--ds-border, #091e4224); }\
-#jita-side-group .jita-sd-date { position: absolute; right: 0; bottom: 7px; margin-top: 0; }\
+/* Each card is a flex column in its STRETCHED cell and its footer takes the bottom (margin-top:auto), so the\
+   footers of a row line up across the two columns, with no strip kept for a card that has no date. */\
+#jita-side-group #jita-sd-list li { padding: 7px 0; border-bottom: 1px solid var(--ds-border, #091e4224); }\
 /* With a grid the simple :last-child no-border rule is wrong (only kills one of the bottom row); leave\
    borders on every item - a faint divider under each card reads fine in either column count. */\
 #jita-side-group #jita-sd-list a, #jita-side-group .jita-sd-link { color: var(--ds-link, #0c66e4); }\
 #jita-side-group .jita-sd-sum { color: var(--ds-text, #172b4d); }\
-#jita-side-group .jita-sd-meta, #jita-side-group .jita-sd-score, #jita-side-group .jita-sd-date { color: var(--ds-text-subtlest, #626f86); }\
-#jita-side-group .jita-sd-exc { color: var(--ds-text-success, #216e4e); }\
-#jita-side-group .jita-sd-exc.site { color: var(--ds-text-subtlest, #626f86); }\
+#jita-side-group .jita-sd-score, #jita-side-group .jita-foot { color: var(--ds-text-subtlest, #626f86); }\
+#jita-side-group .jita-mark.site, #jita-side-group .jita-mark-stale, #jita-side-group .jita-mark-steady { color: var(--ds-icon-subtle, #626f86); }\
+#jita-side-group .jita-foot-st.prog .jita-foot-dot { color: var(--ds-icon-accent-yellow, #b38600); }\
+#jita-side-group .jita-foot-st.todo .jita-foot-dot, #jita-side-group .jita-mark.exact, #jita-side-group .jita-mark-down { color: var(--ds-icon-success, #22a06b); }\
+#jita-side-group .jita-foot-st.done .jita-foot-dot { color: var(--ds-icon-danger, #c9372c); }\
+#jita-side-group .jita-mark-up, #jita-side-group .jita-mark-new, #jita-side-group .jita-mark-warn { color: var(--ds-icon-warning, #e56910); }\
+#jita-side-group .jita-sd-link.jita-sd-linking { color: var(--ds-text-subtlest, #626f86); cursor: default; text-decoration: none; }\
+#jita-side-group .jita-sd-link.jita-sd-noattach { color: var(--ds-text-subtlest, #626f86) !important; }\
 #jita-side-group .jita-sd-proj { background: var(--ds-background-neutral, #091e420f); color: var(--ds-text-subtle, #44546f); }\
 #jita-side-group .jita-sd-hide { color: var(--ds-text-subtlest, #626f86); }\
 #jita-side-group .jita-sd-hide:hover { color: #c9372c; }\
@@ -7305,7 +7327,7 @@ JiTA.ui = {
             var tb = document.createElement('button');
             tb.type = 'button';
             tb.className = 'jita-fm-view' + (JiTA.ui.trendMode ? ' on' : '');
-            tb.textContent = JiTA.ui.trendMode ? '← Back to similar defects' : '🔥 Trending defects';
+            tb.textContent = JiTA.ui.trendMode ? '← Back to similar defects' : JiTA.ui.SYM.hot + ' Trending defects';
             tb.title = 'Double-tap # to switch to it and back';
             tb.addEventListener('click', function () {
                 JiTA.ui.trendMode = !JiTA.ui.trendMode;
@@ -8518,39 +8540,92 @@ JiTA.ui = {
         }, 340);
     },
 
+    // ---- a card's footer: one row of symbols and the date at its right ----
+    // The symbols are unicode text, coloured by CSS, never emoji (U+FE0E keeps the one with an emoji form as text).
+    // Each says what it means in its hover; the hover preview still gets the whole meta line (_meta). Plain HTML with
+    // titles only: the sidebar snapshot restores rows without their handlers.
+    SYM: { status: '●', exact: '≡', loose: '≈', hot: '▲', stale: '◷', up: '↑', steady: '→', down: '↓', 'new': '★', warn: '⚠\uFE0E' },
+    PROGRESS_RE: /progress|review|testing|\bqa\b|verif|investigat|develop|fixing|implement/i,
+    _mark: function (cls, glyph, title, count) {
+        return $('<span class="jita-mark"></span>').addClass('jita-mark-' + cls).attr('title', title).text(glyph + (count != null ? count : ''));
+    },
+    // Every status EBR, EDR, EO and PLAT use, by the category Jira gives it (Schogol's list, 2026-11-03): done (Jira's
+    // green), in progress (blue) or open (grey).
+    STATUS_CAT: { 'attached': 'done', 'closed': 'done', 'rejected': 'done',
+        'in porting': 'prog', 'in progress': 'prog', 'in test': 'prog', 'live testing': 'prog', 'ready for deployment': 'prog', 'ready for review': 'prog', 'ready for test': 'prog',
+        'blocked': 'todo', 'open': 'todo', 'refined': 'todo', 'unrefined': 'todo' },
+    // Which colour a card's dot takes (Schogol 2026-11-03): 'todo' open, green; 'prog' in progress, yellow; 'done' closed,
+    // red. A listed status takes its Jira category, whatever resolution it kept (a reopened defect is open again). One not
+    // listed goes by the older rules: a bug report by its status alone, a defect by its status or resolution.
+    _statusCat: function (r) {
+        var U = JiTA.util, st = r.status || '', k = st.toLowerCase().trim(), cats = JiTA.ui.STATUS_CAT;
+        if (Object.prototype.hasOwnProperty.call(cats, k)) { return cats[k]; }
+        if (/^EBR-/.test(r.key || '') ? U.isClosedStatus(st) : U.isResolved(st, r.resolution)) { return 'done'; }
+        return JiTA.ui.PROGRESS_RE.test(st) ? 'prog' : 'todo';
+    },
+    // A card's meta line as the hover preview shows it: status · resolution · stale note · trend note, and the created
+    // date when asked (Triage mode's reporter view, read by when each one was filed).
+    _meta: function (r, withDate) {
+        var bits = [r.status, r.resolution, r.staleNote, r.note].filter(function (x) { return !!x; });
+        var when = withDate ? JiTA.util.fmtDate(r.created) : '';
+        if (when) { bits.push(when); }
+        return bits.join(' · ');
+    },
+    // The footer: the status, then what raised or marks the card (the exception match, trending, fixed long before the
+    // report; on a trending row its trend and the reports filed after the fix), and the date. Always a div: CSS hides an
+    // empty one. opts.score (the trending rows) leaves out ▲, which their count already says.
+    _foot: function (r, opts) {
+        var U = JiTA.ui, S = U.SYM, T = JiTA.trend, $f = $('<div class="jita-foot"></div>');
+        if (r.status) {
+            var cat = U._statusCat(r);
+            var $st = $('<span class="jita-foot-st"></span>').addClass(cat).attr('title', r.status + (r.resolution ? ' · ' + r.resolution : '')).appendTo($f);
+            $('<span class="jita-foot-dot"></span>').text(S.status).appendTo($st);
+            $('<span class="jita-foot-lbl"></span>').text(cat === 'done' && r.resolution ? r.resolution : r.status).appendTo($st);
+        }
+        if (r.excHit) { JiTA.repexc.badge(r.excHit, '<span class="jita-mark"></span>', r.excHits).appendTo($f); }   // why it ranks higher
+        if (!(opts && opts.score)) {
+            var hot = T.badge(r.key);   // a defect players are hitting right now (nothing for a report key)
+            if (hot) { hot.appendTo($f); }
+        }
+        if (r.staleNote) {   // Feature A: explain the demotion
+            U._mark('stale', S.stale, r.staleNote.charAt(0).toUpperCase() + r.staleNote.slice(1) + ', so it ranks lower').appendTo($f);
+        }
+        if (r.trend && S[r.trend]) {
+            U._mark(r.trend, S[r.trend], r.trend === 'new' ? ('New: none in the ' + T.BASE_DAYS + ' days before')
+                : ({ up: 'Rising', steady: 'Steady', down: 'Falling' }[r.trend] + ': usually about ' + T.usual(r.base) + ' per ' + T.WINDOW_DAYS + ' days')).appendTo($f);
+        }
+        if (r.afterFix >= T.AFTER_FIX_MIN) {
+            U._mark('warn', S.warn, r.afterFix + ' filed after this defect was resolved: a regression, or a fix that has not shipped yet', r.afterFix).appendTo($f);
+        }
+        var when = JiTA.util.shortDate(r.created);
+        if (when) { $('<span class="jita-foot-date"></span>').text(when).attr('title', 'Created ' + JiTA.util.fmtDate(r.created)).appendTo($f); }
+        return $f;
+    },
+
     // Shared list-row builder for both views. `target` = the key link's anchor target ('_self' for the
     // EBR->defect list so you navigate in place; '_blank' for the defect->report list so the defect page stays
     // put). `action(key)` returns the trailing control ($ Mark-dup on the EBR view, Attach on the report view).
     // The staleNote fires only for stale-demoted defect matches, the closed class only for a closed report in the
     // reporter's list (both undefined elsewhere), and data-jita-key (read by the report view's incremental
     // attach/slide-in) is harmless on the EBR view.
-    // opts.score replaces the relevance % with a text of its own (the trending view's report count); r.note is
-    // appended to the meta line. Every other row gets the 🔥 badge when its defect is trending.
+    // A card is its top line (key, then the % and the control at the right), the summary and the footer (_foot).
+    // opts.score replaces the relevance % with a text of its own (the trending view's report count).
     _row: function (r, target, action, opts) {
         var pct = (typeof r.pct === 'number') ? r.pct : 0;
-        var meta = r.status || '';
-        if (r.resolution) { meta += (meta ? ' · ' : '') + r.resolution; }
-        if (r.staleNote) { meta += (meta ? ' · ' : '') + r.staleNote; }   // Feature A: explain the demotion
-        if (r.note) { meta += (meta ? ' · ' : '') + r.note; }             // trending: how the count compares, reports after a fix
+        var meta = JiTA.ui._meta(r, false);
         var $li = $('<li></li>').attr('data-jita-key', r.key);
         if (r.closed) { $li.addClass('jita-sd-closed'); }                  // a closed report among this reporter's reports
         // Feature C: hover preview - a styled card (built in _showTip) showing the summary, full description
         // (incl. reproduction steps) and status, so the triager can judge a match without navigating.
         $li.on('mouseenter', function () { JiTA.ui._showTip(r, this, meta); });
         $li.on('mouseleave', function () { JiTA.ui._hideTip(); });
-        $('<a></a>').attr('href', '/browse/' + r.key).attr('target', target).text(r.key).appendTo($li);
-        if (opts && opts.score) { $('<span class="jita-sd-score"></span>').text(opts.score).appendTo($li); }
-        else {
-            var hot = JiTA.trend.badge(r.key);   // a defect players are hitting right now (nothing for a report key)
-            if (hot) { hot.appendTo($li); }
-            if (!(opts && opts.noScore)) { $('<span class="jita-sd-score"></span>').text(pct + '%').appendTo($li); }   // reporter-list rows have no relevance score
-        }
-        action(r.key).appendTo($li);
+        var $top = $('<div class="jita-sd-top"></div>').appendTo($li);
+        $('<a></a>').attr('href', '/browse/' + r.key).attr('target', target).text(r.key).appendTo($top);
+        if (opts && opts.score) { $('<span class="jita-sd-score"></span>').text(opts.score).appendTo($top); }
+        else if (!(opts && opts.noScore)) { $('<span class="jita-sd-score"></span>').text(pct + '%').appendTo($top); }   // reporter-list rows have no relevance score
+        action(r.key).appendTo($top);
         $('<div class="jita-sd-sum"></div>').text(r.summary || '').appendTo($li);
-        if (meta) { $('<div class="jita-sd-meta"></div>').text(meta).appendTo($li); }
-        if (r.excHit) { JiTA.repexc.badge(r.excHit, '<div class="jita-sd-exc"></div>', r.excHits).appendTo($li); }   // why it ranks higher
-        var created = JiTA.util.fmtDate(r.created);
-        if (created) { $('<div class="jita-sd-date"></div>').text('Created ' + created).appendTo($li); }
+        JiTA.ui._foot(r, opts).appendTo($li);
         return $li;
     },
 
@@ -8880,7 +8955,7 @@ JiTA.ui = {
         if (JiTA.ui.simReportsMode) { return JiTA.ui.renderSimilarReports(key, background); }
         if (JiTA.ui.trendMode) { return JiTA.ui.renderTrending(key, background); }
         JiTA.ui._ensurePanel();
-        // The 🔥 badges come from a cached count. If it is missing or stale it is fetched now, and the list repaints
+        // The ▲ badges come from a cached count. If it is missing or stale it is fetched now, and the list repaints
         // once when it lands so the rows pick the badges up.
         JiTA.trend.warm(function () { JiTA.ui.scheduleRender(); });
         JiTA.ui._syncFilterBtn();   // reflect any active session filters on the funnel
@@ -12094,7 +12169,7 @@ JiTA.triage = {
         T._fetchQueue().then(function () {
             if (!T._trySeekResume()) { T._render(); T._prefetch(); }   // resume positions + renders itself when it can
         });
-        // The 🔥 badges on the matches come from a cached count. If it is missing or stale it is fetched now, and the
+        // The ▲ badges on the matches come from a cached count. If it is missing or stale it is fetched now, and the
         // report on screen repaints once when it lands - unless something is in progress on it.
         JiTA.trend.warm(function () {
             if (T._open && !T._busy && !T._armed && !T._gmPick && T._queue[T._idx]) { T._render(); }
@@ -12676,29 +12751,20 @@ JiTA.triage = {
                 (function (r, n) {
                     var $li = $('<li></li>').attr('data-jt-n', n);
                     if (r.closed) { $li.addClass('jt-closed'); }   // a CLOSED report in the reporter list
-                    var $n = $('<span class="jt-n"></span>').text(n).appendTo($li);
+                    var $top = $('<div class="jt-mtop"></div>').appendTo($li);
+                    var $n = $('<span class="jt-n"></span>').text(n).appendTo($top);
                     if (noAttach) { $n.addClass('jt-n-nokey').attr('title', 'No hotkey - these are bug reports, and a report cannot be attached to another report'); }
                     else if (n > T.MATCH_KEYS) { $n.addClass('jt-n-nokey').attr('title', 'No hotkey - only matches 1-' + T.MATCH_KEYS + ' are digit-addressable'); }
-                    $('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + r.key).text(r.key).appendTo($li);
-                    // The trending view shows each defect's report count where the relevance % would be; every other
-                    // row carries the 🔥 when its defect is trending.
-                    if (view === 'trending') { $('<span class="jt-pct"></span>').text(r.count + ' in ' + JiTA.trend.WINDOW_DAYS + 'd').appendTo($li); }
-                    else {
-                        var hot = JiTA.trend.badge(r.key);
-                        if (hot) { hot.appendTo($li); }
-                        if (view !== 'reporter') { $('<span class="jt-pct"></span>').text((typeof r.pct === 'number' ? r.pct : 0) + '%').appendTo($li); }
-                    }
-                    var meta = r.status || ''; if (r.resolution) { meta += (meta ? ' · ' : '') + r.resolution; }
-                    if (r.note) { meta += (meta ? ' · ' : '') + r.note; }
+                    $('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + r.key).text(r.key).appendTo($top);
+                    // The trending view shows each defect's report count where the relevance % would be.
+                    if (view === 'trending') { $('<span class="jt-pct"></span>').text(r.count + ' in ' + JiTA.trend.WINDOW_DAYS + 'd').appendTo($top); }
+                    else if (view !== 'reporter') { $('<span class="jt-pct"></span>').text((typeof r.pct === 'number' ? r.pct : 0) + '%').appendTo($top); }
                     // The reporter list is chronological rather than ranked, so WHEN each one was filed is
-                    // the thing you read it by ("they have reported this three times since March").
-                    if (view === 'reporter') {
-                        var when = JiTA.util.fmtDate(r.created);
-                        if (when) { meta += (meta ? ' · ' : '') + when; }
-                    }
+                    // the thing you read it by ("they have reported this three times since March"): the hover's meta
+                    // gives it in full, the footer at its right.
+                    var meta = JiTA.ui._meta(r, view === 'reporter');
                     $('<span class="jt-msum"></span>').text(r.summary || '').appendTo($li);
-                    if (meta) { $('<span class="jt-mmeta"></span>').text(meta).appendTo($li); }
-                    if (r.excHit) { JiTA.repexc.badge(r.excHit, '<span class="jt-mexc"></span>', r.excHits).appendTo($li); }   // why it ranks higher
+                    JiTA.ui._foot(r, { score: view === 'trending' }).appendTo($li);   // status, why it ranks higher, ▲ (not on trending rows), the date
                     // Feature C hover preview, same as the panel rows: the styled card with the defect's summary,
                     // full (rendered) description and status - r already carries description/created from the
                     // enrichment reads above. The tip is fixed-position at z 10001, above the overlay's 10000.
@@ -13544,7 +13610,7 @@ JiTA.triage = {
                 // 300 not 420: OS/browser scaling shrinks the CSS viewport, and the queue list and Details rail
                 // now take a fixed slice of it too, so the two-column layout has to survive a much narrower pane.
                 '.jita-triage-view .jt-list { list-style: none; margin: 0; padding: 0 4px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; align-content: start; }' +
-                '.jita-triage-view .jt-list li { padding: 6px 8px; border: 1px solid #2c333a; border-radius: 6px; background: #22272b; }' +
+                '.jita-triage-view .jt-list li { padding: 6px 8px; border: 1px solid #2c333a; border-radius: 6px; background: #22272b; display: flex; flex-direction: column; }' +
                 '.jita-triage-view .jt-list li.armed { border-color: #ffb547; background: #2e2a1e; }' +
                 '.jita-triage-view .jt-list li.jt-closed { opacity: .55; }' +   // a CLOSED report in the reporter list
 
@@ -13554,9 +13620,7 @@ JiTA.triage = {
                 '.jita-triage-view .jt-list a:hover { text-decoration: underline; }' +
                 '.jita-triage-view .jt-pct { color: #fff; font-weight: 800; margin-left: 8px; font-size: 11px; }' +
                 '.jita-triage-view .jt-msum { display: block; color: #e6e6e6; font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }' +
-                '.jita-triage-view .jt-mmeta { display: block; color: #7a8694; font-size: 10px; margin-top: 2px; }' +
-                '.jita-triage-view .jt-mexc { display: block; color: #7fdca4; font-size: 10px; font-weight: 700; margin-top: 2px; }' +
-                '.jita-triage-view .jt-mexc.site { color: #9aa6b2; }' +
+                '.jita-triage-view .jt-list .jita-foot { padding-top: 5px; }' +   // the footer itself is JiTA.ui's (_foot), at the card's bottom
                 '.jita-triage-view .jt-empty { color: #9aa6b2; font-size: 12px; padding: 14px 4px; }' +
                 '.jita-triage-view .jt-msg { flex: 0 0 auto; padding: 8px 16px; border-top: 1px solid #3a434d; color: #9aa6b2; font-size: 12px; min-height: 31px; }' +
                 '.jita-triage-view .jt-msg.warn { color: #ffb547; font-weight: 600; }' +
@@ -13959,7 +14023,7 @@ JiTA.dupfind = {
  * Cached in the meta store for an hour and refreshed on use (the panel, triage, the list), under a cross-tab
  * lease so several open tabs do not all run the same search. Shown in three places: a view in the funnel menu
  * (panel and triage), which a double-tap of '#' also switches to and back; a standalone list with a per-day chart,
- * which the same double-tap opens wherever there is no panel view to switch; and a 🔥 badge on every defect row
+ * which the same double-tap opens wherever there is no panel view to switch; and a ▲ badge on every defect row
  * that clears MIN.
  */
 JiTA.trend = {
@@ -14135,7 +14199,7 @@ JiTA.trend = {
         var T = JiTA.trend, bits = [];
         if (r.trend === 'new') { bits.push('new: none in the ' + T.BASE_DAYS + ' days before'); }
         else { bits.push({ up: 'rising', steady: 'steady', down: 'falling' }[r.trend]); }
-        if (r.afterFix >= T.AFTER_FIX_MIN) { bits.push('⚠ ' + r.afterFix + ' filed after the fix'); }
+        if (r.afterFix >= T.AFTER_FIX_MIN) { bits.push(JiTA.ui.SYM.warn + ' ' + r.afterFix + ' filed after the fix'); }
         return bits.join(' · ');
     },
 
@@ -14183,7 +14247,7 @@ JiTA.trend = {
         }, function () { /* no count yet: rows simply carry no badge */ });
     },
 
-    // The 🔥 on a defect row anywhere else. Nothing below MIN, and nothing from a count more than a day old.
+    // The ▲ on a defect row anywhere else. Nothing below MIN, and nothing from a count more than a day old.
     countFor: function (key) {
         var T = JiTA.trend, d = T._data;
         if (!d || d.v !== T.V || (Date.now() - d.at) > T.STALE_MS) { return 0; }
@@ -14193,7 +14257,7 @@ JiTA.trend = {
     badge: function (key) {
         var T = JiTA.trend, n = T.countFor(key);
         if (n < T.MIN) { return null; }
-        return $('<span class="jita-hot"></span>').text('🔥 ' + n)
+        return $('<span class="jita-hot"></span>').text(JiTA.ui.SYM.hot + n)
             .attr('title', n + ' bug reports filed in the last ' + T.WINDOW_DAYS + ' days are attached to this defect');
     },
 
@@ -14275,7 +14339,7 @@ JiTA.trend = {
         var st = (r.status || '') + (r.resolution ? ' · ' + r.resolution : '');
         if (st) { $('<span class="jtr-st"></span>').text(st).appendTo($row); }
         if (r.afterFix >= T.AFTER_FIX_MIN) {
-            $('<span class="jtr-fix"></span>').text('⚠ ' + r.afterFix + ' after the fix')
+            $('<span class="jtr-fix"></span>').text(JiTA.ui.SYM.warn + ' ' + r.afterFix + ' after the fix')
                 .attr('title', 'Filed after this defect was resolved: a regression, or a fix that has not shipped yet').appendTo($row);
         }
         $('<a class="jtr-rep" target="_blank" rel="noopener">reports ↗</a>').attr('href', T.reportsUrl(r.key))
@@ -14291,7 +14355,7 @@ JiTA.trend = {
         JiTA.trend._cssInjected = true;
         try {
             GM_addStyle(
-                '.jita-hot { font-size: 10px; font-weight: 700; color: #ffb547; margin-left: 6px; white-space: nowrap; }' +
+                '.jita-hot { flex: 0 0 auto; font-size: 11px; font-weight: 700; color: #ffb547; white-space: nowrap; cursor: default; }' +
                 '#jita-side-group .jita-hot { color: var(--ds-text-warning, #974f0c); }' +
                 '#jita-menu.jita-trend-view { width: 1180px; max-width: 96vw; display: flex; flex-direction: column; overflow: hidden; }' +
                 '.jita-trend-view .jtr-scroll { flex: 1 1 auto; min-height: 0; max-height: 70vh; overflow-y: auto; padding: 10px 16px; }' +
@@ -16389,11 +16453,16 @@ JiTA.repexc = {
         'st-site': ['~ same trace site in log', 'a stacktrace logged from the same place (message and innermost frames) as one of the defect\'s'],
         'st-msg': ['~ same stacktrace message in log', 'a stacktrace with the same message as one of the defect\'s, where the client cut one of the two off before its stack']
     },
-    // `html` is the element to make it of. `hits` (from _hits or _named, optional) are what the log holds: its hover names
-    // the best one, with its message and stack, and any others by name. The card itself only says how it matched.
+    // The card's mark for it, made of `html`: ≡ for the same stack, ≈ for a looser match, saying the rest in its hover (tip).
     badge: function (kind, html, hits) {
-        var R = JiTA.repexc, b = R.BADGE[kind] || R.BADGE.site, exact = kind === 'exact' || kind === 'st-exact';
-        var $b = $(html).addClass(exact ? 'exact' : 'site').text(b[0]), tip = 'The bug report\'s log holds ' + b[1] + ', so it ranks higher and its % is raised';
+        var exact = kind === 'exact' || kind === 'st-exact';
+        return $(html).addClass(exact ? 'exact' : 'site').text(JiTA.ui.SYM[exact ? 'exact' : 'loose']).attr('title', JiTA.repexc.tip(kind, hits));
+    },
+    // A mark's hover: what it is ("Same exception in log"), then what the log holds. `hits` (from _hits or _named,
+    // optional) name the best of it, with its message and stack, and any others by name.
+    tip: function (kind, hits) {
+        var R = JiTA.repexc, b = R.BADGE[kind] || R.BADGE.site, label = b[0].replace(/^~ /, '');
+        var tip = label.charAt(0).toUpperCase() + label.slice(1) + '\n' + 'The bug report\'s log holds ' + b[1] + ', so it ranks higher and its % is raised';
         var named = (hits || []).filter(function (h) { return h && h.sig; });
         if (named.length) {
             tip += ':\n\n' + JiTA.profile._sigTip(named[0].sig, R._said(named[0]));
@@ -16403,7 +16472,7 @@ JiTA.repexc = {
                     (more.length > R.MORE_SHOWN ? '; and ' + (more.length - R.MORE_SHOWN) + ' more' : '');
             }
         }
-        return $b.attr('title', tip);
+        return tip;
     },
     // What a hit's exception or stacktrace says: its message as the log writes it, else as its signature has it, on one
     // line and at most SAID_MAX characters.
@@ -23646,6 +23715,15 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.47.0', date: '2026-11-01', features: [
+            'Cards in Similar defects, Matching bug reports and Triage mode end in one row of small symbols, the date at the right. The dot is green while open, yellow in progress, red once closed. ≡ is the same exception in the log, ≈ a looser match.',
+            'More symbols: ▲ and a count for a trending defect, ◷ for one fixed long before the report, and ↑ → ↓ ★ for the trend on trending rows. Hover any symbol for what it says. The status, exception and Created lines are gone.',
+            'A card\'s date reads 12 Jun in the current year and 06 Mar 25 before it, with the full date in its hover.'
+        ], fixes: [
+            'Triage Assistant in the sidebar: an Attach still checking the report\'s assignee is grey, no longer link blue.',
+            'A card without a created date keeps no empty strip at its bottom, and a missing date no longer shows as 01 Jan 1970.',
+            'Triage mode\'s matches now show when a defect was fixed long before the report, as the panel\'s cards do.'
+        ] },
         { v: '3.46.0', date: '2026-10-22', features: [
             'Stacktraces in a log (STACKTRACE #) now count wherever exceptions do: double-tap + finds them, they raise a match in both lists ("same stacktrace in log"), the Defect Profile counts them, and the log parser marks their defects.',
             'The client cuts a stacktrace at 6400 characters, so a long one can lose its stack. Such a one is matched by its message alone, as a looser "~" match.',
