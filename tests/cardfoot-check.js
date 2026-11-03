@@ -11,6 +11,7 @@ const once = (head, from) => {
 };
 const member = (head, from) => { const s = once(head, from); return src.slice(s, src.indexOf('\n    },', s) + 7); };
 const line = (head, from) => { const s = once(head, from); return src.slice(s, src.indexOf('\n', s) + 1); };
+const object = (head) => { const s = once(head); return src.slice(s, src.indexOf(' },\n', s) + 4); };   // a property over several lines, ending " },"
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
@@ -37,7 +38,7 @@ global.JiTA = { util: {}, ui: {}, profile: {}, logsig: {} };
 Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    isClosedStatus: function (status) {') +
     src.slice(once('    fmtDate: function (iso) {'), src.indexOf('\n    }\n};', once('    fmtDate: function (iso) {'))) + '\n    }' + '})'));   // fmtDate and shortDate, the last members
 const UI_AT = once('\nJiTA.ui = {');
-Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + member('    _statusCat: function (r) {') +
+Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + object('    STATUS_CAT: {') + member('    _statusCat: function (r) {') +
     member('    _meta: function (r, withDate) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + '})'));
 JiTA.ui._showTip = (r, el, meta) => { tips.push(meta); };
 JiTA.ui._hideTip = () => {};
@@ -61,10 +62,18 @@ ok('...while a real one still reads in full (control)', JiTA.util.fmtDate('2025-
 
 // ================= the status dot =================
 const cat = (key, status, resolution) => U._statusCat({ key: key, status: status, resolution: resolution });
-ok('a bug report reopened with its old resolution is open: grey', cat('EBR-1', 'Open', 'Duplicate') === 'todo');
-ok('...an attached or closed one done: green', cat('EBR-1', 'Attached', null) === 'done' && cat('EBR-1', 'Closed', 'Done') === 'done');
-ok('a defect with a resolution is done', cat('EDR-1', 'Closed', 'Fixed') === 'done' && cat('EDR-1', 'Open', 'Fixed') === 'done');
-ok('...one being worked on blue, an open one grey', cat('EDR-1', 'In Progress', null) === 'prog' && cat('EDR-1', 'Ready for QA', null) === 'prog' && cat('EDR-1', 'Open', null) === 'todo');
+ok('a bug report reopened with its old resolution is open: green', cat('EBR-1', 'Open', 'Duplicate') === 'todo');
+ok('...an attached or closed one done: red', cat('EBR-1', 'Attached', null) === 'done' && cat('EBR-1', 'Closed', 'Done') === 'done');
+ok('...one being worked on yellow, an open one green', cat('EDR-1', 'In Progress', null) === 'prog' && cat('EDR-1', 'Ready for QA', null) === 'prog' && cat('EDR-1', 'Open', null) === 'todo');
+const JIRA = { Attached: 'done', Closed: 'done', Rejected: 'done', 'In Porting': 'prog', 'In Progress': 'prog', 'In Test': 'prog', 'Live Testing': 'prog',
+    'Ready for Deployment': 'prog', 'Ready for Review': 'prog', 'Ready for Test': 'prog', Blocked: 'todo', Open: 'todo', Refined: 'todo', Unrefined: 'todo' };
+ok('every status Jira lists takes its own category: closed red, in progress yellow, open green', Object.keys(JIRA).every((s) => cat('EDR-1', s, null) === JIRA[s] && cat('EBR-1', s, null) === JIRA[s]),
+    Object.keys(JIRA).filter((s) => cat('EDR-1', s, null) !== JIRA[s]).join(', '));
+ok('...whatever resolution it kept: a reopened defect is open, one waiting for deployment in progress', cat('EDR-1', 'Open', 'Fixed') === 'todo' && cat('EDR-1', 'Ready for Deployment', 'Fixed') === 'prog' &&
+    cat('EDR-1', 'Closed', 'Fixed') === 'done');
+ok('...in any case, with spaces around it', cat('EDR-1', 'IN TEST', null) === 'prog' && cat('EDR-1', ' In Test ', null) === 'prog');
+ok('a status Jira does not list goes by the older rules: a defect\'s resolution, a closed or a working word', cat('EDR-1', 'Waiting', 'Fixed') === 'done' && cat('EDR-1', 'Verifying', null) === 'prog' &&
+    cat('EDR-1', 'Waiting', null) === 'todo' && cat('EBR-1', 'Waiting', 'Duplicate') === 'todo' && cat('EBR-1', 'Cancelled', null) === 'done' && cat('EDR-1', 'constructor', null) === 'todo');
 
 // ================= the footer =================
 const foot = (r, opts) => U._foot(r, opts);
@@ -73,7 +82,7 @@ JiTA.trend._data = { v: JiTA.trend.V, at: Date.now(), defects: { 'EDR-9': { rece
 let f = foot({ key: 'EDR-9', status: 'Closed', resolution: 'Fixed', excHit: 'exact', staleNote: 'fixed 2y before report', created: '2025-03-06T10:00:00.000+0000' });
 ok('the footer: the status, the exception match, trending, fixed long before, then the date', JSON.stringify(kinds(f)) === JSON.stringify(['status', 'exact', 'hot', 'jita-mark-stale', 'date']), JSON.stringify(kinds(f)));
 const st = f.kids[0];
-ok('a resolved defect shows its resolution by a green dot, the whole status in its hover', st.has('done') && find(st, 'jita-foot-dot')[0].text() === S.status &&
+ok('a resolved defect shows its resolution by a red dot, the whole status in its hover', st.has('done') && find(st, 'jita-foot-dot')[0].text() === S.status &&
     find(st, 'jita-foot-lbl')[0].text() === 'Fixed' && st.attr('title') === 'Closed · Fixed', st.text() + ' / ' + st.attr('title'));
 const dt = f.kids[f.kids.length - 1];
 ok('...the date last, short, with the full date in its hover', dt.has('jita-foot-date') && /^\d\d \w{3}( \d\d)?$/.test(dt.text()) && dt.attr('title') === 'Created 06 Mar 2025', dt.text() + ' / ' + dt.attr('title'));
@@ -125,8 +134,12 @@ ok('a card is a flex column, its footer at the bottom by margin-top:auto', /\n#j
 ok('...its top line keeps its floats', /\n\.jita-sd-top \{ display: flow-root; \}/.test(css));
 ok('no rule is left for the meta, exception or date lines', !/\.jita-sd-meta\b|\.jita-sd-exc\b|\.jita-sd-date\b/.test(css));
 ok('the sidebar card keeps no strip and pins no date', /\n#jita-side-group #jita-sd-list li \{ padding: 7px 0; border-bottom:/.test(css) && !/position: relative; padding: 7px 0 22px/.test(css));
-ok('...its symbols take Jira\'s colours', /#jita-side-group \.jita-mark-up, #jita-side-group \.jita-mark-new, #jita-side-group \.jita-mark-warn \{ color: var\(--ds-icon-warning/.test(css) &&
-    /#jita-side-group \.jita-foot-st\.prog \.jita-foot-dot \{ color: var\(--ds-icon-information/.test(css));
+ok('...its symbols take Jira\'s colours', /#jita-side-group \.jita-mark-up, #jita-side-group \.jita-mark-new, #jita-side-group \.jita-mark-warn \{ color: var\(--ds-icon-warning/.test(css));
+ok('the status dot is green while open, yellow in progress, red once closed', /\n\.jita-foot-st\.todo \.jita-foot-dot \{ color: #4caf7d; \}/.test(css) &&
+    /\n\.jita-foot-st\.prog \.jita-foot-dot \{ color: #f5cd47; \}/.test(css) && /\n\.jita-foot-st\.done \.jita-foot-dot \{ color: #f87168; \}/.test(css));
+ok('...in the sidebar in Jira\'s own green, yellow and red', /\n#jita-side-group \.jita-foot-st\.todo \.jita-foot-dot, [^{]*\{ color: var\(--ds-icon-success,/.test(css) &&
+    /\n#jita-side-group \.jita-foot-st\.prog \.jita-foot-dot \{ color: var\(--ds-icon-accent-yellow,/.test(css) && /\n#jita-side-group \.jita-foot-st\.done \.jita-foot-dot \{ color: var\(--ds-icon-danger,/.test(css) &&
+    !/\.jita-foot-st\.(todo|done) \.jita-foot-dot, #jita-side-group \.jita-mark\.site/.test(css));
 ok('...and an Attach still checking is grey, not link blue', /\n#jita-side-group \.jita-sd-link\.jita-sd-linking \{ color: var\(--ds-text-subtlest/.test(css));
 const tcss = src.slice(once("'.jita-triage-view .jt-list { list-style: none;"), once("'.jita-triage-view .jt-empty {"));
 ok('Triage mode: its cards are flex columns too, with the panel\'s footer', /\.jt-list li \{[^']*display: flex; flex-direction: column; \}'/.test(tcss) && /\.jt-list \.jita-foot \{ padding-top: 5px; \}'/.test(tcss) &&

@@ -6946,9 +6946,9 @@ JiTA.ui = {
 .jita-foot-st { display: inline-flex; align-items: center; gap: 3px; min-width: 0; overflow: hidden; cursor: default; }\
 .jita-foot-lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\
 .jita-foot-dot { flex: 0 0 auto; font-size: 10px; }\
-.jita-foot-st.todo .jita-foot-dot { color: #9aa6b2; }\
-.jita-foot-st.prog .jita-foot-dot { color: #4c9aff; }\
-.jita-foot-st.done .jita-foot-dot { color: #4caf7d; }\
+.jita-foot-st.todo .jita-foot-dot { color: #4caf7d; }\
+.jita-foot-st.prog .jita-foot-dot { color: #f5cd47; }\
+.jita-foot-st.done .jita-foot-dot { color: #f87168; }\
 .jita-mark { flex: 0 0 auto; font-size: 13px; font-weight: 700; white-space: nowrap; cursor: default; }\
 .jita-mark.exact, .jita-mark-down { color: #7fdca4; }\
 .jita-mark.site, .jita-mark-stale, .jita-mark-steady { color: #9aa6b2; }\
@@ -7074,9 +7074,10 @@ JiTA.ui = {
 #jita-side-group #jita-sd-list a, #jita-side-group .jita-sd-link { color: var(--ds-link, #0c66e4); }\
 #jita-side-group .jita-sd-sum { color: var(--ds-text, #172b4d); }\
 #jita-side-group .jita-sd-score, #jita-side-group .jita-foot { color: var(--ds-text-subtlest, #626f86); }\
-#jita-side-group .jita-foot-st.todo .jita-foot-dot, #jita-side-group .jita-mark.site, #jita-side-group .jita-mark-stale, #jita-side-group .jita-mark-steady { color: var(--ds-icon-subtle, #626f86); }\
-#jita-side-group .jita-foot-st.prog .jita-foot-dot { color: var(--ds-icon-information, #1d7afc); }\
-#jita-side-group .jita-foot-st.done .jita-foot-dot, #jita-side-group .jita-mark.exact, #jita-side-group .jita-mark-down { color: var(--ds-icon-success, #22a06b); }\
+#jita-side-group .jita-mark.site, #jita-side-group .jita-mark-stale, #jita-side-group .jita-mark-steady { color: var(--ds-icon-subtle, #626f86); }\
+#jita-side-group .jita-foot-st.prog .jita-foot-dot { color: var(--ds-icon-accent-yellow, #b38600); }\
+#jita-side-group .jita-foot-st.todo .jita-foot-dot, #jita-side-group .jita-mark.exact, #jita-side-group .jita-mark-down { color: var(--ds-icon-success, #22a06b); }\
+#jita-side-group .jita-foot-st.done .jita-foot-dot { color: var(--ds-icon-danger, #c9372c); }\
 #jita-side-group .jita-mark-up, #jita-side-group .jita-mark-new, #jita-side-group .jita-mark-warn { color: var(--ds-icon-warning, #e56910); }\
 #jita-side-group .jita-sd-link.jita-sd-linking { color: var(--ds-text-subtlest, #626f86); cursor: default; text-decoration: none; }\
 #jita-side-group .jita-sd-link.jita-sd-noattach { color: var(--ds-text-subtlest, #626f86) !important; }\
@@ -8548,10 +8549,17 @@ JiTA.ui = {
     _mark: function (cls, glyph, title, count) {
         return $('<span class="jita-mark"></span>').addClass('jita-mark-' + cls).attr('title', title).text(glyph + (count != null ? count : ''));
     },
-    // Which of Jira's three status colours a card's dot takes: 'done', 'prog' or 'todo'. A bug report goes by its status
-    // alone (a reopened one keeps its old resolution), a defect by its status or resolution.
+    // Every status EBR, EDR, EO and PLAT use, by the category Jira gives it (Schogol's list, 2026-11-03): done (Jira's
+    // green), in progress (blue) or open (grey).
+    STATUS_CAT: { 'attached': 'done', 'closed': 'done', 'rejected': 'done',
+        'in porting': 'prog', 'in progress': 'prog', 'in test': 'prog', 'live testing': 'prog', 'ready for deployment': 'prog', 'ready for review': 'prog', 'ready for test': 'prog',
+        'blocked': 'todo', 'open': 'todo', 'refined': 'todo', 'unrefined': 'todo' },
+    // Which colour a card's dot takes (Schogol 2026-11-03): 'todo' open, green; 'prog' in progress, yellow; 'done' closed,
+    // red. A listed status takes its Jira category, whatever resolution it kept (a reopened defect is open again). One not
+    // listed goes by the older rules: a bug report by its status alone, a defect by its status or resolution.
     _statusCat: function (r) {
-        var U = JiTA.util, st = r.status || '';
+        var U = JiTA.util, st = r.status || '', k = st.toLowerCase().trim(), cats = JiTA.ui.STATUS_CAT;
+        if (Object.prototype.hasOwnProperty.call(cats, k)) { return cats[k]; }
         if (/^EBR-/.test(r.key || '') ? U.isClosedStatus(st) : U.isResolved(st, r.resolution)) { return 'done'; }
         return JiTA.ui.PROGRESS_RE.test(st) ? 'prog' : 'todo';
     },
@@ -24813,7 +24821,7 @@ JiTA.changelog = {
             'Small improvements behind the scenes.'
         ] },
         { v: '3.47.0', date: '2026-11-01', features: [
-            'Similar defects, Matching bug reports and Triage mode\'s matches: each card ends in one row of small symbols with its date at the right. The status shows as a dot in Jira\'s colours, ≡ means the same exception in the log, ≈ a looser match.',
+            'Cards in Similar defects, Matching bug reports and Triage mode end in one row of small symbols, the date at the right. The dot is green while open, yellow in progress, red once closed. ≡ is the same exception in the log, ≈ a looser match.',
             'More symbols: ▲ and a count for a trending defect, ◷ for one fixed long before the report, and ↑ → ↓ ★ for the trend on trending rows. Hover any symbol for what it says. The status, exception and Created lines are gone.',
             'A card\'s date reads 12 Jun in the current year and 06 Mar 25 before it, with the full date in its hover.'
         ], fixes: [
