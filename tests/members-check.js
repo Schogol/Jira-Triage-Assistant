@@ -500,6 +500,12 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('a note is stored as notes are: spaces squeezed, one blank line at most', mv.m['acc-dist'].note === 'Ask for update?\n\nOn leave', J(mv.m['acc-dist'].note));
     w = await M.setNote('acc-dist', 'Ask for update?\n\nOn leave');
     ok('...the same note again writes nothing', !w.written);
+    w = await M.setNote('acc-pg', ' Mentor\n\nOn leave ', 'Mentor\nOn leave');
+    ok('a note the team page has already is not stored: the tab follows the page, empty lines aside', !w.written && !(props[L.MEMBERS_KEY].value.m || {})['acc-pg']);
+    w = await M.setNote('acc-pg', 'Mentor, and more', 'Mentor\nOn leave');
+    ok('...another is', w.written && props[L.MEMBERS_KEY].value.m['acc-pg'].note === 'Mentor, and more');
+    w = await M.setNote('acc-pg', 'Mentor\nOn leave', 'Mentor\nOn leave');
+    ok('...and saving the page\'s again lets it go', w.written && !props[L.MEMBERS_KEY].value.m['acc-pg']);
     await M.setRole('acc-dist', 'Bug Hunter', 'ISD Distillery');
     ok('back to the default role, the role goes and the note stays', !('role' in props[L.MEMBERS_KEY].value.m['acc-dist']) && props[L.MEMBERS_KEY].value.m['acc-dist'].note);
     await M.setNote('acc-dist', '   ');
@@ -528,8 +534,9 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await M.team(true).catch((e) => refused.push(e.message));
     await M.setRank('acc-ast', 'Senior', 'ISD Astaris').catch((e) => refused.push(e.message));
     await M.addToTeam('acc-ast', 'Senior', 'ISD Astaris', () => '').catch((e) => refused.push(e.message));
+    await M.setPageNote('acc-ast', 'x', 'ISD Astaris').catch((e) => refused.push(e.message));
     const pr = await M.publish(true), tk = await M.tick();
-    ok('a non-Lead can read, count, change and publish nothing, nor read, change or add to the team page', refused.length === 7 && refused.every((m) => /Leads only/.test(m)) &&
+    ok('a non-Lead can read, count, change and publish nothing, nor read, change or add to the team page', refused.length === 8 && refused.every((m) => /Leads only/.test(m)) &&
         pr.skipped === 'not a Lead' && tk === null && teamReads === 0, J(refused));
     gm.leadDutyMe = { accountId: 'acc-me', displayName: 'ISD BH Schogol', handle: 'schogol', isLead: true };
     L._me = null;
@@ -566,9 +573,11 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('with no team page set there are no ranks, and nothing is read', (await M.team(true)) === null && teamReads === 0);
     err = null;
     await M.setRank('acc-ast', 'Senior', 'ISD Astaris').catch((e) => { err = e; });
-    let err2 = null;
+    let err2 = null, err3 = null;
     await M.addToTeam('acc-ast', 'Senior', 'ISD Astaris', () => '').catch((e) => { err2 = e; });
-    ok('...nor anything changed or added there', err && err.message === 'no team page is set' && err2 && err2.message === 'no team page is set' && teamReads === 0, err && err.message);
+    await M.setPageNote('acc-ast', 'x', 'ISD Astaris').catch((e) => { err3 = e; });
+    ok('...nor anything changed or added there', err && err.message === 'no team page is set' && err2 && err2.message === 'no team page is set' && err3 && err3.message === 'no team page is set' &&
+        teamReads === 0, err && err.message);
     L.TEAM_PAGE = teamId;
 
     // ================= changing the team page =================
@@ -618,7 +627,7 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     const stuckT = M._parseTeam(pageT).stuck;
     ok('the team page\'s read says whose row cannot be changed on its own, and why', stuckT['t-b'].rank === 'their Rank cell is merged with other cells' &&
         stuckT['t-c'].row === 'their Name cell names someone else too' && stuckT['t-e'].rank === 'their Rank cell holds a macro' && stuckT['t-e'].row === '' &&
-        J(stuckT['t-g']) === J({ rank: '', row: '' }), J(stuckT));
+        J(stuckT['t-g']) === J({ rank: '', note: '', row: '' }), J(stuckT));
     // setRank: read, changed, written at the next version; read again and tried once more when changed meanwhile
     teamBody = pageW; teamVersion = 20; teamWrites = [];
     M._team = { at: NOW, value: { ranks: {}, names: {}, n: 1 } };
@@ -702,6 +711,68 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     sr = await M.addToTeam('n-4', 'Rookie', 'ISD R', nameOfA);
     gm.leadDutyDryRun = false;
     ok('...and a dry run adds nobody', sr.skipped === 'dry run' && teamWrites.length === 0);
+    // ---- notes on the team page ----
+    const noteRow = (who, rank, note) => '<tr><td><p>' + who + ' </p></td><td><p>' + rank + '</p></td><td>' + note + '</td><td><p>CET</p></td></tr>';
+    const pageN = teamPage([noteRow(mention('n-a'), 'Lead', '<p>(Mentor)</p><p>On leave till Dec</p>'), noteRow(mention('n-b'), 'Bughunter', '<p>Mentor of ' + mention('n-a') + '</p>'),
+        noteRow(mention('n-c'), 'Bughunter', '<p />'), noteRow('ISD Typed One', 'Rookie', '<p>Q&amp;A<br />second</p>')]);
+    const tN = M._parseTeam(pageN);
+    ok('the team page\'s Notes column is found, and each member\'s Notes cell kept', M._tables(pageN)[0].notes === 2 && tN.notes['n-a'] === '<p>(Mentor)</p><p>On leave till Dec</p>' &&
+        tN.notes['n-c'] === '<p />' && tN.nameNotes['typed one'] === '<p>Q&amp;A<br />second</p>', J([tN.notes, tN.nameNotes]));
+    const twoColPage = '<table><tbody><tr><th>Name</th><th>Rank</th></tr><tr><td>' + mention('n-z') + '</td><td>Lead</td></tr></tbody></table>';
+    ok('...a table with no Notes column keeps none, and says so for writing one', M._tables(twoColPage)[0].notes === -1 && !('n-z' in M._parseTeam(twoColPage).notes) &&
+        M._parseTeam(twoColPage).stuck['n-z'].note === 'their row has no Notes cell');
+    ok('...a header reading Note counts too', M._tables('<table><tbody><tr><th>Name</th><th>Note</th><th>Rank</th></tr></tbody></table>')[0].notes === 1);
+    ok('...and a Notes cell merged into the Rank cell is no note', M._parseTeam(pageT).notes['t-h'] === '' && M._parseTeam(pageT).notes['t-g'] === '<p>Notes stay</p>', J(M._parseTeam(pageT).notes));
+    ok('a note reads as text: paragraphs and line breaks as lines, an @mention as @ and the name, entities as written', M._noteText(tN.notes['n-a'], {}) === '(Mentor)\nOn leave till Dec' &&
+        M._noteText(tN.notes['n-b'], { 'n-a': 'ISD Alpha' }) === 'Mentor of @ISD Alpha' && M._noteText(tN.notes['n-b'], {}) === 'Mentor of @someone' &&
+        M._noteText(tN.nameNotes['typed one'], {}) === 'Q&A\nsecond' && M._noteText('<p />', {}) === '' && M._noteText('<p>a   b</p><p> </p>', {}) === 'a b' &&
+        M._noteText('<p>' + mention('x') + '</p>', { x: 'A<b>B' }) === '@A<b>B', J(M._noteText(tN.notes['n-b'], { 'n-a': 'ISD Alpha' })));
+    ok('a Notes cell holding an @mention, or merged with another, is not written; a plain or empty one is', tN.stuck['n-b'].note === 'their Notes cell holds an @mention or a macro' &&
+        tN.stuck['n-a'].note === '' && tN.stuck['n-c'].note === '' && stuckT['t-h'].note === 'their Notes cell is merged with other cells' && stuckT['t-a'].note === '' &&
+        stuckT['t-c'].note === 'their Name cell names someone else too', J(tN.stuck));
+    const teamNM = M._parseTeam(teamPage([noteRow(mention('acc-dist'), 'Bughunter', '<p>Mentor</p>'), noteRow(mention('acc-sen'), 'Snr Bughunter', '<p>Health</p>'),
+        noteRow('ISD Astaris', 'Bughunter', '<p>Typed note</p>'), noteRow(mention('acc-me'), 'Lead', '<p>Lead of ' + mention('acc-dist') + '</p>')]));
+    const byN = {};
+    M.model(act0, mem0, live0, '2026-11', teamNM).forEach((r) => { byN[r.acc] = r; });
+    ok('with the team page, a member\'s note is their Notes cell there, not one a Lead set', byN['acc-dist'].note === 'Mentor' && !byN['acc-dist'].noteSet && byN['acc-dist'].pageNote === 'Mentor');
+    ok('...a note a Lead set wins over it, the page\'s kept beside it', byN['acc-sen'].note === 'Health issues\nback in Jan' && byN['acc-sen'].noteSet && byN['acc-sen'].pageNote === 'Health');
+    ok('...a name typed on the page has its note too, and an @mention in one reads as the member\'s name', byN['acc-ast'].note === 'Typed note' && byN['acc-me'].note === 'Lead of @ISD Distillery',
+        J([byN['acc-ast'].note, byN['acc-me'].note]));
+    ok('...someone not on it has none from it', byN['acc-new'].pageNote === undefined && byN['acc-new'].note === '' && !byN['acc-new'].noteSet);
+    const nc = (r, note, team) => M.noteChange(r, note, team === undefined ? tN : team);
+    const rA = { acc: 'n-a', name: 'ISD Alpha', pageNote: '(Mentor)\nOn leave till Dec', onTeam: true };
+    ok('saving the note the team page has asks nothing, its empty lines and spaces aside', J(nc(rA, '(Mentor)\n\nOn leave till Dec')) === '{}' && J(nc(rA, '  (Mentor)\nOn leave till Dec  ')) === '{}');
+    ok('...another asks to change it there, an empty one to clear it', nc(rA, 'Mentor').ask === 'Change ISD Alpha\'s note on the ECAID - Team Members page too?\n\nOK: the page and the tab. Cancel: the tab only.' &&
+        nc(rA, '  ').ask === 'Clear ISD Alpha\'s note on the ECAID - Team Members page too?\n\nOK: the page and the tab. Cancel: the tab only.', nc(rA, 'Mentor').ask);
+    ok('...a Notes cell with an @mention in it is changed by hand', nc({ acc: 'n-b', name: 'ISD B', pageNote: 'Mentor of @someone', onTeam: true }, 'x').why ===
+        'their Notes cell holds an @mention or a macro on the ECAID - Team Members page, so change their note there by hand');
+    ok('...someone not on the page, or on it by a typed name, is saved in the tab only, saying why', nc({ acc: 'zz', name: 'ISD Z', pageNote: undefined, onTeam: false }, 'x').why ===
+        'they are not on the ECAID - Team Members page' && nc({ acc: 'zz', name: 'ISD Typed One', pageNote: 'Q&A\nsecond', onTeam: true }, 'x').why ===
+        'they are on the ECAID - Team Members page without an @mention, so change their note there by hand');
+    ok('...and without the team page nothing is asked, nor for no note for someone with none there', J(nc(rA, 'x', null)) === '{}' && J(nc(rA, 'x', { error: 'HTTP 503' })) === '{}' &&
+        J(nc({ acc: 'zz', name: 'Z', pageNote: undefined, onTeam: false }, '')) === '{}');
+    const tWN = (acc, note) => { try { return M._withNote(pageN, acc, note); } catch (e) { return 'THROWS ' + e.message; } };
+    ok('a note written changes that member\'s Notes cell alone, a paragraph a line', tWN('n-c', 'Mentor\n\nOn leave') ===
+        pageN.replace(noteRow(mention('n-c'), 'Bughunter', '<p />'), noteRow(mention('n-c'), 'Bughunter', '<p>Mentor</p><p>On leave</p>')), tWN('n-c', 'Mentor\n\nOn leave').slice(-400));
+    ok('...an empty one leaves an empty paragraph, and a note is escaped', tWN('n-a', '') ===
+        pageN.replace(noteRow(mention('n-a'), 'Lead', '<p>(Mentor)</p><p>On leave till Dec</p>'), noteRow(mention('n-a'), 'Lead', '<p />')) && tWN('n-c', 'R&D <1>').indexOf('<td><p>R&amp;D &lt;1&gt;</p></td>') > 0);
+    ok('...never one holding an @mention, nor for someone not @mentioned', tWN('n-b', 'x') === 'THROWS their Notes cell holds an @mention or a macro' && tWN('nobody', 'x') === 'THROWS they are not @mentioned on it');
+    const lit = noteRow(mention('n-q'), 'Lead', '<p>x</p>').replace('<td><p>x</p></td>', '<td data-highlight-colour="#e3fcef"><p>x</p></td>');
+    ok('...and a Notes cell keeps its own attributes', M._withNote(teamPage([lit]), 'n-q', 'y') === teamPage([lit.replace('<p>x</p>', '<p>y</p>')]));
+    teamBody = pageN; teamVersion = 50; teamWrites = [];
+    sr = await M.setPageNote('n-c', 'Mentor', 'ISD C');
+    ok('setPageNote writes the Notes cell at the next version, saying whose', sr.written && teamWrites.length === 1 && teamWrites[0].from === 50 && teamWrites[0].message === 'Set ISD C\'s note (JiTA Members tab)' &&
+        teamBody === pageN.replace(noteRow(mention('n-c'), 'Bughunter', '<p />'), noteRow(mention('n-c'), 'Bughunter', '<p>Mentor</p>')), J(teamWrites.map((x) => x.message)));
+    teamWrites = [];
+    sr = await M.setPageNote('n-c', '   ', 'ISD C');
+    ok('...an empty note clears it', sr.written && teamWrites.length === 1 && teamWrites[0].message === 'Cleared ISD C\'s note (JiTA Members tab)' && teamBody === pageN, J(teamWrites.map((x) => x.message)));
+    err = null; teamWrites = [];
+    await M.setPageNote('n-b', 'x', 'ISD B').catch((e) => { err = e; });
+    ok('...one that cannot be changed on its own is not written, saying why', err && err.message === 'their Notes cell holds an @mention or a macro' && teamWrites.length === 0, err && err.message);
+    gm.leadDutyDryRun = true;
+    sr = await M.setPageNote('n-c', 'y', 'ISD C');
+    gm.leadDutyDryRun = false;
+    ok('...and a dry run writes nothing', sr.skipped === 'dry run' && teamWrites.length === 0);
     // pageChange: what a role picked would do to the team page
     const tmP = M._parseTeam(pageT + teamPage([teamRow(mention('acc-ast'), 'Bughunter'), teamRow('ISD BH Typed', 'Bughunter')]));
     const pc = (acc, name, rank, onTeam, role) => M.pageChange({ acc: acc, name: name, rank: rank, onTeam: onTeam }, role, tmP);
@@ -731,7 +802,7 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     let html = pageWrites.length ? pageWrites[0].html : '';
     ok('the page is written to the members page, not the ledger page, and the build that wrote it recorded', res.written && pageWrites.length === 1 && pageWrites[0].id === '199754526' &&
         L.MEMBERS_PAGE !== L.LEDGER_PAGE && props[L.MEMBERS_KEY].value.pub.v === '3.48.0', J(res));
-    ok('...one table: role, name, notes, the 6 months, Last active and State', /<th>Role<\/th><th>Name<\/th><th>Notes<\/th><th>Oct 2026<\/th><th>Sep 2026<\/th>.*<th>May 2026<\/th><th>Last active<\/th><th>State<\/th>/.test(html) &&
+    ok('...one table: role, name, notes, the 6 months oldest first, Last active and State', /<th>Role<\/th><th>Name<\/th><th>Notes<\/th><th>May 2026<\/th><th>Jun 2026<\/th><th>Jul 2026<\/th><th>Aug 2026<\/th><th>Sep 2026<\/th><th>Oct 2026<\/th><th>Last active<\/th><th>State<\/th>/.test(html) &&
         (html.match(/<table>/g) || []).length === 1);
     ok('...rows by rank: the Lead first, then the Bug Hunters by name', html.indexOf('ISD BH Schogol') < html.indexOf('ISD Astaris') && html.indexOf('ISD Astaris') < html.indexOf('ISD Byteghost') &&
         html.indexOf('ISD Byteghost') < html.indexOf('ISD Distillery'));
@@ -739,12 +810,14 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...a month below 40 coloured, a Lead\'s too, 0 in red, a GM month starred; a 40 plain', /<span style="color: #974f0c;">34\*<\/span>/.test(html) && /<span style="color: #ae2a19;">0<\/span>/.test(html) &&
         /<span style="color: #974f0c;">12<\/span>/.test(html) && /<td[^>]*>40<\/td>/.test(html) && !/<span[^>]*>40<\/span>/.test(html));
     ok('...a month before joining shown as -', /<td[^>]*>-<\/td>/.test(html));
+    const astPage = (html.split('<tr>').filter((tr) => /ISD Astaris/.test(tr))[0] || '').split('</td>').map((c) => c.replace(/<[^>]+>/g, '')).slice(3, 9).join(',');
+    ok('...a member\'s months oldest first, each under its own', astPage === '-,0,15*,34*,40,23', astPage);
     const oddName = M._content([{ role: 'Bug Hunter', name: 'ISD <b>Bold</b> & Co', note: '', months: [1, 2, 3, 4, 5, 6], gm: [0, 0, 0, 0, 0, 0], last: '', state: '' }], { frozen: {} }, true);
     ok('...a name escaped too', oddName.indexOf('ISD &lt;b&gt;Bold&lt;/b&gt; &amp; Co') >= 0 && oddName.indexOf('<b>Bold') < 0);
     ok('...the State as a lozenge, the row tinted by it', /<ac:parameter ac:name="colour">Red<\/ac:parameter><ac:parameter ac:name="title">Inactive<\/ac:parameter>/.test(html) &&
         /<td class="highlight-#ffebe6" data-highlight-colour="#ffebe6">ISD Byteghost/.test(html.replace(/<td[^>]*>Bug Hunter<\/td>/g, '')) || /data-highlight-colour="#ffebe6"/.test(html), html.slice(0, 200));
     ok('...the minimum, the GM rule and the stamp said', /ECAID asks for <strong>40 a month<\/strong>/.test(html) && /\* includes GM handoffs made the old way/.test(html) && /<em>Generated from the shared lead-duty ledger/.test(html));
-    ok('...and the months counted late footnoted', /Counted late: Aug 2026 \(on 2026-11-01\), Jul 2026 \(on 2026-11-01\)/.test(html) &&
+    ok('...and the months counted late footnoted, oldest first', /Counted late: May 2026 \(on 2026-11-01\), Jun 2026 \(on 2026-11-01\), Jul 2026 \(on 2026-11-01\), Aug 2026 \(on 2026-11-01\)\./.test(html) &&
         /someone who joined since shows 0 for it, or - when a newer month shows they had not joined yet\./.test(html), (html.match(/Counted late:[^<]*/) || [''])[0]);
     res = await M.publish(false);
     ok('nothing changed: nothing written', res.skipped === 'unchanged' && pageWrites.length === 1, J(res));
@@ -853,8 +926,14 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await settle();
     const rowsOf = () => body.kids.filter((k) => k.hasClass('ld-mrow') && !k.hasClass('ld-mhead'));
     const rowFor = (acc) => rowsOf().filter((r) => r.attrs['data-key'] === acc)[0];
-    const cell = (r, i) => r.kids.filter((k) => k.hasClass('ld-mnum'))[i];
+    const cell = (r, i) => r.kids.filter((k) => k.hasClass('ld-mnum'))[i < 6 ? 5 - i : i];   // i as the window counts: 0 Oct ... 5 May, 6 this month
     ok('the tab lists every member under a header, by rank', body.kids.some((k) => k.hasClass('ld-mhead')) && rowsOf().length === 5 && rowsOf()[0].attrs['data-key'] === 'acc-me', J(rowsOf().map((r) => r.attrs['data-key'])));
+    const monthsHead = body.kids.filter((k) => k.hasClass('ld-mhead'))[0].kids.filter((k) => k.hasClass('ld-mnum')).map((k) => k.text());
+    const astCells = rowFor('acc-ast').kids.filter((k) => k.hasClass('ld-mnum'));
+    ok('the months read as a calendar does: May to October, then this month so far', J(monthsHead) === J(['May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov so far']) &&
+        /May 2026/.test(astCells[0].attrs.title) && /Oct 2026/.test(astCells[5].attrs.title) && astCells[6].hasClass('ld-mcur'), J(monthsHead));
+    ok('...in a row too: a month\'s number under its own month', astCells.map((k) => k.text()).join(',') === '-,0,15,34,40,23,4', astCells.map((k) => k.text()).join(','));
+    ok('the window\'s order turned around is oldest first', J(M._oldestFirst(['c', 'b', 'a'])) === J([2, 1, 0]) && J(M._oldestFirst([])) === '[]');
     const ast = rowFor('acc-ast');
     ok('a Bug Hunter\'s month under 40 is marked, 0 in red, with what it means in its hover', cell(ast, 2).hasClass('low') && cell(ast, 2).text() === '34' &&
         /34 actioned in Aug 2026, of the 40 a month ECAID asks for\nincl\. 4 handed to the GMs the old way/.test(cell(ast, 2).attrs.title) && cell(rowFor('acc-byte'), 0).hasClass('zero'), cell(ast, 2).attrs.title);
@@ -1048,6 +1127,61 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
         teamWrites[0].message === 'Added ISD Newcomer as Snr Bughunter (JiTA Members tab)' && hintOf(rowFor('acc-new')).text() === '', J(teamWrites.map((x) => x.message)));
     ok('...and the role set to the same goes, the page now giving it', !('role' in (props[L.MEMBERS_KEY].value.m['acc-new'] || {})) && picked(rowFor('acc-new')) === 'Senior',
         J(props[L.MEMBERS_KEY].value.m['acc-new']));
+
+    // notes from the team page, and a note edited in the tab
+    await later();
+    teamBody = teamPage([noteRow(mention('acc-dist'), 'Snr Bughunter', '<p>Mentor</p>'), noteRow(mention('acc-me'), 'Lead', '<p>Founder</p>'),
+        noteRow(mention('acc-ast'), 'Bughunter', '<p>Old note</p>'), noteRow(mention('acc-new'), 'Snr Bughunter', '<p>New in October</p>')]);
+    U._loadMembers(true);
+    await settle();
+    const noteOf = (acc) => rowFor(acc).kids.filter((k) => k.hasClass('ld-mnote'))[0];
+    ok('a member with no note of the tab\'s own shows their note from the team page, saying so', noteOf('acc-me').text() === 'Founder' && !noteOf('acc-me').hasClass('empty') &&
+        noteOf('acc-me').attrs.title === 'Founder\n\nFrom the ECAID - Team Members page', noteOf('acc-me').attrs.title);
+    ok('...one set in the tab shows instead, its hover giving the page\'s too', noteOf('acc-ast').text() === 'Cross trained to NEC' &&
+        /^Cross trained to NEC\n\nSet by schogol on \d{4}-\d\d-\d\d\nThe ECAID - Team Members page has: Old note$/.test(noteOf('acc-ast').attrs.title), noteOf('acc-ast').attrs.title);
+    confirmAnswer = true; confirmAsked.length = 0; teamWrites = []; answer = 'Founder and Lead';
+    noteOf('acc-me').fire('click');
+    await settle();
+    ok('a note edited asks to change it on the team page too; agreed, only that Notes cell changes there', confirmAsked.length === 1 &&
+        confirmAsked[0] === 'Change ISD BH Schogol\'s note on the ECAID - Team Members page too?\n\nOK: the page and the tab. Cancel: the tab only.' && teamWrites.length === 1 &&
+        teamBody.indexOf(noteRow(mention('acc-me'), 'Lead', '<p>Founder and Lead</p>')) >= 0 && teamWrites[0].message === 'Set ISD BH Schogol\'s note (JiTA Members tab)', J(confirmAsked));
+    ok('...the tab then following the page, with no note of its own', noteOf('acc-me').text() === 'Founder and Lead' && !(props[L.MEMBERS_KEY].value.m['acc-me'] || {}).note &&
+        /From the ECAID - Team Members page$/.test(noteOf('acc-me').attrs.title), J(props[L.MEMBERS_KEY].value.m['acc-me']));
+    confirmAsked.length = 0; teamWrites = []; answer = 'Mentor';
+    noteOf('acc-dist').fire('click');
+    await settle();
+    ok('saving the note the page has asks nothing, and lets the tab\'s own go', confirmAsked.length === 0 && teamWrites.length === 0 && !(props[L.MEMBERS_KEY].value.m['acc-dist'] || {}).note &&
+        noteOf('acc-dist').text() === 'Mentor', J(props[L.MEMBERS_KEY].value.m['acc-dist']));
+    await later();
+    pageWrites = [];
+    await M.publish(true);
+    ok('the productivity page shows a note from the team page as any other', pageWrites.length === 1 && /<td[^>]*>Founder and Lead<\/td>/.test(pageWrites[0].html) &&
+        /<td[^>]*>Mentor<\/td>/.test(pageWrites[0].html), pageWrites.length + ' writes');
+    confirmAnswer = false; confirmAsked.length = 0; answer = 'Mentor, on leave';
+    noteOf('acc-dist').fire('click');
+    await settle();
+    ok('declined, the note is kept in the tab only', confirmAsked.length === 1 && teamWrites.length === 0 && props[L.MEMBERS_KEY].value.m['acc-dist'].note === 'Mentor, on leave' &&
+        noteOf('acc-dist').text() === 'Mentor, on leave', J(props[L.MEMBERS_KEY].value.m['acc-dist']));
+    confirmAsked.length = 0; answer = '';
+    noteOf('acc-me').fire('click');
+    await settle();
+    ok('a note cleared in the tab only lets the page\'s show again, and says so', confirmAsked.length === 1 && /^Clear ISD BH Schogol's note/.test(confirmAsked[0]) && noteOf('acc-me').text() === 'Founder and Lead' &&
+        /Saved in the tab only: the ECAID - Team Members page still has a note for them, so that one shows$/.test(status.textContent), status.textContent);
+    confirmAnswer = true; confirmAsked.length = 0; teamWrites = []; answer = 'x'; teamRefuse = Object.assign(new Error('HTTP 403'), { status: 403 });
+    noteOf('acc-me').fire('click');
+    await settle();
+    ok('a team page that will not take the note keeps it in the tab only, saying why', teamWrites.length === 0 && props[L.MEMBERS_KEY].value.m['acc-me'].note === 'x' &&
+        /Saved in the tab only: the ECAID - Team Members page was not changed \(HTTP 403\)$/.test(status.textContent), status.textContent);
+    confirmAsked.length = 0; teamWrites = []; answer = 'x, and y';
+    afterTeamSave = () => { teamFail = Object.assign(new Error('HTTP 503'), { status: 503 }); };
+    noteOf('acc-me').fire('click');
+    await settle();
+    ok('a note written to the page but not read back is kept in the tab too, so it still shows', teamWrites.length === 1 && props[L.MEMBERS_KEY].value.m['acc-me'].note === 'x, and y' &&
+        noteOf('acc-me').text() === 'x, and y', J(props[L.MEMBERS_KEY].value.m['acc-me']));
+    pageWrites = [];
+    await M.publish(true);
+    ok('...and those set in the tab over the page\'s', pageWrites.length === 1 && /<td[^>]*>x, and y<\/td>/.test(pageWrites[0].html) &&
+        /<td[^>]*>Mentor, on leave<\/td>/.test(pageWrites[0].html) && !/Old note/.test(pageWrites[0].html), pageWrites.length + ' writes');
 
     Date.now = realNow;
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'members checks passed.'));

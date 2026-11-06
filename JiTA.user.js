@@ -21563,7 +21563,7 @@ JiTA.leadduty.ui = {
         $('<span class="ld-mname"></span>').text('Name').appendTo($h);
         $('<span class="ld-mrolehd"></span>').text('Role').appendTo($h);
         $('<span class="ld-mnote"></span>').text('Note').appendTo($h);
-        wins.forEach(function (ym) { $('<span class="ld-mnum"></span>').text(M._mon(ym).slice(0, 3)).attr('title', M._mon(ym)).appendTo($h); });
+        M._oldestFirst(wins).forEach(function (i) { $('<span class="ld-mnum"></span>').text(M._mon(wins[i]).slice(0, 3)).attr('title', M._mon(wins[i])).appendTo($h); });
         $('<span class="ld-mnum ld-mcur"></span>').text(M._mon(st.cur).slice(0, 3) + ' so far').appendTo($h);
         $('<span class="ld-mlast"></span>').text('Last active').appendTo($h);
         var shown = rows.filter(function (r) { return !U._memQuiet || r.state === 'below' || r.state === 'inactive'; });
@@ -21598,11 +21598,13 @@ JiTA.leadduty.ui = {
         var $sel = $('<select class="ld-mrole"></select>').attr('title', r.roleSet ? why : (why + ': change it, and every Lead sees the same'));
         M.ROLES.forEach(function (role) { $('<option></option>').attr('value', role).text(role).prop('selected', role === r.role).appendTo($sel); });
         $sel.on('change', function () { U._setMemberRole(this, r, $(this).val()); }).appendTo($r);
+        var whence = !r.noteSet ? '\n\nFrom the ECAID - Team Members page' : ((r.noteBy ? ('\n\nSet by ' + r.noteBy + (r.noteAt ? (' on ' + r.noteAt) : '')) : '') +
+            (r.pageNote ? ('\nThe ECAID - Team Members page has: ' + r.pageNote) : ''));
         $('<span class="ld-mnote"></span>').toggleClass('empty', !r.note).text(r.note ? r.note.split('\n')[0] : 'Add a note')
-            .attr('title', r.note ? (r.note + (r.noteBy ? ('\n\nSet by ' + r.noteBy + (r.noteAt ? (' on ' + r.noteAt) : '')) : '')) : 'Add a note on this member, shared with every Lead')
+            .attr('title', r.note ? (r.note + whence) : 'Add a note on this member, shared with every Lead')
             .on('click', function () { U._editMemberNote(r, wins, cur); }).appendTo($r);
-        wins.forEach(function (ym, i) {
-            var n = r.months[i], $c = $('<span class="ld-mnum"></span>').appendTo($r);
+        M._oldestFirst(wins).forEach(function (i) {
+            var ym = wins[i], n = r.months[i], $c = $('<span class="ld-mnum"></span>').appendTo($r);
             if (n === undefined) { $c.text('…').addClass('dim').attr('title', M._mon(ym) + ' has not been counted yet'); return; }
             if (n === null) { $c.text('-').addClass('dim').attr('title', 'Not in the group yet in ' + M._mon(ym)); return; }
             $c.text(String(n));
@@ -21671,18 +21673,38 @@ JiTA.leadduty.ui = {
         });
     },
 
-    // A row's note, edited in the note dialog: written, then only that row drawn again.
+    // A row's note, edited in the note dialog: on the team page too when it has another and the Lead agrees (their Notes
+    // cell), then in the ledger, then only that row drawn again.
     _editMemberNote: function (r, wins, cur) {
         var L = JiTA.leadduty, U = L.ui, M = L.members, draft = 'member:' + r.acc;
         U._askNote({ title: 'Note on ' + r.name, hint: 'Shared with every Lead, and shown on the ECAID Member Productivity page.', save: 'Save note', draft: draft, value: r.note }, function (note) {
-            M.setNote(r.acc, note).then(function (w) {
+            var ch = M.noteChange(r, note, U._mem && U._mem.team);
+            var drawn = function (w, why) {
                 delete U._drafts[draft];
                 var v = U._adopt(U._memVer, w);
                 if (v && U._mem) { U._mem.mem = v; }
-                if (!U._mem) { return; }
-                var fresh = M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team).filter(function (x) { return x.acc === r.acc; })[0];
-                if (fresh) { U._swapRow(r.acc, U._memberRow(fresh, wins, cur)); }
-            }, function (e) { U._status('Not saved - ' + (e && e.message || e)); });
+                if (U._mem) {
+                    var fresh = M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team).filter(function (x) { return x.acc === r.acc; })[0];
+                    if (fresh) { U._swapRow(r.acc, U._memberRow(fresh, wins, cur)); }
+                }
+                if (why) { U._status('Saved in the tab only: ' + why); }
+            };
+            var failed = function (e) { U._status('Not saved - ' + (e && e.message || e)); };
+            var tabOnly = function (why) {
+                // an empty note follows the page, so the page's own note shows again
+                if (!why && !L._note(note) && r.pageNote) { why = 'the ECAID - Team Members page still has a note for them, so that one shows'; }
+                return M.setNote(r.acc, note, r.pageNote).then(function (w) { drawn(w, why); });
+            };
+            if (!ch.ask || !confirm(ch.ask)) { tabOnly(ch.why || '').catch(failed); return; }
+            M.setPageNote(r.acc, note, r.name).then(function () {
+                // the page says it now: read it again, and nothing needs storing (if it cannot be read, the note is stored instead)
+                return M.team(true).then(function (t) {
+                    if (U._mem) { U._mem.team = t; }
+                    return M.setNote(r.acc, note, M._noteOf(t, r.acc, r.name, {}));
+                }, function () { return M.setNote(r.acc, note, r.pageNote); }).then(function (w) { drawn(w, ''); });
+            }, function (e) {
+                return tabOnly('the ECAID - Team Members page was not changed (' + (e && e.message || e) + ')');
+            }).catch(failed);
         });
     },
 
@@ -22468,6 +22490,13 @@ JiTA.leadduty.members = {
         for (var i = 0; i < L.members.MONTHS; i++) { cur = L._prevYm(cur); out.push(cur); }
         return out;
     },
+    // The indexes of a newest-first list (the window, a member's months), oldest first: the order the months are shown
+    // in, as a calendar reads (Schogol 2026-11-06), this month so far after them.
+    _oldestFirst: function (list) {
+        var out = [];
+        for (var i = list.length - 1; i >= 0; i--) { out.push(i); }
+        return out;
+    },
     // Whether a cached credits result counts its whole month: computed on or after the first day after it, the credits
     // scheduler's own rule for its final count.
     isFinal: function (res, ym) { return !!(res && res.ym === ym && String(res.computedAt || '') >= JiTA.leadduty._bounds(ym).end); },
@@ -22527,6 +22556,24 @@ JiTA.leadduty.members = {
         if (own.call(team.ranks, acc)) { return team.ranks[acc]; }
         return (k && own.call(team.names, k)) ? team.names[k] : undefined;
     },
+    // A member's note on the team page, as text (see _noteText; names: accountId -> name for the @mentions in it), found
+    // as _rankOf finds the rank; undefined when the page does not list them, or has no Notes column where it does.
+    _noteOf: function (team, acc, name, names) {
+        var M = JiTA.leadduty.members, own = Object.prototype.hasOwnProperty, k = M._nameKey(name), notes = team.notes || {}, byName = team.nameNotes || {}, html;
+        if (own.call(team.ranks, acc)) { html = own.call(notes, acc) ? notes[acc] : undefined; }
+        else if (k && own.call(team.names, k)) { html = own.call(byName, k) ? byName[k] : undefined; }
+        return html === undefined ? undefined : M._noteText(html, names || {});
+    },
+    // A Notes cell's content as a note: an @mention read as @ and the name, a paragraph or line break a new line, spaces
+    // squeezed, empty lines left out.
+    _noteText: function (html, names) {
+        var own = Object.prototype.hasOwnProperty;
+        var s = String(html || '').replace(/<ac:link\b[^>]*>\s*<ri:user\b[^>]*?ri:account-id="([^"]+)"[\s\S]*?<\/ac:link>/gi, function (m, acc) {
+            return '@' + JiTA.conf.esc(own.call(names, acc) && names[acc] ? names[acc] : 'someone');   // as text: _text reads it back
+        });
+        return JiTA.leadduty.apps._text(s).split('\n').map(function (l) { return l.replace(/\s+/g, ' ').trim(); })
+            .filter(function (l) { return !!l; }).join('\n');
+    },
     // The team page's ranks, read again after TEAM_TTL_MS (or when forced): { ranks: { accountId: role }, names:
     // { nameKey: role }, stuck, n, tables, version } (see _parseTeam), null when no team page is set. A page that cannot
     // be read, or lists nobody, rejects, saying which. Single-flight; Leads only.
@@ -22551,50 +22598,59 @@ JiTA.leadduty.members = {
         return p;
     },
     // The team page's members, from the rows of its rank tables (see _tables): the accounts @mentioned in a row's Name
-    // cell (or the name typed there), with the role its rank stands for. The first row naming someone wins.
-    // { ranks, names, n (the members found), tables (the tables used), stuck: { accountId: why their row cannot be
-    // changed on its own, as _stuck says } }.
+    // cell (or the name typed there), with the role its rank stands for and, in a table with a Notes column, the content
+    // of their Notes cell (raw, for _noteText). The first row naming someone wins. { ranks, names, notes: { accountId:
+    // html }, nameNotes: { nameKey: html }, n (the members found), tables (the tables used), stuck: { accountId: why their
+    // row cannot be changed on its own, as _stuck says } }.
     _parseTeam: function (html) {
-        var M = JiTA.leadduty.members, out = { ranks: {}, names: {}, n: 0, tables: 0, stuck: {} }, own = Object.prototype.hasOwnProperty;
+        var M = JiTA.leadduty.members, out = { ranks: {}, names: {}, notes: {}, nameNotes: {}, n: 0, tables: 0, stuck: {} }, own = Object.prototype.hasOwnProperty;
         M._tables(html).forEach(function (t) {
             out.tables++;
             t.rows.forEach(function (row) {
-                var who = row[t.name], rank = row[t.rank], role = M.rankRole(rank ? rank.text : '');
+                var who = row[t.name], rank = row[t.rank], role = M.rankRole(rank ? rank.text : ''), note = t.notes >= 0 ? row[t.notes] : null;
                 if (!who || who === rank) { return; }   // no Name cell, or a divider row: one cell across both
+                var html = note && note !== who && note !== rank ? note.inner : '';
                 if (who.accs.length) {
                     who.accs.forEach(function (a) {
                         if (own.call(out.ranks, a)) { return; }
-                        out.ranks[a] = role; out.stuck[a] = M._stuck(row, who, rank); out.n++;
+                        out.ranks[a] = role; out.stuck[a] = M._stuck(row, who, rank, note); out.n++;
+                        if (t.notes >= 0) { out.notes[a] = html; }
                     });
                     return;
                 }
                 var k = M._nameKey(who.text);
-                if (k && !own.call(out.names, k)) { out.names[k] = role; out.n++; }
+                if (k && !own.call(out.names, k)) {
+                    out.names[k] = role; out.n++;
+                    if (t.notes >= 0) { out.nameNotes[k] = html; }
+                }
             });
         });
         return out;
     },
     // The tables of a storage body with a Name and a Rank column, found by their header row: { head (that row), rows
-    // (those under it), both as _grid gives them, placed in the body, name, rank (the two columns) }.
+    // (those under it), both as _grid gives them, placed in the body, name, rank, notes (the columns; notes -1 when there
+    // is no Notes column) }.
     _tables: function (body) {
         var M = JiTA.leadduty.members, out = [], re = /<table\b[\s\S]*?<\/table>/gi, m;
         body = String(body || '');
         while ((m = re.exec(body))) {
             var rows = M._grid(m[0], m.index), h = null, i;
             for (i = 0; i < rows.length && !h; i++) { h = M._header(rows[i]); }
-            if (h) { out.push({ head: rows[i - 1], rows: rows.slice(i), name: h[0], rank: h[1] }); }
+            if (h) { out.push({ head: rows[i - 1], rows: rows.slice(i), name: h[0], rank: h[1], notes: h[2] }); }
         }
         return out;
     },
-    // A header row's Name and Rank columns, [name, rank], or null when it does not name both.
+    // A header row's Name, Rank and Notes columns, [name, rank, notes] (notes -1 when it has none), or null when it does
+    // not name the first two.
     _header: function (row) {
-        var ni = -1, ri = -1;
+        var ni = -1, ri = -1, oi = -1;
         for (var i = 0; i < row.length; i++) {
             var h = row[i].text.toLowerCase().replace(/[^a-z]/g, '');
             if (h === 'name' && ni < 0) { ni = i; }
             if (h === 'rank' && ri < 0) { ri = i; }
+            if ((h === 'notes' || h === 'note') && oi < 0) { oi = i; }
         }
-        return (ni >= 0 && ri >= 0) ? [ni, ri] : null;
+        return (ni >= 0 && ri >= 0) ? [ni, ri, oi] : null;
     },
     // A table's rows as arrays of cells, a cell spanning rows or columns in each place it covers (so a cell merged down
     // from a row above has a rowspan over 1). A row has its place in the body (at, base being the table's own place); a
@@ -22621,24 +22677,27 @@ JiTA.leadduty.members = {
         }
         return rows;
     },
-    // What keeps a member's row from being changed on its own: { rank: why their Rank cell cannot be rewritten, row: why
-    // their row cannot be removed }, each '' when nothing does.
-    _stuck: function (row, who, rank) {
+    // What keeps a member's row from being changed on its own: { rank: why their Rank cell cannot be rewritten, note: why
+    // their Notes cell (note, null with no Notes column) cannot be, row: why their row cannot be removed }, each '' when
+    // nothing does.
+    _stuck: function (row, who, rank, note) {
         var shared = who.accs.length > 1 ? 'their Name cell names someone else too' : '', spans = '';
         for (var k = 0; k < row.length; k++) { if (row[k].rs > 1) { spans = 'their row shares a merged cell with other rows'; } }
         var cell = !rank ? 'their row has no Rank cell' : ((rank.rs > 1 || rank.cs > 1) ? 'their Rank cell is merged with other cells' :
             (/<ac:/i.test(rank.inner) ? 'their Rank cell holds a macro' : ''));
-        return { rank: shared || cell, row: shared || spans };
+        var notes = !note ? 'their row has no Notes cell' : ((note.rs > 1 || note.cs > 1 || note === who || note === rank) ? 'their Notes cell is merged with other cells' :
+            (/<ac:|<ri:/i.test(note.inner) ? 'their Notes cell holds an @mention or a macro' : ''));
+        return { rank: shared || cell, note: shared || notes, row: shared || spans };
     },
-    // The first row of the team page's rank tables whose Name cell @mentions acc: { row, rank (its Rank cell), why (as
-    // _stuck says) }, or null.
+    // The first row of the team page's rank tables whose Name cell @mentions acc: { row, rank, note (its Rank and Notes
+    // cells; note null with no Notes column), why (as _stuck says) }, or null.
     _locate: function (body, acc) {
         var M = JiTA.leadduty.members, tables = M._tables(body);
         for (var i = 0; i < tables.length; i++) {
             var t = tables[i];
             for (var j = 0; j < t.rows.length; j++) {
-                var row = t.rows[j], who = row[t.name], rank = row[t.rank];
-                if (who && who !== rank && who.accs.indexOf(acc) >= 0) { return { row: row, rank: rank, why: M._stuck(row, who, rank) }; }
+                var row = t.rows[j], who = row[t.name], rank = row[t.rank], note = t.notes >= 0 ? row[t.notes] : null;
+                if (who && who !== rank && who.accs.indexOf(acc) >= 0) { return { row: row, rank: rank, note: note, why: M._stuck(row, who, rank, note) }; }
             }
         }
         return null;
@@ -22671,6 +22730,16 @@ JiTA.leadduty.members = {
         return body.slice(0, c.src[0]) + '<t' + c.tag + (c.self ? c.attrs.replace(/\s+$/, '') : c.attrs) + '>' + M._rewriteCell(c.inner, M.RANK_WORDS[role]) +
             '</t' + c.tag + '>' + body.slice(c.src[1]);
     },
+    // The team page's body with one member's Notes cell holding `note`, one paragraph a line (an empty note an empty
+    // paragraph), the cell's own attributes kept; throws saying why when it cannot be changed on its own.
+    _withNote: function (body, acc, note) {
+        var M = JiTA.leadduty.members, at = M._locate(body, acc), c, lines = String(note || '').split('\n').filter(function (l) { return !!l.trim(); });
+        if (!at) { throw new Error('they are not @mentioned on it'); }
+        if (at.why.note) { throw new Error(at.why.note); }
+        c = at.note;
+        return body.slice(0, c.src[0]) + '<t' + c.tag + (c.self ? c.attrs.replace(/\s+$/, '') : c.attrs) + '>' +
+            (lines.length ? lines.map(function (l) { return '<p>' + JiTA.conf.esc(l) + '</p>'; }).join('') : '<p />') + '</t' + c.tag + '>' + body.slice(c.src[1]);
+    },
     // Change one member on the team page, leaving every other byte of it as it was: their Rank cell's text becomes the
     // role's word (RANK_WORDS), or for Left ECAID their row goes. Resolves { written, version } (see _editTeam); rejects
     // saying why when their row cannot be changed on its own. Leads only; a dry run writes nothing.
@@ -22694,6 +22763,16 @@ JiTA.leadduty.members = {
         return M._editTeam(function (body) {
             return M._locate(body, acc) ? { skipped: 'already on it' } : M._withMember(body, acc, role, name, nameOf);
         }, 'Added ' + name + ' as ' + M.RANK_WORDS[role] + ' (JiTA Members tab)');
+    },
+    // Set one member's note on the team page (see _withNote), as notes are kept (L._note). Resolves { written, version }
+    // (see _editTeam); rejects saying why when their Notes cell cannot be changed on its own. Leads only; a dry run writes
+    // nothing.
+    setPageNote: function (acc, note, name) {
+        var L = JiTA.leadduty, M = L.members, want = L._note(note);
+        if (!L.isLead()) { return Promise.reject(M._notLead()); }
+        if (!L.TEAM_PAGE) { return Promise.reject(new Error('no team page is set')); }
+        if (L._dry()) { return Promise.resolve({ skipped: 'dry run' }); }
+        return M._editTeam(function (body) { return M._withNote(body, acc, want); }, (want ? 'Set ' : 'Cleared ') + name + '\'s note (JiTA Members tab)');
     },
     // Read the team page, change(body) it - the new body, or what to resolve instead of writing - and save it at its next
     // version. When the page changed meanwhile it is read again and the change tried once more. Resolves { written,
@@ -22768,6 +22847,22 @@ JiTA.leadduty.members = {
         return { ask: left ? ('Remove ' + r.name + ' from ' + page + ' too? Their whole row goes; the page history keeps it.' + tail)
             : ('Change ' + r.name + '\'s rank on ' + page + ' to ' + M.RANK_WORDS[role] + ' too?' + tail) };
     },
+    // Whether two notes say the same, kept as notes are (L._note), their empty lines aside: the team page keeps none.
+    _sameNote: function (a, b) {
+        var flat = function (s) { return JiTA.leadduty._note(s).replace(/\n\s*\n/g, '\n'); };
+        return flat(a) === flat(b);
+    },
+    // What saving `note` for row r would do to the team page, as pageChange says it for a role: { ask }, { why } or {}
+    // when the page is not concerned (it was not read, or already says so).
+    noteChange: function (r, note, team) {
+        var L = JiTA.leadduty, M = L.members, own = Object.prototype.hasOwnProperty, page = 'the ECAID - Team Members page', want = L._note(note);
+        if (!team || !team.ranks || M._sameNote(want, r.pageNote || '')) { return {}; }
+        var hand = ', so change their note there by hand';
+        if (!own.call(team.ranks, r.acc)) { return { why: r.onTeam ? ('they are on ' + page + ' without an @mention' + hand) : ('they are not on ' + page) }; }
+        var why = ((team.stuck || {})[r.acc] || {}).note;
+        if (why) { return { why: why + ' on ' + page + hand }; }
+        return { ask: (want ? 'Change ' : 'Clear ') + r.name + '\'s note on ' + page + ' too?\n\nOK: the page and the tab. Cancel: the tab only.' };
+    },
 
     // A member's standing from their full months, newest first (a count; null for a month before they were in the group;
     // undefined for one not counted yet): 'inactive' with nothing in each of the last INACTIVE_MONTHS, 'below' under
@@ -22812,7 +22907,9 @@ JiTA.leadduty.members = {
 
     // The rows, by role rank and then by name (without "ISD "): { acc, name, role, roleSet, rank (the role the team page
     // gives them, '' for a rank that is none, undefined when it does not list them), onTeam (whether it lists them; null
-    // when it was not read), note, noteBy, noteAt, months[MONTHS] (as state() takes them), gm[MONTHS] (old-way GM handoffs
+    // when it was not read), note (the one a Lead set, else the team page's), noteSet (whether a Lead set it), pageNote
+    // (the team page's note: '' for an empty cell, undefined when it does not list them or has no Notes column), noteBy,
+    // noteAt, months[MONTHS] (as state() takes them), gm[MONTHS] (old-way GM handoffs
     // inside each), cur (this month so far: a count, null when not in the group, undefined when not counted in this
     // browser), last (the newest month anything was actioned in, or ''), state }. act and mem are the two properties'
     // values (or null), live this browser's credits result for the current month (or null), cur the current month, team
@@ -22821,11 +22918,12 @@ JiTA.leadduty.members = {
         var M = JiTA.leadduty.members, wins = M.window(cur), tm = (team && team.ranks) ? team : null;
         var frozen = (act && act.frozen) || {}, a = (act && act.a) || {}, g = (act && act.g) || {};
         var roster = (act && act.roster && act.roster.n) || {}, people = (mem && mem.m) || {};
-        var lv = (live && live.ym === cur) ? M.fromCredits(live) : null, accs = {};
-        Object.keys(roster).forEach(function (k) { accs[k] = true; });
-        if (lv) { Object.keys(lv.names).forEach(function (k) { accs[k] = true; }); }
+        var lv = (live && live.ym === cur) ? M.fromCredits(live) : null, accs = {}, names = {};
+        Object.keys(roster).forEach(function (k) { accs[k] = true; names[k] = roster[k]; });
+        if (lv) { Object.keys(lv.names).forEach(function (k) { accs[k] = true; names[k] = lv.names[k]; }); }
         var rows = Object.keys(accs).map(function (acc) {
-            var name = (lv && lv.names[acc]) || roster[acc] || acc, p = people[acc] || {}, rank = tm ? M._rankOf(tm, acc, name) : undefined;
+            var name = names[acc] || acc, p = people[acc] || {}, rank = tm ? M._rankOf(tm, acc, name) : undefined;
+            var pageNote = tm ? M._noteOf(tm, acc, name, names) : undefined;
             var set = !!(p.role && M.ROLES.indexOf(p.role) >= 0), role = set ? p.role : M.defaultRole(name, rank);
             var months = wins.map(function (ym) { return frozen[ym] ? ((a[acc] && a[acc][ym] != null) ? a[acc][ym] : null) : undefined; });
             // A month counted late lists the group as it was when counted, not as it was in that month: its 0 for someone a
@@ -22837,7 +22935,8 @@ JiTA.leadduty.members = {
             var now = lv ? (lv.counts[acc] != null ? lv.counts[acc] : null) : undefined, last = now > 0 ? cur : '';
             for (var i = 0; !last && i < wins.length; i++) { if (months[i] > 0) { last = wins[i]; } }
             return { acc: acc, name: name, role: role, roleSet: set, rank: rank, onTeam: tm ? rank !== undefined : null,
-                note: p.note || '', noteBy: p.by || '', noteAt: p.at || '', months: months, gm: gm, cur: now, last: last, state: M.state(role, months) };
+                note: p.note || pageNote || '', noteSet: !!p.note, pageNote: pageNote, noteBy: p.by || '', noteAt: p.at || '',
+                months: months, gm: gm, cur: now, last: last, state: M.state(role, months) };
         });
         var key = function (r) { return r.name.replace(/^isd\s+/i, '').toLowerCase(); };
         return rows.sort(function (x, y) {
@@ -23016,8 +23115,9 @@ JiTA.leadduty.members = {
     },
 
     // A member's role and note, kept in MEMBERS_KEY: only a role other than the default (from their name and their rank on
-    // the team page) is stored, so picking the page's rank follows the page again; an empty note deletes it, and an entry
-    // with nothing left goes. Resolve the mutate result; a real change republishes the page. Leads only.
+    // the team page) is stored, so picking the page's rank follows the page again; likewise a note is stored only when it
+    // is not the one their row on the team page has (pageNote), and an empty note deletes it; an entry with nothing left
+    // goes. Resolve the mutate result; a real change republishes the page. Leads only.
     setRole: function (acc, role, name, rank) {
         var L = JiTA.leadduty, M = L.members;
         if (!L.isLead()) { return Promise.reject(M._notLead()); }
@@ -23029,10 +23129,11 @@ JiTA.leadduty.members = {
             return true;
         });
     },
-    setNote: function (acc, note) {
+    setNote: function (acc, note, pageNote) {
         var L = JiTA.leadduty, M = L.members;
         if (!L.isLead()) { return Promise.reject(M._notLead()); }
         var want = L._note(note);
+        if (pageNote != null && M._sameNote(want, pageNote)) { want = ''; }   // the team page says it already: follow the page
         return M._person(acc, function (e) {
             if ((e.note || '') === want) { return false; }
             if (want) { e.note = want; } else { delete e.note; }
@@ -23120,7 +23221,8 @@ JiTA.leadduty.members = {
         var body = rows.map(function (r) {
             var judged = !!M.JUDGED[r.role], cells = [R._txt(r.role), R._txt(r.name), R._lines(r.note)];
             tints.push(rich ? (M.TINT[r.state] || null) : null);
-            r.months.forEach(function (n, i) {
+            M._oldestFirst(r.months).forEach(function (i) {
+                var n = r.months[i];
                 if (n === undefined) { cells.push(''); return; }
                 if (n === null) { cells.push('-'); return; }
                 var txt = R._txt(String(n) + (r.gm[i] ? '*' : ''));
@@ -23131,7 +23233,7 @@ JiTA.leadduty.members = {
             cells.push(lozenge(r.state));
             return cells;
         });
-        var late = wins.filter(function (ym) { return frozen[ym] && frozen[ym].late; });
+        var late = wins.slice().reverse().filter(function (ym) { return frozen[ym] && frozen[ym].late; });
         var gm = rows.some(function (r) { return r.gm.some(function (n) { return n > 0; }); });
         var left = rows.some(function (r) { return r.state === 'left'; });
         return '<p>Every ISD member with what they actioned in each of the last ' + M.MONTHS + ' full months: bug reports attached, ' +
@@ -23146,7 +23248,7 @@ JiTA.leadduty.members = {
             (late.length ? ('<p>Counted late: ' + late.map(function (ym) { return R._txt(M._mon(ym) + ' (on ' + String(frozen[ym].at).slice(0, 10) + ')'); }).join(', ') +
                 '. A month counted late lists the group as it was when counted: someone who joined since shows 0 for it, or - when a ' +
                 'newer month shows they had not joined yet.</p>') : '') +
-            R._table(['Role', 'Name', 'Notes'].concat(wins.map(M._mon)).concat(['Last active', 'State']), body, tints);
+            R._table(['Role', 'Name', 'Notes'].concat(wins.slice().reverse().map(M._mon)).concat(['Last active', 'State']), body, tints);
     },
     // The line above the content, outside the hash (it names the time, which changes on every look).
     _stamp: function () {
