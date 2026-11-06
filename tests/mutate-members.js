@@ -432,6 +432,8 @@ const muts = [
     [MB, 'after writing a note the ranks are not read again', '                    if (U._mem) { U._mem.team = t; }\n', '', EDITNOTE],
     [MB, 'a note written but not read back is lost', '}, function () { return M.setNote(r.acc, note, r.pageNote); })', '}, function () { return null; })', EDITNOTE],
     [MB, 'a failed note write loses the note', "return tabOnly('the ECAID - Team Members page was not changed (' + (e && e.message || e) + ')');", 'throw e;', EDITNOTE],
+    [MB, 'an empty note invites a note, not a public one', ": 'Add a public note')", ": 'Add a note')"],
+    [MB, 'an empty note does not say who sees it', ": 'Add a public note on this member: every Lead sees it, and the ECAID Member Productivity page shows it')", ": 'Add a note')"],
     [MB, 'a note from the page does not say so', "var whence = !r.noteSet ? '\\n\\nFrom the ECAID - Team Members page' :", "var whence = !r.noteSet ? '' :"],
     [MB, 'a note set in the tab does not give the page\'s', "(r.pageNote ? ('\\nThe ECAID - Team Members page has: ' + r.pageNote) : '')", "''"]
 ];

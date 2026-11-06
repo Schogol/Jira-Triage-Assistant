@@ -944,6 +944,9 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...this month so far, saying how many to go', cell(ast, 6).text() === '4' && /4 so far this month, 36 to go for the 40/.test(cell(ast, 6).attrs.title), cell(ast, 6).attrs.title);
     ok('...a month before joining shown as - with its reason', cell(rowFor('acc-new'), 0).text() === '-' && /Not in the group yet/.test(cell(rowFor('acc-new'), 0).attrs.title));
     ok('...the state dot saying why', rowFor('acc-byte').kids[0].hasClass('inactive') && /^Inactive: nothing actioned in Aug 2026 to Oct 2026/.test(rowFor('acc-byte').kids[0].attrs.title), rowFor('acc-byte').kids[0].attrs.title);
+    const byteNote = rowFor('acc-byte').kids.filter((k) => k.hasClass('ld-mnote'))[0];
+    ok('...and a member with no note invites a public one, saying who sees it', byteNote.text() === 'Add a public note' && byteNote.hasClass('empty') &&
+        byteNote.attrs.title === 'Add a public note on this member: every Lead sees it, and the ECAID Member Productivity page shows it', byteNote.text());
     ok('...a Bug Hunter\'s dot judged on their average, not on Sep\'s 40 nor Oct\'s 23 alone', ast.kids[0].hasClass('below') &&
         ast.kids[0].attrs.title === 'Below the minimum: 22.4 a month on average over their 5 months in the group, of the 40 a month ECAID asks for', ast.kids[0].attrs.title);
     ok('the status line counts them', /5 members · \d+ meet the minimum · \d+ below · \d+ inactive/.test(status.textContent), status.textContent);

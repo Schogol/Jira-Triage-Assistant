@@ -21600,8 +21600,8 @@ JiTA.leadduty.ui = {
         $sel.on('change', function () { U._setMemberRole(this, r, $(this).val()); }).appendTo($r);
         var whence = !r.noteSet ? '\n\nFrom the ECAID - Team Members page' : ((r.noteBy ? ('\n\nSet by ' + r.noteBy + (r.noteAt ? (' on ' + r.noteAt) : '')) : '') +
             (r.pageNote ? ('\nThe ECAID - Team Members page has: ' + r.pageNote) : ''));
-        $('<span class="ld-mnote"></span>').toggleClass('empty', !r.note).text(r.note ? r.note.split('\n')[0] : 'Add a note')
-            .attr('title', r.note ? (r.note + whence) : 'Add a note on this member, shared with every Lead')
+        $('<span class="ld-mnote"></span>').toggleClass('empty', !r.note).text(r.note ? r.note.split('\n')[0] : 'Add a public note')
+            .attr('title', r.note ? (r.note + whence) : 'Add a public note on this member: every Lead sees it, and the ECAID Member Productivity page shows it')
             .on('click', function () { U._editMemberNote(r, wins, cur); }).appendTo($r);
         M._oldestFirst(wins).forEach(function (i) {
             var ym = wins[i], n = r.months[i], $c = $('<span class="ld-mnum"></span>').appendTo($r);
