@@ -52,7 +52,7 @@ global.confirm = (m) => { confirms.push(m); return true; };
 global.gmGet = (k, d) => d;
 global.gmSet = () => {};
 global.window = {};
-global.JITA_IS_FORGE_FRAME = false;
+global.JITA_IS_FORGE_FRAME = false; global.JITA_IS_SUBFRAME = false;
 global.JITA_GM_CATEGORIES = ['Gameplay', 'Billing & Account', 'Technical', 'Other'];
 global.document = { getElementById: () => null };
 

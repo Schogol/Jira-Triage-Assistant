@@ -118,6 +118,14 @@ var JITA_IS_FORGE_FRAME = (function () {
     try { return /(^|\.)atlassian-dev\.net$/i.test(location.hostname); } catch (e) { return false; }
 })();
 
+// True in a frame inside another page: the Zendesk Forge panel, or a frame Confluence embeds in an article (a
+// database, a macro). The page itself already boots and shows the pills; a second instance in the frame would show
+// them again inside the article (Schogol, 2026-11-07: the Lead duties pill inside a database cell). So a frame boots
+// nothing and floats nothing - the canned-response dropdown, which runs in every frame, aside.
+var JITA_IS_SUBFRAME = JITA_IS_FORGE_FRAME || (function () {
+    try { return window.self !== window.top; } catch (e) { return true; }
+})();
+
 // True on a CONFLUENCE page (same host as Jira, under /wiki). The script is matched there for the Lead-duties
 // chip and overlay, which belong where the documentation is actually read, so a page can be marked proof-read on
 // the page itself; the What's new pill and Settings come along. Nothing else applies - there is no Jira DOM to
@@ -10577,7 +10585,7 @@ JiTA.credits = {
     // ---- always-on corner badge (your current-month total + rank; reads cache; click opens the view) -----
     badge: {
         mount: function () {
-            if (!flagOn('credits') || JITA_NO_JIRA_UI) { return; }   // Jira tabs only (never the Forge iframe or Confluence)
+            if (!flagOn('credits') || JITA_NO_JIRA_UI || JITA_IS_SUBFRAME) { return; }   // Jira tabs only (never the Forge iframe, Confluence, or a frame in a page)
             var el = document.getElementById('jita-credits-badge');
             if (!el) {
                 el = document.createElement('div');
@@ -12203,7 +12211,7 @@ JiTA.triage = {
     // ---- lifecycle -----------------------------------------------------------------------------------------
     open: function () {
         var T = JiTA.triage;
-        if (JITA_IS_FORGE_FRAME || T._open) { return; }
+        if (JITA_IS_SUBFRAME || T._open) { return; }
         if (!flagOn('similarDefects')) {
             try { JiTA.ui.toast('Triage mode needs the Triage Assistant feature (local DB + ranking) - enable it in Settings first.'); } catch (e) { alert('Enable the Triage Assistant feature first.'); }
             return;
@@ -13821,7 +13829,7 @@ JiTA.dupfind = {
 
     openView: function () {
         var D = JiTA.dupfind;
-        if (JITA_IS_FORGE_FRAME) { return; }
+        if (JITA_IS_SUBFRAME) { return; }
         if (!flagOn('similarDefects')) {
             try { JiTA.ui.toast('The duplicate finder needs the Triage Assistant feature (local DB + embeddings) - enable it in Settings first.'); } catch (e) { /* ignore */ }
             return;
@@ -20375,7 +20383,7 @@ JiTA.leadduty.ui = {
 
     open: function (tab) {
         var L = JiTA.leadduty, U = L.ui;
-        if (JITA_IS_FORGE_FRAME || !L.isLead()) { return; }
+        if (JITA_IS_SUBFRAME || !L.isLead()) { return; }
         if (U.isOpen()) { JiTA.menu.close(); return; }
         U._injectCss();
         if (tab) { U._tab = tab; }
@@ -23281,7 +23289,7 @@ JiTA.leadduty.reminder = {
 
     shouldShow: function () {
         var L = JiTA.leadduty;
-        if (JITA_IS_FORGE_FRAME || !L.isLead()) { return false; }
+        if (JITA_IS_SUBFRAME || !L.isLead()) { return false; }
         var snoozed = gmGet(L.SNOOZE_KEY, 0) || 0;
         return (Date.now() - snoozed) > L.SNOOZE_MS;
     },
@@ -23333,7 +23341,7 @@ JiTA.leadduty.reminder = {
 
     nag: function () {
         var L = JiTA.leadduty, R = L.reminder;
-        if (R._nagged || JITA_IS_FORGE_FRAME || !L.isLead()) { return; }
+        if (R._nagged || JITA_IS_SUBFRAME || !L.isLead()) { return; }
         if (Date.now() < (gmGet(L.NAG_KEY, 0) || 0)) { return; }
         L.syncMirrors().then(function () { return L.outstanding(); }).then(function (o) {
             if (R._nagged) { return; }
@@ -23576,7 +23584,7 @@ JiTA.worker = {
     _standAsides: 0,     // times we've ceded the lock to let a newer tab lead (bounded by MAX_STANDASIDE)
 
     start: function () {
-        if (JiTA.worker._started || JITA_IS_FORGE_FRAME) { return; }
+        if (JiTA.worker._started || JITA_IS_SUBFRAME) { return; }
         JiTA.worker._started = true;
         try { JiTA.worker._bc = new BroadcastChannel(JiTA.worker.CHANNEL); JiTA.worker._bc.onmessage = JiTA.worker._onBc; } catch (e) { /* no channel -> leader-only */ }
         // Elect a single leader: hold an exclusive Web Lock for this tab's lifetime. When the leader steps down
@@ -24920,6 +24928,7 @@ JiTA.changelog = {
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
         { v: '3.48.0', date: '2026-11-01', fixes: [
+            'The Lead duties and What\'s new pills no longer show a second time inside a database a Confluence page embeds.',
             'Small improvements behind the scenes.'
         ] },
         { v: '3.47.0', date: '2026-11-01', features: [
@@ -25740,7 +25749,7 @@ JiTA.changelog = {
         return '📝 What\'s new: ' + fresh.length + ' updates';
     },
 
-    shouldShow: function () { return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseenFeatures().length > 0; },
+    shouldShow: function () { return !JITA_IS_SUBFRAME && JiTA.changelog.unseenFeatures().length > 0; },
 
     // "2026-09-05" -> "05 Sep 2026", the same shape as every other date JiTA shows. Read straight from the string:
     // a Date would shift it a day in some timezones.
@@ -25947,8 +25956,9 @@ function jitaArmLeadDuties() {
 
 // ---- Confluence boot: Lead duties and the What's new pill, nothing else ---------------------------------
 // No Jira DOM to observe, no issue to parse, no defect sync, and deliberately no worker leader election - a
-// wiki tab must never become the tab that owns the embedding model for everyone.
-if (JITA_IS_WIKI) {
+// wiki tab must never become the tab that owns the embedding model for everyone. Nor in a frame the article embeds
+// (a database): the page around it boots already.
+if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
     (function () {
         if (!window.indexedDB) { return; }
         setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { /* swallow */ } }, 1200);
@@ -25962,7 +25972,7 @@ if (JITA_IS_WIKI) {
 
 // ---- Jira boot: watch the DOM and (re)inject the panel across Atlassian's React re-renders / SPA nav ----
 (function () {
-    if (JITA_NO_JIRA_UI) { return; }      // the Forge iframe runs only the responses dropdown, Confluence its own boot (above)
+    if (JITA_NO_JIRA_UI || JITA_IS_SUBFRAME) { return; }   // the Forge iframe runs only the responses dropdown, Confluence its own boot (above), a frame in a page nothing
     // "What's new" after an update. Scheduled first, so nothing that boots after it can keep it from showing; start()
     // still waits for the page to settle, and the observer below puts the pill back if anything takes it away.
     try { JiTA.changelog.start(); } catch (eCl) { /* swallow */ }
