@@ -25,14 +25,16 @@ let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
 
 const gm = {};
+let order = null;   // the run's steps and its own bookkeeping, in the order they happen (the Members checks)
 global.gmGet = (k, d) => (Object.prototype.hasOwnProperty.call(gm, k) ? gm[k] : d);
-global.gmSet = (k, v) => { gm[k] = v; };
+global.gmSet = (k, v) => { gm[k] = v; if (order) { order.push('gm:' + k); } };
 global.window = { addEventListener: () => {} };
 
 // One scenario run. `qcThrows` makes qc.claimMonth reject, so we can check the wiki half still survives;
-// `mirrorsReady` is the local-mirror gate that lets a tick run ahead of its six-hourly interval.
-function run(qcThrows, mirrorsReady) {
-    const calls = [], puts = {};
+// `mirrorsReady` is the local-mirror gate that lets a tick run ahead of its six-hourly interval. `mode` breaks
+// the end of the run: 'reject' / 'throw' fail the Members tick, 'pubReject' fails the ledger page publish.
+function run(qcThrows, mirrorsReady, mode) {
+    const calls = [], puts = {}, ord = order = [];
     const L = {
         _ym: () => '2026-09', _prevYm: () => '2026-08',
         _mirrorsReady: () => Promise.resolve(mirrorsReady !== false),
@@ -67,7 +69,16 @@ function run(qcThrows, mirrorsReady) {
                 });
             }
         },
-        report: { publish() { calls.push('publish'); return Promise.resolve({}); } },
+        report: { publish() { calls.push('publish'); return mode === 'pubReject' ? Promise.reject(new Error('page locked')) : Promise.resolve({}); } },
+        members: {
+            tick() {
+                calls.push('members.tick');
+                if (mode === 'throw') { throw new Error('members broke before it returned'); }
+                if (mode === 'reject') { return Promise.reject(new Error('confluence down')); }
+                // Settles a moment later, so the order shows whether the tick waited for it.
+                return new Promise((res) => setTimeout(() => { ord.push('members.done'); res(); }, 5));
+            }
+        },
         local: {
             // Pre-seed an offline mark in each mirror (pending: the ledger has not taken it yet), so we can see whether
             // the scheduler clobbers it - and, next to it, a mark that is NOT pending: one taken back in another
@@ -82,7 +93,7 @@ function run(qcThrows, mirrorsReady) {
     global.JiTA = { leadduty: L, sched: { tabId: 'T' }, dlog: () => {} };
     eval(src.slice(ss, se));
     L.sched.tick();
-    return new Promise((res) => setTimeout(() => res({ calls, puts, S: L.sched }), 30));
+    return new Promise((res) => setTimeout(() => { order = null; res({ calls, puts, S: L.sched, order: ord }); }, 30));
 }
 
 (async () => {
@@ -106,14 +117,33 @@ function run(qcThrows, mirrorsReady) {
     ok('a pending queue survives the refresh', (a.puts['leadduty:qc:2026-08'].pending || []).length === 1);
     ok('a mark taken back elsewhere is not brought back (wiki)', !(a.puts['leadduty:wiki:2026-09'].done || {}).p3, JSON.stringify(a.puts['leadduty:wiki:2026-09'].done));
     ok('...nor in QC', !(a.puts['leadduty:qc:2026-08'].done || {})['EBR-1x'], JSON.stringify(a.puts['leadduty:qc:2026-08'].done));
-    ok('the page is republished after both halves', a.calls.indexOf('publish') === a.calls.length - 1, a.calls.join(' '));
+    ok('the page is republished after both halves', a.calls.indexOf('publish') === a.calls.length - 2, a.calls.join(' '));
+    ok('...and the Members page after it, once, last of all', a.calls.indexOf('members.tick') === a.calls.length - 1 &&
+        a.calls.filter((c) => c === 'members.tick').length === 1, a.calls.join(' '));
     ok('the tick marks itself done', !!gm.leadDutyLastTs && !gm.leadDutyFailTs);
     ok('the lease is released', !gm.leadDutyLease);
+    ok('...both only once the Members page is done', a.order.indexOf('members.done') !== -1 &&
+        a.order.indexOf('members.done') < a.order.indexOf('gm:leadDutyLastTs') &&
+        a.order.indexOf('members.done') < a.order.lastIndexOf('gm:leadDutyLease'), a.order.join(' '));
+
+    // The Members page is cosmetic next to the ledger: however it fails, the tick is done and the lease is free.
+    for (const m of ['reject', 'throw']) {
+        Object.keys(gm).forEach((k) => delete gm[k]);
+        const r = await run(false, true, m);
+        ok('a Members tick that ' + (m === 'throw' ? 'throws' : 'fails') + ' is not a failed tick (no 30-min back-off)',
+            r.calls.indexOf('members.tick') !== -1 && !gm.leadDutyFailTs && !!gm.leadDutyLastTs, r.calls.join(' '));
+        ok('...and the lease is still released (' + m + ')', !gm.leadDutyLease);
+    }
+    Object.keys(gm).forEach((k) => delete gm[k]);
+    const p = await run(false, true, 'pubReject');
+    ok('a failed ledger page publish still brings the Members page in step', p.calls.indexOf('members.tick') === p.calls.length - 1, p.calls.join(' '));
+    ok('...and is not a failed tick either', !gm.leadDutyFailTs && !!gm.leadDutyLastTs);
 
     Object.keys(gm).forEach((k) => delete gm[k]);
     const b = await run(true);
     ok('a QC failure still leaves the wiki month mirrored', !!b.puts['leadduty:wiki:2026-09']);
     ok('a QC failure still republishes the page', b.calls.indexOf('publish') !== -1, b.calls.join(' '));
+    ok('...and the Members page', b.calls.indexOf('members.tick') !== -1, b.calls.join(' '));
     ok('a QC failure is not treated as a failed tick (no 30-min backoff)', !gm.leadDutyFailTs && !!gm.leadDutyLastTs);
     ok('...but it is remembered, for the QC back-off', !!gm.leadDutyQcFailTs);
 

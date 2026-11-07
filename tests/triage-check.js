@@ -38,7 +38,7 @@ global.document = {
     createDocumentFragment: () => ({ _isFrag: true, children: [], appendChild(c) { this.children.push(c); return c; } })
 };
 global.window = {};
-global.JITA_IS_FORGE_FRAME = false;
+global.JITA_IS_FORGE_FRAME = false; global.JITA_IS_SUBFRAME = false;
 global.JITA_GM_CATEGORIES = ['Gameplay', 'Billing & Account', 'Technical', 'Other'];
 const gm = {};
 global.gmGet = (k, d) => (Object.prototype.hasOwnProperty.call(gm, k) ? gm[k] : d);

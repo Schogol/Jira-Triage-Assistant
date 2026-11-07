@@ -213,10 +213,17 @@ const translate = async (r) => { results = r.slice(); alerts = []; logs = []; co
     global.MutationObserver = function (fn) { cb = fn; this.observe = (target, opts) => { observed = { target: target, opts: opts }; }; };
     global.document = { body: { tag: 'body' } };
     global.JITA_IS_WIKI = true;
-    (0, eval)(cut('if (JITA_IS_WIKI) {\n    (function () {\n        if (!window.indexedDB) { return; }', '\n}\n') + '\n}');
+    global.JITA_IS_SUBFRAME = false;
+    const wikiBoot = cut('if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {\n    (function () {\n        if (!window.indexedDB) { return; }', '\n}\n') + '\n}';
+    (0, eval)(wikiBoot);
     if (cb) { cb([]); }
     ok('the wiki watches the page for menus and steps its corner pills aside', !!observed && observed.target === document.body && observed.opts.subtree === true && yields === 1,
         JSON.stringify(observed && observed.opts) + ' / ' + yields);
+    observed = null; cb = null; yields = 0;
+    global.JITA_IS_SUBFRAME = true;   // a database the article embeds: the page around it boots already
+    (0, eval)(wikiBoot);
+    global.JITA_IS_SUBFRAME = false;
+    ok('...but a frame inside the page boots nothing: no second set of pills inside the article', observed === null && cb === null, JSON.stringify(observed));
     const css = (src.match(/var SCROLLBAR_CSS =[\s\S]*?;\n/) || [''])[0];
     ok('the scrollbar thumb gradient is valid CSS', /linear-gradient\(to right, /.test(css) && !/linear-gradient\(left,/.test(css));
 

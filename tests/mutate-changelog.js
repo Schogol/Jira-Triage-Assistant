@@ -14,10 +14,10 @@ const muts = [
     [H, 'seeing it is never remembered', 'if (!seen || JiTA.worker._verCmp(C.latest().v, seen) > 0) { gmSet(C.SEEN_KEY, C.latest().v); }\n        C.remove();', 'C.remove();'],
     [H, 'the oldest version is remembered as seen', 'gmSet(C.SEEN_KEY, C.latest().v);', 'gmSet(C.SEEN_KEY, C.ENTRIES[C.ENTRIES.length - 1].v);'],
     [H, 'the pill never counts', 'if (fresh.length === 1) {', 'if (fresh.length >= 1) {'],
-    [H, 'shows inside the Zendesk frame', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return JiTA.changelog.unseenFeatures().length > 0;'],
-    [H, 'shows with nothing new', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return !JITA_IS_FORGE_FRAME;'],
+    [H, 'shows inside a frame', 'return !JITA_IS_SUBFRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return JiTA.changelog.unseenFeatures().length > 0;'],
+    [H, 'shows with nothing new', 'return !JITA_IS_SUBFRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return !JITA_IS_SUBFRAME;'],
     // ---- only features bring the pill (v3.39.0) ----
-    [H, 'a fix-only update brings the pill', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return !JITA_IS_FORGE_FRAME && JiTA.changelog.unseen().length > 0;'],
+    [H, 'a fix-only update brings the pill', 'return !JITA_IS_SUBFRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return !JITA_IS_SUBFRAME && JiTA.changelog.unseen().length > 0;'],
     [H, 'the pill counts the fix-only updates too', '        if (lbl) { lbl.textContent = C.label(C.unseenFeatures()); }', '        if (lbl) { lbl.textContent = C.label(C.unseen()); }'],
     [H, 'any entry counts as a feature', "    hasFeatures: function (e) { return JiTA.changelog._list(e, 'features').length > 0; },", '    hasFeatures: function (e) { return !!e; },'],
     // ---- the two tabs ----
