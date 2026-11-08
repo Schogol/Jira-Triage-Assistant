@@ -84,30 +84,37 @@ rules[rules.length - 1].d.resolve({ invocations: [{ status: 'FAILURE' }] });
 ok('an automation that does not answer SUCCESS frees the report and says the conversion did not start',
     !jitaConvertBusy['EBR-4'] && /did not start \(FAILURE\)/.test(lastErr || '') && goes.length === 1 && button.disabled === false, String(lastErr));
 
-// ---- after it started: open the new defect, but never on an issue the user has moved on to ----
+// ---- after it started: open the new defect in-app, but never on an issue the user has moved on to (v3.51.1) ----
 const fnSrc = (name) => { const i = src.indexOf('\nfunction ' + name + '('); if (i < 0) { throw new Error('no ' + name); } return src.slice(i + 1, src.indexOf('\n}\n', i) + 2); };
-let timers = [], reloads = 0;
+let timers = [], reloads = 0, opened = [], viewRefreshes = 0, toasts = [];
 global.setTimeout = (fn) => { timers.push(fn); return timers.length; };
 global.window = { location: { href: '/browse/EBR-1', reload: () => { reloads++; } } };
+// softrefresh-check.js covers the real ones
+global.jitaOpenIssue = (k) => { opened.push(k); };
+global.jitaRefreshIssueView = () => { viewRefreshes++; };
+JiTA.ui = { toast: (m) => { toasts.push(m); } };
 const go = (0, eval)('(' + fnSrc('jitaGoToNewDefect') + ')');
 current = 'EBR-1'; gets = [];
 go('EBR-1', ['EDR-5']);
 gets[0].d.resolve({ fields: { issuelinks: [{ key: 'EDR-5' }] } });
-ok('no new link yet: it looks again a second later', timers.length === 1 && window.location.href === '/browse/EBR-1');
+ok('no new link yet: it looks again a second later', timers.length === 1 && !opened.length);
 timers.shift()();
 gets[1].d.resolve({ fields: { issuelinks: [{ key: 'EDR-5' }, { key: 'EDR-77' }] } });
-ok('...and opens the new defect once it is linked', window.location.href === '/browse/EDR-77', window.location.href);
-window.location.href = '/browse/EBR-2'; current = 'EBR-2'; gets = []; timers = []; reloads = 0;
+ok('...and opens the new defect in-app once it is linked, with no page load', opened.join() === 'EDR-77' && window.location.href === '/browse/EBR-1' && reloads === 0, opened.join() + ' ' + window.location.href);
+current = 'EBR-2'; gets = []; timers = []; reloads = 0; opened = [];
 go('EBR-2', []);
 current = 'EBR-9';   // the user moves on to another issue while it converts
 gets[0].d.resolve({ fields: { issuelinks: [] } });
 timers.shift()();
-ok('once the user is on another issue it stops: no request, no navigation, no reload', gets.length === 1 && reloads === 0 && timers.length === 0 && window.location.href === '/browse/EBR-2',
+ok('once the user is on another issue it stops: no request, no navigation, no refresh', gets.length === 1 && reloads === 0 && timers.length === 0 && !opened.length && viewRefreshes === 0,
     gets.length + ' requests, ' + reloads + ' reloads');
-current = 'EBR-3'; gets = []; timers = []; reloads = 0;
+current = 'EBR-3'; gets = []; timers = []; reloads = 0; button = Button(); jitaConvertBusy['EBR-3'] = true; jitaConvertButtonState();
 go('EBR-3', []);
 for (let i = 0; i < 31; i++) { gets[gets.length - 1].d.reject({ status: 502 }); if (timers.length) { timers.shift()(); } }
-ok('on the report itself it gives up after 30 tries and reloads it', reloads === 1 && gets.length === 31, reloads + ' reloads, ' + gets.length + ' requests');
+ok('on the report itself it gives up after 30 tries, showing the report as Jira has it now, with no reload', viewRefreshes === 1 && reloads === 0 && gets.length === 31 && !opened.length,
+    viewRefreshes + ' refreshes, ' + reloads + ' reloads, ' + gets.length + ' requests');
+ok('...lets the report go, so its button works again', !jitaConvertBusy['EBR-3'] && button.disabled === false, JSON.stringify(jitaConvertBusy));
+ok('...and says to look at its links before converting again', toasts.some((t) => t === 'No new defect showed up among EBR-3\'s links within 30 seconds. Check its links before converting it again.'), toasts.join('|'));
 
 // ---- Close waits for the status menu ----
 function LateDeferred() {

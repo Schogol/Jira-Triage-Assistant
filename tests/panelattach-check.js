@@ -82,7 +82,13 @@ const log0 = console.log;
     // ================= the defect-side Attach =================
     let attaches = [], drops = [], fades = 0, dropFails = false;
     Object.assign(JiTA.ui, eval('({' + member('    _assigneeCache: {},', uiStart).replace(/,\n$/, ',') + '\n' + member('    _getAssignee: function (key) {', uiStart) + member('    _attachReportButton: function (reportKey, opts) {', uiStart) + member('    _markDupButton: function (defectKey) {', uiStart) + '})'));
-    Object.assign(JiTA.ui, { currentKey: 'EDR-1', toast: (m) => { toasts.push(m); }, _hideTip() {}, softRefreshStatus() {}, _fadeOutAndReplace: () => { fades++; },
+    // Jira's issue view, told to read the issue on screen again (softrefresh-check.js covers the real helpers).
+    let onScreen = 'EDR-1', viewRefreshes = 0, shows = [], statusNow = 'Open', patched = [];
+    global.jitaCurrentKey = () => onScreen;
+    global.jitaRefreshIssueView = () => { viewRefreshes++; };
+    global.jitaShowWritten = (key, shown, missed) => { shows.push({ key, shown, missed }); };
+    global.jitaStatusText = () => statusNow;
+    Object.assign(JiTA.ui, { currentKey: 'EDR-1', toast: (m) => { toasts.push(m); }, _hideTip() {}, softRefreshStatus: (s) => { patched.push(s); }, _fadeOutAndReplace: () => { fades++; },
         // Every report still open; livestatus-check.js covers the real status lookup and an attach refused by it.
         _liveStatus: (keys) => Promise.resolve(keys.reduce((o, k) => { o[k] = 'Open'; return o; }, {})), _isOpenStatus: (s) => !!s && !/closed|attached/i.test(s) });
     JiTA.link.currentUser = () => Promise.resolve('me');
@@ -106,21 +112,34 @@ const log0 = console.log;
     JiTA.ui._assigneeCache = {};
     b = JiTA.ui._attachReportButton('EBR-10');
     await flush();
-    dropFails = true; toasts = []; fades = 0;
+    dropFails = true; toasts = []; fades = 0; viewRefreshes = 0;
     console.log = () => {};
     tap(b);
     await flush();
     console.log = log0;
     ok('still unassigned when asked again, it is attached (control)', attaches.join() === 'EBR-10->EDR-1', attaches.join());
     ok('a local DB failure afterwards is not reported as a failed attach', !toasts.some((m) => /Could not attach/.test(m)) && b.text() === '✓ attached' && fades === 1, toasts.join(' | ') + ' / ' + b.text() + ' / ' + fades);
-    JiTA.ui.currentKey = 'EBR-3';
-    logs = [];
+    ok('...and Jira, the defect being on screen, is told to show its new link', viewRefreshes === 1, String(viewRefreshes));
+    JiTA.ui.currentKey = 'EBR-3'; onScreen = 'EBR-3';
+    logs = []; shows = []; patched = []; statusNow = 'Open'; viewRefreshes = 0;
     console.log = (...a) => { logs.push(a.join(' ')); };
     const m = JiTA.ui._markDupButton('EDR-4');
     tap(m);
     await flush();
     console.log = log0;
     ok('the report-side Attach logs a failed local cleanup instead of leaving it unhandled', logs.some((l) => /could not drop EBR-3/.test(l)), logs.join(' | '));
+    ok('...Jira is told to show the report as it is now, watched for its new status', shows.length === 1 && shows[0].key === 'EBR-3' && !shows[0].shown(), JSON.stringify(shows.map((x) => x.key)));
+    statusNow = 'Attached';
+    ok('...which counts as shown once the lozenge reads anything other than it did', shows[0].shown() === true);
+    shows[0].missed();
+    ok('...and a Jira that never shows it gets the status patched in by hand, as before', patched.join() === 'Attached' && viewRefreshes === 0, patched.join());
+    JiTA.link.attachDuplicate = (a, b2) => { attaches.push(a + '->' + b2); return Promise.resolve({ attached: false, linked: true }); };
+    shows = []; patched = [];
+    tap(JiTA.ui._markDupButton('EDR-5'));
+    await flush();
+    ok('a link without the Attached status is shown too, with nothing patched', viewRefreshes === 1 && !shows.length && !patched.length, viewRefreshes + ' ' + shows.length);
+    JiTA.link.attachDuplicate = (a, b2) => { attaches.push(a + '->' + b2); return Promise.resolve({ attached: true, linked: true }); };
+    JiTA.ui.currentKey = 'EDR-1'; onScreen = 'EDR-1';
     dropFails = false;
 
     // ================= the on-demand translation =================

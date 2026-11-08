@@ -186,9 +186,13 @@ Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') +
 Object.assign(JiTA.logsig, eval('({' + member('    _crashOf: function (sig) {') + '})'));
 eval(src.slice(cs + 1, ce) + '\n    _noop: null\n};');
 const C = JiTA.checklist;
-const REFRESH = { ms: C.REFRESH_MS, step: C.REFRESH_STEP_MS, event: C.REFRESH_EVENT };   // as shipped, checked below
-C.REFRESH_MS = 40; C.REFRESH_STEP_MS = 5;   // the wait for Jira to show a write, short enough for a test
-const waitRefresh = () => new Promise((r) => setTimeout(r, C.REFRESH_MS + 40));
+// The issue on screen, shown without a reload: the real helpers (softrefresh-check.js covers them), with a wait short
+// enough for a test.
+const hs = src.indexOf('\nvar JITA_REFRESH_EVENT = '), he = src.indexOf('\n}\n', src.indexOf('\nfunction jitaOpenIssue(', hs)) + 3;
+if (hs < 0 || he < 3) { throw new Error('could not slice the refresh helpers'); }
+(0, eval)(src.slice(hs, he));
+global.JITA_REFRESH_MS = 40; global.JITA_REFRESH_STEP_MS = 5;
+const waitRefresh = () => new Promise((r) => setTimeout(r, JITA_REFRESH_MS + 40));
 
 // ---- fixtures ----
 const EXC = { sig: "keyerror: 'x'|a.py:f>b.py:g>c.py:h", msg: "KeyError: 'x' raised while undocking" };
@@ -830,10 +834,10 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
         reloads = 0;
         await C._addLabel('EDR-1', 'Undock');
         await settle();
-        C._key = 'EDR-2';
+        onScreen = 'EDR-2';
         await waitRefresh();
         ok('...but not once another issue is on screen', reloads === 0);
-        C._key = 'EDR-1';
+        onScreen = 'EDR-1';
     } finally { console.log = keepLog; jiraHears = true; }
 
     // ---- requests ----
@@ -874,8 +878,6 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     try { await C._req('GET', '/rest/api/3/issue/EDR-9'); } catch (e) { err = e; }
     ok('...a refusal whose answer is not JSON still says its status', err && err.message === 'HTTP 404' && err.status === 404, err && err.message);
     answers = {};
-    ok('the wait for Jira to show a write, as shipped: the event Jira hears, looked at every quarter second for 8 seconds',
-        REFRESH.event === 'legacy_refreshIssuePage' && REFRESH.ms === 8000 && REFRESH.step === 250, J(REFRESH));
 
     // ---- the page ----
     ok('a recheck follows an edit made in Jira: the fields are read as the page shows them', (() => {
