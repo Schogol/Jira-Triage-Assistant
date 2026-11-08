@@ -521,6 +521,25 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('a write that fails rejects', err && /500/.test(err.message));
     await later();
     ok('...and asks for no publish', pubs === pubsBefore, (pubs - pubsBefore) + ' publishes');
+    // internal notes: Leads only, kept apart, never published
+    await later();
+    saves = []; pubs = 0; pageWrites = [];
+    w = await M.setInternalNote('acc-dist', '  Watch his   EBR quality \n\n\n ok ');
+    let inv = props[L.INOTES_KEY].value;
+    ok('an internal note is kept apart from the rest, as notes are, with who set it and when', w.written && inv.m['acc-dist'].t === 'Watch his EBR quality\n\nok' &&
+        inv.m['acc-dist'].by === 'schogol' && /^\d{4}-\d\d-\d\d$/.test(inv.m['acc-dist'].at) && J(saves) === J([L.INOTES_KEY]), J([inv, saves]));
+    await later();
+    ok('...and asks for no publish: no page shows it', pubs === 0 && pageWrites.length === 0, pubs + ' publishes');
+    w = await M.setInternalNote('acc-dist', 'Watch his EBR quality\n\nok');
+    ok('...the same again writes nothing', !w.written);
+    w = await M.setInternalNote('acc-ast', 'Second one');
+    w = await M.setInternalNote('acc-dist', '   ');
+    ok('...an empty one removes it, and only it', w.written && !('acc-dist' in props[L.INOTES_KEY].value.m) && props[L.INOTES_KEY].value.m['acc-ast'].t === 'Second one');
+    let rin = await M.readInternal();
+    ok('the tab reads them back with their version', rin.value.m['acc-ast'].t === 'Second one' && rin.version === props[L.INOTES_KEY].version, J(rin));
+    const bigIn = { v: 1, m: {} };
+    for (let i = 0; i < 60; i++) { bigIn.m['712020:' + ('0000000' + i).slice(-8) + '-1111-2222-3333-444455556666'] = { t: 'x'.repeat(L.NOTE_MAX), by: 'lookuptable', at: '2026-11-08' }; }
+    ok('60 members with internal notes of the longest kept stay under the property cap', J(bigIn).length < L.MAX_PROP_BYTES, String(J(bigIn).length));
 
     // ================= Leads only =================
     gm.leadDutyMe = { accountId: 'acc-x', displayName: 'ISD Distillery', handle: null, isLead: false };
@@ -535,8 +554,10 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await M.setRank('acc-ast', 'Senior', 'ISD Astaris').catch((e) => refused.push(e.message));
     await M.addToTeam('acc-ast', 'Senior', 'ISD Astaris', () => '').catch((e) => refused.push(e.message));
     await M.setPageNote('acc-ast', 'x', 'ISD Astaris').catch((e) => refused.push(e.message));
+    await M.readInternal().catch((e) => refused.push(e.message));
+    await M.setInternalNote('acc-ast', 'x').catch((e) => refused.push(e.message));
     const pr = await M.publish(true), tk = await M.tick();
-    ok('a non-Lead can read, count, change and publish nothing, nor read, change or add to the team page', refused.length === 8 && refused.every((m) => /Leads only/.test(m)) &&
+    ok('a non-Lead can read, count, change and publish nothing, nor read, change or add to the team page, nor see an internal note', refused.length === 10 && refused.every((m) => /Leads only/.test(m)) &&
         pr.skipped === 'not a Lead' && tk === null && teamReads === 0, J(refused));
     gm.leadDutyMe = { accountId: 'acc-me', displayName: 'ISD BH Schogol', handle: 'schogol', isLead: true };
     L._me = null;
@@ -1185,6 +1206,41 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await M.publish(true);
     ok('...and those set in the tab over the page\'s', pageWrites.length === 1 && /<td[^>]*>x, and y<\/td>/.test(pageWrites[0].html) &&
         /<td[^>]*>Mentor, on leave<\/td>/.test(pageWrites[0].html) && !/Old note/.test(pageWrites[0].html), pageWrites.length + ' writes');
+
+    // internal notes in the tab: Leads only, never on a page
+    await later();
+    U._loadMembers(true);
+    await settle();
+    const headI = body.kids.filter((k) => k.hasClass('ld-mhead'))[0];
+    const inoteOf = (acc) => rowFor(acc).kids.filter((k) => k.hasClass('ld-minote'))[0];
+    ok('the tab has a public and an internal note column, the internal one saying who sees it', headI.kids.filter((k) => k.hasClass('ld-mnote')).map((k) => k.text()).join('|') === 'Public note|Internal note' &&
+        /^Only Leads see these/.test(headI.kids.filter((k) => k.hasClass('ld-minote'))[0].attrs.title), headI.kids.filter((k) => k.hasClass('ld-mnote')).map((k) => k.text()).join('|'));
+    ok('a member\'s internal note shows, its hover saying only Leads see it, and who set it', inoteOf('acc-ast').text() === 'Second one' && !inoteOf('acc-ast').hasClass('empty') &&
+        /^Second one\n\nOnly Leads see this note: it stays in the Lead Ledger, and no page shows it\.\nSet by schogol on \d{4}-\d\d-\d\d$/.test(inoteOf('acc-ast').attrs.title), inoteOf('acc-ast').attrs.title);
+    ok('...one with none invites one', inoteOf('acc-me').text() === 'Add an internal note' && inoteOf('acc-me').hasClass('empty') &&
+        inoteOf('acc-me').attrs.title === 'Only Leads see this note: it stays in the Lead Ledger, and no page shows it.', inoteOf('acc-me').attrs.title);
+    // a row as drawn: every element of it but its internal note, with its classes, attributes, properties and text
+    const sigOf = (n) => ((n && n.cls) ? (n.tag + '.' + n.cls.join('.') + J(n.attrs) + J(n.props) + n._text + '[' + n.kids.map(sigOf).join(',') + ']') : J(n && n.data));
+    const restOf = (acc) => rowFor(acc).kids.filter((k) => !(k.hasClass && k.hasClass('ld-minote'))).map(sigOf).join('\n');
+    const restBefore = restOf('acc-me');
+    pubs = 0; pageWrites = []; answer = 'Asked for a break\nuntil December'; asked = null;
+    U._drafts['inote:acc-me'] = 'typed before';
+    inoteOf('acc-me').fire('click');
+    await settle();
+    ok('clicking it opens the note dialog on the internal note, with a draft of its own', asked && asked.title === 'Internal note on ISD BH Schogol' && asked.value === '' &&
+        asked.draft === 'inote:acc-me' && /^Only Leads see it/.test(asked.hint), J(asked));
+    ok('...saved, it is kept apart in the Lead Ledger, its draft let go, and only its row drawn again', props[L.INOTES_KEY].value.m['acc-me'].t === 'Asked for a break\nuntil December' &&
+        !('inote:acc-me' in U._drafts) && inoteOf('acc-me').text() === 'Asked for a break' && rowFor('acc-ast') && inoteOf('acc-ast').text() === 'Second one',
+        J(props[L.INOTES_KEY].value.m['acc-me']));
+    ok('...the rest of its row drawn as it was, the team page\'s rank and note included', restOf('acc-me') === restBefore, restOf('acc-me'));
+    asked = null;
+    inoteOf('acc-me').fire('click');
+    await settle();
+    ok('...and opened again, the dialog holds it', asked && asked.value === 'Asked for a break\nuntil December', J(asked));
+    await later();
+    ok('...with no publish asked for', pubs === 0 && pageWrites.length === 0, pubs + ' publishes');
+    await M.publish(true);
+    ok('no page ever shows an internal note', pageWrites.length === 1 && !/Asked for a break|Second one/.test(pageWrites[0].html), pageWrites.length + ' writes');
 
     Date.now = realNow;
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'members checks passed.'));

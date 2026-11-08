@@ -22,7 +22,8 @@ const FROM = R('fromCredits: function (res) {'), DEF = R('defaultRole: function 
     PAGECH = R('pageChange: function (r, role, team) {'), ADD = R('addToTeam: function (acc, role, name, nameOf) {'), EDIT = R('_editTeam: function (change, message) {'),
     WITHM = R('_withMember: function (body, acc, role, name, nameOf) {'), SPANS = R('_spans: function (a, b) {'), NEWROW = R('_newRow: function (t, acc, role) {'),
     ADDM = R('_addMember: function (r) {'), NOTECH = R('noteChange: function (r, note, team) {'), WITHN = R('_withNote: function (body, acc, note) {'),
-    SETPN = R('setPageNote: function (acc, note, name) {'), NOTEOF = R('_noteOf: function (team, acc, name, names) {'), NOTETEXT = R('_noteText: function (html, names) {');
+    SETPN = R('setPageNote: function (acc, note, name) {'), NOTEOF = R('_noteOf: function (team, acc, name, names) {'), NOTETEXT = R('_noteText: function (html, names) {'),
+    READIN = R('readInternal: function () {'), SETIN = R('setInternalNote: function (acc, note) {'), EDITIN = R('_editInternalNote: function (r, wins, cur) {');
 const muts = [
     // ---- the months ----
     [MB, 'the window takes in the current month', 'for (var i = 0; i < L.members.MONTHS; i++) { cur = L._prevYm(cur); out.push(cur); }',
@@ -268,7 +269,7 @@ const muts = [
     [MB, 'the page\'s rank is not heeded when a role is set', "var want = role === M.defaultRole(name, rank) ? '' : role;", "var want = role === M.defaultRole(name) ? '' : role;"],
     [MB, 'the same role is written again', "            if ((e.role || '') === want) { return false; }\n", '', ROLE],
     [MB, 'a non-Lead can set a note', '        if (!L.isLead()) { return Promise.reject(M._notLead()); }\n', '', NOTE],
-    [MB, 'a note is stored as typed', 'var want = L._note(note);', "var want = String(note || '');"],
+    [MB, 'a note is stored as typed', 'var want = L._note(note);', "var want = String(note || '');", NOTE],
     [MB, 'the same note is written again', "            if ((e.note || '') === want) { return false; }\n", '', NOTE],
     [MB, 'an entry with nothing left is kept', '            if (!e.role && !e.note) { delete v.m[acc]; return v; }\n', '', PERSON],
     [MB, 'who set it is not stored', '            e.by = M._meName();\n', '', PERSON],
@@ -353,7 +354,7 @@ const muts = [
     [MB, 'a forced load does not read the team page again', 'var team = M.team(force).then(', 'var team = M.team().then('],
     [MB, 'the tab draws without the team page', 'rows = M.model(st.act, st.mem, st.live, st.cur, st.team);', 'rows = M.model(st.act, st.mem, st.live, st.cur);'],
     [MB, 'the team page read is not kept with the members', '            st.team = r[1];\n', ''],
-    [MB, 'a note saved draws its row without the team page', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team)', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur)'],
+    [MB, 'a note saved draws its row without the team page', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team)', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur)', EDITNOTE],
     [MB, 'a role over the page\'s rank does not say what the page says', 'if (r.roleSet && r.rank && r.rank !== r.role) { why += ', 'if (false) { why += '],
     [MB, 'a role from the page reads as the default', "((r.rank && r.rank === r.role) ? 'From the ECAID - Team Members page' : ('The default, ' + r.role))", "('The default, ' + r.role)"],
     [MB, 'the tab does not hand on the page\'s rank', 'return M.setRole(r.acc, role, r.name, r.rank).then(function (w) { drawn(w);', 'return M.setRole(r.acc, role, r.name).then(function (w) { drawn(w);'],
@@ -435,7 +436,34 @@ const muts = [
     [MB, 'an empty note invites a note, not a public one', ": 'Add a public note')", ": 'Add a note')"],
     [MB, 'an empty note does not say who sees it', ": 'Add a public note on this member: every Lead sees it, and the ECAID Member Productivity page shows it')", ": 'Add a note')"],
     [MB, 'a note from the page does not say so', "var whence = !r.noteSet ? '\\n\\nFrom the ECAID - Team Members page' :", "var whence = !r.noteSet ? '' :"],
-    [MB, 'a note set in the tab does not give the page\'s', "(r.pageNote ? ('\\nThe ECAID - Team Members page has: ' + r.pageNote) : '')", "''"]
+    [MB, 'a note set in the tab does not give the page\'s', "(r.pageNote ? ('\\nThe ECAID - Team Members page has: ' + r.pageNote) : '')", "''"],
+    // ---- internal notes (v3.49.0): Leads only, kept apart, never on a page ----
+    [MB, 'a non-Lead can read the internal notes', '        if (!L.isLead()) { return Promise.reject(M._notLead()); }\n', '', READIN],
+    [MB, 'the internal notes\' version is lost', 'version: (r.prop && r.prop.version) || 0 };', 'version: 0 };', READIN],
+    [MB, 'a non-Lead can set an internal note', '        if (!L.isLead()) { return Promise.reject(M._notLead()); }\n', '', SETIN],
+    [MB, 'an internal note is kept as typed', 'var want = L._note(note);', "var want = String(note || '');", SETIN],
+    [MB, 'internal notes go into the members property', 'return L.ledger.mutate(L.INOTES_KEY, function (v) {', 'return L.ledger.mutate(L.MEMBERS_KEY, function (v) {', SETIN],
+    [MB, 'the same internal note is written again', "            if (((v.m[acc] || {}).t || '') === want) { return null; }\n", '', SETIN],
+    [MB, 'an empty internal note is kept', 'if (want) { v.m[acc] = { t: want, by: M._meName(), at: M._today() }; } else { delete v.m[acc]; }',
+        'v.m[acc] = { t: want, by: M._meName(), at: M._today() };', SETIN],
+    [MB, 'who set an internal note is not kept', 'by: M._meName(), at: M._today() };', "by: '', at: M._today() };", SETIN],
+    [MB, 'when an internal note was set is not kept', 'at: M._today() }; } else', "at: '' }; } else", SETIN],
+    [MB, 'an internal note asks for a publish', '            return v;\n        });\n    },\n    // Change one member\'s entry', '            return v;\n        }).then(M._tap);\n    },\n    // Change one member\'s entry'],
+    [MB, 'the tab does not read the internal notes', 'Promise.all([M.gather(), team, M.readInternal()])', 'Promise.all([M.gather(), team, Promise.resolve({ value: null, version: 0 })])'],
+    [MB, 'the internal notes read are not kept', '            st.inotes = r[2].value;\n', ''],
+    [MB, 'the header has no internal note column', "        $('<span class=\"ld-mnote ld-minote\"></span>').text('Internal note')", "        $('<span></span>').text('Internal note')"],
+    [MB, 'the header calls the public note a note', ".text('Public note')", ".text('Note')"],
+    [MB, 'an internal note does not show', "inn.t ? inn.t.split('\\n')[0] : 'Add an internal note'", "'Add an internal note'"],
+    [MB, 'an internal note does not say who sees it', "+ 'Only Leads see this note: it stays in the Lead Ledger, and no page shows it.' +", "+ '' +"],
+    [MB, 'who set an internal note is not said', "((inn.t && inn.by) ? ('\\nSet by ' + inn.by + (inn.at ? (' on ' + inn.at) : '')) : '')", "''"],
+    [MB, 'clicking an internal note does nothing', ".on('click', function () { U._editInternalNote(r, wins, cur); })", ''],
+    [MB, 'the internal note dialog opens empty', "value: U._inote(r.acc).t || '' }", "value: '' }", EDITIN],
+    [MB, 'the internal note shares the public note\'s draft', "draft = 'inote:' + r.acc", "draft = 'member:' + r.acc", EDITIN],
+    [MB, 'an internal note saved stays a draft', '                delete U._drafts[draft];\n', '', EDITIN],
+    [MB, 'an internal note saved is not taken into the tab', '                if (v && U._mem) { U._mem.inotes = v; }\n', '', EDITIN],
+    [MB, 'an internal note saved draws nothing again', '                if (fresh) { U._swapRow(r.acc, U._memberRow(fresh, wins, cur)); }\n', '', EDITIN],
+    [MB, 'an internal note saved draws its row without the team page', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team)',
+        'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur)', EDITIN]
 ];
 function within(fn) {
     if (!fn) { return [0, src.length]; }
