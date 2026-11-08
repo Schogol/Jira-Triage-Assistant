@@ -1215,6 +1215,10 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     const inoteOf = (acc) => rowFor(acc).kids.filter((k) => k.hasClass('ld-minote'))[0];
     ok('the tab has a public and an internal note column, the internal one saying who sees it', headI.kids.filter((k) => k.hasClass('ld-mnote')).map((k) => k.text()).join('|') === 'Public note|Internal note' &&
         /^Only Leads see these/.test(headI.kids.filter((k) => k.hasClass('ld-minote'))[0].attrs.title), headI.kids.filter((k) => k.hasClass('ld-mnote')).map((k) => k.text()).join('|'));
+    const noteCss = (/\.jita-leadduty-view \.ld-mnote \{([^}]*)\}/.exec(src) || [])[1] || '';
+    ok('...the two note columns sharing the room alike, so they line up with the header whatever a note says, a long one cut short with a mark',
+        /(^|;)\s*flex: 1 1 0;/.test(noteCss) && /\bmin-width: 0;/.test(noteCss) && /\boverflow: hidden;/.test(noteCss) && /\btext-overflow: ellipsis;/.test(noteCss) &&
+        /\bwhite-space: nowrap;/.test(noteCss), noteCss);
     ok('a member\'s internal note shows, its hover saying only Leads see it, and who set it', inoteOf('acc-ast').text() === 'Second one' && !inoteOf('acc-ast').hasClass('empty') &&
         /^Second one\n\nOnly Leads see this note: it stays in the Lead Ledger, and no page shows it\.\nSet by schogol on \d{4}-\d\d-\d\d$/.test(inoteOf('acc-ast').attrs.title), inoteOf('acc-ast').attrs.title);
     ok('...one with none invites one', inoteOf('acc-me').text() === 'Add an internal note' && inoteOf('acc-me').hasClass('empty') &&
