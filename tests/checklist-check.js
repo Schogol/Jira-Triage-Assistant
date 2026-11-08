@@ -92,8 +92,9 @@ global.document = {
     addEventListener: (ev, fn, cap) => { listeners.push({ ev, fn, cap }); }
 };
 const listeners = [];
-global.window = { addEventListener: (ev, fn) => { listeners.push({ ev, fn, win: true }); }, confirm: (m) => { confirms.push(m); return confirmAnswer; } };
-let confirms = [], confirmAnswer = true;
+global.window = { addEventListener: (ev, fn) => { listeners.push({ ev, fn, win: true }); }, confirm: (m) => { confirms.push(m); return confirmAnswer; },
+    location: { reload: () => { reloads++; } } };
+let confirms = [], confirmAnswer = true, reloads = 0;
 global.GM_addStyle = (css) => { styles.push(css); };
 const styles = [];
 global.$ = (x) => {
@@ -116,14 +117,15 @@ const puts = () => ajaxLog.filter((r) => r.method === 'PUT');
 
 // ---- JiTA around the checklist ----
 let toasts = [], isLead = false, groupMembers = [], issueOf = {}, histOf = {}, sourceOf = {}, readOf = {}, holdingOf = {}, me = 'acc-rep';
-global.gmGet = (k, d) => d;
-global.gmSet = () => {};
+const gmStore = {};
+global.gmGet = (k, d) => (k in gmStore ? gmStore[k] : d);
+global.gmSet = (k, v) => { gmStore[k] = JSON.parse(J(v)); };
 global.jitaCurrentKey = () => onScreen;
 let onScreen = '', checklistOn = true;
 global.flagOn = (name) => (name === 'defectChecklist' ? checklistOn : true);
 global.JiTA = {
     HOST: 'https://x.atlassian.net', dlog: () => {},
-    util: { fmtDate: (iso) => 'on ' + String(iso).slice(0, 10), copy: (t) => { copied.push(t); return copyAnswer ? Promise.resolve() : Promise.reject(new Error('no')); } },
+    util: { fmtDate: (iso) => String(iso).slice(0, 10), copy: (t, h) => { copied.push(t); copiedHtml.push(h); return copyAnswer ? Promise.resolve() : Promise.reject(new Error('no')); } },
     logsig: { MIN_FRAMES: 2, CRASH_FRAMES: 2, holding: (sigs) => Promise.resolve(holdingOf), _logBlocks: (t) => String(t).split('\n\n'),
         _fingerprint: (b) => ({ sig: String(b).split('\n')[0].toLowerCase() }) },
     excfind: { _fps: (text) => fpsOf(text), _read: (item) => (readOf[item.key] instanceof Error ? Promise.reject(readOf[item.key]) : Promise.resolve(readOf[item.key])) },
@@ -148,17 +150,20 @@ global.JiTA = {
         group: { members: () => Promise.resolve(groupMembers) },
         _get: (path) => {
             gets.push(path);
+            const em = /^\/rest\/api\/3\/issue\/([A-Z]+-\d+)\/editmeta$/.exec(path);
+            if (em) { return editmetaOf[em[1]] ? Promise.resolve(JSON.parse(J(editmetaOf[em[1]]))) : Promise.reject(Object.assign(new Error('403'), { status: 403 })); }
             const m = /^\/rest\/api\/3\/issue\/([A-Z]+-\d+)(\?.*)?$/.exec(path);
             if (m && /fields=reporter$/.test(path) && issueOf[m[1]]) { return Promise.resolve({ key: m[1], fields: { reporter: JSON.parse(J(issueOf[m[1]].fields.reporter)) } }); }
+            if (m && /fields=updated$/.test(path) && issueOf[m[1]]) { return Promise.resolve({ key: m[1], fields: { updated: issueOf[m[1]].fields.updated || null } }); }
             if (m && /fields=\*all/.test(path)) { return issueOf[m[1]] ? Promise.resolve(JSON.parse(J(issueOf[m[1]]))) : Promise.reject(Object.assign(new Error('404'), { status: 404 })); }
             if (m) { return sourceOf[m[1]] ? Promise.resolve(JSON.parse(J(sourceOf[m[1]]))) : Promise.reject(Object.assign(new Error('404'), { status: 404 })); }
             return Promise.reject(new Error('unexpected GET ' + path));
         },
-        _changelog: (key) => { gets.push('changelog ' + key); return Promise.resolve(JSON.parse(J(histOf[key] || []))); }
+        _changelog: (key) => { gets.push('changelog ' + key); return histOf[key] instanceof Error ? Promise.reject(histOf[key]) : Promise.resolve(JSON.parse(J(histOf[key] || []))); }
     }
 };
-let gets = [], meta = {}, searches = [], searchAnswer = [];
-let copied = [], copyAnswer = true, built = 0, fieldRows = [], logText = {};
+let gets = [], meta = {}, searches = [], searchAnswer = [], editmetaOf = {};
+let copied = [], copiedHtml = [], copyAnswer = true, built = 0, fieldRows = [], logText = {};
 // The fingerprints of a description: "EXC[<sig>]" for each exception pasted in it.
 function fpsOf(text) { const out = [], re = /EXC\[([^\]]+)\]/g; let m; while ((m = re.exec(String(text)))) { out.push({ sig: m[1], msg: m[1] }); } return out; }
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + '})'));
@@ -185,21 +190,23 @@ function converted() {
         issuelinks: [{ type: { name: 'Duplicate' }, inwardIssue: { key: 'EBR-10', fields: { summary: 'game crash when undock' } } }]
     } };
 }
-// The same defect once its reporter is done with it.
+// The same defect once its reporter is done with it: its steps rewritten in plain words (no list needed), its attachments
+// checked.
 function finished() {
     const i = converted(), f = i.fields;
     f.summary = 'Undocking from a station crashes the client';
-    f.description = adf(['Singularity, build 2945678', 'Undocking from any station crashes the client to desktop.', 'EXC[' + EXC.sig + ']'], ['Dock in Jita 4-4', 'Undock', 'Observe the client crashes']);
+    f.description = adf(['Singularity, build 2945678', 'Undocking from any station crashes the client to desktop.', 'Dock in Jita 4-4, undock, and the client closes.', 'EXC[' + EXC.sig + ']']);
     f.labels = ['Undock', 'Crash', 'cloned'];
     f.attachment = [{ filename: 'logs.txt', size: 100 }, { filename: 'loglite_undock.txt', size: 5000 }];
     f.customfield_101 = { value: 'A - Crash / Exploit' }; f.customfield_102 = { value: 'Moderate / Limited' };
     f.customfield_105 = { value: 'Singularity' }; f.customfield_106 = '2945678';
+    i.properties = { 'jita.checklist': { v: 1, ok: { attachments: { by: 'acc-rep', name: 'ISD BH Hunter', at: '2026-11-08T12:00:00.000Z', sig: C._attSig(f.attachment) } } } };
     return i;
 }
 const SRC = { key: 'EBR-10', fields: { summary: 'game crash when undock', description: REPORT_DESC(), labels: ['PlatformWin', 'Russian'],
     attachment: [{ filename: 'logs.txt', size: 100, content: 'u-logs' }] } };
 const srcObj = () => ({ key: 'EBR-10', summary: SRC.fields.summary, desc: JiTA.util.toPlainText(SRC.fields.description), labels: SRC.fields.labels.slice(),
-    steps: C._steps(SRC.fields.description, null).text, attachments: SRC.fields.attachment.map((a) => Object.assign({}, a)) });
+    steps: C._steps(SRC.fields.description, null), attachments: SRC.fields.attachment.map((a) => Object.assign({}, a)) });
 // Without the EVE Server and EVE Build fields: the old way, the server and build at the top of the description.
 const OLD_NAMES = { summary: 'Summary', customfield_101: 'Severity', customfield_102: 'Impact', customfield_10001: 'Team', customfield_104: 'Epic Link' };
 const byId = (items, id) => items.filter((it) => it.id === id)[0];
@@ -258,8 +265,37 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...defects linked are no source', C._source({ summary: 'x', labels: ['cloned'], issuelinks: [link('Relates', 'EDR-9', 'x')] }, []) === null);
 
     // ---- logs, labels, exceptions ----
-    ok('logs are the player\'s logs.txt, a LogLite export and a LogLite workspace', C._isLog('logs.txt') && C._isLog('LogLite export.txt') && C._isLog('session.lsw'));
-    ok('...not an image named like one', !C._isLog('catalog.png') && !C._isLog('dialog.jpg'));
+    ok('the attachments as a set: their names and sizes, in any order', C._attSig([{ filename: 'b.png', size: 2 }, { filename: 'a.txt', size: 1 }]) === 'a.txt:1|b.png:2' && C._attSig([]) === '');
+    // ---- server names ----
+    const reOf = C._serverRe(['Tranquility', 'Singularity']);
+    ok('a server named as given, or the way hunters write it (TQ, SiSi)', reOf.test('Tranquility 2945678') && reOf.test('on TQ, build 2945678') && reOf.test('sisi 123') && reOf.test('Singularity'));
+    ok('...as a word of its own, and no name it was not given', !reOf.test('Tranquilityx') && !reOf.test('atqb') && !reOf.test('Duality 2945678'));
+    ok('...a name holding a dot or brackets taken as written', C._serverRe(['Test (A.1)']).test('on Test (A.1) build 1234567') && !C._serverRe(['Test (A.1)']).test('Test xA21x'));
+    ok('...and with no names, nothing matches', !C._serverRe([]).test('Tranquility'));
+    editmetaOf = { 'EDR-1': { fields: { customfield_105: { allowedValues: [{ value: 'Tranquility' }, { value: 'Singularity' }, { value: 'Duality' }] } } } };
+    gets = [];
+    let names = await C._serverNames('EDR-1', 'customfield_105');
+    ok('the server names are the EVE Server field\'s options, as Jira offers them for the defect', J(names) === J(['Tranquility', 'Singularity', 'Duality']) && gets.some((p) => /EDR-1\/editmeta$/.test(p)), J(names) + ' ' + J(gets));
+    gets = [];
+    names = await C._serverNames('EDR-1', 'customfield_105');
+    ok('...kept for a week, not read again', J(names) === J(['Tranquility', 'Singularity', 'Duality']) && !gets.length);
+    gets = [];
+    editmetaOf['EDR-1'].fields.customfield_999 = { allowedValues: [{ value: 'Other' }] };
+    names = await C._serverNames('EDR-1', 'customfield_999');
+    ok('...for that field only: another field\'s options are read for it', J(names) === J(['Other']) && gets.length === 1, J(names));
+    gets = [];
+    await C._serverNames('EDR-1', 'customfield_105');
+    gmStore[C.SERVERS_KEY].at = Date.now() - 8 * 24 * 3600 * 1000;
+    gets = [];
+    await C._serverNames('EDR-1', 'customfield_105');
+    ok('...and read again after a week', gets.length === 1);
+    delete gmStore[C.SERVERS_KEY];
+    editmetaOf = { 'EDR-1': { fields: { customfield_105: { schema: { type: 'string' } } } } };
+    ok('...a field with no options (a text field) gives the built-in names', J(await C._serverNames('EDR-1', 'customfield_105')) === J(C.SERVER_NAMES) && !gmStore[C.SERVERS_KEY]);
+    editmetaOf = {};
+    ok('...as does an editmeta that cannot be read', J(await C._serverNames('EDR-1', 'customfield_105')) === J(C.SERVER_NAMES));
+    gets = [];
+    ok('...or no EVE Server field at all, with nothing read', J(await C._serverNames('EDR-1', '')) === J(C.SERVER_NAMES) && !gets.length);
     // ---- label suggestions ----
     ok('a label is found by its words: FittingWindow and Fitting_Window by "fitting window", or as one word',
         J(C._labelForms('FittingWindow')) === J([['fitting', 'window'], ['fittingwindow']]) && J(C._labelForms('Fitting_Window')) === J([['fitting', 'window'], ['fittingwindow']]) &&
@@ -267,7 +303,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...a plural counts as its singular, and the words must follow each other', C._hasRun(['two', 'drones', 'lost'], ['drone']) && C._hasRun(['the', 'fitting', 'windows'], ['fitting', 'window']) &&
         !C._hasRun(['fitting', 'the', 'window'], ['fitting', 'window']) && !C._hasRun(['dronesx'], ['drone']));
     const COUNTS = { Overview: 10, Undock: 5, FittingWindow: 3, lowercase: 9, Rare: 1, PlatformWin: 50, cloned: 99, Crash: 40, Window: 7 };
-    const sugD = { summary: 'Undock from a station breaks the Overview', steps: { text: 'open the fitting window' }, desc: 'lowercase rare crash window platform win cloned',
+    const sugD = { summary: 'Undock from a station breaks the Overview', steps: 'open the fitting window', desc: 'lowercase rare crash window platform win cloned',
         labels: ['Crash'], src: { labels: ['PlatformWin'] } };
     const sug = C.suggest(sugD, COUNTS);
     ok('suggested: labels in use whose words the defect\'s text holds, the summary counting most', J(sug.map((x) => x.label)) === J(['Overview', 'Window', 'Undock', 'FittingWindow']), J(sug));
@@ -297,11 +333,12 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
 
     // the reproduction steps
     const stepsOf = (desc, field) => C._steps(desc, field);
-    ok('the steps are the description\'s "Reproduction Steps" section, as the in-game reporter writes it', stepsOf(REPORT_DESC(), null).text.trim() === '1. undock 2. it crashes', J(stepsOf(REPORT_DESC(), null)));
-    ok('...or its numbered lists', stepsOf(adf(['intro'], ['Dock', 'Undock']), null).text === 'Dock Undock' && stepsOf(adf(['intro'], ['Dock', 'Undock']), null).ordered);
-    ok('...the hunter\'s own list over the player\'s section left below it', stepsOf(adf(['Reproduction Steps: 1. undock 2. it crashes'], ['Dock', 'Undock', 'Observe']), null).text === 'Dock Undock Observe');
-    ok('...or a steps field of its own, when it has one filled in', stepsOf(REPORT_DESC(), adf([], ['Open the map', 'Zoom'])).text === 'Open the map Zoom' &&
-        stepsOf(REPORT_DESC(), adf([], ['Open the map', 'Zoom'])).ordered && stepsOf(REPORT_DESC(), adf([])).text.trim() === '1. undock 2. it crashes');
+    ok('the steps are the description\'s "Reproduction Steps" section, as the in-game reporter writes it', stepsOf(REPORT_DESC(), null).trim() === '1. undock 2. it crashes', J(stepsOf(REPORT_DESC(), null)));
+    ok('...or its numbered lists', stepsOf(adf(['intro'], ['Dock', 'Undock']), null) === 'Dock Undock');
+    ok('...the hunter\'s own list over the player\'s section left below it', stepsOf(adf(['Reproduction Steps: 1. undock 2. it crashes'], ['Dock', 'Undock', 'Observe']), null) === 'Dock Undock Observe');
+    ok('...or a steps field of its own, when it has one filled in', stepsOf(REPORT_DESC(), adf([], ['Open the map', 'Zoom'])) === 'Open the map Zoom' &&
+        stepsOf(REPORT_DESC(), adf([])).trim() === '1. undock 2. it crashes');
+    ok('...and nothing when none of them is there', stepsOf(adf(['just prose about undocking']), null) === '');
     ok('the report\'s labels left on the defect, cloned and jira_escalated aside', J(C._reportLabels(['PlatformWin', 'cloned', 'jira_escalated', 'Crash'], ['PlatformWin', 'cloned', 'jira_escalated'])) === J(['PlatformWin']));
     ok('labels not starting with a capital letter, cloned and jira_escalated aside', J(C._lowerLabels(['ui', 'UI', '3D', 'cloned', 'jira_escalated', 'überlay'])) === J(['ui', 'überlay']));
     ok('an exception in the description by its signature', C._hasExc({ desc: '', fps: [{ sig: EXC.sig }] }, [EXC]));
@@ -321,11 +358,14 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     let d = factsOf(converted()), items = C.items(d);
     const openIds = (its) => its.filter((it) => !it.ok && !it.waived).map((it) => it.id).join(',');
     ok('a defect as the conversion leaves it has every item open but the ones it cannot get wrong',
-        openIds(items) === 'summary,desc,build,steps,fields,replabels', openIds(items));
+        openIds(items) === 'summary,desc,build,steps,fields,replabels,attachments', openIds(items));
     ok('...its summary is still the report\'s', /Still the bug report's summary/.test(byId(items, 'summary').why));
     ok('...so is its description, and its labels', /Still the bug report's description/.test(byId(items, 'desc').why) && /PlatformWin/.test(byId(items, 'replabels').why) && J(byId(items, 'replabels').left) === J(['PlatformWin']));
-    ok('...and its reproduction steps, though numbered', /Still the bug report's reproduction steps/.test(byId(items, 'steps').why));
-    ok('...the player\'s log copied from the report counts as a log', byId(items, 'logs').ok);
+    ok('...and its reproduction steps, word for word', byId(items, 'steps').label === 'Reproduction steps rewritten' && /Still the bug report's reproduction steps, word for word/.test(byId(items, 'steps').why));
+    ok('...its attachments wait for its writer to check them, the report\'s named as such', (() => {
+        const it = byId(items, 'attachments'); return !it.ok && it.tick && !it.waivable && /Check they belong to this defect: logs\.txt \(from the bug report\)\./.test(it.why);
+    })(), byId(items, 'attachments').why);
+    ok('...no logs item: the player\'s logs are fine', !byId(items, 'logs'));
     ok('...EVE Server and EVE Build are named as empty', /^Fill in EVE Server and EVE Build with where you tested it/.test(byId(items, 'build').why), byId(items, 'build').why);
     ok('...Severity and Impact are named as not set', byId(items, 'fields').why === 'Not set yet: Severity, Impact.', byId(items, 'fields').why);
     d = factsOf(finished());
@@ -349,18 +389,50 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...a missing server too', /No server name/.test(byId(descOf(['build 2945678'], ['a', 'b']), 'build').why));
     ok('...both far down the description are not at the top', !byId(descOf(['x'.repeat(320) + ' Tranquility 2945678'], ['a', 'b']), 'build').ok);
     ok('...and a template to copy', /Server: \nBuild: /.test(byId(descOf(['nothing'], ['a', 'b']), 'build').copy));
-    // reproduction steps
-    ok('reproduction steps as a list', byId(descOf(['Tranquility 2945678'], ['a', 'b']), 'steps').ok);
-    ok('...or written "1. ... 2. ..."', byId(descOf(['Tranquility 2945678', '1. Dock 2. Undock 3. Observe the crash']), 'steps').ok);
-    ok('...but not as prose', !byId(descOf(['Tranquility 2945678', 'Dock, then undock and it crashes.']), 'steps').ok);
-    ok('...nor as one step', !byId(descOf(['Tranquility 2945678', 'Steps: 1. undock and it crashes.']), 'steps').ok);
-    ok('...nor as the bug report\'s own steps, numbered as they are', (() => { const it = byId(descOf(['Tranquility 2945678', 'Reproduction Steps: 1. undock 2. it crashes']), 'steps'); return !it.ok && /Still the bug report's reproduction steps/.test(it.why); })());
-    ok('...a steps field of its own is read first', (() => {
-        const i = finished(); i.names = Object.assign({ customfield_107: 'Steps to Reproduce' }, NAMES); i.fields.customfield_107 = adf([], ['Open the map', 'Zoom']);
-        i.fields.description = adf(['Tranquility 2945678', 'no list here']);
-        return byId(C.items(factsOf(i)), 'steps').ok;
+    // server names from the EVE Server field's options
+    ok('the top of the description is read for the server names the EVE Server field offers', (() => {
+        const i = finished(); i.names = OLD_NAMES; i.fields.description = adf(['Duality 2945678', 'x']);
+        const off = byId(C.items(C._facts(i, [], srcObj(), ['Tranquility', 'Singularity'])), 'build'), on = byId(C.items(C._facts(i, [], srcObj(), ['Tranquility', 'Duality'])), 'build');
+        return !off.ok && /No server name \(Tranquility, Singularity\)/.test(off.why) && on.ok;
     })());
-    ok('the steps item offers a template to copy', /^Reproduction steps:\n1\. /.test(byId(items, 'steps').copy));
+    ok('...the built-in names when none are given', (() => { const d0 = C._facts(finished(), [], srcObj()); return J(d0.servers) === J(C.SERVER_NAMES); })());
+    // reproduction steps: in any form, just not the bug report's
+    ok('reproduction steps rewritten in plain words, no list needed, are done', byId(descOf(['Tranquility 2945678', 'Dock in Jita, undock, and it crashes.']), 'steps').ok);
+    ok('...the report\'s steps kept word for word are not, whatever is around them', (() => { const it = byId(descOf(['Tranquility 2945678', 'My own: dock and undock.', 'Reproduction Steps: 1. undock 2. it crashes']), 'steps'); return !it.ok && /word for word/.test(it.why); })());
+    ok('...nor kept below the hunter\'s own list', !byId(descOf(['Tranquility 2945678', 'Reproduction Steps: 1. undock 2. it crashes'], ['Dock', 'Undock']), 'steps').ok);
+    ok('...in a steps field of its own, too', (() => {
+        const i = finished(); i.names = Object.assign({ customfield_107: 'Steps to Reproduce' }, NAMES); i.fields.customfield_107 = adf(['Reproduction Steps: 1. undock 2. it crashes']);
+        return !byId(C.items(factsOf(i)), 'steps').ok;
+    })());
+    ok('...a report\'s short steps are not looked for, so nothing is asked', (() => { const s = srcObj(); s.steps = '1. undock'; return !byId(C.items(C._facts(converted(), [], s)), 'steps'); })());
+    ok('...with no report\'s steps to go by, a steps field of its own must be filled in', (() => {
+        const i = finished(); i.names = Object.assign({ customfield_107: 'Steps to Reproduce' }, NAMES); i.fields.customfield_107 = null;
+        const empty = byId(C.items(C._facts(i, [], null)), 'steps');
+        i.fields.customfield_107 = adf(['dock, then undock']);
+        const full = byId(C.items(C._facts(i, [], null)), 'steps');
+        return empty && !empty.ok && empty.label === 'Steps to Reproduce filled in' && /Write the reproduction steps into Steps to Reproduce/.test(empty.why) && full.ok;
+    })());
+    ok('...and a defect from scratch without one has no steps item: Also check reminds of them', !byId(C.items(C._facts(finished(), [], null)), 'steps') && C.MORE.some((m) => /Reproduction steps/.test(m)));
+    ok('the steps item offers a template to copy', /^Reproduction steps:\n1\. /.test(byId(C.items(factsOf(converted())), 'steps').copy));
+    ok('...as a real numbered list too, its three steps empty but the last', (() => {
+        const it = byId(C.items(factsOf(converted())), 'steps');
+        return it.copy === C.STEPS_TEXT && /^<p>Reproduction steps:<\/p><ol><li><p><\/p><\/li><li><p><\/p><\/li><li><p>Observe that <\/p><\/li><\/ol>$/.test(it.html);
+    })(), byId(C.items(factsOf(converted())), 'steps').html);
+    ok('...from either form of the item', (() => {
+        const i = finished(); i.names = Object.assign({ customfield_107: 'Steps to Reproduce' }, NAMES); i.fields.customfield_107 = null;
+        const it = byId(C.items(C._facts(i, [], null)), 'steps'); return it.copy === C.STEPS_TEXT && it.html === C.STEPS_HTML;
+    })());
+    ok('the old way\'s server and build template, as text and rich text', (() => { const it = byId(descOf(['nothing'], ['a', 'b']), 'build'); return it.copy === C.BUILD_TEXT && it.html === C.BUILD_HTML && /^<p>Server: <\/p><p>Build: <\/p>$/.test(C.BUILD_HTML); })());
+    // the attachments, ticked off by their writer
+    const attOf = (att, ok0) => { const i = finished(); i.fields.attachment = att; if (ok0 !== undefined) { i.properties = { 'jita.checklist': { v: 1, ok: ok0 } }; } return byId(C.items(factsOf(i)), 'attachments'); };
+    const ATT = [{ filename: 'logs.txt', size: 100 }, { filename: 'loglite.txt', size: 5 }];
+    ok('attachments ticked off for the set they are count as checked', attOf(ATT, { attachments: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08', sig: C._attSig(ATT) } }).ok);
+    ok('...one added since asks again, saying who checked them and when', (() => {
+        const it = attOf(ATT.concat([{ filename: 'shot.png', size: 9 }]), { attachments: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08', sig: C._attSig(ATT) } });
+        return !it.ok && /^They changed since Hunter checked them on 2026-11-08: check them again\./.test(it.why);
+    })(), attOf(ATT.concat([{ filename: 'shot.png', size: 9 }]), { attachments: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08', sig: C._attSig(ATT) } }).why);
+    ok('...none at all is asked about too', (() => { const it = attOf([], {}); return !it.ok && it.none && /There are none/.test(it.why); })());
+    ok('...and the tick carries the set it is for', attOf(ATT, {}).sig === C._attSig(ATT));
     const fieldsOf = (sev, imp) => { const i = finished(); i.fields.customfield_101 = sev; i.fields.customfield_102 = imp; return byId(C.items(factsOf(i)), 'fields'); };
     ok('Severity and Impact: an unset one is named', fieldsOf({ value: 'A' }, null).why === 'Not set yet: Impact.', fieldsOf({ value: 'A' }, null).why);
     ok('...both set is done, and nothing asks for a State', fieldsOf({ value: 'A' }, { value: 'Minor' }).ok && fieldsOf({ value: 'A' }, { value: 'Minor' }).label === 'Severity and Impact set');
@@ -376,8 +448,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     })());
     ok('Priority, Team and Epic Link: one the reporter set is named', (() => { const i = finished(); i.fields.customfield_10001 = { name: 'Core' }; const it = byId(C.items(factsOf(i)), 'fc'); return !it.ok && /Set on this defect by its reporter: Team/.test(it.why); })());
     ok('a label in lower case is named', (() => { const i = finished(); i.fields.labels = ['undock', 'Crash']; const it = byId(C.items(factsOf(i)), 'caps'); return !it.ok && /undock/.test(it.why); })());
-    ok('a defect written from scratch has no rewrite or report-label items', (() => { const ids = C.items(C._facts(finished(), [], null)).map((it) => it.id).join(','); return ids.indexOf('desc') < 0 && ids.indexOf('replabels') < 0 && ids.indexOf('logs') >= 0; })());
-    ok('...and its logs need no report to compare with', (() => { const it = byId(C.items(C._facts(finished(), [], null)), 'logs'); return it.ok; })());
+    ok('a defect written from scratch has no rewrite or report-label items', (() => { const ids = C.items(C._facts(finished(), [], null)).map((it) => it.id).join(','); return ids.indexOf('desc') < 0 && ids.indexOf('replabels') < 0 && ids.indexOf('attachments') >= 0; })());
     ok('a defect outside EDR is open, and may be marked not needed', (() => { const i = finished(); i.key = 'EO-5'; const it = byId(C.items(factsOf(i)), 'project'); return !it.ok && it.waivable; })());
     // the exception item
     const withExc = (descParas, exc) => { const s = srcObj(); s.exc = exc; const i = finished(); if (descParas) { i.fields.description = adf(descParas, ['a', 'b']); } return byId(C.items(C._facts(i, [], s)), 'exc'); };
@@ -385,10 +456,10 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...an open one when they hold some the description does not', (() => { const it = withExc(['Tranquility 2945678', 'no exception here'], [EXC]); return it && !it.ok && it.waivable && /logs hold 1 exception/.test(it.why); })());
     ok('...done once the description holds one of them', withExc(['Tranquility 2945678', 'EXC[' + EXC.sig + ']'], [EXC]).ok);
     // waivers
-    const waived = (ids) => { const i = finished(); i.fields.attachment = [{ filename: 'screenshot.png', size: 100 }]; i.properties = { 'jita.checklist': { v: 1, w: ids } }; return C.items(factsOf(i)); };
-    ok('an item marked Not needed counts as done, and says who marked it', (() => { const it = byId(waived({ logs: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08' } }), 'logs'); return !it.ok && it.waived && it.by.name === 'Hunter'; })());
-    ok('...only items the guide lets a defect go without', (() => { const i = converted(); i.properties = { 'jita.checklist': { v: 1, w: { summary: { by: 'x' }, steps: { by: 'x' } } } }; const its = C.items(factsOf(i)); return !byId(its, 'summary').waived && !byId(its, 'steps').waived; })());
-    ok('...which are the project, the report\'s labels, the logs and the exception', (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).filter((it) => it.waivable).map((it) => it.id).join(',') === 'project,replabels,logs,exc'; })());
+    const waived = (ids) => { const i = converted(); i.properties = { 'jita.checklist': { v: 1, w: ids } }; return C.items(factsOf(i)); };
+    ok('an item marked Not needed counts as done, and says who marked it', (() => { const it = byId(waived({ replabels: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08' } }), 'replabels'); return !it.ok && it.waived && it.by.name === 'Hunter'; })());
+    ok('...only items the guide lets a defect go without', (() => { const its = waived({ summary: { by: 'x' }, steps: { by: 'x' }, attachments: { by: 'x' } }); return !byId(its, 'summary').waived && !byId(its, 'steps').waived && !byId(its, 'attachments').waived; })());
+    ok('...which are the project, the report\'s labels and the exception', (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).filter((it) => it.waivable).map((it) => it.id).join(',') === 'project,replabels,exc'; })());
 
     // ---- the state ----
     let s0 = srcObj(), st = C._judge(C._facts(finished(), [], s0), 'reporter', 'acc-rep', []);
@@ -397,7 +468,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     st = C._judge(C._facts(finished(), [], s0), 'reporter', 'acc-rep', []);
     ok('...logs that could not be read hold nothing up', !st.pending && st.complete);
     st = C._judge(C._facts(converted(), [], srcObj()), 'reporter', 'acc-rep', []);
-    ok('the open items are counted', st.open === 6 && !st.complete, String(st.open));
+    ok('the open items are counted', st.open === 7 && !st.complete, String(st.open));
 
     // ================= who sees it =================
     const whoOf = (rep, name) => C._who({ fields: { reporter: { accountId: rep, displayName: name } } }, 'acc-me');
@@ -430,6 +501,25 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     readOf = { 'EBR-10': { rec: { logs: false, exc: [] } } };
     last2 = await C.load('EDR-1', () => {});
     ok('...a reading that never got its logs is no reading either', last2.src.failed && !last2.pending);
+    // the server names a load reads the top of the description by: the EVE Server field's options
+    delete gmStore[C.SERVERS_KEY];
+    editmetaOf = { 'EDR-1': { fields: { customfield_105: { allowedValues: [{ value: 'Chaos' }] } } } };
+    const iChaos = converted(); iChaos.fields.description = adf(['Chaos 2945678', 'Undocking crashes the client.']);
+    issueOf = { 'EDR-1': iChaos };
+    last2 = await C.load('EDR-1', () => {});
+    ok('a load reads the top of the description for the servers the EVE Server field offers', byId(last2.items, 'build').ok, byId(last2.items, 'build').why);
+    ok('...and keeps what Jira says the defect was last updated', C._upd['EDR-1'] === '', J(C._upd));
+    editmetaOf = {}; delete gmStore[C.SERVERS_KEY];
+    iChaos.fields.updated = '2026-11-08T12:00:00.000+0000';
+    await C.load('EDR-1', () => {});
+    ok('...its `updated`, for the checks to compare with', C._upd['EDR-1'] === '2026-11-08T12:00:00.000+0000', J(C._upd));
+    issueOf = { 'EDR-1': converted() };
+    // a load that fails once it knows who is looking says who
+    histOf['EDR-1'] = new Error('HTTP 500 from Jira');
+    let lerr = null;
+    try { await C.load('EDR-1', () => {}); } catch (e) { lerr = e; }
+    ok('a load that fails once it knows who is looking says who it was', !!lerr && lerr.message === 'HTTP 500 from Jira' && lerr.sees === 'reporter' && lerr.me === 'acc-rep', lerr && J({ m: lerr.message, s: lerr.sees, me: lerr.me }));
+    delete histOf['EDR-1'];
     readOf = { 'EBR-10': { rec: { logs: true, exc: [EXC], build: null } } };
     me = 'acc-other';
     gets = [];
@@ -454,7 +544,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     await settle();
     let g = document.getElementById(C.GROUP_ID), body = g && g.find('#jita-cl');
     ok('the card is mounted right under Details', !!g && anchor.nextSibling === g);
-    ok('...its title says how many items are open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent === 'Defect checklist · 7 open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent);
+    ok('...its title says how many items are open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent === 'Defect checklist · 8 open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent);
     ok('...it names the bug report it was compared with', /Compared with EBR-10, the bug report it was converted from/.test(byCls(body, 'jcl-src')[0].textContent));
     const rows = byCls(body, 'jcl-item');
     ok('...one row per item, open ones marked ○, done ones ✓', rows.length === C.items(C._facts(converted(), [], Object.assign(srcObj(), { exc: [EXC] }))).length &&
@@ -464,7 +554,11 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     const actsOf = (id) => byCls(rows.filter((r) => r.attrs['data-item'] === id)[0], 'jcl-act').map((a) => a.textContent).join(',');
     ok('the reporter may take the report\'s labels off, or mark them not needed', actsOf('replabels') === 'Take off,Not needed', actsOf('replabels'));
     ok('...copy a template for the steps (the build has fields of its own here)', actsOf('build') === '' && actsOf('steps') === 'Copy', actsOf('build') + ' / ' + actsOf('steps'));
-    ok('...and nothing on a done item, nor a way to skip the summary', actsOf('logs') === '' && actsOf('summary') === '');
+    copied = []; copiedHtml = [];
+    byCls(rows.filter((r) => r.attrs['data-item'] === 'steps')[0], 'jcl-act')[0].fire('click');
+    await settle();
+    ok('...which copies the steps as text, and as a numbered list for Jira\'s editor', copied[0] === C.STEPS_TEXT && copiedHtml[0] === C.STEPS_HTML, J(copied) + ' ' + J(copiedHtml));
+    ok('...and nothing on a done item, nor a way to skip the summary', actsOf('caps') === '' && actsOf('summary') === '');
     const excRows = byCls(body, 'jcl-erow');
     ok('the report\'s exceptions are listed with the defects holding them', excRows.length === 1 && /KeyError/.test(byCls(excRows[0], 'jcl-emsg')[0].textContent) &&
         byCls(excRows[0], 'jcl-edef')[0].textContent === 'EDR-7');
@@ -472,16 +566,18 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     const chips = byCls(body, 'jcl-chip');
     ok('the reporter gets labels suggested from the defect\'s text', chips.map((c) => c.textContent).join(',') === '+ Undock' && /On 2 other defects/.test(chips[0].attrs.title),
         chips.map((c) => c.textContent).join(','));
-    ajaxLog = []; confirms = []; confirmAnswer = false;
+    ajaxLog = []; confirms = []; confirmAnswer = false; reloads = 0;
     chips[0].fire('click');
     await settle();
-    ok('...a click asks first, and a no adds nothing', confirms.length === 1 && /Add the label Undock to EDR-1/.test(confirms[0]) && !puts().length);
-    confirmAnswer = true;
+    ok('...a click asks first, and a no adds nothing', confirms.length === 1 && /Add the label Undock to EDR-1/.test(confirms[0]) && !puts().length && !reloads);
+    ok('...saying the page then reloads', /The page then reloads to show it\./.test(confirms[0]));
+    confirmAnswer = true; toasts = [];
     chips[0].fire('click');
     await settle();
     ok('...a yes adds it', puts().length === 1 && J(puts()[0].body) === J({ update: { labels: [{ add: 'Undock' }] } }), J(puts()));
+    ok('...and the page reloads, so Jira shows it and no edit there writes the old labels back', reloads === 1 && toasts.some((t) => /^Added Undock to EDR-1\. The page reloads to show it\.$/.test(t)), reloads + ' ' + toasts.join(' | '));
     let fin = byCls(body, 'jcl-finish')[0];
-    ok('the hand-off waits for the last item', fin && fin.props.disabled === true && /7 items still open/.test(fin.attrs.title), fin && fin.attrs.title);
+    ok('the hand-off waits for the last item', fin && fin.props.disabled === true && /8 items still open/.test(fin.attrs.title), fin && fin.attrs.title);
     ok('a defect that is no exploit keeps the exploit steps folded away', !byCls(body, 'jcl-warn').length && byCls(body, 'jcl-mline').some((l) => /Exploit/.test(l.textContent)));
 
     // a Lead's view
@@ -506,15 +602,16 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('an exception the description holds already is offered for Copy, no longer for Add', byCls(byCls(body, 'jcl-erow')[0], 'jcl-act').map((a) => a.textContent).join(',') === 'Copy');
 
     // ---- the hand-off ----
-    ajaxLog = []; confirms = []; confirmAnswer = false;
+    ajaxLog = []; confirms = []; confirmAnswer = false; reloads = 0;
     fin.fire('click');
     await settle();
-    ok('the unassign asks first, and a no writes nothing', confirms.length === 1 && /Unassign EDR-1 and hand it to FC/.test(confirms[0]) && !puts().length);
+    ok('the unassign asks first, and a no writes nothing', confirms.length === 1 && /Unassign EDR-1 and hand it to FC\? The page then reloads to show it\./.test(confirms[0]) && !puts().length && !reloads);
     confirmAnswer = true;
     fin.fire('click');
     await settle();
     ok('...a yes unassigns it', puts().length === 1 && puts()[0].path === '/rest/api/3/issue/EDR-1/assignee' && J(puts()[0].body) === J({ accountId: null }), J(puts()));
     ok('...with the token Jira wants for a write', puts()[0].headers['X-Atlassian-Token'] === 'no-check');
+    ok('...and the page reloads to show it', reloads === 1);
 
     // ---- nobody unassigns an unfinished defect ----
     issueOf['EDR-1'] = converted();
@@ -528,7 +625,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     };
     toasts = [];
     ok('"Unassigned" picked in Jira\'s assignee field is refused while items are open', !!pick('Unassigned'));
-    ok('...saying why', toasts.length === 1 && /stays assigned until the Defect checklist is done: 7 items still open/.test(toasts[0]), toasts.join(' | '));
+    ok('...saying why', toasts.length === 1 && /stays assigned until the Defect checklist is done: 8 items still open/.test(toasts[0]), toasts.join(' | '));
     ok('...the mousedown too, so the picker never hears of it', !!pick('Unassigned', 'mousedown') && toasts.length === 1);
     ok('...but nobody else is picked for', !pick('Bob Builder') && !pick('Assign to me'));
     ok('the guard is bound in the capture phase', listeners.some((l) => l.ev === 'click' && l.cap === true && l.fn === C._onPick) && listeners.some((l) => l.ev === 'mousedown' && l.cap === true));
@@ -569,11 +666,12 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     const i3 = converted(); i3.fields.assignee = null;
     issueOf['EDR-1'] = i3;
     histOf['EDR-1'] = [{ author: { accountId: 'acc-rep' }, created: new Date(Date.now() - 20000).toISOString(), items: [{ field: 'assignee', fieldId: 'assignee', from: 'acc-rep', to: null }] }];
-    ajaxLog = []; toasts = [];
+    ajaxLog = []; toasts = []; reloads = 0;
     await C.refresh('EDR-1');
     await settle();
     ok('an unassign that got past it (a shortcut) is put back to its assignee', puts().length === 1 && puts()[0].path === '/rest/api/3/issue/EDR-1/assignee' && J(puts()[0].body) === J({ accountId: 'acc-rep' }), J(puts()));
-    ok('...saying why', toasts.some((t) => /It was put back to its assignee/.test(t)), toasts.join(' | '));
+    ok('...saying why, and that a reload shows it', toasts.some((t) => /It was put back to its assignee: reload the page to see it in Jira's fields\./.test(t)), toasts.join(' | '));
+    ok('...but never reloading the page unasked', reloads === 0);
     ajaxLog = [];
     await C.refresh('EDR-1');
     await settle();
@@ -586,44 +684,92 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     await settle();
     ajaxLog = []; confirms = [];
     answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: false, status: 404 } };
-    await C._waive('EDR-1', 'logs', true);
+    await C._waive('EDR-1', 'replabels', true);
     await settle();
     let put = puts()[0];
     ok('Not needed is kept on the issue, saying who and when, and asks nothing', confirms.length === 0 && put && put.path === '/rest/api/3/issue/EDR-1/properties/jita.checklist' &&
-        put.body.v === 1 && put.body.w.logs.by === 'acc-rep' && put.body.w.logs.name === 'ISD BH Hunter' && !!put.body.w.logs.at, J(put));
+        put.body.v === 1 && put.body.w.replabels.by === 'acc-rep' && put.body.w.replabels.name === 'ISD BH Hunter' && !!put.body.w.replabels.at, J(put));
     ajaxLog = [];
-    answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: true, data: { key: 'jita.checklist', value: { v: 1, w: { logs: { by: 'acc-rep' }, exc: { by: 'acc-rep' } } } } } };
-    await C._waive('EDR-1', 'logs', false);
+    const KEPT = { v: 1, w: { replabels: { by: 'acc-rep' }, exc: { by: 'acc-rep' } }, ok: { attachments: { by: 'acc-rep', sig: 'logs.txt:100' } } };
+    answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: true, data: { key: 'jita.checklist', value: KEPT } } };
+    await C._waive('EDR-1', 'replabels', false);
     await settle();
     put = puts()[0];
-    ok('...taking it back keeps the other marks (read again first)', put && J(put.body.w) === J({ exc: { by: 'acc-rep' } }), put && J(put.body));
+    ok('...taking it back keeps the other marks, the ticks too (read again first)', put && J(put.body.w) === J({ exc: { by: 'acc-rep' } }) && J(put.body.ok) === J(KEPT.ok), put && J(put.body));
+    // the attachments ticked off
+    ajaxLog = [];
+    answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: true, data: { key: 'jita.checklist', value: { v: 1, w: { exc: { by: 'acc-rep' } } } } } };
+    await C._tick('EDR-1', 'attachments', 'logs.txt:100', true);
+    await settle();
+    put = puts()[0];
+    ok('a tick is kept on the issue for the set of attachments it was for, saying who and when', put && put.body.ok.attachments.sig === 'logs.txt:100' &&
+        put.body.ok.attachments.by === 'acc-rep' && put.body.ok.attachments.name === 'ISD BH Hunter' && !!put.body.ok.attachments.at && J(put.body.w) === J({ exc: { by: 'acc-rep' } }), put && J(put.body));
+    ajaxLog = [];
+    answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: true, data: { key: 'jita.checklist', value: KEPT } } };
+    await C._tick('EDR-1', 'attachments', '', false);
+    await settle();
+    put = puts()[0];
+    ok('...and taken back', put && J(put.body.ok) === '{}' && J(put.body.w) === J(KEPT.w), put && J(put.body));
+    answers = {};
+    // ...from the card: the reporter's "They are good"
+    await C.refresh('EDR-1');
+    await settle();
+    let attRow = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-item').filter((r) => r.attrs['data-item'] === 'attachments')[0];
+    let attActs = byCls(attRow, 'jcl-act');
+    ok('the reporter ticks the attachments off on the card', attActs.map((a) => a.textContent).join(',') === 'They are good', attActs.map((a) => a.textContent).join(','));
+    ajaxLog = []; confirms = [];
+    answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: false, status: 404 } };
+    attActs[0].fire('click');
+    await settle();
+    ok('...a click ticks them for the set they are, asking nothing', confirms.length === 0 && puts().length === 1 && puts()[0].body.ok.attachments.sig === C._attSig(converted().fields.attachment), J(puts()));
+    answers = {};
+    const iNone = converted(); iNone.fields.attachment = [];
+    issueOf['EDR-1'] = iNone;
+    await C.refresh('EDR-1');
+    await settle();
+    attRow = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-item').filter((r) => r.attrs['data-item'] === 'attachments')[0];
+    ok('...with none, the button says None needed', byCls(attRow, 'jcl-act').map((a) => a.textContent).join(',') === 'None needed');
+    const iTicked = converted(); iTicked.properties = { 'jita.checklist': { v: 1, ok: { attachments: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08', sig: C._attSig(iTicked.fields.attachment) } } } };
+    issueOf['EDR-1'] = iTicked;
+    await C.refresh('EDR-1');
+    await settle();
+    attRow = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-item').filter((r) => r.attrs['data-item'] === 'attachments')[0];
+    ok('...ticked, it says who checked them and when, and can be taken back', /^Checked by Hunter on 2026-11-08$/.test(byCls(attRow, 'jcl-lbl')[0].attrs.title) &&
+        byCls(attRow, 'jcl-act').map((a) => a.textContent).join(',') === 'Undo', byCls(attRow, 'jcl-lbl')[0].attrs.title);
+    issueOf['EDR-1'] = converted();
     isLead = true; me = 'acc-lead';
     await C.refresh('EDR-1');
     await settle();
+    attRow = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-item').filter((r) => r.attrs['data-item'] === 'attachments')[0];
+    ok('a Lead does not tick the attachments off', !byCls(attRow, 'jcl-act').length);
     ajaxLog = [];
-    await C._waive('EDR-1', 'logs', true);
+    await C._waive('EDR-1', 'replabels', true);
+    await C._tick('EDR-1', 'attachments', 'x', true);
     await settle();
-    ok('...a Lead marks nothing', !ajaxLog.length);
+    ok('...and marks nothing', !ajaxLog.length);
     isLead = false; me = 'acc-rep';
     await C.refresh('EDR-1');
     await settle();
     answers = {};
-    ajaxLog = []; confirms = []; confirmAnswer = false;
+    ajaxLog = []; confirms = []; confirmAnswer = false; reloads = 0;
     await C._takeLabels('EDR-1', ['PlatformWin']);
-    ok('the report\'s labels come off only after a yes', confirms.length === 1 && /PlatformWin/.test(confirms[0]) && /cloned and jira_escalated stay/.test(confirms[0]) && !puts().length);
-    confirmAnswer = true;
+    ok('the report\'s labels come off only after a yes', confirms.length === 1 && /PlatformWin/.test(confirms[0]) && /cloned and jira_escalated stay\. The page then reloads to show it\./.test(confirms[0]) && !puts().length && !reloads);
+    confirmAnswer = true; toasts = [];
     await C._takeLabels('EDR-1', ['PlatformWin', 'Russian']);
     await settle();
     ok('...then one edit takes each off', puts().length === 1 && J(puts()[0].body) === J({ update: { labels: [{ remove: 'PlatformWin' }, { remove: 'Russian' }] } }), J(puts()));
+    ok('...and the page reloads to show it', reloads === 1 && toasts.some((t) => /^Taken off EDR-1: PlatformWin, Russian\. The page reloads to show it\.$/.test(t)), toasts.join(' | '));
     // the exception, added in an expand
     logText = { 'u-logs': "header\n\nkeyerror: 'x'|a.py:f>b.py:g>c.py:h\nTraceback (most recent call last):\n  File a.py\n\nother block" };
-    ajaxLog = []; confirms = []; confirmAnswer = true;
+    ajaxLog = []; confirms = []; confirmAnswer = true; reloads = 0; toasts = [];
     answers = { 'GET /rest/api/3/issue/EDR-1': { ok: true, data: { fields: { description: adf(['what the hunter wrote']) } } } };
     const sNow = C._state['EDR-1'];
     await C._addExc('EDR-1', sNow, EXC);
     await settle();
     put = puts()[0];
     ok('Add asks first, naming the expand\'s title', confirms.length === 1 && /in an expand titled:\n\nKeyError: 'x' raised while undocking/.test(confirms[0]), confirms[0]);
+    ok('...saying to save an edit of the description first, as the page then reloads', /\n\nSave or cancel an edit of the description first: the page then reloads to show it\.$/.test(confirms[0]), confirms[0]);
+    ok('...and it does, once the description is written', reloads === 1 && toasts.some((t) => /^Added to the description of EDR-1\. The page reloads to show it\.$/.test(t)), reloads + ' ' + toasts.join(' | '));
     ok('...reads the description again just before it writes', ajaxLog.filter((r) => r.method === 'GET' && /fields=description/.test(r.path)).length === 1);
     ok('...and appends the exception as the log has it, the hunter\'s text kept', put && put.body.fields.description.content.length === 2 &&
         put.body.fields.description.content[0].content[0].text === 'what the hunter wrote' && /Traceback \(most recent call last\)/.test(put.body.fields.description.content[1].content[0].content[0].text), put && J(put.body));
@@ -678,6 +824,197 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     C._place();
     ok('...and goes back under Details when another card went in between', anchor.nextSibling === document.getElementById(C.GROUP_ID));
     ok('the card\'s style is added once', styles.length === 1);
+
+    // ================= a check that fails =================
+    issueOf['EDR-1'] = converted(); histOf['EDR-1'] = new Error('HTTP 500 from Jira.');
+    delete C._state['EDR-1']; C._seen = 'stale';
+    const said = [], realLog = console.log;
+    console.log = (...a) => { said.push(a.map((x) => (x && x.message) || String(x)).join(' ')); };
+    try { await C.refresh('EDR-1'); await settle(); } finally { console.log = realLog; }
+    g = document.getElementById(C.GROUP_ID); body = g && g.find('#jita-cl');
+    ok('a check that fails for the defect\'s reporter shows on the card, saying so', !!g && byCls(body, 'jcl-count')[0].textContent === 'Could not check EDR-1' &&
+        byCls(body, 'jcl-failed').length === 1 && g.querySelector('[data-jita-title]').textContent === 'Defect checklist · could not check', g && body.textContent);
+    ok('...and why, with nothing refused until it can be checked', /^HTTP 500 from Jira\. Nothing is refused until it can be checked\.$/.test(byCls(body, 'jcl-line')[0].textContent), byCls(body, 'jcl-line')[0].textContent);
+    ok('...with a way to check again', byCls(body, 'jcl-again').length === 1 && byCls(body, 'jcl-again')[0].handlers.click.length === 1);
+    ok('...and in the console', said.some((l) => /^\[JiTA\] checklist: could not check EDR-1: HTTP 500 from Jira\.$/.test(l)), J(said));
+    toasts = [];
+    ok('...nothing is refused meanwhile', !pick('Unassigned') && !toasts.length);
+    ok('...and it is checked again once the page changes, not on every change of it', C._seen === C._pageSig());
+    column.removeChild(document.getElementById(C.GROUP_ID));
+    C.reensure();
+    ok('...a card Jira wiped comes back saying so', !!document.getElementById(C.GROUP_ID) && byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-failed').length === 1);
+    histOf['EDR-1'] = [];
+    await C.refresh('EDR-1'); await settle();
+    histOf['EDR-1'] = new Error('HTTP 502');
+    toasts = []; said.length = 0;
+    console.log = (...a) => { said.push(a.map((x) => (x && x.message) || String(x)).join(' ')); };
+    try { await C.refresh('EDR-1'); await settle(); } finally { console.log = realLog; }
+    body = document.getElementById(C.GROUP_ID).find('#jita-cl');
+    ok('a check that fails after a good one keeps that card, and says so in a toast', !byCls(body, 'jcl-failed').length && byCls(body, 'jcl-item').length > 0 &&
+        toasts.some((t) => /could not read EDR-1 again: HTTP 502/.test(t)), toasts.join(' | '));
+    histOf['EDR-1'] = [];
+    // a failure before it knows who is looking
+    const kept = issueOf['EDR-1'];
+    delete issueOf['EDR-1']; delete C._state['EDR-1']; C.clear();
+    const debugged = [], realDlog = JiTA.dlog;
+    JiTA.dlog = (...a) => { debugged.push(a.join(' ')); };
+    await C.refresh('EDR-1'); await settle();
+    JiTA.dlog = realDlog;
+    ok('a failure before it knows who is looking draws no card, and is said only with debug logging on', !document.getElementById(C.GROUP_ID) && !C._state['EDR-1'] &&
+        debugged.some((l) => /could not read EDR-1/.test(l)), J(debugged));
+    issueOf['EDR-1'] = kept;
+
+    // ================= is the defect still as it was read? =================
+    issueOf['EDR-1'] = converted(); issueOf['EDR-1'].fields.updated = '2026-11-08T12:00:00.000+0000'; histOf['EDR-1'] = [];
+    await C.refresh('EDR-1'); await settle();
+    gets = [];
+    await C._check(); await settle();
+    ok('a check asks Jira one small thing, and with nothing changed reads nothing more', J(gets) === J(['/rest/api/3/issue/EDR-1?fields=updated']), J(gets));
+    issueOf['EDR-1'].fields.updated = '2026-11-08T12:00:05.000+0000';
+    gets = [];
+    await C._check(); await settle();
+    ok('...an edit made since reads the defect again', gets.some((p) => /fields=\*all/.test(p)) && C._upd['EDR-1'] === '2026-11-08T12:00:05.000+0000', J(gets));
+    gets = [];
+    const c1 = C._check(), c2 = C._check();
+    await c1; await c2; await settle();
+    ok('...one check at a time', gets.filter((p) => /fields=updated$/.test(p)).length === 1, J(gets));
+    const goodState = C._state['EDR-1'];
+    C._state['EDR-1'] = { key: 'EDR-1', sees: 'reporter', me: 'acc-rep', error: 'HTTP 500' };
+    gets = [];
+    await C._check(); await settle();
+    ok('...and a check that failed waits for the focus or a click on its ↻', !gets.length);
+    C._state['EDR-1'] = { key: 'EDR-1', sees: '' };
+    await C._check(); await settle();
+    ok('...as does a defect the card is not for', !gets.length);
+    C._state['EDR-1'] = goodState;
+    // after a click or a key, and after the page changed
+    const realST = global.setTimeout, realCT = global.clearTimeout, realCheck = C._check;
+    let timers = [], cleared = [], checks = 0;
+    global.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return timers.length; };
+    global.clearTimeout = (t) => { cleared.push(t); };
+    C._check = () => { checks++; return Promise.resolve(); };
+    try {
+        C._inputT = [];
+        C._onInput(); C._onInput();
+        ok('a click or a key checks the defect soon after, and again later for a slow save, the last one counting', timers.length === 4 &&
+            J(timers.slice(2).map((t) => t.ms)) === J(C.INPUT_MS) && J(cleared) === J([1, 2]) && C.INPUT_MS[0] < 3000 && C.INPUT_MS[1] <= 10000, J(timers.map((t) => t.ms)) + ' cleared ' + J(cleared));
+        timers[2].fn(); timers[3].fn();
+        ok('...each one a check', checks === 2);
+        timers = []; C._state['EDR-1'] = { key: 'EDR-1', sees: '' };
+        C._onInput();
+        ok('...not on a defect the card is not for', !timers.length);
+        C._state['EDR-1'] = goodState;
+        ok('clicks and keys are heard in the capture phase, before Jira takes them', listeners.some((l) => l.ev === 'mouseup' && l.cap === true && l.fn === C._onInput) &&
+            listeners.some((l) => l.ev === 'keyup' && l.cap === true && l.fn === C._onInput));
+        timers = []; checks = 0; onScreen = 'EDR-1'; C._key = 'EDR-1'; C._seen = 'before';
+        C.ensure();
+        ok('a change on the page checks the defect a moment later, rather than reading it in full', timers.length === 1 && timers[0].ms === C.RECHECK_MS && C.RECHECK_MS <= 1500 && C._seen === C._pageSig(),
+            J(timers.map((t) => t.ms)));
+        timers[0].fn();
+        ok('...with a check', checks === 1);
+        timers = [];
+        C.ensure();
+        ok('...and the same page checks nothing', !timers.length);
+        checks = 0;
+        C._onFocus();
+        ok('back in the tab, the defect is checked', checks === 1);
+        const realRefresh = C.refresh;
+        let refreshes = 0;
+        C.refresh = () => { refreshes++; return Promise.resolve(); };
+        C._state['EDR-1'] = { key: 'EDR-1', sees: 'reporter', me: 'acc-rep', error: 'HTTP 500' };
+        C._lastLoad = Date.now();
+        C._onFocus();
+        ok('...a check that failed is tried again on the focus, though not straight after the last one', refreshes === 0 && checks === 1);
+        C._lastLoad = Date.now() - C.FOCUS_MS - 1;
+        C._onFocus();
+        ok('...but a while after it', refreshes === 1 && checks === 1);
+        C.refresh = realRefresh;
+        C._state['EDR-1'] = goodState;
+    } finally {
+        global.setTimeout = realST; global.clearTimeout = realCT; C._check = realCheck;
+    }
+
+    // ================= a defect nobody has before it is done =================
+    const iU = converted(); iU.fields.assignee = null;
+    issueOf['EDR-1'] = iU; histOf['EDR-1'] = [];
+    await C.refresh('EDR-1'); await settle();
+    foot = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-foot')[0];
+    let take = byCls(foot, 'jcl-finish')[0];
+    ok('a defect nobody has before it is done says FC can pick it up, and its reporter may take it', /Unassigned, so FC can pick it up, though items are still open\./.test(foot.textContent) &&
+        byCls(foot, 'jcl-early').length === 1 && !!take && take.textContent === 'Assign to me until it is done' && !take.props.disabled, foot.textContent);
+    ajaxLog = []; confirms = []; confirmAnswer = false; reloads = 0;
+    take.fire('click'); await settle();
+    ok('...asking first: a no writes nothing', confirms.length === 1 && /^Assign EDR-1 to you until its Defect checklist is done\? Unassigned, it is where FC picks defects up\. The page then reloads to show it\.$/.test(confirms[0]) &&
+        !puts().length && !reloads, confirms[0]);
+    confirmAnswer = true; toasts = []; gets = [];
+    take.fire('click'); await settle();
+    ok('...a yes assigns it to them, and the page reloads to show it', puts().length === 1 && puts()[0].path === '/rest/api/3/issue/EDR-1/assignee' && J(puts()[0].body) === J({ accountId: 'acc-rep' }) &&
+        reloads === 1 && toasts.some((t) => /^EDR-1 is assigned to you until the checklist is done\. The page reloads to show it\.$/.test(t)), J(puts()) + ' ' + reloads + ' ' + toasts.join(' | '));
+    ok('...and the card reads the defect again, should the reload not come', gets.some((p) => /fields=\*all/.test(p)), J(gets));
+    answers = { 'PUT /rest/api/3/issue/EDR-1/assignee': { ok: false, status: 403, json: { errorMessages: ['No permission'] } } };
+    await C.refresh('EDR-1'); await settle();
+    take = byCls(byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-foot')[0], 'jcl-finish')[0];
+    toasts = []; reloads = 0;
+    take.fire('click'); await settle();
+    ok('...one Jira refuses says why, and the button is back', toasts.some((t) => /^Could not assign EDR-1 to you: No permission$/.test(t)) && !take.props.disabled && take.textContent === 'Assign to me until it is done' && !reloads, toasts.join(' | '));
+    answers = {};
+    isLead = true; me = 'acc-lead';
+    await C.refresh('EDR-1'); await settle();
+    foot = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-foot')[0];
+    ok('...a Lead is told, but takes nothing', /Unassigned, so FC can pick it up/.test(foot.textContent) && !byCls(foot, 'jcl-finish').length, foot.textContent);
+    isLead = false; me = 'acc-rep';
+    const iUF = finished(); iUF.fields.assignee = null;
+    issueOf['EDR-1'] = iUF;
+    await C.refresh('EDR-1'); await settle();
+    foot = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-foot')[0];
+    ok('a finished defect nobody has is with FC, and offers nothing', foot.textContent === 'Unassigned: with FC.' && !byCls(foot, 'jcl-finish').length && !byCls(foot, 'jcl-early').length, foot.textContent);
+
+    // ================= copying rich text (JiTA.util.copy with html) =================
+    const realUtil = JiTA.util;
+    const U = eval('({' + member('    copy: function (text, html) {') + member('    _copyHtml: function (text, html) {') + '})');
+    JiTA.util = U;
+    let writes = [], texts = [], writeAnswer = true;
+    const nav = { clipboard: { write: (its) => { writes.push(its); return writeAnswer ? Promise.resolve() : Promise.reject(new Error('denied')); },
+        writeText: (t) => { texts.push(t); return Promise.resolve(); } } };
+    const realNav = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { value: nav, configurable: true, writable: true });
+    global.ClipboardItem = function (o) { this.o = o; this.types = Object.keys(o); };
+    try {
+        await U.copy('plain', '<ol><li>a</li></ol>');
+        const item = writes[0] && writes[0][0];
+        ok('a rich copy gives the clipboard both kinds at once', writes.length === 1 && !!item && J(item.types.slice().sort()) === J(['text/html', 'text/plain']) && !texts.length, J(item && item.types));
+        ok('...the HTML and the text as given', !!item && (await item.o['text/html'].text()) === '<ol><li>a</li></ol>' && (await item.o['text/plain'].text()) === 'plain');
+        writeAnswer = false; writes = []; texts = [];
+        let rr = null;
+        await U.copy('plain', '<ol></ol>').then(() => { rr = 'ok'; }, () => { rr = 'refused'; });
+        ok('...one the browser refuses copies the text alone', writes.length === 1 && J(texts) === J(['plain']) && rr === 'ok', J(texts) + ' ' + rr);
+        // the old way, where the browser has no rich copy
+        Object.defineProperty(globalThis, 'navigator', { value: {}, configurable: true, writable: true });
+        delete global.ClipboardItem;
+        let execAnswer = true, drawn = null, removed = 0, execs = 0, atCopy = null;
+        const selection = { ranges: [], removeAllRanges() { this.ranges = []; }, addRange(r) { this.ranges.push(r); } };
+        const realDoc = global.document;
+        global.document = Object.assign({}, realDoc, {
+            createElement: (t) => { drawn = { tag: t, style: {}, innerHTML: '' }; return drawn; },
+            createRange: () => ({ selectNodeContents(n) { this.node = n; } }),
+            body: { appendChild() {}, removeChild() { removed++; } },
+            execCommand: (c) => { execs++; atCopy = selection.ranges.length ? selection.ranges[0].node : null; return c === 'copy' && execAnswer; }
+        });
+        global.window.getSelection = () => selection;
+        try {
+            rr = null;
+            await U.copy('plain', '<ol><li>a</li></ol>').then(() => { rr = 'ok'; }, () => { rr = 'refused'; });
+            ok('...without it, the HTML is drawn off screen, selected and copied as it is, and taken away', rr === 'ok' && !!drawn && drawn.innerHTML === '<ol><li>a</li></ol>' && atCopy === drawn &&
+                execs === 1 && removed === 1 && !selection.ranges.length, rr + ' ' + J(drawn));
+            execAnswer = false; rr = null;
+            await U.copy('plain', '<p></p>').then(() => { rr = 'ok'; }, () => { rr = 'refused'; });
+            ok('...and a refusal there is said', rr === 'refused');
+        } finally { global.document = realDoc; delete global.window.getSelection; }
+    } finally {
+        JiTA.util = realUtil;
+        delete global.ClipboardItem;
+        if (realNav) { Object.defineProperty(globalThis, 'navigator', realNav); } else { delete globalThis.navigator; }
+    }
 
     // ================= switched off in Settings =================
     issueOf['EDR-1'] = converted();

@@ -17,7 +17,7 @@ const muts = [
     [H, 'a read starts its engine unwatched', '            return O._engineTimed(code).then(function (w) {', '            return O._engine(code).then(function (w) {'],
     [H, 'a failed warm-up keeps its engine', "function (e) { O._resetEngine(); throw e; });\n            }).then(null, function () { /* surfaced on the real run */ });",
         "function (e) { throw e; });\n            }).then(null, function () { /* surfaced on the real run */ });"],
-    [H, 'a refused copy counts as copied', "if (ok) { resolve(); } else { reject(new Error('copy refused')); }", 'resolve();'],
+    [H, 'a refused copy counts as copied', "document.body.removeChild(ta);\n                if (ok) { resolve(); } else { reject(new Error('copy refused')); }", 'document.body.removeChild(ta);\n                resolve();'],
     [H, 'the card says Copied whatever happened', "                    flash('Copy failed');", "                    flash('Copied');"]
 ];
 let allRed = true;

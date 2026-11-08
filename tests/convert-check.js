@@ -18,6 +18,7 @@ function Deferred() {
     const d = { _done: [], _fail: [] };
     d.done = (f) => { d._done.push(f); return d; };
     d.fail = (f) => { d._fail.push(f); return d; };
+    d.always = (f) => { d._done.push(f); d._fail.push(f); return d; };
     d.resolve = (v) => { d._done.forEach((f) => f(v)); };
     d.reject = (x) => { d._fail.forEach((f) => f(x)); };
     return d;
@@ -25,7 +26,11 @@ function Deferred() {
 function Button() { const b = { disabled: false }; b.prop = (k, v) => { if (v === undefined) { return b.disabled; } b.disabled = !!v; return b; }; return b; }
 let button = Button(), current = 'EBR-1', gets = [], rules = [], goes = [], errors = 0, lastErr = null;
 global.$ = (sel) => (sel === '#convertToDefectButton' ? button : { prop() { return this; } });
-$.ajax = (o) => { const d = Deferred(); gets.push({ url: o.url, d }); return d; };
+$.ajax = (o) => { const d = Deferred(); gets.push({ url: o.url, type: o.type, data: o.data, headers: o.headers, d }); return d; };
+// The Defect checklist's switch, and who is converting (an unassigned report is taken first while the checklist is on).
+let checklistOn = false, meAnswer = 'acc-me';
+global.flagOn = (name) => (name === 'defectChecklist' ? checklistOn : true);
+global.JiTA = { link: { currentUser: () => (meAnswer instanceof Error ? Promise.reject(meAnswer) : Promise.resolve(meAnswer)) } };
 global.jitaCurrentKey = () => current;
 global.jitaLinkedKeys = (links) => (links || []).map((l) => l.key);
 global.jitaInvokeAutomationRule = (id, rule) => { const d = Deferred(); rules.push({ id, rule, d }); return d; };
@@ -36,7 +41,7 @@ global.JITA_CONVERT_DEFECT_RULE = 'rule-9';
 
 // ---- one conversion, with Jira swapping the button mid-way ----
 jitaConvertClick();
-ok('a click starts the conversion: the report and its links are read', gets.length === 1 && /issue\/EBR-1\?fields=issuelinks$/.test(gets[0].url), gets.map((g) => g.url).join());
+ok('a click starts the conversion: the report, its links and its assignee are read', gets.length === 1 && /issue\/EBR-1\?fields=issuelinks,assignee$/.test(gets[0].url), gets.map((g) => g.url).join());
 ok('...and the button is disabled', button.disabled === true);
 button = Button();             // Jira's re-render puts a fresh, enabled button back
 jitaConvertButtonState();      // as addButtons does for every button it puts back
@@ -144,5 +149,41 @@ cloud = 'c-1';
 invokeRule('10001', 'rule-9');
 ok('...with one, the automation is called', invoked === 1);
 
-console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'Convert to Defect checks passed.'));
-process.exit(fail ? 1 : 0);
+// ---- an unassigned report is taken first, so its defect starts out with the one converting it (v3.51.0) ----
+// The conversion gives the defect the report's assignee, and a defect nobody has is where FC picks defects up, though its
+// Defect checklist has not been worked through.
+(async () => {
+    const flush = async () => { for (let i = 0; i < 10; i++) { await new Promise((r) => setImmediate(r)); } };
+    global.$ = (sel) => (sel === '#convertToDefectButton' ? button : { prop() { return this; } });
+    $.ajax = (o) => { const d = Deferred(); gets.push({ url: o.url, type: o.type, data: o.data, headers: o.headers, d }); return d; };
+    const convertOf = async (key, assignee) => {
+        current = key; button = Button(); gets = []; rules = [];
+        jitaConvertClick();
+        gets[0].d.resolve({ id: key.replace('EBR-', '9'), fields: { issuelinks: [], assignee: assignee } });
+        await flush();
+    };
+    checklistOn = true; meAnswer = 'acc-me';
+    await convertOf('EBR-20', null);
+    const put = gets[1];
+    ok('an unassigned report is taken by the one converting it before it converts', !!put && put.type === 'PUT' && /\/rest\/api\/3\/issue\/EBR-20\/assignee$/.test(put.url) &&
+        put.data === JSON.stringify({ accountId: 'acc-me' }) && !!put.headers && put.headers['X-Atlassian-Token'] === 'no-check' && rules.length === 0, put && JSON.stringify({ url: put.url, data: put.data }));
+    put.d.resolve();
+    ok('...and converts once it is taken', rules.length === 1 && rules[0].id === '920');
+    await convertOf('EBR-21', null);
+    gets[1].d.reject({ status: 403 });
+    ok('...a take Jira refuses converts all the same', rules.length === 1 && rules[0].id === '921');
+    await convertOf('EBR-22', { accountId: 'acc-x' });
+    ok('a report someone has is converted as it is', gets.length === 1 && rules.length === 1);
+    checklistOn = false;
+    await convertOf('EBR-23', null);
+    ok('with the checklist switched off, an unassigned report is converted as it is', gets.length === 1 && rules.length === 1);
+    checklistOn = true; meAnswer = null;
+    await convertOf('EBR-24', null);
+    ok('...and when who is converting cannot be told', gets.length === 1 && rules.length === 1);
+    meAnswer = new Error('no session');
+    await convertOf('EBR-25', null);
+    ok('...or cannot be read', gets.length === 1 && rules.length === 1);
+
+    console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'Convert to Defect checks passed.'));
+    process.exit(fail ? 1 : 0);
+})().catch((e) => { console.log('CRASH ' + (e && e.stack || e)); process.exit(2); });
