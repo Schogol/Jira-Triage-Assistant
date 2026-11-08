@@ -13908,8 +13908,9 @@ JiTA.profile = {
  *
  * What it writes to Jira, each asked first: the report's labels taken off, a suggested label added, an exception from the
  * report's logs added to the description in an expand, the defect taken by its reporter, and the unassign; and the marks,
- * which ask nothing. Nothing else here edits an issue. Settings > Features switches the card off, and the unassign block
- * with it. A check that fails says so on the card, and refuses nothing.
+ * which ask nothing. Nothing else here edits an issue. After each field written, Jira's issue view is told to read the
+ * issue again (_written), so it shows the change without a reload. Settings > Features switches the card off, and the
+ * unassign block with it. A check that fails says so on the card, and refuses nothing.
  */
 JiTA.checklist = {
     TITLE: 'Defect checklist',
@@ -13942,6 +13943,12 @@ JiTA.checklist = {
     RECHECK_MS: 1000,
     INPUT_MS: [1500, 5000],
     FOCUS_MS: 10000,                              // back in the tab: a check that failed is tried again, at most this often
+    // After a write, Jira's issue view is told to read the issue again (_written) by the DOM event its own comment box and
+    // Connect's AP.jira.refreshIssuePage() fire. The page is looked at every REFRESH_STEP_MS, and reloads when it has not
+    // changed REFRESH_MS after.
+    REFRESH_EVENT: 'legacy_refreshIssuePage',
+    REFRESH_MS: 8000,
+    REFRESH_STEP_MS: 250,
     SHOW_EXC: 5,                                  // exceptions listed before "N more"
     // What the Copy buttons give: as text, and as rich text that pastes into Jira's editor as a real numbered list (Enter on
     // a step makes the next).
@@ -14543,26 +14550,38 @@ JiTA.checklist = {
         if (!back || back.from !== s.d.reporter || C._reverted[key] === back.at) { return; }
         C._reverted[key] = back.at;
         C._req('PUT', '/rest/api/3/issue/' + encodeURIComponent(key) + '/assignee', { accountId: back.from }).then(function () {
-            JiTA.ui.toast(C._refusal(s) + ' It was put back to its assignee: reload the page to see it in Jira\'s fields.');
+            JiTA.ui.toast(C._refusal(s) + ' It was put back to its assignee.');
+            C._jiraRefresh();
             C.refresh(key);
         }, function (e) { JiTA.ui.toast('The Defect checklist could not put ' + key + '\'s assignee back: ' + (e && e.message || e)); });
     },
 
     // ---- writing ------------------------------------------------------------------------------------------------------
     // A Jira write (or read) with the token Jira wants for one; a 429 waits as long as Jira asks and tries again, twice.
+    // The answer is read as text and parsed here: Jira answers a saved issue property 200 or 201 with no body, which jQuery,
+    // left to parse it as JSON, took for a failure ("HTTP 200"). A read must answer JSON; a write may answer nothing.
     // Rejects with an Error carrying .status and Jira's own reason.
     _req: function (method, path, body) {
         return new Promise(function (resolve, reject) {
             (function attempt(n) {
-                var o = { url: JiTA.HOST + path, type: method, headers: { 'X-Atlassian-Token': 'no-check', 'Accept': 'application/json' } };
+                var o = { url: JiTA.HOST + path, type: method, dataType: 'text', headers: { 'X-Atlassian-Token': 'no-check', 'Accept': 'application/json' } };
                 if (body !== undefined) { o.contentType = 'application/json'; o.data = JSON.stringify(body); }
-                $.ajax(o).done(function (d) { resolve(d == null || d === '' ? {} : d); }).fail(function (xhr) {
+                $.ajax(o).done(function (t) {
+                    if (!t) { resolve({}); return; }
+                    var d;
+                    try { d = JSON.parse(t); } catch (e) {
+                        if (method === 'GET') { reject(new Error('Jira answered with something other than JSON')); } else { resolve({}); }
+                        return;
+                    }
+                    resolve(d == null ? {} : d);
+                }).fail(function (xhr) {
                     if (xhr && xhr.status === 429 && n > 0) {
                         var ra = parseInt(xhr.getResponseHeader && xhr.getResponseHeader('Retry-After'), 10);
                         setTimeout(function () { attempt(n - 1); }, (isNaN(ra) ? 3 : ra) * 1000);
                         return;
                     }
-                    var j = xhr && xhr.responseJSON, m = [];
+                    var j = null, m = [];
+                    try { j = JSON.parse((xhr && xhr.responseText) || 'null'); } catch (e) { j = null; }
                     if (j && j.errorMessages) { m = m.concat(j.errorMessages); }
                     if (j && j.errors) { Object.keys(j.errors).forEach(function (k) { m.push(j.errors[k]); }); }
                     var err = new Error(m.length ? m.join(' ') : ('HTTP ' + (xhr ? xhr.status : '?')));
@@ -14594,20 +14613,33 @@ JiTA.checklist = {
     _waive: function (key, id, on) { return JiTA.checklist._keep(key, 'w', id, on); },
     // An item ticked off, or not any more: the attachments said to be good, for the set they are (`sig`).
     _tick: function (key, id, sig, on) { return JiTA.checklist._keep(key, 'ok', id, on, { sig: sig }); },
-    // A field written here: Jira's issue view keeps what it read and offers a script no way to read the issue again, so the
-    // page reloads. Unreloaded it would go on showing the old value, and an edit of that field in it would write the old
-    // value back: a label taken off would return, the expand would go. Said in a toast, and the card read again, first, for
-    // when the reload is called off (Jira asking about an edit not saved yet).
+    // A field written here: Jira's issue view keeps what it read, so it is told to read the issue again (_jiraRefresh).
+    // Left showing the old value, an edit of that field in it would write the old value back: a label taken off would
+    // return, the expand would go. Should the page not change within REFRESH_MS (a Jira that no longer hears the event),
+    // it reloads instead. Said in a toast, and the card read again.
     _written: function (key, msg) {
-        JiTA.ui.toast(msg + ' The page reloads to show it.');
-        JiTA.checklist.refresh(key);
-        try { window.location.reload(); } catch (e) { /* the toast and the card say it */ }
+        var C = JiTA.checklist, before = C._pageSig(), t0 = Date.now();
+        JiTA.ui.toast(msg);
+        C.refresh(key);
+        C._jiraRefresh();
+        (function look() {
+            if (C._key !== key || C._pageSig() !== before) { return; }   // left, or Jira shows it
+            if (Date.now() - t0 < C.REFRESH_MS) { setTimeout(look, C.REFRESH_STEP_MS); return; }
+            console.log('[JiTA] checklist: Jira did not show the change on ' + key + ', so the page reloads to show it.');
+            try { window.location.reload(); } catch (e) { /* the toast and the card say it */ }
+        })();
+    },
+    // Tells Jira's issue view to read the issue on screen again, as Jira's own comment box does after it writes one. With
+    // no detail: an object made in a userscript's sandbox is one the page cannot read in Firefox, and without one the
+    // issue view reads the issue on screen (the form Connect's AP.jira.refreshIssuePage() fires).
+    _jiraRefresh: function () {
+        try { document.dispatchEvent(new CustomEvent(JiTA.checklist.REFRESH_EVENT)); } catch (e) { /* _written reloads */ }
     },
     // The bug report's labels taken off the defect, asked first; cloned and jira_escalated stay (they are never in `labels`).
     _takeLabels: function (key, labels) {
         var C = JiTA.checklist;
         if (!labels || !labels.length) { return Promise.resolve(); }
-        if (!window.confirm('Take the bug report\'s labels off ' + key + ': ' + labels.join(', ') + '?\n\ncloned and jira_escalated stay. The page then reloads to show it.')) { return Promise.resolve(); }
+        if (!window.confirm('Take the bug report\'s labels off ' + key + ': ' + labels.join(', ') + '?\n\ncloned and jira_escalated stay.')) { return Promise.resolve(); }
         return C._req('PUT', C._issuePath(key), { update: { labels: labels.map(function (l) { return { remove: l }; }) } }).then(function () {
             C._written(key, 'Taken off ' + key + ': ' + labels.join(', ') + '.');
         }, function (e) { JiTA.ui.toast('Could not take the labels off ' + key + ': ' + (e && e.message || e)); });
@@ -14615,7 +14647,7 @@ JiTA.checklist = {
     // A suggested label added to the defect, asked first.
     _addLabel: function (key, label) {
         var C = JiTA.checklist;
-        if (!window.confirm('Add the label ' + label + ' to ' + key + '? The page then reloads to show it.')) { return Promise.resolve(); }
+        if (!window.confirm('Add the label ' + label + ' to ' + key + '?')) { return Promise.resolve(); }
         return C._req('PUT', C._issuePath(key), { update: { labels: [{ add: label }] } }).then(function () {
             C._written(key, 'Added ' + label + ' to ' + key + '.');
         }, function (e) { JiTA.ui.toast('Could not add ' + label + ' to ' + key + ': ' + (e && e.message || e)); });
@@ -14654,7 +14686,7 @@ JiTA.checklist = {
     _addExc: function (key, s, e) {
         var C = JiTA.checklist, title = C._title(e);
         if (!window.confirm('Add this exception to the end of the description of ' + key + ', in an expand titled:\n\n' + title +
-            '\n\nSave or cancel an edit of the description first: the page then reloads to show it.')) { return Promise.resolve(); }
+            '\n\nSave or cancel an edit of the description first: saved afterwards, it would take the expand out again.')) { return Promise.resolve(); }
         return C._raw(s.src, e).then(function (text) {
             return C._req('GET', C._issuePath(key) + '?fields=description').then(function (iss) {
                 return C._req('PUT', C._issuePath(key), { fields: { description: C._withExpand(((iss && iss.fields) || {}).description, title, text) } });
@@ -14663,22 +14695,10 @@ JiTA.checklist = {
             C._written(key, 'Added to the description of ' + key + '.');
         }, function (err) { JiTA.ui.toast('Could not add it to ' + key + ': ' + (err && err.message || err)); });
     },
-    // The exception copied as the log has it. Reading the log again can take long enough for the browser to stop treating
-    // the copy as the click's; then the button asks for a second click, which copies at once.
-    _copyExc: function (s, e, $btn) {
-        var C = JiTA.checklist;
-        $btn.text('…');
-        return C._raw(s.src, e).then(function (text) {
-            return JiTA.util.copy(text).then(function () { $btn.text('Copied'); }, function () {
-                $btn.text('Copy again');
-                JiTA.ui.toast('The exception is read: click Copy again to copy it.');
-            });
-        }, function () { $btn.text('Copy'); JiTA.ui.toast('Could not read the exception out of the bug report\'s logs.'); });
-    },
     // Taken by its reporter until it is done, asked first: offered on a defect that is unassigned before it is.
     _hold: function (key, me, $btn) {
         var C = JiTA.checklist;
-        if (!window.confirm('Assign ' + key + ' to you until its Defect checklist is done? Unassigned, it is where FC picks defects up. The page then reloads to show it.')) { return Promise.resolve(); }
+        if (!window.confirm('Assign ' + key + ' to you until its Defect checklist is done? Unassigned, it is where FC picks defects up.')) { return Promise.resolve(); }
         $btn.prop('disabled', true).text('Assigning…');
         return C._req('PUT', C._issuePath(key) + '/assignee', { accountId: me }).then(function () {
             C._written(key, key + ' is assigned to you until the checklist is done.');
@@ -14690,7 +14710,7 @@ JiTA.checklist = {
     // Handed to FC: unassigned, asked first. Only offered once every item is done.
     _unassign: function (key, $btn) {
         var C = JiTA.checklist;
-        if (!window.confirm('Unassign ' + key + ' and hand it to FC? The page then reloads to show it.')) { return Promise.resolve(); }
+        if (!window.confirm('Unassign ' + key + ' and hand it to FC?')) { return Promise.resolve(); }
         $btn.prop('disabled', true).text('Unassigning…');
         return C._req('PUT', C._issuePath(key) + '/assignee', { accountId: null }).then(function () {
             C._written(key, key + ' is unassigned: FC picks it up from here.');
@@ -14837,7 +14857,7 @@ JiTA.checklist = {
         }, function () { $w.remove(); });
         return $w;
     },
-    // The report's exceptions, each with the defects that hold it already, Copy, and (for the reporter) Add.
+    // The report's exceptions, each with the defects that hold it already and (for the reporter) Add.
     _excList: function (key, s, mine) {
         var C = JiTA.checklist, exc = s.src.exc, $w = $('<div class="jcl-exc"></div>');
         $('<div class="jcl-sub"></div>').text('Exceptions in ' + s.src.key + '\'s logs (' + exc.length + ')').appendTo($w);
@@ -14851,7 +14871,6 @@ JiTA.checklist = {
                 });
                 if (e.defects.length > 3) { $('<span></span>').text('+' + (e.defects.length - 3)).attr('title', e.defects.slice(3).join(', ')).appendTo($d); }
             }
-            $('<a class="jcl-act" href="#">Copy</a>').attr('title', 'Copy the exception as the log has it').on('click', function (ev) { ev.preventDefault(); C._copyExc(s, e, $(this)); }).appendTo($r);
             if (mine && !C._hasExc(s.d, [e])) {
                 $('<a class="jcl-act" href="#">Add</a>').attr('title', 'Add it to the end of the description, in an expand').on('click', function (ev) { ev.preventDefault(); C._addExc(key, s, e); }).appendTo($r);
             }
@@ -24411,7 +24430,7 @@ JiTA.changelog = {
         { v: '3.51.0', date: '2026-11-08', features: [
             'New Defect checklist card on a defect you wrote: what the ISD guide asks of a defect, each item checked against the defect, and against the bug report it was converted from.',
             'A defect cannot be unassigned (handed to FC) until every item is done, its attachments checked included. Items the guide lets a defect go without can be marked Not needed. Settings > Features switches it off.',
-            'It suggests labels already in use that the defect\'s text calls for. One click adds one, takes the bug report\'s labels off, or adds an exception from its logs to the description in an expand, and the page reloads to show it.',
+            'It suggests labels already in use that the defect\'s text calls for. One click adds one, takes the bug report\'s labels off, or adds an exception from its logs to the description in an expand, and Jira shows it at once, without a reload.',
             'Convert to Defect assigns an unassigned bug report to you first, so the defect starts out yours until you hand it to FC. A defect that starts out unassigned anyway offers Assign to me.',
             'The card follows an edit within seconds, and its Copy gives the reproduction steps as a real numbered list in Jira.',
             'Leads see the card on every ISD member\'s defect.'

@@ -89,9 +89,16 @@ global.document = {
     querySelectorAll: () => [],
     getElementById: (id) => all(column).filter((k) => k.id === id)[0] || null,
     createTextNode: (t) => ({ data: t }),
-    addEventListener: (ev, fn, cap) => { listeners.push({ ev, fn, cap }); }
+    addEventListener: (ev, fn, cap) => { listeners.push({ ev, fn, cap }); },
+    dispatchEvent: (ev) => { jiraEvents.push(ev); if (ev.type === 'legacy_refreshIssuePage' && jiraHears) { jiraShows(); } return true; }
 };
 const listeners = [];
+// Jira's issue view: told to read the issue again (the DOM event), it shows the issue as it is now, which changes what the
+// page shows (_pageSig reads the Details rows). jiraHears false: a Jira that no longer hears the event.
+global.CustomEvent = function (type, init) { this.type = type; this.detail = init && init.detail !== undefined ? init.detail : null; };
+let jiraEvents = [], jiraHears = true, jiraShown = 0;
+const jiraShows = () => { fieldRows = [{ label: 'Labels', el: { textContent: 'as Jira shows it now, ' + (++jiraShown) } }]; };
+const refreshes = () => jiraEvents.filter((e) => e.type === 'legacy_refreshIssuePage');
 global.window = { addEventListener: (ev, fn) => { listeners.push({ ev, fn, win: true }); }, confirm: (m) => { confirms.push(m); return confirmAnswer; },
     location: { reload: () => { reloads++; } } };
 let confirms = [], confirmAnswer = true, reloads = 0;
@@ -104,13 +111,22 @@ global.$ = (x) => {
 };
 
 // ---- Jira: scripted answers per "METHOD path", every request recorded ----
+// As jQuery answers: Jira's answers are JSON, so unless the text is asked for (dataType 'text') it is parsed, and a body
+// that does not parse, an empty one included, fails with the answer's own 2xx status (a 204 is not parsed). An answer is
+// { ok, status, data } or { ok, status, text }; a refusal { ok: false, status, json, retry }.
 let ajaxLog = [], answers = {};
 $.ajax = (o) => {
     const path = o.url.replace('https://x.atlassian.net', ''), key = o.type + ' ' + path.split('?')[0];
-    ajaxLog.push({ method: o.type, path: path, body: o.data ? JSON.parse(o.data) : undefined, headers: o.headers });
+    ajaxLog.push({ method: o.type, path: path, body: o.data ? JSON.parse(o.data) : undefined, headers: o.headers, dataType: o.dataType });
     const a = answers[key] || answers[o.type + ' *'] || { ok: true, data: {} }, next = Array.isArray(a) ? (a.length > 1 ? a.shift() : a[0]) : a;
-    const d = { done(fn) { if (next.ok) { setImmediate(() => fn(next.data)); } return d; },
-        fail(fn) { if (!next.ok) { setImmediate(() => fn({ status: next.status, responseJSON: next.json, getResponseHeader: () => next.retry || null })); } return d; } };
+    const text = next.text !== undefined ? next.text : (next.data == null || next.data === '' ? '' : (typeof next.data === 'string' ? next.data : J(next.data)));
+    let value = text, parseErr = false;
+    if (next.ok && o.dataType !== 'text' && next.status !== 204) { try { value = JSON.parse(text); } catch (e) { parseErr = true; } }
+    const failed = !next.ok || parseErr;
+    const xhr = { status: parseErr ? (next.status || 200) : next.status, responseText: next.json ? J(next.json) : (next.text || ''), getResponseHeader: () => next.retry || null };
+    if (o.dataType !== 'text' && next.json) { xhr.responseJSON = next.json; }
+    const d = { done(fn) { if (!failed) { setImmediate(() => fn(value)); } return d; },
+        fail(fn) { if (failed) { setImmediate(() => fn(xhr)); } return d; } };
     return d;
 };
 const puts = () => ajaxLog.filter((r) => r.method === 'PUT');
@@ -170,6 +186,9 @@ Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') +
 Object.assign(JiTA.logsig, eval('({' + member('    _crashOf: function (sig) {') + '})'));
 eval(src.slice(cs + 1, ce) + '\n    _noop: null\n};');
 const C = JiTA.checklist;
+const REFRESH = { ms: C.REFRESH_MS, step: C.REFRESH_STEP_MS, event: C.REFRESH_EVENT };   // as shipped, checked below
+C.REFRESH_MS = 40; C.REFRESH_STEP_MS = 5;   // the wait for Jira to show a write, short enough for a test
+const waitRefresh = () => new Promise((r) => setTimeout(r, C.REFRESH_MS + 40));
 
 // ---- fixtures ----
 const EXC = { sig: "keyerror: 'x'|a.py:f>b.py:g>c.py:h", msg: "KeyError: 'x' raised while undocking" };
@@ -562,20 +581,22 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     const excRows = byCls(body, 'jcl-erow');
     ok('the report\'s exceptions are listed with the defects holding them', excRows.length === 1 && /KeyError/.test(byCls(excRows[0], 'jcl-emsg')[0].textContent) &&
         byCls(excRows[0], 'jcl-edef')[0].textContent === 'EDR-7');
-    ok('...each with Copy and Add', byCls(excRows[0], 'jcl-act').map((a) => a.textContent).join(',') === 'Copy,Add');
+    ok('...each with Add alone: no Copy', byCls(excRows[0], 'jcl-act').map((a) => a.textContent).join(',') === 'Add', byCls(excRows[0], 'jcl-act').map((a) => a.textContent).join(','));
     const chips = byCls(body, 'jcl-chip');
     ok('the reporter gets labels suggested from the defect\'s text', chips.map((c) => c.textContent).join(',') === '+ Undock' && /On 2 other defects/.test(chips[0].attrs.title),
         chips.map((c) => c.textContent).join(','));
     ajaxLog = []; confirms = []; confirmAnswer = false; reloads = 0;
     chips[0].fire('click');
     await settle();
-    ok('...a click asks first, and a no adds nothing', confirms.length === 1 && /Add the label Undock to EDR-1/.test(confirms[0]) && !puts().length && !reloads);
-    ok('...saying the page then reloads', /The page then reloads to show it\./.test(confirms[0]));
-    confirmAnswer = true; toasts = [];
+    ok('...a click asks first, and a no adds nothing', confirms.length === 1 && confirms[0] === 'Add the label Undock to EDR-1?' && !puts().length && !reloads && !refreshes().length, confirms[0]);
+    confirmAnswer = true; toasts = []; jiraEvents = []; gets = [];
     chips[0].fire('click');
     await settle();
     ok('...a yes adds it', puts().length === 1 && J(puts()[0].body) === J({ update: { labels: [{ add: 'Undock' }] } }), J(puts()));
-    ok('...and the page reloads, so Jira shows it and no edit there writes the old labels back', reloads === 1 && toasts.some((t) => /^Added Undock to EDR-1\. The page reloads to show it\.$/.test(t)), reloads + ' ' + toasts.join(' | '));
+    ok('...and Jira is told to read the issue again, so it shows the label and no edit there writes the old labels back', refreshes().length === 1 &&
+        refreshes()[0].detail === null && toasts.some((t) => t === 'Added Undock to EDR-1.'), J(jiraEvents) + ' ' + toasts.join(' | '));
+    await waitRefresh();
+    ok('...with no reload once Jira shows it, and the card read again', reloads === 0 && gets.some((p) => /fields=\*all/.test(p)), reloads + ' ' + J(gets));
     let fin = byCls(body, 'jcl-finish')[0];
     ok('the hand-off waits for the last item', fin && fin.props.disabled === true && /8 items still open/.test(fin.attrs.title), fin && fin.attrs.title);
     ok('a defect that is no exploit keeps the exploit steps folded away', !byCls(body, 'jcl-warn').length && byCls(body, 'jcl-mline').some((l) => /Exploit/.test(l.textContent)));
@@ -587,6 +608,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     g = document.getElementById(C.GROUP_ID); body = g.find('#jita-cl');
     const leadActs = byCls(body, 'jcl-act').map((a) => a.textContent);
     ok('a Lead sees the card, but marks nothing and takes nothing off', leadActs.indexOf('Not needed') < 0 && leadActs.indexOf('Take off') < 0 && leadActs.indexOf('Add') < 0 && leadActs.indexOf('Copy') >= 0, leadActs.join(','));
+    ok('...nor anything on the report\'s exceptions', !byCls(byCls(body, 'jcl-erow')[0], 'jcl-act').length);
     ok('...nor gets labels suggested to add', !byCls(body, 'jcl-sugg').length);
     isLead = false; me = 'acc-rep';
 
@@ -599,19 +621,20 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     fin = byCls(body, 'jcl-finish')[0];
     ok('...and its hand-off is offered', fin && !fin.props.disabled && fin.handlers.click && fin.handlers.click.length === 1);
     ok('a severity A defect shows the exploit steps in plain sight', byCls(body, 'jcl-warn').length === 1 && /Liaison/.test(byCls(body, 'jcl-warn')[0].textContent));
-    ok('an exception the description holds already is offered for Copy, no longer for Add', byCls(byCls(body, 'jcl-erow')[0], 'jcl-act').map((a) => a.textContent).join(',') === 'Copy');
+    ok('an exception the description holds already is no longer offered for Add', byCls(body, 'jcl-erow').length === 1 && !byCls(byCls(body, 'jcl-erow')[0], 'jcl-act').length);
 
     // ---- the hand-off ----
     ajaxLog = []; confirms = []; confirmAnswer = false; reloads = 0;
     fin.fire('click');
     await settle();
-    ok('the unassign asks first, and a no writes nothing', confirms.length === 1 && /Unassign EDR-1 and hand it to FC\? The page then reloads to show it\./.test(confirms[0]) && !puts().length && !reloads);
-    confirmAnswer = true;
+    ok('the unassign asks first, and a no writes nothing', confirms.length === 1 && confirms[0] === 'Unassign EDR-1 and hand it to FC?' && !puts().length && !reloads, confirms[0]);
+    confirmAnswer = true; jiraEvents = []; toasts = [];
     fin.fire('click');
     await settle();
     ok('...a yes unassigns it', puts().length === 1 && puts()[0].path === '/rest/api/3/issue/EDR-1/assignee' && J(puts()[0].body) === J({ accountId: null }), J(puts()));
     ok('...with the token Jira wants for a write', puts()[0].headers['X-Atlassian-Token'] === 'no-check');
-    ok('...and the page reloads to show it', reloads === 1);
+    await waitRefresh();
+    ok('...and Jira shows it, with no reload', refreshes().length === 1 && reloads === 0 && toasts.some((t) => t === 'EDR-1 is unassigned: FC picks it up from here.'), refreshes().length + ' ' + reloads + ' ' + toasts.join(' | '));
 
     // ---- nobody unassigns an unfinished defect ----
     issueOf['EDR-1'] = converted();
@@ -666,11 +689,13 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     const i3 = converted(); i3.fields.assignee = null;
     issueOf['EDR-1'] = i3;
     histOf['EDR-1'] = [{ author: { accountId: 'acc-rep' }, created: new Date(Date.now() - 20000).toISOString(), items: [{ field: 'assignee', fieldId: 'assignee', from: 'acc-rep', to: null }] }];
-    ajaxLog = []; toasts = []; reloads = 0;
+    ajaxLog = []; toasts = []; reloads = 0; jiraEvents = [];
     await C.refresh('EDR-1');
     await settle();
     ok('an unassign that got past it (a shortcut) is put back to its assignee', puts().length === 1 && puts()[0].path === '/rest/api/3/issue/EDR-1/assignee' && J(puts()[0].body) === J({ accountId: 'acc-rep' }), J(puts()));
-    ok('...saying why, and that a reload shows it', toasts.some((t) => /It was put back to its assignee: reload the page to see it in Jira's fields\./.test(t)), toasts.join(' | '));
+    ok('...saying why', toasts.some((t) => /still open\. Hand it to FC from the card once they are done\. It was put back to its assignee\.$/.test(t)), toasts.join(' | '));
+    ok('...and Jira is told to show it', refreshes().length === 1 && refreshes()[0].detail === null, J(jiraEvents));
+    await waitRefresh();
     ok('...but never reloading the page unasked', reloads === 0);
     ajaxLog = [];
     await C.refresh('EDR-1');
@@ -717,11 +742,15 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     let attRow = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-item').filter((r) => r.attrs['data-item'] === 'attachments')[0];
     let attActs = byCls(attRow, 'jcl-act');
     ok('the reporter ticks the attachments off on the card', attActs.map((a) => a.textContent).join(',') === 'They are good', attActs.map((a) => a.textContent).join(','));
-    ajaxLog = []; confirms = [];
-    answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: false, status: 404 } };
+    ajaxLog = []; confirms = []; toasts = []; gets = [];
+    // as Jira answers it: no property yet, and the new one saved with 201 and no body
+    answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: false, status: 404 },
+        'PUT /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: true, status: 201, text: '' } };
     attActs[0].fire('click');
     await settle();
     ok('...a click ticks them for the set they are, asking nothing', confirms.length === 0 && puts().length === 1 && puts()[0].body.ok.attachments.sig === C._attSig(converted().fields.attachment), J(puts()));
+    ok('...and Jira\'s empty answer counts as saved: no "Could not save", and the card is read again', !toasts.some((t) => /Could not save/.test(t)) &&
+        gets.some((p) => /fields=\*all/.test(p)), toasts.join(' | ') + ' ' + J(gets));
     answers = {};
     const iNone = converted(); iNone.fields.attachment = [];
     issueOf['EDR-1'] = iNone;
@@ -753,37 +782,59 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     answers = {};
     ajaxLog = []; confirms = []; confirmAnswer = false; reloads = 0;
     await C._takeLabels('EDR-1', ['PlatformWin']);
-    ok('the report\'s labels come off only after a yes', confirms.length === 1 && /PlatformWin/.test(confirms[0]) && /cloned and jira_escalated stay\. The page then reloads to show it\./.test(confirms[0]) && !puts().length && !reloads);
-    confirmAnswer = true; toasts = [];
+    ok('the report\'s labels come off only after a yes', confirms.length === 1 && confirms[0] === 'Take the bug report\'s labels off EDR-1: PlatformWin?\n\ncloned and jira_escalated stay.' && !puts().length && !reloads, confirms[0]);
+    confirmAnswer = true; toasts = []; jiraEvents = [];
     await C._takeLabels('EDR-1', ['PlatformWin', 'Russian']);
     await settle();
     ok('...then one edit takes each off', puts().length === 1 && J(puts()[0].body) === J({ update: { labels: [{ remove: 'PlatformWin' }, { remove: 'Russian' }] } }), J(puts()));
-    ok('...and the page reloads to show it', reloads === 1 && toasts.some((t) => /^Taken off EDR-1: PlatformWin, Russian\. The page reloads to show it\.$/.test(t)), toasts.join(' | '));
+    await waitRefresh();
+    ok('...and Jira shows it, with no reload', refreshes().length === 1 && reloads === 0 && toasts.some((t) => t === 'Taken off EDR-1: PlatformWin, Russian.'), refreshes().length + ' ' + reloads + ' ' + toasts.join(' | '));
     // the exception, added in an expand
     logText = { 'u-logs': "header\n\nkeyerror: 'x'|a.py:f>b.py:g>c.py:h\nTraceback (most recent call last):\n  File a.py\n\nother block" };
-    ajaxLog = []; confirms = []; confirmAnswer = true; reloads = 0; toasts = [];
+    ajaxLog = []; confirms = []; confirmAnswer = true; reloads = 0; toasts = []; jiraEvents = [];
     answers = { 'GET /rest/api/3/issue/EDR-1': { ok: true, data: { fields: { description: adf(['what the hunter wrote']) } } } };
     const sNow = C._state['EDR-1'];
     await C._addExc('EDR-1', sNow, EXC);
     await settle();
     put = puts()[0];
     ok('Add asks first, naming the expand\'s title', confirms.length === 1 && /in an expand titled:\n\nKeyError: 'x' raised while undocking/.test(confirms[0]), confirms[0]);
-    ok('...saying to save an edit of the description first, as the page then reloads', /\n\nSave or cancel an edit of the description first: the page then reloads to show it\.$/.test(confirms[0]), confirms[0]);
-    ok('...and it does, once the description is written', reloads === 1 && toasts.some((t) => /^Added to the description of EDR-1\. The page reloads to show it\.$/.test(t)), reloads + ' ' + toasts.join(' | '));
+    ok('...saying to save an edit of the description first, as one saved afterwards would take the expand out', /\n\nSave or cancel an edit of the description first: saved afterwards, it would take the expand out again\.$/.test(confirms[0]), confirms[0]);
+    await waitRefresh();
+    ok('...and once the description is written, Jira shows it, with no reload', refreshes().length === 1 && reloads === 0 && toasts.some((t) => t === 'Added to the description of EDR-1.'), refreshes().length + ' ' + reloads + ' ' + toasts.join(' | '));
     ok('...reads the description again just before it writes', ajaxLog.filter((r) => r.method === 'GET' && /fields=description/.test(r.path)).length === 1);
     ok('...and appends the exception as the log has it, the hunter\'s text kept', put && put.body.fields.description.content.length === 2 &&
         put.body.fields.description.content[0].content[0].text === 'what the hunter wrote' && /Traceback \(most recent call last\)/.test(put.body.fields.description.content[1].content[0].content[0].text), put && J(put.body));
     ajaxLog = []; confirmAnswer = false;
     await C._addExc('EDR-1', sNow, EXC);
     ok('...a no writes nothing', !ajaxLog.length);
-    // Copy
-    copied = []; copyAnswer = true;
-    const btn = N('<a class="jcl-act">Copy</a>');
-    await C._copyExc(sNow, EXC, btn);
-    ok('Copy copies the exception as the log has it', copied.length === 1 && /Traceback/.test(copied[0]) && btn.textContent === 'Copied', J(copied));
-    copied = []; copyAnswer = false;
-    await C._copyExc(sNow, { sig: 'gone|a:b>c:d', msg: 'Gone' }, btn);
-    ok('...falls back to the signature\'s text, and asks for a second click when the browser refuses', copied[0] === 'tip:Gone' && btn.textContent === 'Copy again' && toasts.some((t) => /click Copy again/.test(t)));
+    ok('the exception is no longer copied from the card: Add is enough', C._copyExc === undefined);
+    ajaxLog = []; confirmAnswer = true;
+    answers = { 'GET /rest/api/3/issue/EDR-1': { ok: true, data: { fields: { description: adf(['what the hunter wrote']) } } } };
+    await C._addExc('EDR-1', sNow, { sig: 'gone|a:b>c:d', msg: 'Gone' });
+    await settle();
+    put = puts()[0];
+    ok('an exception no log holds any more is added as its signature reads', put && put.body.fields.description.content[1].content[0].content[0].text === 'tip:Gone', put && J(put.body));
+    answers = {};
+    await waitRefresh();
+    // a Jira that no longer hears the event
+    jiraHears = false; confirmAnswer = true; reloads = 0; jiraEvents = [];
+    const keepLog = console.log, logged = [];
+    console.log = (...a) => { logged.push(a.join(' ')); };
+    try {
+        await C._addLabel('EDR-1', 'Undock');
+        await settle();
+        ok('a write Jira does not show is waited for a moment, not reloaded at once', refreshes().length === 1 && reloads === 0);
+        await waitRefresh();
+        ok('...then the page reloads, so no edit in Jira writes the old value back, and the console says why', reloads === 1 &&
+            logged.some((l) => /Jira did not show the change on EDR-1, so the page reloads to show it\./.test(l)), reloads + ' ' + J(logged));
+        reloads = 0;
+        await C._addLabel('EDR-1', 'Undock');
+        await settle();
+        C._key = 'EDR-2';
+        await waitRefresh();
+        ok('...but not once another issue is on screen', reloads === 0);
+        C._key = 'EDR-1';
+    } finally { console.log = keepLog; jiraHears = true; }
 
     // ---- requests ----
     ajaxLog = [];
@@ -794,7 +845,37 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     let err = null;
     try { await C._req('PUT', '/rest/api/3/issue/EDR-9', {}); } catch (e) { err = e; }
     ok('...a refusal says what Jira said, and carries the status', err && err.message === 'Field x is required bad label' && err.status === 400, err && err.message);
+    // A saved issue property: Jira answers 200 (or 201 when new) with no body, which jQuery fails to parse as JSON.
+    ajaxLog = [];
+    answers = { 'PUT /rest/api/3/issue/EDR-9/properties/jita.checklist': { ok: true, status: 200, text: '' } };
+    err = null; res = null;
+    try { res = await C._req('PUT', '/rest/api/3/issue/EDR-9/properties/jita.checklist', { v: 1 }); } catch (e) { err = e; }
+    ok('a save Jira answers 200 with no body is a success, not "HTTP 200": the answer is read as text', !err && J(res) === '{}' && ajaxLog[0].dataType === 'text', (err && err.message) + ' ' + J(res));
+    answers = { 'PUT /rest/api/3/issue/EDR-9/properties/jita.checklist': { ok: true, status: 201, text: '' } };
+    err = null;
+    try { await C._req('PUT', '/rest/api/3/issue/EDR-9/properties/jita.checklist', { v: 1 }); } catch (e) { err = e; }
+    ok('...201 (a property saved the first time) too', !err, err && err.message);
+    answers = { 'PUT /rest/api/3/issue/EDR-9': { ok: true, status: 200, text: 'OK' } };
+    err = null;
+    try { res = await C._req('PUT', '/rest/api/3/issue/EDR-9', {}); } catch (e) { err = e; }
+    ok('...a write may answer something other than JSON', !err && J(res) === '{}', err && err.message);
+    answers = { 'GET /rest/api/3/issue/EDR-9': { ok: true, status: 200, text: '<html>log in</html>' } };
+    err = null;
+    try { await C._req('GET', '/rest/api/3/issue/EDR-9'); } catch (e) { err = e; }
+    ok('...but a read must answer JSON (a login page is no empty answer)', err && err.message === 'Jira answered with something other than JSON', err && err.message);
+    answers = { 'GET /rest/api/3/issue/EDR-9': { ok: true, status: 200, data: { key: 'EDR-9', fields: { labels: ['A'] } } } };
+    res = await C._req('GET', '/rest/api/3/issue/EDR-9');
+    ok('...and its JSON is read', res && res.key === 'EDR-9' && J(res.fields.labels) === '["A"]', J(res));
+    answers = { 'GET /rest/api/3/issue/EDR-9': { ok: true, status: 200, text: 'null' } };
+    res = await C._req('GET', '/rest/api/3/issue/EDR-9');
+    ok('...a JSON null as an empty answer', J(res) === '{}', J(res));
+    answers = { 'GET /rest/api/3/issue/EDR-9': { ok: false, status: 404, text: 'Not found' } };
+    err = null;
+    try { await C._req('GET', '/rest/api/3/issue/EDR-9'); } catch (e) { err = e; }
+    ok('...a refusal whose answer is not JSON still says its status', err && err.message === 'HTTP 404' && err.status === 404, err && err.message);
     answers = {};
+    ok('the wait for Jira to show a write, as shipped: the event Jira hears, looked at every quarter second for 8 seconds',
+        REFRESH.event === 'legacy_refreshIssuePage' && REFRESH.ms === 8000 && REFRESH.step === 250, J(REFRESH));
 
     // ---- the page ----
     ok('a recheck follows an edit made in Jira: the fields are read as the page shows them', (() => {
@@ -944,13 +1025,14 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
         byCls(foot, 'jcl-early').length === 1 && !!take && take.textContent === 'Assign to me until it is done' && !take.props.disabled, foot.textContent);
     ajaxLog = []; confirms = []; confirmAnswer = false; reloads = 0;
     take.fire('click'); await settle();
-    ok('...asking first: a no writes nothing', confirms.length === 1 && /^Assign EDR-1 to you until its Defect checklist is done\? Unassigned, it is where FC picks defects up\. The page then reloads to show it\.$/.test(confirms[0]) &&
+    ok('...asking first: a no writes nothing', confirms.length === 1 && confirms[0] === 'Assign EDR-1 to you until its Defect checklist is done? Unassigned, it is where FC picks defects up.' &&
         !puts().length && !reloads, confirms[0]);
-    confirmAnswer = true; toasts = []; gets = [];
+    confirmAnswer = true; toasts = []; gets = []; jiraEvents = [];
     take.fire('click'); await settle();
-    ok('...a yes assigns it to them, and the page reloads to show it', puts().length === 1 && puts()[0].path === '/rest/api/3/issue/EDR-1/assignee' && J(puts()[0].body) === J({ accountId: 'acc-rep' }) &&
-        reloads === 1 && toasts.some((t) => /^EDR-1 is assigned to you until the checklist is done\. The page reloads to show it\.$/.test(t)), J(puts()) + ' ' + reloads + ' ' + toasts.join(' | '));
-    ok('...and the card reads the defect again, should the reload not come', gets.some((p) => /fields=\*all/.test(p)), J(gets));
+    ok('...a yes assigns it to them', puts().length === 1 && puts()[0].path === '/rest/api/3/issue/EDR-1/assignee' && J(puts()[0].body) === J({ accountId: 'acc-rep' }) &&
+        toasts.some((t) => t === 'EDR-1 is assigned to you until the checklist is done.'), J(puts()) + ' ' + toasts.join(' | '));
+    await waitRefresh();
+    ok('...and Jira shows it, with no reload, and the card reads the defect again', refreshes().length === 1 && reloads === 0 && gets.some((p) => /fields=\*all/.test(p)), refreshes().length + ' ' + reloads + ' ' + J(gets));
     answers = { 'PUT /rest/api/3/issue/EDR-1/assignee': { ok: false, status: 403, json: { errorMessages: ['No permission'] } } };
     await C.refresh('EDR-1'); await settle();
     take = byCls(byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-foot')[0], 'jcl-finish')[0];
