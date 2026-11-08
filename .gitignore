@@ -10,3 +10,4 @@ Thumbs.db
 # Broken copies the breakage suites write while they run (tests/run-breakages.js removes them)
 tests/mut.js
 tests/mut[a-z].js
+tests/mut[a-z][a-z].js

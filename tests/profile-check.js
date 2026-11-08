@@ -31,9 +31,14 @@ global.flagOn = (n) => flags[n] !== false;
 global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, triage: {}, repexc: { forget() {}, profileReady() {} } };
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isResolved: function (status, resolution) {') + '})'));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
-Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _fingerprint: function (text) {') + member('    _logBlocks: function (text) {') +
-    member('    defectsForSigs: function (sigs) {') + member('    _defectsLocal: function (sigs) {') + member('    _crashOf: function (sig) {') + '})'));
+Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    OPEN_CUT: ') + line('    isTrace: function (sig) {') +
+    line('    isCut: function (sig) {') + line('    _traceKey: function (sig) {') + member('    _fingerprint: function (text) {') + member('    _logBlocks: function (text) {') +
+    member('    defectsForSigs: function (sigs) {') + member('    _defectsLocal: function (sigs) {') + member('    _crashOf: function (sig) {') +
+    member('    _traceMates: function (idx, sig) {') + member('    _pointAt: function (idx, sig, crashSig) {') + '})'));
 JiTA.hidden = { keys: {}, isHidden: (k) => !!JiTA.hidden.keys[k] };
+// What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
+Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
+eval(block('JiTA.excnoise = {', '\n};\n'));
 Object.assign(JiTA.ocr, eval('({' + block('    LANGS: [', '\n    ],\n') + member('    _langFromLabels: function (labels) {') + '})'));
 JiTA.db.getMeta = (k) => Promise.resolve(k in meta ? meta[k] : null);
 JiTA.db.setMeta = (k, v) => { metaSets.push(k); meta[k] = v; return Promise.resolve(); };
@@ -334,11 +339,11 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const issues = [1, 2, 3, 4, 5, 6].map((i) => ({ key: 'EBR-' + i, fields: { description: ciWith({}), created: '2026-09-2' + i + 'T00:00:00.000+0000', attachment: [] } }));
     P._reports = () => Promise.resolve({ issues: issues, total: 30 });
     JiTA.db.getDefect = () => Promise.resolve({ status: 'Open' });
-    meta = { 'rp:EBR-1': { v: P.V, logs: true, hasLog: false, zip: true, wer: false }, 'rp:EBR-2': { v: P.V - 1, logs: true, zip: true } };
+    meta = { 'rp:EBR-1': { v: P.V, logs: true, hasLog: false, lv: P.LOG_V, zip: true, wer: false }, 'rp:EBR-2': { v: P.V - 1, logs: true, zip: true } };
     let reads = [], hold = [];
     P._readFiles = (iss, r, z) => {
         reads.push(iss.key + (r ? '+cached' : '') + (z ? '+zip' : ''));
-        return new Promise((res) => { hold.push(() => { const rec = { v: P.V, key: iss.key, logs: true, hasLog: true, exc: [], zip: z }; meta['rp:' + iss.key] = rec; res(rec); }); });
+        return new Promise((res) => { hold.push(() => { const rec = { v: P.V, key: iss.key, logs: true, hasLog: true, exc: [], lv: P.LOG_V, zip: z }; meta['rp:' + iss.key] = rec; res(rec); }); });
     };
     let states = [], still = true;
     const done = P.build('EDR-7', (s) => { states.push(s); }, () => still);
@@ -358,14 +363,14 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('every finished read updates the profile', states.length === 4 && states.map((s) => s.pending).join() === '5,4,3,2', states.map((s) => s.pending).join());
     ok('...leaving the defect lets the started reads finish but starts no new one, and the profile is not marked done', reads.length === 3 && !states[3].done, reads.join() + ' ' + states[3].done);
     still = true; reads = []; states = [];
-    P._readFiles = (iss, r, z) => { reads.push(iss.key); return Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: false, zip: z }); };
+    P._readFiles = (iss, r, z) => { reads.push(iss.key); return Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: false, lv: P.LOG_V, zip: z }); };
     await P.build('EDR-7', (s) => { states.push(s); }, () => true);
     ok('...the next visit carries on with the reports still unread, and finishes', reads.join() === 'EBR-5,EBR-6' && states[states.length - 1].done && states[states.length - 1].pending === 0,
         reads.join() + ' ' + states.map((s) => s.pending).join());
     reads = [];
     store[P.ZIP_KEY] = false;
     meta = {};
-    P._readFiles = (iss, r, z) => { reads.push(iss.key + (z ? '+zip' : '')); return Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: false, zip: false }); };
+    P._readFiles = (iss, r, z) => { reads.push(iss.key + (z ? '+zip' : '')); return Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: false, lv: P.LOG_V, zip: false }); };
     states = [];
     await P.build('EDR-8', (s) => { states.push(s); }, () => true);
     ok('with igbr.zip switched off no zip is read', reads.length === 6 && reads.every((r) => !/\+zip/.test(r)) && states[states.length - 1].zip === false && states[states.length - 1].done, reads.join());
@@ -434,6 +439,10 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     P._paint('EDR-7', { key: 'EDR-7', total: 2, views: full.slice(0, 2), summary: P.summarise(full.slice(0, 2), null), pending: 0, done: true, zip: true });
     ok('...while something 2 reports share is still shown, unhighlighted, below a pattern\'s minimum', /Exception in 2\/2 logs/.test(box.text()) &&
         !made.some((m) => m.hasClass('strong') && /Exception in 2\/2/.test(m.e.txt)), box.text());
+    const TS = { sig: JiTA.logsig.TRACE + 'possible service deadlock detected!|a.py:x>b.py:y', msg: 'Possible service deadlock detected!' };
+    const traced = [1, 2].map((i) => mk('EBR-' + i, { exc: [TS] }));
+    P._paint('EDR-7', { key: 'EDR-7', total: 2, views: traced, summary: P.summarise(traced, null), pending: 0, done: true, zip: true });
+    ok('a shared stacktrace is shown as one', /Stacktrace in 2\/2 logs: Possible service deadlock detected!/.test(box.text()) && !/Exception in/.test(box.text()), box.text());
     P._paint('EDR-7', { key: 'EDR-7', total: 0, views: [], summary: P.summarise([], null), pending: 0, done: true });
     ok('a defect without reports shows no section', !box.hasClass('has-hits') && box.text() === '');
     JiTA.ui.currentKey = 'EDR-1';
@@ -507,7 +516,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     try { P.openView('EDR-7'); } catch (e) { threw = e; }
     const otxt = overlay ? overlay.text() : '';
     ok('the full profile opens', !threw && overlay && overlay.hasClass('jita-profile-view'), String(threw && threw.stack));
-    ok('...with every section, the outlier and its reason, and a row per report', /Hardware and language/.test(otxt) && /Exceptions shared by 2 or more logs/.test(otxt) &&
+    ok('...with every section, the outlier and its reason, and a row per report', /Hardware and language/.test(otxt) && /Exceptions and stacktraces shared by 2 or more logs/.test(otxt) &&
         /EVE client crashes/.test(otxt) && /EBR-6/.test(otxt) && /GPU vendor NVIDIA, while 5 of 6 have AMD/.test(otxt) && /no crash in nvwgf2umx\.dll/.test(otxt), otxt.slice(0, 300));
     P._last['EDR-8'] = groupedState;
     P.openView('EDR-8');
@@ -523,6 +532,14 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const crow = made.filter((m) => m.hasClass('jpv-row') && m.e.kids.length === 2 && /^nvwgf2umx\.dll/.test(m.e.kids[1].e.txt))[0];
     const chover = crow ? crow.e.kids[0].e.attrs.title : '';
     ok('...so does a hardware value, and a crash module', vhover === '1 report: EBR-6' && chover === '5 reports: EBR-1, EBR-2, EBR-3, EBR-4, EBR-5', vhover + ' || ' + chover);
+    const tv = [1, 2].map((i) => mk('EBR-' + i, { exc: [TS, X] }));
+    P._last['EDR-9'] = { key: 'EDR-9', total: 2, views: tv, summary: P.summarise(tv, null), pending: 0, done: true, zip: true };
+    made = [];
+    P.openView('EDR-9');
+    const kindTags = made.filter((m) => m.hasClass('jpv-kind')).map((m) => m.e.txt);
+    ok('the full profile marks a shared stacktrace, and only it', kindTags.join() === 'stacktrace', kindTags.join());
+    ok('...and a report\'s log counts its exceptions and its stacktraces apart', /1 exception\(s\), 1 stacktrace\(s\)/.test(overlay.text()) && !/2 exception\(s\)/.test(overlay.text()),
+        overlay.text().slice(-200));
 
     // ================= exceptions whose defect is hidden in the Triage Assistant (v3.44.0) =================
     // The defect a signature points at, picked as "Known defects in attached log" picks it: the same stack, else the same crash site.
@@ -538,7 +555,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     sigIdx.sigMap[fA.sig] = { members: [{ key: 'EDR-2' }, { key: 'EDR-1' }] };
     sigIdx.crashMap[fA.crashSig] = { members: [{ key: 'EDR-3' }] };
     const wStart = once("    // A signature's crash site, from the signature alone.");
-    const W = new Function('LG_MIN', 'LG_CRASH', 'logsigCache', src.slice(wStart, src.indexOf('\n    // One load at a time', wStart)) +
+    const W = new Function('LG_MIN', 'LG_CRASH', 'logsigCache', line('    var LG_TRACE = ') + src.slice(wStart, src.indexOf('\n    // One load at a time', wStart)) +
         '\nreturn { lgCrashOf: lgCrashOf, lgDefects: lgDefects };')(2, 2, sigIdx);
     ok('...and so does the worker\'s copy', [fA, fB, fC].every((f) => W.lgCrashOf(f.sig) === f.crashSig));
     JiTA.logsig.ensure = () => Promise.resolve(sigIdx);
@@ -615,16 +632,86 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const onlyHidden = [1, 2, 3].map((i) => mk('EBR-' + i, { exc: [H1] }));
     P._last['EDR-7'] = { key: 'EDR-7', total: 3, views: onlyHidden, summary: P.summarise(onlyHidden, null, hidOf), pending: 0, done: true, zip: true };
     P.openView('EDR-7');
-    ok('with only hidden exceptions shared, the list says so instead of claiming there are none', /No exception appears in more than one log, apart from the hidden ones below\./.test(overlay.text()),
+    ok('with only hidden exceptions shared, the list says so instead of claiming there are none', /No exception or stacktrace appears in more than one log, apart from the hidden ones below\./.test(overlay.text()),
         overlay.text().slice(0, 400));
+    P._last['EDR-7'] = st;
+
+    // ---- exceptions that don't count (JiTA.excnoise): set apart in the card and the full profile ----
+    const N = JiTA.excnoise;
+    const U1 = { sig: "usererror: user error, msg=throttlegeneric, dict={'remainingtime': #}|uilib.py:checkaccelerators>evecommands.py:cmdstopship", msg: 'UserError: User error, msg=ThrottleGeneric' };
+    const nv = [1, 2, 3, 4, 5, 6].map((i) => mk('EBR-' + i, { exc: i <= 2 ? [U1, V1] : [U1] }));
+    const ns = { key: 'EDR-7', total: 6, views: nv, summary: P.summarise(nv, null, () => '', N.why), defect: null, hiddenOf: () => '', gen: N.gen, pending: 0, done: true, zip: true };
+    ok('(the UserError all 6 logs share is no pattern; the ValueError 2 share is all that counts)', !ns.summary.domExc && ns.summary.exc.length === 1 && ns.summary.exc[0].sig === V1.sig &&
+        ns.summary.leftExc.length === 1 && ns.summary.leftExc[0].why === 'user', JSON.stringify(ns.summary.leftExc));
+    made = [];
+    P._leftOpen = false;
+    P._paint('EDR-7', ns);
+    const nchips = made.filter((m) => m.hasClass('jp-chip')).map((m) => m.e.txt).join(' | ');
+    ok('the card shows no chip for what does not count, and the next shared one instead', !/UserError/.test(nchips) && /Exception in 2\/6 logs: ValueError: bad/.test(nchips), nchips);
+    const nxEl = made.filter((m) => m.hasClass('jp-hidden'))[0], nxTog = made.filter((m) => m.hasClass('jp-open') && /not counted/.test(m.e.txt))[0];
+    ok('...it is folded away under one line', nxEl && !nxEl.hasClass('open') && nxTog && nxTog.e.txt === '▸ 1 not counted', nxTog && nxTog.e.txt);
+    ok('...which lists it, saying why, with the reports behind it', nxEl && nxEl.text().indexOf('6/6 logs: UserError: User error, msg=ThrottleGeneric (UserError: a message the game shows the player)') >= 0 &&
+        made.some((m) => m.hasClass('jp-why') && m.e.attrs.title === '6 reports: EBR-1, EBR-2, EBR-3, EBR-4, EBR-5, EBR-6'), nxEl && nxEl.text());
+    nxTog.e.on.click({ preventDefault() {} });
+    ok('...a click unfolds it', nxEl.hasClass('open') && nxTog.e.txt === '▾ 1 not counted', nxTog.e.txt);
+    made = [];
+    P._paint('EDR-7', ns);
+    ok('...and it stays unfolded when the card is drawn again', made.filter((m) => m.hasClass('jp-hidden'))[0].hasClass('open'));
+    P._leftOpen = false;
+    N.ignore(V1.sig, 'ValueError: bad');
+    made = [];
+    P._paint('EDR-7', ns);
+    const nchips2 = made.filter((m) => m.hasClass('jp-chip')).map((m) => m.e.txt).join(' | '), nxTog2 = made.filter((m) => m.hasClass('jp-open') && /not counted/.test(m.e.txt))[0];
+    ok('a card drawn after what counts changed is summarised again: an exception just ignored leaves its chip for the fold', !/ValueError/.test(nchips2) && nxTog2 && nxTog2.e.txt === '▸ 2 not counted',
+        nchips2 + ' / ' + (nxTog2 && nxTog2.e.txt));
+    N.unignore(N.keyOf(V1.sig));
+    // The full profile: a shared one can be ignored there, and counted again from the fold.
+    let asks = [];
+    global.confirm = (q) => { asks.push(q); return true; };
+    P._last['EDR-7'] = ns;
+    made = [];
+    P.openView('EDR-7');
+    const ntog = made.filter((m) => m.hasClass('jpv-toggle') && /^▸ Not counted/.test(m.e.txt))[0];
+    ok('the full profile folds them under their own heading, each saying why', ntog && ntog.e.txt === '▸ Not counted (1): UserErrors, ones you ignore, and ones common in the open reports\' logs' &&
+        /6\/6UserError: User error, msg=ThrottleGeneric/.test(overlay.text()) && made.some((m) => m.hasClass('jpv-why') && m.e.txt === 'UserError: a message the game shows the player'), ntog && ntog.e.txt);
+    ok('...a UserError with no link to count it, as it never does', !made.some((m) => m.hasClass('jpv-act') && /count/.test(m.e.txt)));
+    const ign = made.filter((m) => m.hasClass('jpv-act') && m.e.txt === 'ignore');
+    ok('a shared one has an ignore link', ign.length === 1);
+    ign[0].e.on.click({ preventDefault() {} });
+    ok('...which asks first, then ignores its message and draws the profile again with it set apart', asks.length === 1 && /^Ignore "ValueError: bad" everywhere, at any stack\?\n\nFor every defect and bug report/.test(asks[0]) && N.isIgnored(V1.sig) &&
+        ns.gen === N.gen && ns.summary.excGroups.length === 0 && ns.summary.leftExc.length === 2, JSON.stringify(asks));
+    ok('...where nothing is shared now but what does not count, which it says', /No exception or stacktrace appears in more than one log, apart from the ones not counted below\./.test(overlay.text()),
+        overlay.text().slice(0, 300));
+    const again = made.filter((m) => m.hasClass('jpv-act') && m.e.txt === 'count again');
+    ok('...and it can be counted again from there', again.length === 1 && made.some((m) => m.hasClass('jpv-why') && m.e.txt === 'ignored by you'));
+    again[0].e.on.click({ preventDefault() {} });
+    ok('...which puts it back among the shared ones', !N.isIgnored(V1.sig) && ns.summary.excGroups.length === 1 && ns.summary.excGroups[0].paths[0].sig === V1.sig);
+    global.confirm = () => false;
+    made = [];
+    P.openView('EDR-7');
+    made.filter((m) => m.hasClass('jpv-act') && m.e.txt === 'ignore')[0].e.on.click({ preventDefault() {} });
+    ok('an ignore the user does not agree to changes nothing', !N.isIgnored(V1.sig) && ns.summary.excGroups.length === 1);
+    // A common one: counted anyway from the fold.
+    N._freq = { at: Date.now(), n: 100, c: { [V1.sig]: 40 } };
+    N.gen++;
+    made = [];
+    P.openView('EDR-7');
+    const anyway = made.filter((m) => m.hasClass('jpv-act') && m.e.txt === 'count anyway');
+    ok('a common one is set apart with its share, and a link to count it anyway', anyway.length === 1 && ns.summary.excGroups.length === 0 &&
+        made.some((m) => m.hasClass('jpv-why') && m.e.txt === 'in 40% of the open reports\' logs'));
+    anyway[0].e.on.click({ preventDefault() {} });
+    ok('...which counts it again', N.countedAnyway() === 1 && !N.isCommon(V1.sig) && ns.summary.excGroups.length === 1);
+    N.uncountAll();
+    N._freq = null;
+    N.gen++;
     P._last['EDR-7'] = st;
 
     // ---- building: the defects of the exceptions are looked up ----
     const lookupMs = P.LOOKUP_MS;
     P.LOOKUP_MS = 30;
     P._reports = () => Promise.resolve({ issues: [1, 2, 3].map((i) => ({ key: 'EBR-' + i, fields: { description: ciWith({}), created: '2026-09-2' + i + 'T00:00:00.000+0000', attachment: [] } })), total: 3 });
-    meta = { 'rp:EBR-1': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], zip: true, wer: false }, 'rp:EBR-2': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], zip: true, wer: false } };
-    P._readFiles = (iss, r, z) => Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: true, exc: [H1, V1, K9], zip: z, wer: false });
+    meta = { 'rp:EBR-1': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], lv: P.LOG_V, zip: true, wer: false }, 'rp:EBR-2': { v: P.V, logs: true, hasLog: true, exc: [H1, V1], lv: P.LOG_V, zip: true, wer: false } };
+    P._readFiles = (iss, r, z) => Promise.resolve({ v: P.V, key: iss.key, logs: true, hasLog: true, exc: [H1, V1, K9], lv: P.LOG_V, zip: z, wer: false });
     let asked = [], answer = (sigs) => Promise.resolve(sigs.indexOf(H1.sig) >= 0 ? { [H1.sig]: 'EDR-2' } : {});
     JiTA.logsig.defectsForSigs = (sigs) => { asked.push(sigs.slice()); return answer(sigs); };
     JiTA.hidden.keys = { 'EDR-2': true };
@@ -667,6 +754,16 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('...nor does a lookup that throws', hstates.length >= 2 && lastOf().done && lastOf().summary.hiddenExc.length === 0, String(hstates.length));
     P.LOOKUP_MS = lookupMs;
     JiTA.hidden.keys = {};
+    // What doesn't count is set apart by the rules as they stand, and each state keeps what summarising it again takes.
+    JiTA.logsig.defectsForSigs = () => Promise.resolve({});
+    const rpOf = (exc) => ({ v: P.V, logs: true, hasLog: true, exc: exc, lv: P.LOG_V, zip: true, wer: false });
+    meta = { 'rp:EBR-1': rpOf([U1, V1]), 'rp:EBR-2': rpOf([U1, V1]), 'rp:EBR-3': rpOf([U1]) };
+    hstates = [];
+    await P.build('EDR-24', (s) => { hstates.push(s); }, () => true);
+    ok('a profile built sets apart a UserError its reports share', lastOf().done && lastOf().summary.leftExc.length === 1 && lastOf().summary.leftExc[0].why === 'user' &&
+        lastOf().summary.leftExc[0].count === 3 && lastOf().summary.exc.every((e) => e.sig !== U1.sig) && lastOf().summary.excGroups[0].msg === 'ValueError: bad',
+        JSON.stringify(lastOf().summary.leftExc));
+    ok('...and keeps what summarising it again takes', lastOf().gen === N.gen && typeof lastOf().hiddenOf === 'function' && Array.isArray(lastOf().views) && 'defect' in lastOf());
 
     // ================= wiring =================
     ok('renderReports draws the section on a defect', member('    renderReports: function (key, background) {').indexOf('JiTA.profile.renderSection(key, background);') >= 0);

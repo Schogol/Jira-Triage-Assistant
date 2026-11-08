@@ -126,8 +126,9 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
 
     // ================= the fingerprint, in both copies =================
     global.JiTA = { logsig: { MIN_FRAMES: 2, CRASH_FRAMES: 2 } };
-    Object.assign(JiTA.logsig, eval('({' + cut('    _splitBlocks: function (text) {', '\n    },\n') + '\n    },' + cut('    _fingerprint: function (text) {', '\n    },\n') + '\n    }})'));
-    const W = new Function('LG_MIN', 'LG_CRASH', cut('    function lgSplit(text) {', '    function lgSiblings(key) {') + '\nreturn { split: lgSplit, fp: lgFp };')(2, 2);
+    Object.assign(JiTA.logsig, eval('({' + cut('    TRACE: ', '\n') + '\n' + cut('    OPEN_CUT: ', '\n') + '\n' + cut('    _splitBlocks: function (text) {', '\n    },\n') + '\n    },' +
+        cut('    _fingerprint: function (text) {', '\n    },\n') + '\n    }})'));
+    const W = new Function('LG_MIN', 'LG_CRASH', cut('    var LG_TRACE = ', '\n') + '\n' + cut('    function lgSplit(text) {', '    function lgSiblings(key) {') + '\nreturn { split: lgSplit, fp: lgFp };')(2, 2);
     const tab = (x) => JiTA.logsig._splitBlocks(x).map((b) => JiTA.logsig._fingerprint(b).sig);
     const wrk = (x) => W.split(x).map((b) => W.fp(b).sig);
     const LOG = ['EXCEPTION #1 logged at 10/02/2026 12:00:00', 'Formatted exception info: KeyError: 2', 'Thrown at:', '/eve/a/foo.py(130) baz', '/eve/b/qux.py(40) quux', 'EXCEPTION END'].join('\n');
@@ -137,8 +138,10 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
     const want = tab(LOG)[0];
     ok('a parsed log block has a signature (control)', !!want && want === wrk(LOG)[0], want);
     ok('a stack trace pasted after EXCEPTION END is not read as more frames', tab(WITH_TRACE)[0] === want, tab(WITH_TRACE)[0]);
+    const AFTER_END = LOG.split('\n').join(' ') + ' and later, in no block: /eve/c/other.py(10) zap /eve/d/more.py(20) zop';
+    ok('...nor are frames after it in no block of their own: the block ends at EXCEPTION END', tab(AFTER_END)[0] === want, tab(AFTER_END)[0]);
     ok('a description pasted with its log columns, lines joined by spaces, matches the parsed log', tab(PASTED)[0] === want, tab(PASTED)[0]);
-    const samples = [LOG, WITH_TRACE, PASTED, LOG + '\n' + LOG.replace('#1', '#2').replace('KeyError: 2', 'ValueError: x'), 'no exception here'];
+    const samples = [LOG, WITH_TRACE, AFTER_END, PASTED, LOG + '\n' + LOG.replace('#1', '#2').replace('KeyError: 2', 'ValueError: x'), 'no exception here'];
     ok('the worker\'s copy reads every sample exactly as the tab\'s does', samples.every((s) => JSON.stringify(tab(s)) === JSON.stringify(wrk(s))),
         samples.map((s) => JSON.stringify(tab(s)) + ' vs ' + JSON.stringify(wrk(s))).filter((x, i) => JSON.stringify(tab(samples[i])) !== JSON.stringify(wrk(samples[i]))).join(' | '));
 

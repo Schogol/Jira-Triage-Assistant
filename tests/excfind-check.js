@@ -106,8 +106,12 @@ Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') +
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 JiTA.util.delay = (ms) => new Promise((r) => setTimeout(r, ms));
 let crashCalls = 0;
-Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + member('    _splitBlocks: function (text) {') + member('    _fingerprint: function (text) {') +
+Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    OPEN_CUT: ') + line('    isTrace: function (sig) {') +
+    line('    isCut: function (sig) {') + line('    _traceKey: function (sig) {') + member('    _splitBlocks: function (text) {') + member('    _fingerprint: function (text) {') +
     member('    _crashOf: function (sig) {') + '})'));
+// What counts (JiTA.excnoise), the real one over the stubs above (excnoise-check.js covers it).
+Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
+eval(block('JiTA.excnoise = {', '\n};\n'));
 const realCrash = JiTA.logsig._crashOf;
 JiTA.logsig._crashOf = function (s) { crashCalls++; return realCrash.call(this, s); };
 JiTA.ocr._langFromLabels = () => null;
@@ -203,7 +207,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('two exceptions without a crash site do not match each other loosely', X.match(X._entry(item('EBR-37'), { exc: [{ sig: 'keyerror: y|' }] }, {}), [{ sig: 'valueerror: x|', crash: null }]).length === 0);
 
     // ================= editing what an exception is looked for by =================
-    const UE = "UserError: User error, msg=IndustryValidationError, dict={'errors': [(<Error.MISMATCH_COST: 25>, (12, 1677))]}";
+    const UE = "IndustryError: Industry error, msg=IndustryValidationError, dict={'errors': [(<Error.MISMATCH_COST: 25>, (12, 1677))]}";
     const FU = ['ui/industry.py(10) Validate', 'ui/foo.py(123) OnClick', 'ui/bar.py(45) Load'];
     const U = fp(UE, FU), tU = { sig: U.sig, crash: U.crashSig, msg: U.msg };
     const um = (msg, fr) => X._exc(fp(msg, fr || FU).sig).m;
@@ -227,9 +231,9 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     let rw = X._rawPattern(UE.replace('25', '#'));
     ok('as written, # stands for any number', rw.test(W(UE)) && rw.test(W(UE.replace('25', '30'))) && !rw.test(W(UE.replace('25', 'x'))), rw.source);
     ok('...and every other number is as written, even one a signature reads as any number', !rw.test(W(UE.replace('(12, 1677)', '(12, 9)'))));
-    rw = X._rawPattern("UserError: User error, msg=IndustryValidationError, dict={'errors': [(<Error.MISMATCH_COST: #>, (12, #))]}");
+    rw = X._rawPattern("IndustryError: Industry error, msg=IndustryValidationError, dict={'errors': [(<Error.MISMATCH_COST: #>, (12, #))]}");
     ok('...so (12, #) takes 12 and any number, not 13', rw.test(W(UE)) && rw.test(W(UE.replace('1677', '5'))) && !rw.test(W(UE.replace('(12, 1677)', '(13, 1677)'))));
-    ok('...* any text, case and spacing aside, the whole message', X._rawPattern('  usererror:  USER error, *').test(W(UE)) && !X._rawPattern('User error').test(W(UE)) &&
+    ok('...* any text, case and spacing aside, the whole message', X._rawPattern('  industryerror:  INDUSTRY error, *').test(W(UE)) && !X._rawPattern('Industry error').test(W(UE)) &&
         X._rawPattern('a.b').test('a.b') && !X._rawPattern('a.b').test('axb'));
     ok('...a # in the message is matched by a # too', X._rawPattern('item #').test(W('Item #')) && X._rawPattern('item #').test(W('item 12')));
     const T = (pat, msg, pre) => X._tokMatch(X._toks(pat), W(msg), pre);
@@ -238,16 +242,16 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('...and, for a message cut short, may run off its end', T('KeyError: # in *', 'KeyError: 2', true) && T('KeyError: #', 'KeyError: 12', true) && !T('KeyError: x', 'KeyError: 2', true) &&
         !T('KeyError: x', 'KeyError: 2', false));
     ok('...a long message and pattern are no trouble', T('a'.repeat(150) + '*' + 'b#*', 'a'.repeat(150) + 'c'.repeat(300) + 'b12 end'));
-    re = X._pattern('UserError: User error, msg=* dict=*');
-    ok('* stands for any text', re.test(um(UE)) && re.test(um('UserError: User error, msg=Other, dict={}')) && !re.test(um('ValueError: x')), re.source);
-    ok('...whatever the case and spacing typed', X._pattern('  usererror:   USER error, *').test(um(UE)));
+    re = X._pattern('IndustryError: Industry error, msg=* dict=*');
+    ok('* stands for any text', re.test(um(UE)) && re.test(um('IndustryError: Industry error, msg=Other, dict={}')) && !re.test(um('ValueError: x')), re.source);
+    ok('...whatever the case and spacing typed', X._pattern('  industryerror:   INDUSTRY error, *').test(um(UE)));
     ok('...and other regex characters are text', X._pattern('a.b').test('a.b') && !X._pattern('a.b').test('axb') && X._pattern('(x)+[y]$').test('(x)+[y]$'));
     ok('* alone is any message', X._pattern('*').test(um('Whatever: 1')) && X._pattern('*').test(''));
     const eU = X._exc(U.sig);
     ok('an exception keeps its message, frames and crash-site frames apart', eU.m === P._sigParts(U.sig).msg && eU.fr === 'industry.py:validate>foo.py:onclick>bar.py:load' &&
         eU.cfr === 'foo.py:onclick>bar.py:load' && eU.crash === U.crashSig, JSON.stringify(eU));
-    ts = X.targets([{ sig: U.sig, msg: U.msg }, { sig: A.sig, msg: 'KeyError: 2' }], null, null, { [U.sig]: 'UserError: *' });
-    ok('an edited target is looked for by its edit, with its own frames', ts[0].pat === 'UserError: *' && ts[0].re.test(eU.m) && ts[0].fr === eU.fr && ts[0].cfr === eU.cfr);
+    ts = X.targets([{ sig: U.sig, msg: U.msg }, { sig: A.sig, msg: 'KeyError: 2' }], null, null, { [U.sig]: 'IndustryError: *' });
+    ok('an edited target is looked for by its edit, with its own frames', ts[0].pat === 'IndustryError: *' && ts[0].re.test(eU.m) && ts[0].fr === eU.fr && ts[0].cfr === eU.cfr);
     ok('...the others as they are', ts[1].pat === null && !ts[1].re);
     const pool2 = {}, otherStack = ['ui/other.py(1) Start', 'ui/foo.py(123) OnClick', 'ui/bar.py(45) Load'];
     const tUe = X._withPattern({ sig: U.sig, crash: U.crashSig, msg: U.msg }, UE.replace('25', '#'));
@@ -315,7 +319,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     P._readFiles = (it, rec, zip) => { reads.push({ key: it.key, rec: rec, zip: zip }); return Promise.resolve({ v: P.V, key: it.key, logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'KeyError: 2' }], logSig: P._logSig(it.fields.attachment) }); };
     const att = (name, size) => ({ filename: name, size: size || 100, content: 'https://jira/att/' + name });
     const it5 = { key: 'EBR-5', desc: [], fields: { attachment: [att('logs.txt', 500)] } };
-    meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: 'logs.txt:500', zip: true, wer: true };
+    meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: 'logs.txt:500', lv: P.LOG_V, zip: true, wer: true };
     let r = await X._read(it5);
     ok('a cached reading of the same log files is used, nothing downloaded', r.cached === true && reads.length === 0 && r.rec.exc[0].sig === B.sig);
     meta['rp:EBR-5'].logSig = 'logs.txt:400';
@@ -328,6 +332,20 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     delete meta['rp:EBR-5'].logSig;
     r = await X._read(it5);
     ok('a reading from before log files were named is used as it is', r.cached === true && reads.length === 0);
+    // Read before the reader read stacktraces (it has no lv): its logs again, the zip's part kept.
+    meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: 'logs.txt:500', zip: true, wer: true };
+    r = await X._read(it5);
+    ok('a reading made before the reader read stacktraces is read again, its logs only, what the zip said kept', r.cached === false && reads.length === 1 &&
+        reads[0].rec.logs === false && reads[0].rec.exc.length === 0 && reads[0].rec.zip === true && reads[0].rec.wer === true && reads[0].zip === false, JSON.stringify(reads[0] && reads[0].rec));
+    reads = [];
+    meta['rp:EBR-5'].lv = P.LOG_V - 1;
+    r = await X._read(it5);
+    ok('...as is one made by an older reader that said so', r.cached === false && reads.length === 1 && reads[0].rec.logs === false);
+    reads = [];
+    meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: '', zip: true, hasZip: true };
+    r = await X._read({ key: 'EBR-5', desc: [], fields: { attachment: [att('igbr.zip', 900)] } });
+    ok('...but one whose log came out of its zip (the report has no log of its own) is used as it is: the zip is not read here, and reading the logs alone would lose it',
+        r.cached === true && reads.length === 0 && r.rec.exc[0].sig === B.sig);
     meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: false, zip: true };
     r = await X._read(it5);
     ok('a reading whose logs failed to download is read again', reads.length === 1 && reads[0].rec.logs === false && reads[0].rec.zip === true);
@@ -357,7 +375,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     };
     const overlay = () => { const n = new Node('div'); ROOT.appendChild(n); return n; };
     const fresh = () => { const st = X._state('EDR-77', overlay()); X._st = st; return st; };
-    meta = { 'rp:EBR-3': { v: P.V, key: 'EBR-3', logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'KeyError: 2' }], logSig: 'logs.txt:100' } };
+    meta = { 'rp:EBR-3': { v: P.V, key: 'EBR-3', logs: true, hasLog: true, exc: [{ sig: A.sig, msg: 'KeyError: 2' }], logSig: 'logs.txt:100', lv: P.LOG_V } };
     pages = { '': page(['EBR-1', 'EBR-2:att', 'EBR-3', 'EBR-4'], { nextPageToken: 't2' }), t2: page(['EBR-4', 'EBR-5:desc', 'EBR-9'], { isLast: true }) };
     let st = fresh();
     st.targets = [Object.assign({}, tA, { def: true })]; st.on[A.sig] = true;
@@ -540,7 +558,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('...and its stack on hover', byCls(wr, 'jx-msg')[0].getAttribute('title') === P._sigTip(A.sig, 'KeyError: 2'));
     const phs = (n) => byCls(n, 'jx-ph').map((x) => x.textContent + '=' + x.getAttribute('title')).join();
     ok('an exception is shown as it is looked for: as written, numbers and all', X._shown(tU) === UE, X._shown(tU));
-    ok('...an edited one by its edit', X._shown(Object.assign({}, tU, { pat: 'UserError: * (#)' })) === 'UserError: * (#)');
+    ok('...an edited one by its edit', X._shown(Object.assign({}, tU, { pat: 'IndustryError: * (#)' })) === 'IndustryError: * (#)');
     ok('...one without a message says so', X._shown({ sig: '|a.py:f>b.py:g', msg: '' }) === '(no message)');
     let mk = X._marked($('<span></span>'), 'a # b * c', false);
     ok('in an exception as it is, neither # nor * is marked', mk[0].textContent === 'a # b * c' && phs(mk[0]) === '', phs(mk[0]));
@@ -548,15 +566,28 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('...and in an edit, a * marked as any text', mk[0].textContent === '#* x' && phs(mk[0]) === '#=any number,*=any text', phs(mk[0]));
     X._why(wr, [{ t: tU, exact: true, where: 'log' }]);
     ok('a match line shows the exception as it was looked for, as written', /\(12, 1677\)/.test(wr.textContent) && phs(wr) === '', wr.textContent);
-    X._why(wr, [{ t: Object.assign({}, tU, { pat: 'UserError: *' }), exact: false, where: 'description' }]);
-    ok('...an edited one by its edit, and where it was found', /~ same crash siteUserError: \* \(in its description\)$/.test(wr.textContent) && phs(wr) === '*=any text', wr.textContent);
+    X._why(wr, [{ t: Object.assign({}, tU, { pat: 'IndustryError: *' }), exact: false, where: 'description' }]);
+    ok('...an edited one by its edit, and where it was found', /~ same crash siteIndustryError: \* \(in its description\)$/.test(wr.textContent) && phs(wr) === '*=any text', wr.textContent);
     st.targets = [{ sig: A.sig, msg: 'KeyError: 2', via: 'foo.py:onclick > …', desc: true }];
     X._paintTargets(st);
     ok('...and so does its box', / via foo\.py:onclick/.test(byId['jx-targets'].textContent), byId['jx-targets'].textContent);
-    st.targets = [{ sig: fp('TypeError: bad operand for *: int', FU).sig, msg: 'TypeError: bad operand for *: int' }, Object.assign({}, tU, { pat: 'UserError: *' })];
+    st.targets = [{ sig: fp('TypeError: bad operand for *: int', FU).sig, msg: 'TypeError: bad operand for *: int' }, Object.assign({}, tU, { pat: 'IndustryError: *' })];
     X._paintTargets(st);
     const trows = byCls(byId['jx-targets'], 'jx-target');
     ok('a * in an exception as it is shown plain, one in an edit marked', phs(trows[0]) === '' && phs(trows[1]) === '*=any text', phs(trows[0]) + ' / ' + phs(trows[1]));
+    // A stacktrace says it is one, in its box and in what a report holds (stacktrace-check.js covers its matching).
+    const stFp = JiTA.logsig._fingerprint(['STACKTRACE #1 logged at 04/12/2026 11:23:16 : Possible service deadlock detected!', 'Traced at:'].concat(frames(FA)).join('\n'));
+    const stCut = JiTA.logsig._fingerprint('STACKTRACE #2 logged at 04/12/2026 11:23:17 : Cut short!\n---- dump ----');
+    st.targets = [{ sig: stFp.sig, msg: stFp.msg }, { sig: stCut.sig, msg: stCut.msg }, { sig: A.sig, msg: 'KeyError: 2' }];
+    X._paintTargets(st);
+    const kinds = byCls(byId['jx-targets'], 'jx-target').map((n) => byCls(n, 'jx-kind').map((k) => k.textContent).join());
+    ok('a stacktrace says so in its box, and one cut off before its stack that too; an exception says nothing', JSON.stringify(kinds) === JSON.stringify(['stacktrace', 'stacktrace, stack cut off', '']),
+        JSON.stringify(kinds));
+    X._why(wr, [{ t: { sig: stFp.sig, msg: stFp.msg }, exact: false, where: 'log' }, { t: { sig: stCut.sig, msg: stCut.msg }, exact: false, bare: true, where: 'log' }]);
+    ok('...and a report holding one says how: at its trace site, or by its message with its stack cut off', /~ same trace sitePossible service deadlock detected!/.test(wr.textContent) &&
+        /~ same message, stack cut offCut short!/.test(wr.textContent), wr.textContent);
+    X._why(wr, [{ t: { sig: stFp.sig, msg: stFp.msg }, exact: true, where: 'log' }]);
+    ok('...or the same stack, as an exception\'s does', /^same stackPossible service deadlock detected!$/.test(wr.textContent), wr.textContent);
     X._retarget(Object.assign(st, { tsig: null }));
     // the Attach control's options
     const opts = built.find((b) => b.key === 'EBR-1').opts;
@@ -631,7 +662,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     X._retarget(st);
     const tgt = () => byId['jx-targets'], rowsT = () => byCls(tgt(), 'jx-target'), editsOf = (r) => byCls(r, 'jx-tedit');
     const box = () => find(tgt(), (n) => n.hasCls('jx-pat'))[0];
-    ok('each exception offers an edit', rowsT().length === 2 && rowsT().every((r) => editsOf(r).map((n) => n.textContent).join() === 'edit'));
+    ok('each exception offers an edit, and to ignore it', rowsT().length === 2 && rowsT().every((r) => editsOf(r).map((n) => n.textContent).join() === 'edit,ignore'));
     ok('...and its row shows what it is looked for by, as the box will start: the message as written, nothing marked',
         byCls(rowsT()[0], 'jx-tmsg')[0].textContent === UE && UE === X._editText(st.targets[0]) && byCls(tgt(), 'jx-ph').length === 0, byCls(rowsT()[0], 'jx-tmsg')[0].textContent);
     click(editsOf(rowsT()[0])[0]);
@@ -649,7 +680,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     const want = X._editText(st.targets[0]).replace('25', '#');
     ok('Enter keeps the edit, and the list is drawn again', st.edit[U.sig] === want && !st.editing && !inp.isConnected && rowsT().length === 3, JSON.stringify(st.edit));
     const msg0 = byCls(rowsT()[0], 'jx-tmsg')[0];
-    ok('...the edited message shown and marked, with a reset', msg0.hasCls('edited') && msg0.textContent === want && editsOf(rowsT()[0]).map((n) => n.textContent).join() === 'edit,reset');
+    ok('...the edited message shown and marked, with a reset', msg0.hasCls('edited') && msg0.textContent === want && editsOf(rowsT()[0]).map((n) => n.textContent).join() === 'edit,reset,ignore');
     ok('...its # marked', byCls(msg0, 'jx-ph').length === 1);
     ok('...and the target looked for by it', st.targets[0].pat === want && !!st.targets[0].re);
     X._add(st, item('EBR-41', null, [], '2026-10-07T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: fp(UE.replace('25', '30'), FU).sig }] }, cached: false });
@@ -665,10 +696,10 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     click(editsOf(rowsT()[1])[0]);
     inp = box(); inp.value = 'KeyError: #';
     keyOn(inp, 'Escape');
-    ok('Esc closes the box and keeps nothing', !st.editing && st.edit[A.sig] === undefined && !box() && editsOf(rowsT()[1]).length === 1);
+    ok('Esc closes the box and keeps nothing', !st.editing && st.edit[A.sig] === undefined && !box() && editsOf(rowsT()[1]).map((n) => n.textContent).join() === 'edit,ignore');
     click(editsOf(rowsT()[1])[0]);
     keyOn(box(), 'Enter');
-    ok('Enter on the text as it started keeps no edit', !st.editing && st.edit[A.sig] === undefined && editsOf(rowsT()[1]).length === 1);
+    ok('Enter on the text as it started keeps no edit', !st.editing && st.edit[A.sig] === undefined && editsOf(rowsT()[1]).map((n) => n.textContent).join() === 'edit,ignore');
     click(editsOf(rowsT()[1])[0]);
     inp = box(); inp.value = 'KeyError: *';
     (inp.handlers.blur || []).forEach((f) => f.call(inp));
@@ -706,27 +737,27 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ain.value = '  *  ';
     keyOn(ain, 'Enter');
     ok('...nor a * on its own', st.targets.length === 1 && /on its own, \* finds every exception/.test(addMsg()) && ain.value === '  *  ', addMsg());
-    ain.value = 'UserError:   User error, msg=IndustryValidationError*';
+    ain.value = 'IndustryError:   Industry error, msg=IndustryValidationError*';
     keyOn(ain, 'Enter');
     const own = st.targets[1];
-    ok('a typed message is added, last and ticked, the box emptied', st.targets.length === 2 && own.typed && own.pat === 'UserError: User error, msg=IndustryValidationError*' &&
+    ok('a typed message is added, last and ticked, the box emptied', st.targets.length === 2 && own.typed && own.pat === 'IndustryError: Industry error, msg=IndustryValidationError*' &&
         st.on[own.sig] === true && ain.value === '' && addMsg() === '', JSON.stringify(own));
     ok('...looked for at any stack', own.fr === null && own.re.test(um(UE, FA)));
     const ownRow = rowsT()[1];
     ok('...its row says so, with only a remove, its * marked as any text', /added by you, at any stack/.test(ownRow.textContent) && editsOf(ownRow).map((n) => n.textContent).join() === 'remove' &&
         phs(ownRow) === '*=any text' && ownRow.getAttribute('title') === 'Looked for by this message alone, at any stack', ownRow.textContent);
-    ain.value = 'UserError: User error, msg=IndustryValidationError*';
+    ain.value = 'IndustryError: Industry error, msg=IndustryValidationError*';
     keyOn(ain, 'Enter');
     ok('the same message twice is added once', st.added.typed.length === 1 && st.targets.length === 2);
     X._add(st, item('EBR-60', null, [], '2026-10-08T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: fp(UE.replace('25', '40'), FA).sig }] }, cached: false });
     ok('a report with that message at another stack is found, as the same message',
-        !!hasRow('EBR-60') && /same messageUserError: User error, msg=IndustryValidationError\*/.test(hasRow('EBR-60').textContent), hasRow('EBR-60') && hasRow('EBR-60').textContent);
+        !!hasRow('EBR-60') && /same messageIndustryError: Industry error, msg=IndustryValidationError\*/.test(hasRow('EBR-60').textContent), hasRow('EBR-60') && hasRow('EBR-60').textContent);
     ain.value = descBlock('ValueError: bad', FB);
     keyOn(ain, 'Enter');
     let pasted = st.targets.filter((t) => t.sig === B.sig)[0];
     ok('a whole exception pasted from a log is added at its stack, ticked', !!pasted && pasted.own && !pasted.typed && st.on[B.sig] === true && st.added.pasted.length === 1 && ain.value === '',
         JSON.stringify(st.added));
-    ok('...editable like the others, and removable', editsOf(rowsT()[st.targets.indexOf(pasted)]).map((n) => n.textContent).join() === 'edit,remove' &&
+    ok('...editable like the others, and removable', editsOf(rowsT()[st.targets.indexOf(pasted)]).map((n) => n.textContent).join() === 'edit,ignore,remove' &&
         /added by you/.test(rowsT()[st.targets.indexOf(pasted)].textContent));
     ain.value = 'Formatted exception info: ValueError: worse Caught at: ' + frames(FB).join(' ');
     keyOn(ain, 'Enter');
@@ -740,7 +771,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ain.value = descBlock(UE, FU);
     keyOn(ain, 'Enter');
     ok('pasting one already in the list only ticks it', st.added.pasted.length === 2 && st.on[U.sig] === true && st.targets.length === 4 &&
-        editsOf(rowsT()[0]).map((n) => n.textContent).join() === 'edit');
+        editsOf(rowsT()[0]).map((n) => n.textContent).join() === 'edit,ignore');
     ain.value = frames(FA).join(' ');
     keyOn(ain, 'Enter');
     ok('a stack without its message is not added, and that is said', st.targets.length === 4 && /Paste the whole exception/.test(addMsg()) && ain.value !== '', addMsg());
@@ -763,6 +794,65 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     st = X.openView();
     ok('what was added is remembered for the defect when the window opens again', st.added === keptA && st.added.typed.length === 1 && st.added.pasted.length === 1);
     ok('...and another defect has its own', X._state('EDR-78', overlay()).added !== keptA);
+    ROOT.removeChild(st.node);
+    X._edits = {}; X._added = {};
+
+    // ================= exceptions that don't count (JiTA.excnoise) =================
+    const N = JiTA.excnoise;
+    st = X.openView();
+    const UZ = fp("UserError: User error, msg=ThrottleGeneric, dict={'remainingTime': 6093158L}", FB);
+    st.started = true; st.profileDone = true; st.desc = [{ sig: A.sig, msg: 'KeyError: 2' }];
+    st.profile = { withLog: 4, excGroups: [{ msg: 'ValueError: bad', paths: [{ sig: B.sig, count: 2 }] }], leftExc: [{ msg: UZ.msg, why: 'user', paths: [{ sig: UZ.sig, count: 4 }] }] };
+    X._retarget(st);
+    const ahead = () => byCls(tgt(), 'jx-aparthead')[0], apartBox = () => byCls(tgt(), 'jx-apart')[0], apartRows = () => byCls(apartBox(), 'jx-target');
+    const drawn = () => st.targets.filter((t) => !t.left).concat(st.targets.filter((t) => !!t.left));   // the order rows are drawn in
+    const rowOfSig = (sig) => rowsT()[drawn().findIndex((t) => t.sig === sig)], linksOf = (r) => editsOf(r).map((n) => n.textContent).join();
+    ok('a shared one that does not count is offered below the rest, folded under a line of its own', st.targets.map((t) => t.left || '-').join() === '-,-,user' && !!ahead() &&
+        ahead().textContent === '▸ Not counted (1): UserErrors, ones you ignore, and ones common in the open reports\' logs' && !apartBox().hasCls('open') &&
+        apartRows().length === 1 && rowsT().length === 3, ahead() && ahead().textContent);
+    ok('...saying why, with no link to count it, as a UserError never does', byCls(apartRows()[0], 'jx-left')[0].textContent === 'UserError: a message the game shows the player' &&
+        linksOf(apartRows()[0]) === 'edit', linksOf(apartRows()[0]));
+    ok('...while the rest have nothing said of them', byCls(rowOfSig(A.sig), 'jx-left').length === 0 && linksOf(rowOfSig(B.sig)) === 'edit,ignore');
+    click(ahead());
+    ok('...a click unfolds it', apartBox().hasCls('open') && /^▾ Not counted \(1\)/.test(ahead().textContent) && st.apartOpen === true, ahead().textContent);
+    X._paintTargets(st);
+    ok('...and it stays unfolded when the list is drawn again', apartBox().hasCls('open'));
+    const ucb = find(apartRows()[0], (n) => n.getAttribute('type') === 'checkbox')[0];
+    ucb.checked = true; click(ucb, 'change');
+    X._add(st, item('EBR-70', null, [], '2026-10-09T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: UZ.sig }] }, cached: false });
+    ok('ticked, a folded one is looked for all the same', st.on[UZ.sig] === true && !!hasRow('EBR-70'));
+    click(editsOf(rowOfSig(B.sig)).filter((n) => n.textContent === 'ignore')[0]);
+    ok('ignore sets one apart at once', N.isIgnored(B.sig) && st.targets.filter((t) => t.sig === B.sig)[0].left === 'ignored' && apartRows().length === 2 &&
+        /Not counted \(2\)/.test(ahead().textContent), ahead().textContent);
+    ok('...saying so, with a link to count it again', byCls(rowOfSig(B.sig), 'jx-left')[0].textContent === 'ignored by you' && linksOf(rowOfSig(B.sig)) === 'edit,count again', linksOf(rowOfSig(B.sig)));
+    click(editsOf(rowOfSig(B.sig)).filter((n) => n.textContent === 'count again')[0]);
+    ok('...which puts it back with the rest', !N.isIgnored(B.sig) && !st.targets.filter((t) => t.sig === B.sig)[0].left && apartRows().length === 1);
+    // The count of the common ones, read once the window is open (as _load does): what it sets apart is drawn so at once.
+    meta[N.FREQ_KEY] = { at: Date.now(), n: 100, c: { [A.sig]: 30 } };
+    N._freq = null; N._freqRead = 0;
+    await N.load();
+    X._retarget(st);
+    ok('a count read later sets a common one apart, the list drawn again', st.targets.filter((t) => t.sig === A.sig)[0].left === 'common' && apartRows().length === 2 &&
+        byCls(rowOfSig(A.sig), 'jx-left')[0].textContent === 'in 30% of the open reports\' logs', apartRows().length);
+    ok('...with a link to count it anyway', linksOf(rowOfSig(A.sig)) === 'edit,count anyway', linksOf(rowOfSig(A.sig)));
+    click(editsOf(rowOfSig(A.sig)).filter((n) => n.textContent === 'count anyway')[0]);
+    ok('...which puts it back with the rest', N.countedAnyway() === 1 && !st.targets.filter((t) => t.sig === A.sig)[0].left && apartRows().length === 1);
+    N.uncountAll();
+    N._freq = null;
+    N._changed();
+    // The add box: a pasted one that does not count shows where it went; a typed one is never set apart.
+    st.apartOpen = false;
+    X._paintTargets(st);
+    const ain2 = find(byId['jx-targets'].parentNode, (n) => n.hasCls('jx-addin'))[0];
+    ain2.value = descBlock('UserError: User error, msg=PerformSessionChangeInProgress', FA);
+    keyOn(ain2, 'Enter');
+    const pz = fp('UserError: User error, msg=PerformSessionChangeInProgress', FA);
+    ok('a UserError pasted into the box is drawn apart and ticked, the fold opened to show it', st.on[pz.sig] === true && st.apartOpen === true && apartBox().hasCls('open') &&
+        apartRows().some((r) => r === rowOfSig(pz.sig)), JSON.stringify(st.added.pasted.map((e) => e.msg)));
+    ain2.value = 'UserError: User error, msg=ThrottleGeneric*';
+    keyOn(ain2, 'Enter');
+    const tz = st.targets.filter((t) => t.typed)[0];
+    ok('a typed message is never set apart, whatever it says', !!tz && !tz.left && apartRows().indexOf(rowOfSig(tz.sig)) < 0 && linksOf(rowOfSig(tz.sig)) === 'remove');
     ROOT.removeChild(st.node);
     X._edits = {}; X._added = {};
     X._load = realLoad;
@@ -802,6 +892,23 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('a defect not in the local copy is read from Jira', X._fps(t78)[0].sig === B.sig, t78);
     ajax = {};
     ok('...and one Jira cannot give has no exceptions, without an error', (await X._defectText('EDR-79')) === '');
+    // Which are common is read as the window opens, and may come after the description: what it sets apart is drawn so then.
+    const freqD = deferred(), getMeta0 = JiTA.db.getMeta;
+    JiTA.db.getMeta = (k) => (k === N.FREQ_KEY ? freqD.promise : getMeta0(k));
+    N._freq = null; N._freqRead = 0;
+    dbRec = { key: 'EDR-77', description: descBlock('KeyError: 2', FA) };
+    st = X._state('EDR-77', overlay()); X._st = st;
+    X._load(st);
+    await flush();
+    ok('(the description read first: its exception counts while the count is read)', st.targets.length === 1 && st.targets[0].sig === A.sig && !st.targets[0].left);
+    freqD.resolve({ at: Date.now(), n: 100, c: { [A.sig]: 30 } });
+    await flush();
+    ok('the count of the common ones, read as the window opens, sets one apart when it comes, drawn so', st.targets[0].left === 'common' && /common$/.test(st.tsig.split('#')[0]),
+        st.tsig);
+    JiTA.db.getMeta = getMeta0;
+    N._freq = null; N._freqRead = Date.now();
+    ROOT.removeChild(st.node);
+    dbRec = null;
     X._sweep = realSweep;
 
     // ================= the Attach control's options (the real one) =================

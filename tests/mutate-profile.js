@@ -53,7 +53,7 @@ const muts = [
     [H, 'a report that reaches the shared message another way is an outlier', 'return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg;', 'return e.sig === out.domExc.sig;'],
     [H, 'a "<module>" frame is cut in two', "        String(sig).slice(at + 1).split('>').forEach(function (p) {\n            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }",
         "        String(sig).slice(at + 1).split('>').forEach(function (p) {\n            if (p) { frames.push(p); }"],
-    [H, 'call stacks are labelled by their whole chain', 'chains[0][chains[0].length - 1 - cs]; })) { cs++; }', 'chains[0][chains[0].length - 1 - cs]; })) { break; }'],
+    [H, 'call stacks are labelled by their whole chain', 'full[0][full[0].length - 1 - cs]; })) { cs++; }', 'full[0][full[0].length - 1 - cs]; })) { break; }'],
     [H, 'the full profile lists a message\'s call stacks nowhere', '            if (g.paths.length < 2) { return; }', '            return;'],
     [H, 'what a half-read set of logs said is kept', "useLog(got, String(t || ''));", "useLog(rec, String(t || ''));"],
     [H, 'the zip\'s log is unpacked for a report with its own', "                if (rec.logs && !rec.hasLog) { want.push('logs.txt'); }", "                want.push('logs.txt');"],
@@ -79,7 +79,7 @@ const muts = [
     [H, 'a page token that does not move on is asked for again', ' || d.nextPageToken === token) { return { issues: issues, total: issues.length }; }', ') { return { issues: issues, total: issues.length }; }'],
     [H, 'every report keeps the whole search result', '(d.issues || []).forEach(function (iss) { issues.push(P._slim(iss)); });', '(d.issues || []).forEach(function (iss) { issues.push(iss); });'],
     [H, 'Computer Info outside the description is lost', 'description: JiTA.profile._issueText(f), created:', 'description: JiTA.util.toPlainText(f.description), created:'],
-    [H, 'every report is read again on every visit', '                issues.forEach(function (iss, i) { if (P._needs(recs[i], zip)) { todo.push(i); } });', '                issues.forEach(function (iss, i) { todo.push(i); });'],
+    [H, 'every report is read again on every visit', '                issues.forEach(function (iss, i) { if (P._needs(recs[i], zip, (iss.fields || {}).attachment)) { todo.push(i); } });', '                issues.forEach(function (iss, i) { todo.push(i); });'],
     [H, 'a reading cached by an older build is trusted', '_usable: function (rec) { return (rec && rec.v === JiTA.profile.V) ? rec : null; },', '_usable: function (rec) { return rec || null; },'],
     [H, 'leaving the defect does not stop new reads', '                    if (next >= todo.length || (still && !still())) { return Promise.resolve(); }', '                    if (next >= todo.length) { return Promise.resolve(); }'],
     [H, 'a profile is marked done before all its reports are read', '                        return (left || !todo.length) ? P._last[key] : publish(true);', '                        return publish(true);'],
@@ -121,16 +121,16 @@ const muts = [
     [H, 'a crash site cuts a "<module>" frame in two', "            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }\n        });\n        if (frames.length < JiTA.logsig.MIN_FRAMES)",
         "            if (p) { frames.push(p); }\n        });\n        if (frames.length < JiTA.logsig.MIN_FRAMES)"],
     [H, 'the worker\'s crash site keeps every frame', "        return s.slice(0, at) + '|' + frames.slice(-LG_CRASH).join('>');", "        return s.slice(0, at) + '|' + frames.join('>');"],
-    [H, 'no defect is found by its crash site', 'var c = idx && idx.sigMap[sig], cs = JiTA.logsig._crashOf(sig), cc = cs && idx && idx.crashMap[cs];', 'var c = idx && idx.sigMap[sig], cs = JiTA.logsig._crashOf(sig), cc = null;'],
-    [H, 'the crash site beats the same stack', "                if (c && c.members.length) { out[sig] = c.members[0].key; }\n                else if (cc && cc.members.length) { out[sig] = cc.members[0].key; }",
-        "                if (cc && cc.members.length) { out[sig] = cc.members[0].key; }\n                else if (c && c.members.length) { out[sig] = c.members[0].key; }"],
-    [H, 'the worker finds no defect by its crash site', 'var c = idx.sigMap[sig], cs = lgCrashOf(sig), cc = cs && idx.crashMap[cs];', 'var c = idx.sigMap[sig], cs = lgCrashOf(sig), cc = null;'],
+    [H, 'no defect is found by its crash site', '        var cs = crashSig !== undefined ? crashSig : L._crashOf(sig);', '        var cs = null;'],
+    [H, 'the crash site beats the same stack', "L._crashOf(sig);\n        if ((c = idx.sigMap[sig]) && c.members.length) { return { key: c.members[0].key, by: 'stack' }; }\n        if (cs && (c = idx.crashMap[cs]) && c.members.length) { return { key: c.members[0].key, by: 'site' }; }",
+        "L._crashOf(sig);\n        if (cs && (c = idx.crashMap[cs]) && c.members.length) { return { key: c.members[0].key, by: 'site' }; }\n        if ((c = idx.sigMap[sig]) && c.members.length) { return { key: c.members[0].key, by: 'stack' }; }"],
+    [H, 'the worker finds no defect by its crash site', '        var cs = crashSig !== undefined ? crashSig : lgCrashOf(sig);', '        var cs = null;'],
     [H, 'the worker does not answer the lookup', "                else if (op === 'defects') { result = lgDefects(payload.sigs); }\n", ''],
     [H, 'the lookup never asks the worker', "        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'defects', sigs: sigs })", "        if (false) { return JiTA.worker.call('logsig', { op: 'defects', sigs: sigs })"],
     [H, 'a worker that cannot answer leaves no answer', "{ op: 'defects', sigs: sigs }).catch(function () { return JiTA.logsig._defectsLocal(sigs); }); }", "{ op: 'defects', sigs: sigs }); }"],
     // ...the profile
     [H, 'a hidden exception still makes the pattern', '                if (hid(e.sig)) { return; }\n', ''],
-    [H, 'a hidden exception stays among the shared ones', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig); });', 'out.excGroups = P._groups(withLog, function () { return true; });'],
+    [H, 'a hidden exception stays among the shared ones', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig) && !left(e.sig); });', 'out.excGroups = P._groups(withLog, function (e) { return !left(e.sig); });'],
     [H, 'hidden exceptions are not listed apart', 'out.hiddenExc = P._groups(withLog, function (e) { return hid(e.sig); });', 'out.hiddenExc = [];'],
     [H, 'a hidden exception does not name its defect', "                if (typeof hit === 'string' && g.defects.indexOf(hit) < 0) { g.defects.push(hit); }\n", ''],
     [H, 'a report with the shared message only by a hidden stack is an outlier', '!v.exc.some(function (e) { return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })',
@@ -152,7 +152,7 @@ const muts = [
     [H, 'the card does not name the hidden defect', "                g.defects.forEach(function (d) { $('<a target=\"_blank\" rel=\"noopener\"></a>')", "                [].forEach(function (d) { $('<a target=\"_blank\" rel=\"noopener\"></a>')"],
     [H, 'the full profile shows the hidden exceptions unfolded', "var $hv = $('<div class=\"jpv-hidden\"></div>').appendTo($b);", "var $hv = $('<div class=\"jpv-hidden\"></div>').addClass('open').appendTo($b);"],
     [H, 'the full profile has no hidden exceptions', '        if (hx.length) {\n            var $hv', '        if (false) {\n            var $hv'],
-    [H, 'the full profile says no exception is shared when only hidden ones are', "hx.length ? 'No exception appears in more than one log, apart from the hidden ones below.' :", "false ? '' :"]
+    [H, 'the full profile says no exception is shared when only hidden ones are', "(hx.length || lx.length) ? 'No exception or stacktrace appears in more than one log, apart from ' + apart + ' below.' :", "false ? '' :"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

@@ -7,8 +7,8 @@ const H = 'logsig-check.js';
 const muts = [
     [H, 'a re-match keeps the old badges', '            for (var k = 0; k < links.length; k++) { links[k].parentNode.removeChild(links[k]); }\n', ''],
     [H, 'a re-match keeps the old highlight', "            r.classList.remove('sig-hit', 'sig-hit-loose');\n", ''],
-    [H, 'a re-match keeps the old tooltip', "            if (cell && /^(Known exception|Possibly related \\(same crash site\\)) · /.test(cell.title || '')) { cell.removeAttribute('title'); }\n", ''],
-    [H, 'a re-match clears any tooltip', "            if (cell && /^(Known exception|Possibly related \\(same crash site\\)) · /.test(cell.title || '')) { cell.removeAttribute('title'); }",
+    [H, 'a re-match keeps the old tooltip', "            if (cell && /^(Known (exception|stacktrace)|Possibly related \\(same [^)]*\\)) · /.test(cell.title || '')) { cell.removeAttribute('title'); }\n", ''],
+    [H, 'a re-match clears any tooltip', "            if (cell && /^(Known (exception|stacktrace)|Possibly related \\(same [^)]*\\)) · /.test(cell.title || '')) { cell.removeAttribute('title'); }",
         "            if (cell) { cell.removeAttribute('title'); }"],
     [H, 'the badge is not classed', "                    a.className = 'jita-sig-link';\n", ''],
     [H, 'the cell is rebuilt for the badge', '                    cell.insertBefore(a, cell.firstChild);', '                    cell.textContent = a.textContent + cell.textContent;']
