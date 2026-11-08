@@ -592,7 +592,8 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     const emoji = glyphs.filter((g2) => Array.from(g2).some((ch) => /\p{Emoji_Presentation}/u.test(ch) || /\p{Extended_Pictographic}/u.test(ch)));
     ok('the card\'s symbols are text, never emoji', emoji.length === 0, emoji.join());
     const block = src.slice(cs, ce);
-    ok('...and the card has no dash a reader could take for one', !/[–—]/.test(block));
+    const DASHES = new RegExp('[' + String.fromCharCode(0x2013) + String.fromCharCode(0x2014) + ']');   // built from codes: this file may hold no such dash itself
+    ok('...and the card has no dash a reader could take for one', !DASHES.test(block));
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'defect checklist checks passed.'));
     process.exit(fail ? 1 : 0);
