@@ -67,6 +67,18 @@ To wait for pending promises, a harness should hop through `setImmediate` a few 
 `setTimeout(r, 0)`. On Windows a timeout lasts a whole 15 ms timer tick, and a suite pays that for every wait of
 every breakage.
 
+## Layout checks (`layout-check.js`)
+
+The harnesses draw into fake DOMs, so a column that shifts from row to row passes them all. `layout-check.js` loads
+the real script into a headless Chrome, Chromium or Edge, opens the Lead duties Members and Quality control tabs, the
+sidebar cards and Settings with fixture data, and measures them. `browser.js` drives the browser over the DevTools
+protocol with Node's own WebSocket (Node 22 or later, no npm package); jQuery comes from the script's `@require`,
+checked against its sha256 and kept in the temp folder.
+
+- `JITA_BROWSER` names the browser to use. Otherwise it looks for Chrome, Chromium and Edge where each platform keeps them.
+- With no browser it prints `SKIP` and passes, unless `JITA_LAYOUT_REQUIRED=1`. CI sets it, so CI never skips.
+- `mutate-layout.js` breaks what those layouts rest on, one thing at a time, and requires the check to go red.
+
 ## Adding a test
 
 1. Add `tests/<area>-check.js`. Read the script from

@@ -57,7 +57,7 @@ for (let k = 0; k < W; k++) {
     copies.push(path.join(root, 'tests'));
 }
 
-const failed = new Set();   // the suites with a job that failed
+const failed = new Set(), skipped = new Set();   // the suites with a job that failed, and those that could not run here
 let done = 0, breakages = 0;
 const t0 = Date.now(), total = pool.length + inRepo.length;
 function run(job, cwd) {
@@ -75,15 +75,18 @@ function run(job, cwd) {
             const anchors = lines.filter((l) => /^ANCHOR\b/.test(l));
             // A suite that ignored its shard would make every breakage in each of them: n times the work, and the count.
             const split = !job.shard || lines.some((l) => l.indexOf('shard ' + job.shard + ':') === 0);
+            // A suite that cannot run here says SKIP and why (mutate-layout.js without a browser); CI requires it to run.
+            const skip = !caught && code === 0 && !survived.length && !anchors.length && lines.filter((l) => /^SKIP\b/.test(l))[0];
             const good = caught && !survived.length && !anchors.length && split && code === 0;
             const count = lines.filter((l) => /^(RED|GREEN)\b/.test(l)).length;
-            if (!good) { failed.add(job.f); }
+            if (!good && !skip) { failed.add(job.f); }
+            if (skip) { skipped.add(job.f); }
             done++;
             breakages += count;
-            console.log((good ? 'ok    ' : 'FAIL  ') + name.padEnd(26) + String(count).padStart(3) + ' breakages' +
+            console.log((good ? 'ok    ' : skip ? 'skip  ' : 'FAIL  ') + name.padEnd(26) + String(count).padStart(3) + ' breakages' +
                 (anchors.length ? ', ' + anchors.length + ' anchor(s) missing' : '') + (split ? '' : ', not split into shards (JITA_BREAK_SHARD ignored)') +
-                '  (' + ((Date.now() - t) / 1000).toFixed(1) + ' s)  [' + done + '/' + total + ']');
-            if (!good) { console.log(out.split('\n').map((l) => '      | ' + l).join('\n')); }
+                (skip ? ', ' + skip.replace(/^SKIP\s*/, '').trim() : '') + '  (' + ((Date.now() - t) / 1000).toFixed(1) + ' s)  [' + done + '/' + total + ']');
+            if (!good && !skip) { console.log(out.split('\n').map((l) => '      | ' + l).join('\n')); }
             cleanup(cwd);
             resolve();
         });
@@ -96,6 +99,6 @@ Promise.all(copies.map(worker).concat([repoLane()])).then(() => {
     removeCopies();
     const bad = failed.size;
     console.log('\n' + runners.length + ' breakage suites, ' + breakages + ' breakages, ' + (bad ? bad + ' failed' : 'every breakage caught') +
-        '  (' + ((Date.now() - t0) / 1000).toFixed(1) + ' s, ' + W + ' workers)');
+        (skipped.size ? ', ' + skipped.size + ' skipped' : '') + '  (' + ((Date.now() - t0) / 1000).toFixed(1) + ' s, ' + W + ' workers)');
     process.exit(bad ? 1 : 0);
 });

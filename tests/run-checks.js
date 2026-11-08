@@ -16,10 +16,12 @@ checks.forEach((f) => {
     const fails = lines.filter((l) => /^\s*FAIL\b/.test(l));
     const passes = lines.filter((l) => /^\s*PASS\b/.test(l)).length;
     const good = r.status === 0 && fails.length === 0;
+    // A harness that cannot run here passes with a SKIP line saying why (layout-check.js without a browser).
+    const skip = good && !passes && lines.filter((l) => /^\s*SKIP\b/.test(l))[0];
     if (!good) { bad++; }
-    console.log((good ? 'ok    ' : 'FAIL  ') + f.padEnd(24) + String(passes).padStart(4) + ' passed' +
+    console.log((good ? (skip ? 'skip  ' : 'ok    ') : 'FAIL  ') + f.padEnd(24) + String(passes).padStart(4) + ' passed' +
         (fails.length ? ', ' + fails.length + ' failed' : '') + (r.status !== 0 ? ', exit ' + r.status : '') +
-        '  (' + (Date.now() - t) + ' ms)');
+        (skip ? ', ' + skip.replace(/^\s*SKIP\s*/, '').trim() : '') + '  (' + (Date.now() - t) + ' ms)');
     if (!good) {
         // The whole output for a red harness: the FAIL lines alone rarely say enough in a CI log.
         console.log(out.split('\n').map((l) => '      | ' + l).join('\n'));
