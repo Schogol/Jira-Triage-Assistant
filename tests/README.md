@@ -54,6 +54,15 @@ their broken copies under fixed names (`mutt.js` and the like). A suite that run
 real checkout, so those suites run one after another in `tests/` itself, alongside the workers. Such a suite
 passes `--only` to `ci-static.js` to run just the check it breaks (for example `--only es5`).
 
+The longest suites are split into shards (`SHARDS` in `run-breakages.js`), each a job of its own: shard k of n runs
+with `JITA_BREAK_SHARD=k/n` and makes only the breakages whose index % n is k. A suite passes only if all its shards
+do. To run one suite, or one shard of it, by hand, do it from `tests/`: anywhere else every breakage crashes, and a
+crashed harness counts as caught.
+
+```
+cd tests && JITA_BREAK_SHARD=1/4 node mutate-members.js
+```
+
 To wait for pending promises, a harness should hop through `setImmediate` a few times, not use
 `setTimeout(r, 0)`. On Windows a timeout lasts a whole 15 ms timer tick, and a suite pays that for every wait of
 every breakage.

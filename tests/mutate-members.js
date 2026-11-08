@@ -479,8 +479,14 @@ function within(fn) {
     const e = src.indexOf(fn[1], s + fn[0].length);
     return e < 0 ? null : [s, e];
 }
+// JITA_BREAK_SHARD=k/n (run-breakages.js splits this suite over several workers) makes only the breakages whose index
+// % n === k, each with its anchor check; without it, every breakage.
+const SHARD = /^(\d+)\/(\d+)$/.exec(process.env.JITA_BREAK_SHARD || '0/1'), K = SHARD ? +SHARD[1] : 0, N = SHARD ? +SHARD[2] : 0;
+if (!SHARD || N < 1 || K >= N) { console.log('JITA_BREAK_SHARD must be k/n with 0 <= k < n, not ' + process.env.JITA_BREAK_SHARD); process.exit(2); }
+if (process.env.JITA_BREAK_SHARD) { console.log('shard ' + K + '/' + N + ': ' + muts.filter((m, i) => i % N === K).length + ' of ' + muts.length + ' breakages'); }
 let allRed = true;
-muts.forEach(([h, name, a, b, fn]) => {
+muts.forEach(([h, name, a, b, fn], i) => {
+    if (i % N !== K) { return; }
     const at = within(fn), part = at ? src.slice(at[0], at[1]) : '';
     if (!at || part.split(a).length !== 2) { console.log('ANCHOR ' + (at ? part.split(a).length - 1 : 'no part') + 'x: ' + name); allRed = false; return; }
     fs.writeFileSync('mutmb.js', src.slice(0, at[0]) + part.replace(a, () => b) + src.slice(at[1]));

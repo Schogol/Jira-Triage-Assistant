@@ -279,8 +279,14 @@ const muts = [
     [XF, 'a third tap opens it again', "                lastPlus = 0;\n                try { JiTA.excfind.openView(); }", "                try { JiTA.excfind.openView(); }"],
     [XF, 'opened twice', "if (!JiTA.excfind || document.querySelector('#jita-menu.jita-excfind-view')) { return; }", "if (!JiTA.excfind) { return; }"]
 ];
+// JITA_BREAK_SHARD=k/n (run-breakages.js splits this suite over several workers) makes only the breakages whose index
+// % n === k, each with its anchor check; without it, every breakage.
+const SHARD = /^(\d+)\/(\d+)$/.exec(process.env.JITA_BREAK_SHARD || '0/1'), K = SHARD ? +SHARD[1] : 0, N = SHARD ? +SHARD[2] : 0;
+if (!SHARD || N < 1 || K >= N) { console.log('JITA_BREAK_SHARD must be k/n with 0 <= k < n, not ' + process.env.JITA_BREAK_SHARD); process.exit(2); }
+if (process.env.JITA_BREAK_SHARD) { console.log('shard ' + K + '/' + N + ': ' + muts.filter((m, i) => i % N === K).length + ' of ' + muts.length + ' breakages'); }
 let allRed = true;
-muts.forEach(([h, name, a, b]) => {
+muts.forEach(([h, name, a, b], i) => {
+    if (i % N !== K) { return; }
     if (src.split(a).length !== 2) { console.log('ANCHOR ' + (src.split(a).length - 1) + 'x: ' + name); allRed = false; return; }
     fs.writeFileSync('mutt.js', src.replace(a, () => b));
     let out = '', crashed = false;
@@ -292,5 +298,5 @@ muts.forEach(([h, name, a, b]) => {
     console.log((red ? 'RED   ' : 'GREEN ') + h.replace('-check.js', '') + '  ' + name + '  (' + fails.length + (crashed ? ', crashed' : '') + ')' +
         (fails[0] ? '  e.g.' + fails[0].replace(/^  FAIL /, '').slice(0, 90) : ''));
 });
-fs.unlinkSync('mutt.js');
+if (fs.existsSync('mutt.js')) { fs.unlinkSync('mutt.js'); }
 console.log(allRed ? '\nevery mutation caught' : '\nSOME MUTATION SURVIVED');
