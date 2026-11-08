@@ -47,7 +47,7 @@ global.window = {};
 global.navigator = {};
 global.gmGet = (k, d) => d;
 global.gmSet = () => {};
-global.JITA_IS_FORGE_FRAME = false;
+global.JITA_IS_FORGE_FRAME = false; global.JITA_IS_SUBFRAME = false;
 let invalidates = 0, pages = [];
 global.JiTA = {
     SCRIPT_VERSION: '3.38.6', FIELDS: [], PAGE_SIZE: 100, PAGE_DELAY_MS: 0, NEAR_LIMIT_DELAY_MS: 0,

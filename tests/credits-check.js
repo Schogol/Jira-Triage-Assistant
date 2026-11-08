@@ -171,6 +171,98 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     ok('a manual Refresh of this month stamps the scheduler and refreshes the badge\'s own total', /gmSet\(C\.sched\.LAST_FULL_KEY, Date\.now\(\)\)/.test(view) && /C\.refreshSelf\(yy, mm\)/.test(view));
     ok('a failed leaderboard read says so', /Could not read the leaderboard/.test(view));
 
+    // ================= for the Lead duties Members tab (v3.48.0) =================
+    const LEASE = C.sched.FULL_LEASE_KEY;
+    store = {}; C.running = false;
+    ok('no count running anywhere: not busy', C.busy() === false);
+    C.running = true;
+    ok('a count running in this tab: busy', C.busy() === true);
+    C.running = false;
+    store[LEASE] = { tabId: 'tab-b', ts: Date.now() - 5000 };
+    ok('...or in another tab holding the full-crawl lease', C.busy() === true);
+    store[LEASE] = { tabId: 'tab-b', ts: Date.now() - C.sched.FULL_TTL_MS - 1000 };
+    ok('...but not by a lease gone stale, nor by this tab\'s own', C.busy() === false && ((store[LEASE] = { tabId: 'tab-a', ts: Date.now() }), C.busy() === false));
+    store = {};
+    let leased = [], quietAt = null;
+    C.refresh = (y, m) => { leased.push(y + '-' + m + ':' + (store[LEASE] && store[LEASE].tabId)); quietAt = C._quiet; return Promise.resolve({ ym: '2026-07' }); };
+    C._quiet = false;
+    let lr = await C.refreshLeased(2026, 7);
+    ok('a leased count runs under this tab\'s full-crawl lease, quietly, and gives the lease back', lr.ym === '2026-07' && leased.join() === '2026-7:tab-a' && quietAt === true && !store[LEASE], leased.join());
+    store[LEASE] = { tabId: 'tab-b', ts: Date.now() };
+    leased = [];
+    let lerr = null;
+    await C.refreshLeased(2026, 7).catch((e) => { lerr = e; });
+    ok('...refused, as busy, while another tab holds the lease', lerr && lerr.busy === true && leased.length === 0 && store[LEASE].tabId === 'tab-b');
+    store = {};
+    C.refresh = () => Promise.resolve(null);
+    lerr = null;
+    await C.refreshLeased(2026, 7).catch((e) => { lerr = e; });
+    ok('...busy too when refresh found one running after all, the lease given back', lerr && lerr.busy === true && !store[LEASE]);
+    C.refresh = () => Promise.reject(new Error('crawl failed'));
+    lerr = null;
+    await C.refreshLeased(2026, 7).catch((e) => { lerr = e; });
+    ok('...and a failed count gives the lease back and says why', lerr && /crawl failed/.test(lerr.message) && !lerr.busy && !store[LEASE]);
+    let heard = [];
+    C.onProgress = (m) => { heard.push(m); };
+    C._quiet = true;
+    C._pill('2026-07: reports attached…');
+    C.onProgress = null;
+    ok('every progress line reaches the progress hook, a quiet run\'s too', heard.join() === '2026-07: reports attached…');
+    let wcalls = [];
+    JiTA.worker = { usable: () => false };
+    lerr = null;
+    await C.computeGmOld(2026, 7, '2026-08-01').catch((e) => { lerr = e; });
+    ok('the old-way GM count needs the worker', lerr && /worker unavailable/.test(lerr.message));
+    JiTA.worker = { usable: () => true, call: (t, p, o) => { wcalls.push([t, p, C._workerTag]); return Promise.resolve({ byAcc: { a: 1 } }); } };
+    lr = await C.computeGmOld(2026, 7, '2026-08-01');
+    ok('...which it is asked for with the month, the cut and this tab\'s progress tag', wcalls.length === 1 && wcalls[0][0] === 'creditsGmOld' && wcalls[0][1].y === 2026 && wcalls[0][1].m === 7 &&
+        wcalls[0][1].cut === '2026-08-01' && wcalls[0][2] === wcalls[0][1].tag && C._workerTag === null && lr.byAcc.a === 1, JSON.stringify(wcalls));
+
+    // the worker's count of GM handoffs made the old way
+    const oneLine = (head) => { const s = src.indexOf(head); return src.slice(s, src.indexOf('\n', s) + 1); };
+    let jqls = [];
+    const hist = {
+        'EBR-1': [{ created: '2026-07-10T10:00:00.000+0000', author: { accountId: 'a' }, items: [{ field: 'Team', to: '38', toString: 'EO - GameMasters' }, { field: 'assignee', to: null }] }],
+        'EBR-2': [{ created: '2026-07-11T10:00:00.000+0000', author: { accountId: 'b' }, items: [{ field: 'Team', fieldId: 'customfield_10001', to: 'ef4edd53-c099-4431-82af-9b4bd717cb88-38' }] }],
+        'EBR-3': [{ created: '2026-08-01T09:00:00.000+0000', author: { accountId: 'b' }, items: [{ field: 'Team', to: '38' }] }],
+        'EBR-4': [{ created: '2026-07-12T10:00:00.000+0000', author: { accountId: 'a' }, items: [{ field: 'Team', to: '77', toString: 'EO - Developers' }] }],
+        'EBR-5': [{ created: '2026-07-13T10:00:00.000+0000', author: { accountId: 'b' }, items: [{ field: 'Team', to: 'x-uuid', toString: 'EO - GameMasters' }] }]
+    };
+    const keysBy = { a: ['EBR-1', 'EBR-2', 'EBR-4'], b: ['EBR-2', 'EBR-3', 'EBR-5'] };
+    const G = new Function('cfg', 'crc', 'crGroupMembers', 'crAllKeys', 'crAllHistories', 'crProgress', 'crTick',
+        oneLine('    function teamId(v) {') + oneLine('    function isGmTeam(v) {') + fn('crMonthBounds') + fn('crParallel') + fn('crGmOld') + fn('crSetGm') +
+        '\nreturn { gmOld: crGmOld, setGm: crSetGm };')(
+        { GM_TEAM_ID: 'ef4edd53-c099-4431-82af-9b4bd717cb88-38' }, { EBR: 'EBR', CONCURRENCY: 4 },
+        () => Promise.resolve([{ accountId: 'b', active: true }, { accountId: 'a', active: true }, { accountId: 'x', active: false }]),
+        (jql) => { jqls.push(jql); const acc = /BY "([^"]+)"/.exec(jql)[1]; const o = {}; (keysBy[acc] || []).forEach((k) => { o[k] = true; }); return Promise.resolve(o); },
+        (k) => Promise.resolve(hist[k] || []), () => {}, () => {});
+    let gres = await G.gmOld({ y: 2026, m: 7, cut: '2026-08-01' });
+    ok('a report counts for the member who set its Team field to the GM team in the window, once', JSON.stringify(gres.byAcc) === JSON.stringify({ a: 1, b: 2 }) && gres.ym === '2026-07' && gres.cut === '2026-08-01',
+        JSON.stringify(gres));
+    ok('...each active member asked once, by the assignee changes they made in the window', JSON.stringify(jqls) === JSON.stringify(['project = EBR AND assignee CHANGED BY "a" DURING ("2026-07-01", "2026-08-01")',
+        'project = EBR AND assignee CHANGED BY "b" DURING ("2026-07-01", "2026-08-01")']), JSON.stringify(jqls));
+    jqls = [];
+    gres = await G.gmOld({ y: 2026, m: 7, cut: '2026-07-11' });
+    ok('...cut where asked: a change on the cut day is outside it', JSON.stringify(gres.byAcc) === JSON.stringify({ a: 1 }) && /DURING \("2026-07-01", "2026-07-11"\)/.test(jqls[0]), JSON.stringify(gres));
+    jqls = [];
+    gres = await G.gmOld({ y: 2026, m: 9, cut: '2026-08-21' });
+    ok('...and a month entirely after the switch asks nothing', JSON.stringify(gres.byAcc) === '{}' && jqls.length === 0);
+    gres = await G.gmOld({ y: 2026, m: 8, cut: '2026-09-15' });
+    ok('...nor reads past its month\'s end', gres.cut === '2026-09-01');
+    ok('another team, or another member\'s change, is no handoff of theirs', !G.setGm(hist['EBR-4'], 'a', '2026-07-01', '2026-08-01') && !G.setGm(hist['EBR-1'], 'b', '2026-07-01', '2026-08-01') &&
+        G.setGm(hist['EBR-5'], 'b', '2026-07-01', '2026-08-01'));
+    // queued like a count
+    const Q = new Function('crGmOld', 'var crLast = null, crActiveTags = [];\n' + fn('runGmOld') + '\nreturn { run: runGmOld, tags: function () { return crActiveTags; } };');
+    let order = [], rel = {};
+    const q = Q((p) => { order.push(p.m + ':' + p.cut); return new Promise((res) => { rel[p.m] = res; }); });
+    const g1 = q.run({ y: 2026, m: 7, cut: '2026-08-01', tag: 't1' }), g2 = q.run({ y: 2026, m: 7, cut: '2026-08-01', tag: 't2' }), g3 = q.run({ y: 2026, m: 6, cut: '2026-07-01', tag: 't3' });
+    await flush();
+    ok('the same window asked twice shares one count; another waits its turn', g1 === g2 && g1 !== g3 && order.join() === '7:2026-08-01' && q.tags().join() === 't1,t2', order.join() + ' / ' + q.tags().join());
+    rel[7]({}); await flush();
+    ok('...and starts once that one is done', order.join() === '7:2026-08-01,6:2026-07-01' && q.tags().join() === 't3');
+    rel[6]({}); await flush();
+    ok('the worker answers it', /else if \(type === 'creditsGmOld'\) \{ result = await runGmOld\(payload\); \}/.test(src));
+
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'credits checks passed.'));
     process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('CRASH ' + (e && e.stack || e)); process.exit(2); });

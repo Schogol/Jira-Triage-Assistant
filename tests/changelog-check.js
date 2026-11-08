@@ -20,7 +20,7 @@ const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '
 const gm = {};
 global.gmGet = (k, d) => (k in gm ? gm[k] : d);
 global.gmSet = (k, v) => { gm[k] = v; };
-global.JITA_IS_FORGE_FRAME = false;
+global.JITA_IS_FORGE_FRAME = false; global.JITA_IS_SUBFRAME = false;
 global.JITA_PILL_Z = 250;
 let stacked = 0;
 global.jitaStackPills = () => { stacked++; };
@@ -93,9 +93,9 @@ ok('nothing is new once the newest has been seen', C.unseen().length === 0 && !C
 gm[C.SEEN_KEY] = '99.0.0';
 ok('a browser ahead of this build (a downgrade) sees nothing new', C.unseen().length === 0);
 gm[C.SEEN_KEY] = '9.0.0';
-global.JITA_IS_FORGE_FRAME = true;
-ok('never inside the Zendesk frame', !C.shouldShow());
-global.JITA_IS_FORGE_FRAME = false;
+global.JITA_IS_SUBFRAME = true;
+ok('never inside a frame: the Zendesk panel, a database an article embeds', !C.shouldShow());
+global.JITA_IS_SUBFRAME = false;
 ok('dates read the way the rest of JiTA shows them', C._date('2026-09-29') === '29 Sep 2026' && C._date('2023-05-10') === '10 May 2023' && C._date('2026-09-05') === '05 Sep 2026', C._date('2026-09-29') + ' / ' + C._date('2023-05-10') + ' / ' + C._date('2026-09-05'));
 
 // ---- the two tabs ----

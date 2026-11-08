@@ -22,7 +22,9 @@ const muts = [
     [H, 'Save is a form submit', "save.type = 'button';", ''],
     [H, 'Save ignores the label asked for', "el('button', 'ldn-btn ldn-save', o.save || 'Save')", "el('button', 'ldn-btn ldn-save', 'Save')"],
     // ---- drafts ----
-    [H, 'the draft is not offered', "ta.value = U._drafts[o.draft] || '';", "ta.value = '';"],
+    [H, 'the draft is not offered', "ta.value = U._drafts[o.draft] || o.value || '';", "ta.value = o.value || '';"],
+    [H, 'the current note is not offered', "ta.value = U._drafts[o.draft] || o.value || '';", "ta.value = U._drafts[o.draft] || '';"],
+    [H, 'the current note wins over a draft typed since', "ta.value = U._drafts[o.draft] || o.value || '';", "ta.value = o.value || U._drafts[o.draft] || '';"],
     [H, 'what was typed is not kept', "if (/\\S/.test(ta.value)) { U._drafts[o.draft] = ta.value; } else { delete U._drafts[o.draft]; }", ''],
     [H, 'a blank note is kept as a draft', "if (/\\S/.test(ta.value)) { U._drafts[o.draft] = ta.value; } else { delete U._drafts[o.draft]; }", 'U._drafts[o.draft] = ta.value;'],
     [H, 'a dialog without a draft key keeps one anyway', '            if (o.draft) {\n                if (/', '            if (true) {\n                if (/'],

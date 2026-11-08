@@ -1,5 +1,6 @@
-// mutate-credits.js - breaks each ISD credits fix (v3.38.25) and requires credits-check to go red. A crashed harness
-// counts as red.
+// mutate-credits.js - breaks each ISD credits fix (v3.38.25), and what the Members tab takes from the credits count (v3.48.0:
+// busy, the leased count, the progress hook, the old-way GM handoffs), and requires credits-check to go red. A crashed
+// harness counts as red.
 const fs = require('fs');
 const { execSync } = require('child_process');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
@@ -31,7 +32,38 @@ const muts = [
     [H, 'last month is recomputed every poll', '                }).then(function () { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); end(); },', '                }).then(function () { gmSet(S.FAIL_PREV_KEY, 0); end(); },'],
     [H, 'a month already final is recomputed', "                    if (!res || String(res.computedAt || '') >= now.ym + '-01') { return; }", '                    if (!res) { return; }'],
     [H, 'Refresh flips the quiet flag over a running crawl', "            if (C.running) { JiTA.ui.toast('A credit computation is already running…'); return; }\n", ''],
-    [H, 'a manual Refresh leaves the scheduler to repeat it', '                gmSet(C.sched.LAST_FULL_KEY, Date.now()); gmSet(C.sched.FAIL_FULL_KEY, 0);\n', '']
+    [H, 'a manual Refresh leaves the scheduler to repeat it', '                gmSet(C.sched.LAST_FULL_KEY, Date.now()); gmSet(C.sched.FAIL_FULL_KEY, 0);\n', ''],
+    // ---- for the Members tab (v3.48.0) ----
+    [H, 'the progress hook hears nothing', '        if (JiTA.credits.onProgress) { try { JiTA.credits.onProgress(msg); } catch (e) { /* ignore */ } }\n', ''],
+    [H, 'a count in another tab is not busy', '!!(l && l.ts && (Date.now() - l.ts) <= S.FULL_TTL_MS && l.tabId !== JiTA.sched.tabId)', 'false'],
+    [H, 'a stale lease is busy', '(Date.now() - l.ts) <= S.FULL_TTL_MS && l.tabId !== JiTA.sched.tabId', 'l.tabId !== JiTA.sched.tabId'],
+    [H, 'this tab\'s own lease is busy', '(Date.now() - l.ts) <= S.FULL_TTL_MS && l.tabId !== JiTA.sched.tabId)', '(Date.now() - l.ts) <= S.FULL_TTL_MS)'],
+    [H, 'this tab\'s running count is not busy', 'return JiTA.credits.running || !!(l && l.ts', 'return !!(l && l.ts'],
+    [H, 'a leased count runs beside another tab\'s', 'if (C.running || !S._lease(S.FULL_LEASE_KEY, S.FULL_TTL_MS)) { return Promise.reject(busy()); }', 'if (C.running) { return Promise.reject(busy()); }'],
+    [H, 'the lease is not given back', 'var end = function () { clearInterval(hb); S._release(S.FULL_LEASE_KEY); };', 'var end = function () { clearInterval(hb); };'],
+    [H, 'a leased count is not quiet', '        C._quiet = true;\n        return C.refresh(y, m).then(function (res) {', '        return C.refresh(y, m).then(function (res) {'],
+    [H, 'a leased count that found one running resolves empty', '            if (!res) { throw busy(); }   // refresh() found one running after all\n', ''],
+    [H, 'a failed leased count keeps the lease', '        }, function (e) { end(); throw e; });\n    },\n    // GM handoffs made the old way', '        }, function (e) { throw e; });\n    },\n    // GM handoffs made the old way'],
+    [H, 'the old-way GM count runs without the worker', "        if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.reject(new Error('credits: worker unavailable')); }\n        var tag = (JiTA.sched.tabId) + ':' + (++C._tagSeq);\n        C._workerTag = tag;\n        return JiTA.worker.call('creditsGmOld'",
+        "        var tag = (JiTA.sched.tabId) + ':' + (++C._tagSeq);\n        C._workerTag = tag;\n        return JiTA.worker.call('creditsGmOld'"],
+    [H, 'the cut is not passed on', "JiTA.worker.call('creditsGmOld', { y: y, m: m, cut: cut, tag: tag }", "JiTA.worker.call('creditsGmOld', { y: y, m: m, tag: tag }"],
+    [H, 'the old-way window is not cut', 'var cut = (payload.cut && payload.cut < b.end) ? payload.cut : b.end, byAcc = {};', 'var cut = b.end, byAcc = {};'],
+    [H, 'a cut past its month reads past it', '(payload.cut && payload.cut < b.end) ? payload.cut : b.end', 'payload.cut || b.end'],
+    [H, 'a month after the switch is searched', '        if (cut <= b.start) { return Promise.resolve({ ym: ym, cut: cut, byAcc: byAcc }); }\n', ''],
+    [H, 'deactivated members are asked too', 'var accs = members.filter(function (x) { return x.active !== false; }).map(function (x) { return x.accountId; }).sort();\n            var keysOf',
+        'var accs = members.map(function (x) { return x.accountId; }).sort();\n            var keysOf'],
+    [H, 'the old way is not searched by the member\'s assignee changes', "' AND assignee CHANGED BY \"' + acc + '\" ' + win", "' AND assignee CHANGED ' + win"],
+    [H, 'a Team change outside the window counts', 'day < start || day >= end) { continue; }', 'false) { continue; }'],
+    [H, 'a Team change on the cut day counts', '|| day >= end) { continue; }', '|| day > end) { continue; }'],
+    [H, 'another member\'s Team change counts', 'if (!h.author || h.author.accountId !== acc || day < start', 'if (!h.author || day < start'],
+    [H, 'another team counts', "(isGmTeam(it.to) || /gamemasters/i.test(it.toString || ''))", 'true'],
+    [H, 'the Team field is known by its id alone', "(it.field === 'Team' || it.fieldId === 'customfield_10001')", "it.fieldId === 'customfield_10001'"],
+    [H, 'a member with none is listed', '                    if (c) { byAcc[acc] = c; }\n', '                    byAcc[acc] = c;\n'],
+    [H, 'the same window asked twice counts twice', "var key = 'gmold:' + payload.y + '-' + payload.m + ':' + (payload.cut || ''), tag = payload.tag || null;\n        if (crLast && crLast.key === key) {",
+        "var key = 'gmold:' + payload.y + '-' + payload.m + ':' + (payload.cut || ''), tag = payload.tag || null;\n        if (false) {"],
+    [H, 'an old-way GM count runs alongside a count', '        var begin = function () { crActiveTags = run.tags; return crGmOld(payload); };\n        run.promise = prev.then(begin, begin);',
+        '        var begin = function () { crActiveTags = run.tags; return crGmOld(payload); };\n        run.promise = begin();'],
+    [H, 'the worker does not answer it', "            else if (type === 'creditsGmOld') { result = await runGmOld(payload); }   // the Members tab's old-way GM handoffs, queued like a count\n", '']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

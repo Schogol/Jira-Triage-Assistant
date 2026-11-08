@@ -15,7 +15,7 @@ const DAY = 24 * 60 * 60 * 1000;
 const gm = {};
 global.gmGet = (k, d) => (Object.prototype.hasOwnProperty.call(gm, k) ? gm[k] : d);
 global.gmSet = (k, v) => { gm[k] = v; };
-global.JITA_IS_FORGE_FRAME = false;
+global.JITA_IS_FORGE_FRAME = false; global.JITA_IS_SUBFRAME = false;
 // The corner pills share one layer constant (defined at the top of the userscript since v3.28.3).
 global.JITA_PILL_Z = Number((src.match(/var JITA_PILL_Z = (\d+);/) || [])[1]);
 
@@ -97,6 +97,15 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     R.mount(); await tick();
     ok('a finished month keeps the chip, saying so', painted.some((t) => t === '📋 Lead duties: all done ✓'), painted.join(' | '));
     outstanding = { pages: 2, checks: 10, known: true };
+
+    // ---- never in a frame inside another page (a database an article embeds, the Zendesk panel) ----
+    reset();
+    global.JITA_IS_SUBFRAME = true;
+    const inFrame = R.shouldShow();
+    R.mount(); await tick();
+    R.nag(); await tick();
+    global.JITA_IS_SUBFRAME = false;
+    ok('in a frame inside another page neither the chip nor the dialog shows: the page around it has its own', !inFrame && !painted.length && !overlayOpen, painted.join(' | '));
 
     // ---- the dialog ----
     reset();
