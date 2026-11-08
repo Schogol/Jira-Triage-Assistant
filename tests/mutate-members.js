@@ -24,6 +24,7 @@ const FROM = R('fromCredits: function (res) {'), DEF = R('defaultRole: function 
     ADDM = R('_addMember: function (r) {'), NOTECH = R('noteChange: function (r, note, team) {'), WITHN = R('_withNote: function (body, acc, note) {'),
     SETPN = R('setPageNote: function (acc, note, name) {'), NOTEOF = R('_noteOf: function (team, acc, name, names) {'), NOTETEXT = R('_noteText: function (html, names) {'),
     READIN = R('readInternal: function () {'), SETIN = R('setInternalNote: function (acc, note) {'), EDITIN = R('_editInternalNote: function (r, wins, cur) {');
+const NOTECSS = "'.jita-leadduty-view .ld-mnote { flex: 1 1 0; min-width: 0; color: #cfd6dd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }'";
 const muts = [
     // ---- the months ----
     [MB, 'the window takes in the current month', 'for (var i = 0; i < L.members.MONTHS; i++) { cur = L._prevYm(cur); out.push(cur); }',
@@ -463,7 +464,13 @@ const muts = [
     [MB, 'an internal note saved is not taken into the tab', '                if (v && U._mem) { U._mem.inotes = v; }\n', '', EDITIN],
     [MB, 'an internal note saved draws nothing again', '                if (fresh) { U._swapRow(r.acc, U._memberRow(fresh, wins, cur)); }\n', '', EDITIN],
     [MB, 'an internal note saved draws its row without the team page', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team)',
-        'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur)', EDITIN]
+        'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur)', EDITIN],
+    // ---- the note columns' width (v3.49.1) ----
+    [MB, 'the note columns are sized by their notes', NOTECSS, NOTECSS.replace('flex: 1 1 0;', 'flex: 1 1 auto;')],
+    [MB, 'a long note will not shrink', NOTECSS, NOTECSS.replace(' min-width: 0;', '')],
+    [MB, 'a long note spills over the next column', NOTECSS, NOTECSS.replace(' overflow: hidden;', '')],
+    [MB, 'a long note is cut without a mark', NOTECSS, NOTECSS.replace(' text-overflow: ellipsis;', '')],
+    [MB, 'a long note wraps onto more lines', NOTECSS, NOTECSS.replace(' white-space: nowrap;', '')]
 ];
 function within(fn) {
     if (!fn) { return [0, src.length]; }

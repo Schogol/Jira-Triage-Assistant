@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.49.0
+// @version     3.49.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -21912,7 +21912,9 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-mname { flex: 0 0 170px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }' +
                 '.jita-leadduty-view .ld-mrole, .jita-leadduty-view .ld-mrolehd { flex: 0 0 104px; }' +
                 '.jita-leadduty-view .ld-mrole { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 2px 4px; font-size: 11px; color-scheme: dark; }' +
-                '.jita-leadduty-view .ld-mnote { flex: 1 1 auto; min-width: 0; color: #cfd6dd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }' +
+                // The two note columns split the room alike, whatever their notes say. Sized from their text, a longer public
+                // note pushed the internal one along, out of line with the header, and a long note squeezed it to nothing.
+                '.jita-leadduty-view .ld-mnote { flex: 1 1 0; min-width: 0; color: #cfd6dd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }' +
                 '.jita-leadduty-view .ld-mnote.empty { color: #55606b; font-style: italic; }' +
                 '.jita-leadduty-view .ld-mrow:not(.ld-mhead) .ld-minote:not(.empty) { color: #d9c27e; }' +
                 '.jita-leadduty-view .ld-mrow:not(.ld-mhead) .ld-mnote:hover { color: #4c9aff; }' +
@@ -24980,6 +24982,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.49.1', date: '2026-11-08', fixes: [
+            'Small improvements behind the scenes.'
+        ] },
         { v: '3.49.0', date: '2026-11-08', fixes: [
             'Small improvements behind the scenes.'
         ] },
