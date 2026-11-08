@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.48.0
+// @version     3.49.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -18421,6 +18421,7 @@ JiTA.leadduty = {
     PROBE_KEY: 'jita_leadduty_probe',
     ACTIVITY_KEY: 'jita_leadduty_activity_v1',   // Members tab: each month's counts, counted once for all Leads
     MEMBERS_KEY: 'jita_leadduty_members_v1',     // Members tab: roles and notes, and who published the members page
+    INOTES_KEY: 'jita_leadduty_inotes_v1',       // Members tab: the notes only Leads see - kept apart, so no page is ever built from them
 
     // ---- fixed configuration -------------------------------------------------------------------------
     // Hardcoded on purpose: these are properties of the ISD space, not of the person running the script, and
@@ -21519,6 +21520,7 @@ JiTA.leadduty.ui = {
     _mem: null,          // what gather() resolved: { act, mem, live, missing, cur, actVersion, memVersion }
     _memQuiet: false,    // "Only below the minimum or inactive", for the session
     _memVer: null,       // the members property's version the tab last took (see _adopt)
+    _inVer: null,        // ...and the internal notes' (INOTES_KEY)
     _memProg: '',        // what a count is doing, or why it stopped: kept across the redraws it causes
 
     _loadMembers: function (force) {
@@ -21526,12 +21528,14 @@ JiTA.leadduty.ui = {
         U._status('Reading the members…');
         if (!U._mem || force) { U._body().empty().append($('<div class="ld-empty">Reading the counted months from the Confluence ledger…</div>')); }
         var team = M.team(force).then(null, function (e) { return { error: String(e && e.message || e) }; });
-        Promise.all([M.gather(), team]).then(function (r) {
+        Promise.all([M.gather(), team, M.readInternal()]).then(function (r) {
             var st = r[0];
             if (!U.isOpen() || U._tab !== 'members') { return; }
             st.team = r[1];
+            st.inotes = r[2].value;
             U._mem = st;
             U._memVer = { ledgerVersion: st.memVersion || 0 };
+            U._inVer = { ledgerVersion: r[2].version || 0 };
             U._renderMembers(!force);
         }, function (e) {
             if (!U.isOpen() || U._tab !== 'members') { return; }
@@ -21570,7 +21574,8 @@ JiTA.leadduty.ui = {
         $('<span class="ld-mhint"></span>').appendTo($h);
         $('<span class="ld-mname"></span>').text('Name').appendTo($h);
         $('<span class="ld-mrolehd"></span>').text('Role').appendTo($h);
-        $('<span class="ld-mnote"></span>').text('Note').appendTo($h);
+        $('<span class="ld-mnote"></span>').text('Public note').attr('title', 'Shown on the ECAID Member Productivity page, and on the ECAID - Team Members page when it is changed there too').appendTo($h);
+        $('<span class="ld-mnote ld-minote"></span>').text('Internal note').attr('title', 'Only Leads see these: they stay in the Lead Ledger, and no page shows them').appendTo($h);
         M._oldestFirst(wins).forEach(function (i) { $('<span class="ld-mnum"></span>').text(M._mon(wins[i]).slice(0, 3)).attr('title', M._mon(wins[i])).appendTo($h); });
         $('<span class="ld-mnum ld-mcur"></span>').text(M._mon(st.cur).slice(0, 3) + ' so far').appendTo($h);
         $('<span class="ld-mlast"></span>').text('Last active').appendTo($h);
@@ -21611,6 +21616,11 @@ JiTA.leadduty.ui = {
         $('<span class="ld-mnote"></span>').toggleClass('empty', !r.note).text(r.note ? r.note.split('\n')[0] : 'Add a public note')
             .attr('title', r.note ? (r.note + whence) : 'Add a public note on this member: every Lead sees it, and the ECAID Member Productivity page shows it')
             .on('click', function () { U._editMemberNote(r, wins, cur); }).appendTo($r);
+        var inn = U._inote(r.acc);
+        $('<span class="ld-mnote ld-minote"></span>').toggleClass('empty', !inn.t).text(inn.t ? inn.t.split('\n')[0] : 'Add an internal note')
+            .attr('title', (inn.t ? (inn.t + '\n\n') : '') + 'Only Leads see this note: it stays in the Lead Ledger, and no page shows it.' +
+                ((inn.t && inn.by) ? ('\nSet by ' + inn.by + (inn.at ? (' on ' + inn.at) : '')) : ''))
+            .on('click', function () { U._editInternalNote(r, wins, cur); }).appendTo($r);
         M._oldestFirst(wins).forEach(function (i) {
             var ym = wins[i], n = r.months[i], $c = $('<span class="ld-mnum"></span>').appendTo($r);
             if (n === undefined) { $c.text('…').addClass('dim').attr('title', M._mon(ym) + ' has not been counted yet'); return; }
@@ -21713,6 +21723,27 @@ JiTA.leadduty.ui = {
             }, function (e) {
                 return tabOnly('the ECAID - Team Members page was not changed (' + (e && e.message || e) + ')');
             }).catch(failed);
+        });
+    },
+
+    // A member's internal note as the tab last read it: { t, by, at }, or {} for none.
+    _inote: function (acc) {
+        var U = JiTA.leadduty.ui, m = (U._mem && U._mem.inotes && U._mem.inotes.m) || {};
+        return Object.prototype.hasOwnProperty.call(m, acc) ? m[acc] : {};
+    },
+    // A row's internal note, edited in the note dialog: written to the Lead Ledger alone, then only that row drawn again.
+    _editInternalNote: function (r, wins, cur) {
+        var L = JiTA.leadduty, U = L.ui, M = L.members, draft = 'inote:' + r.acc;
+        U._askNote({ title: 'Internal note on ' + r.name, hint: 'Only Leads see it: it stays in the Lead Ledger, and no page shows it.', save: 'Save note',
+            draft: draft, value: U._inote(r.acc).t || '' }, function (note) {
+            M.setInternalNote(r.acc, note).then(function (w) {
+                delete U._drafts[draft];
+                var v = U._adopt(U._inVer, w);
+                if (v && U._mem) { U._mem.inotes = v; }
+                if (!U._mem) { return; }
+                var fresh = M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team).filter(function (x) { return x.acc === r.acc; })[0];
+                if (fresh) { U._swapRow(r.acc, U._memberRow(fresh, wins, cur)); }
+            }, function (e) { U._status('Not saved - ' + (e && e.message || e)); });
         });
     },
 
@@ -21883,6 +21914,7 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-mrole { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 2px 4px; font-size: 11px; color-scheme: dark; }' +
                 '.jita-leadduty-view .ld-mnote { flex: 1 1 auto; min-width: 0; color: #cfd6dd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }' +
                 '.jita-leadduty-view .ld-mnote.empty { color: #55606b; font-style: italic; }' +
+                '.jita-leadduty-view .ld-mrow:not(.ld-mhead) .ld-minote:not(.empty) { color: #d9c27e; }' +
                 '.jita-leadduty-view .ld-mrow:not(.ld-mhead) .ld-mnote:hover { color: #4c9aff; }' +
                 '.jita-leadduty-view .ld-mnum { flex: 0 0 46px; text-align: right; font-variant-numeric: tabular-nums; color: #e6e6e6; cursor: default; }' +
                 '.jita-leadduty-view .ld-mnum.low { color: #f0b429; font-weight: 700; }' +
@@ -23146,6 +23178,27 @@ JiTA.leadduty.members = {
             if ((e.note || '') === want) { return false; }
             if (want) { e.note = want; } else { delete e.note; }
             return true;
+        });
+    },
+    // The notes only Leads see (INOTES_KEY): { value: { m: { accountId: { t, by, at } } } or null, version }. Only the tab
+    // reads them - neither publishing nor the scheduler does - so no page can ever be built from them. Leads only.
+    readInternal: function () {
+        var L = JiTA.leadduty, M = L.members;
+        if (!L.isLead()) { return Promise.reject(M._notLead()); }
+        return L.ledger.read(L.INOTES_KEY).then(function (r) { return { value: r.value || null, version: (r.prop && r.prop.version) || 0 }; });
+    },
+    // A member's internal note, kept as notes are (L._note): stored with who set it and when, an empty one deleted. It
+    // asks for no publish, since no page shows it. Resolves the mutate result; Leads only.
+    setInternalNote: function (acc, note) {
+        var L = JiTA.leadduty, M = L.members;
+        if (!L.isLead()) { return Promise.reject(M._notLead()); }
+        var want = L._note(note);
+        return L.ledger.mutate(L.INOTES_KEY, function (v) {
+            v = v || { v: 1 };
+            v.m = v.m || {};
+            if (((v.m[acc] || {}).t || '') === want) { return null; }
+            if (want) { v.m[acc] = { t: want, by: M._meName(), at: M._today() }; } else { delete v.m[acc]; }
+            return v;
         });
     },
     // Change one member's entry: change(e) edits it and says whether anything changed.
@@ -24927,6 +24980,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.49.0', date: '2026-11-08', fixes: [
+            'Small improvements behind the scenes.'
+        ] },
         { v: '3.48.0', date: '2026-11-01', fixes: [
             'The Lead duties and What\'s new pills no longer show a second time inside a database a Confluence page embeds.',
             'Small improvements behind the scenes.'
