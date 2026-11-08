@@ -198,14 +198,14 @@ const NAMES = { summary: 'Summary', customfield_101: 'Severity', customfield_102
     customfield_105: 'EVE Server', customfield_106: 'EVE Build' };
 // The bug report's description, as the in-game reporter writes it, steps and all.
 const REPORT_DESC = () => adf(['i undock and the game crashes', 'Reproduction Steps: 1. undock 2. it crashes', 'Session Info: Jita']);
-// A defect as the conversion leaves it: the report's summary, description (steps and all) and labels, its log copied,
-// nothing set.
+// A defect as the conversion leaves it: the report's summary, description (steps and all) and labels, its log and its
+// EVE Server and EVE Build (the player's) copied, nothing set.
 function converted() {
     return { key: 'EDR-1', names: NAMES, properties: {}, fields: {
         summary: 'game crash when undock', description: REPORT_DESC(), labels: ['PlatformWin', 'cloned'],
         attachment: [{ filename: 'logs.txt', size: 100 }], reporter: { accountId: 'acc-rep', displayName: 'ISD BH Hunter' }, assignee: { accountId: 'acc-rep' },
         priority: { id: '3', name: '3 - Medium' }, customfield_101: null, customfield_102: null, customfield_10001: null, customfield_104: null,
-        customfield_105: null, customfield_106: null,
+        customfield_105: { value: 'Tranquility' }, customfield_106: '2900123',
         issuelinks: [{ type: { name: 'Duplicate' }, inwardIssue: { key: 'EBR-10', fields: { summary: 'game crash when undock' } } }]
     } };
 }
@@ -223,9 +223,9 @@ function finished() {
     return i;
 }
 const SRC = { key: 'EBR-10', fields: { summary: 'game crash when undock', description: REPORT_DESC(), labels: ['PlatformWin', 'Russian'],
-    attachment: [{ filename: 'logs.txt', size: 100, content: 'u-logs' }] } };
+    attachment: [{ filename: 'logs.txt', size: 100, content: 'u-logs' }], customfield_105: { value: 'Tranquility' }, customfield_106: '2900123' } };
 const srcObj = () => ({ key: 'EBR-10', summary: SRC.fields.summary, desc: JiTA.util.toPlainText(SRC.fields.description), labels: SRC.fields.labels.slice(),
-    steps: C._steps(SRC.fields.description, null), attachments: SRC.fields.attachment.map((a) => Object.assign({}, a)) });
+    steps: C._steps(SRC.fields.description, null), eveServer: 'Tranquility', eveBuild: '2900123', attachments: SRC.fields.attachment.map((a) => Object.assign({}, a)) });
 // Without the EVE Server and EVE Build fields: the old way, the server and build at the top of the description.
 const OLD_NAMES = { summary: 'Summary', customfield_101: 'Severity', customfield_102: 'Impact', customfield_10001: 'Team', customfield_104: 'Epic Link' };
 const byId = (items, id) => items.filter((it) => it.id === id)[0];
@@ -359,7 +359,8 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
         stepsOf(REPORT_DESC(), adf([])).trim() === '1. undock 2. it crashes');
     ok('...and nothing when none of them is there', stepsOf(adf(['just prose about undocking']), null) === '');
     ok('the report\'s labels left on the defect, cloned and jira_escalated aside', J(C._reportLabels(['PlatformWin', 'cloned', 'jira_escalated', 'Crash'], ['PlatformWin', 'cloned', 'jira_escalated'])) === J(['PlatformWin']));
-    ok('labels not starting with a capital letter, cloned and jira_escalated aside', J(C._lowerLabels(['ui', 'UI', '3D', 'cloned', 'jira_escalated', 'überlay'])) === J(['ui', 'überlay']));
+    ok('the labels a defect has of its own: none of the report\'s, nor cloned and jira_escalated', J(C._ownLabels(['PlatformWin', 'cloned', 'jira_escalated', 'Crash', 'ui'], ['PlatformWin'])) === J(['Crash', 'ui']) &&
+        J(C._ownLabels(['Crash'], undefined)) === J(['Crash']));
     ok('an exception in the description by its signature', C._hasExc({ desc: '', fps: [{ sig: EXC.sig }] }, [EXC]));
     ok('...or by its crash site', C._hasExc({ desc: '', fps: [{ sig: "keyerror: 'x'|z.py:q>b.py:g>c.py:h" }] }, [EXC]));
     ok('...or by its message', C._hasExc({ desc: 'see KeyError: \'x\' raised while undocking, every time', fps: [] }, [EXC]));
@@ -377,15 +378,21 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     let d = factsOf(converted()), items = C.items(d);
     const openIds = (its) => its.filter((it) => !it.ok && !it.waived).map((it) => it.id).join(',');
     ok('a defect as the conversion leaves it has every item open but the ones it cannot get wrong',
-        openIds(items) === 'summary,desc,build,steps,fields,replabels,attachments', openIds(items));
-    ok('...its summary is still the report\'s', /Still the bug report's summary/.test(byId(items, 'summary').why));
+        openIds(items) === 'summary,desc,build,steps,fields,replabels,labels,attachments', openIds(items));
+    ok('...its summary is still the report\'s: Summary rewritten, a fitting title in the hover', byId(items, 'summary').label === 'Summary rewritten' &&
+        byId(items, 'summary').why === 'Give your defect a fitting title.', byId(items, 'summary').label + ' / ' + byId(items, 'summary').why);
+    ok('...no project item, nor one for capital letters', !byId(items, 'project') && !byId(items, 'caps'));
     ok('...so is its description, and its labels', /Still the bug report's description/.test(byId(items, 'desc').why) && /PlatformWin/.test(byId(items, 'replabels').why) && J(byId(items, 'replabels').left) === J(['PlatformWin']));
     ok('...and its reproduction steps, word for word', byId(items, 'steps').label === 'Reproduction steps rewritten' && /Still the bug report's reproduction steps, word for word/.test(byId(items, 'steps').why));
     ok('...its attachments wait for its writer to check them, the report\'s named as such', (() => {
         const it = byId(items, 'attachments'); return !it.ok && it.tick && !it.waivable && /Check they belong to this defect: logs\.txt \(from the bug report\)\./.test(it.why);
     })(), byId(items, 'attachments').why);
     ok('...no logs item: the player\'s logs are fine', !byId(items, 'logs'));
-    ok('...EVE Server and EVE Build are named as empty', /^Fill in EVE Server and EVE Build with where you tested it/.test(byId(items, 'build').why), byId(items, 'build').why);
+    ok('...its EVE Server and EVE Build are still the player\'s, named, to be set or marked as correct', (() => {
+        const it = byId(items, 'build');
+        return it.label === 'EVE Server and EVE Build set to where you reproduced it' && /^Still the bug report's, where the player was: Tranquility, build 2900123\. Set them to the server and build you reproduced it on, or mark them as correct if you reproduced it there\./.test(it.why) &&
+            it.tick && it.tickLabel === 'They are correct' && it.sig === 'tranquility|2900123' && !it.waivable;
+    })(), byId(items, 'build').why);
     ok('...Severity and Impact are named as not set', byId(items, 'fields').why === 'Not set yet: Severity, Impact.', byId(items, 'fields').why);
     d = factsOf(finished());
     items = C.items(d);
@@ -396,14 +403,26 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...and its label says nothing of tags', !/tag/i.test(byId(items, 'summary').label));
     // where it was tested: the EVE Server and EVE Build fields
     const eveOf = (server, build, paras) => { const i = finished(); i.fields.customfield_105 = server; i.fields.customfield_106 = build; if (paras) { i.fields.description = adf(paras, ['a', 'b']); } return byId(C.items(factsOf(i)), 'build'); };
-    ok('EVE Server and EVE Build filled in', eveOf({ value: 'Tranquility' }, '2945678', ['no server here']).ok && eveOf({ value: 'Tranquility' }, '2945678', ['no server here']).label === 'EVE Server and EVE Build set');
-    ok('...one empty is named', (() => { const it = eveOf({ value: 'Tranquility' }, null, ['no server here']); return !it.ok && /^Fill in EVE Build /.test(it.why); })());
+    ok('EVE Server and EVE Build set to something other than the player\'s are done', eveOf({ value: 'Singularity' }, '2945678', ['no server here']).ok &&
+        eveOf({ value: 'Singularity' }, '2945678', ['no server here']).label === 'EVE Server and EVE Build set to where you reproduced it');
+    ok('...one of them changed is enough', eveOf({ value: 'Tranquility' }, '2945678', ['no server here']).ok && eveOf({ value: 'Singularity' }, '2900123', ['no server here']).ok);
+    ok('...both the player\'s still are not, whatever case or spacing, and the old way does not make up for it', (() => {
+        const it = eveOf({ value: ' tranquility ' }, '2900123', ['Singularity 2945678', 'x']); return !it.ok && it.tick;
+    })());
+    const tickedEve = (sig, server) => { const i = finished(); i.fields.customfield_105 = { value: server || 'Tranquility' }; i.fields.customfield_106 = '2900123';
+        i.properties = { 'jita.checklist': { v: 1, ok: { attachments: finished().properties['jita.checklist'].ok.attachments, build: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08', sig: sig } } } };
+        return byId(C.items(factsOf(i)), 'build'); };
+    ok('...until marked as correct, for those values', (() => { const it = tickedEve('tranquility|2900123'); return it.ok && it.tick && it.mark && it.mark.name === 'Hunter'; })());
+    ok('...a mark for other values does not count', !tickedEve('singularity|2900123').ok);
+    ok('...nor is a mark asked for once they are changed', (() => { const it = tickedEve('tranquility|2900123', 'Duality'); return it.ok && !it.tick; })());
+    ok('...and a defect from scratch has nothing to compare them with', (() => { const i = finished(); i.fields.customfield_105 = { value: 'Tranquility' }; i.fields.customfield_106 = '2900123'; return byId(C.items(C._facts(i, [], null)), 'build').ok; })());
+    ok('...one empty is named', (() => { const it = eveOf({ value: 'Tranquility' }, null, ['no server here']); return !it.ok && /^Fill in EVE Build with the server and build you reproduced it on/.test(it.why) && !it.tick; })());
     ok('...the old way, at the top of the description, does as well', eveOf(null, null, ['Tranquility 2945678', 'x']).ok);
     ok('...and the report\'s build is named when its log said', (() => { const s = srcObj(); s.build = 2900000; const i = finished(); i.fields.customfield_106 = null; i.fields.description = adf(['nothing'], ['a', 'b']); const it = byId(C.items(C._facts(i, [], s)), 'build'); return !it.ok && /written by build 2900000/.test(it.why); })());
     ok('...with the fields, no template to copy', !byId(items, 'build').copy);
     // the old way, where the defect has no such fields
     const descOf = (paras, list, names) => { const i = finished(); i.names = names || OLD_NAMES; i.fields.description = adf(paras, list); return C.items(factsOf(i)); };
-    ok('without the fields: the server and build at the top', byId(descOf(['Tranquility 2945678', 'x'], ['a', 'b']), 'build').ok && byId(descOf(['Tranquility 2945678', 'x'], ['a', 'b']), 'build').label === 'Server and build number at the top');
+    ok('without the fields: the server and build at the top', byId(descOf(['Tranquility 2945678', 'x'], ['a', 'b']), 'build').ok && byId(descOf(['Tranquility 2945678', 'x'], ['a', 'b']), 'build').label === 'Server and build you reproduced it on, at the top');
     ok('...a missing build is named, with the report\'s build when its log said', (() => { const s = srcObj(); s.build = 2900000; const i = finished(); i.names = OLD_NAMES; i.fields.description = adf(['Singularity', 'no number'], ['a', 'b']); const it = byId(C.items(C._facts(i, [], s)), 'build'); return !it.ok && /No build number/.test(it.why) && /build 2900000/.test(it.why); })());
     ok('...a missing server too', /No server name/.test(byId(descOf(['build 2945678'], ['a', 'b']), 'build').why));
     ok('...both far down the description are not at the top', !byId(descOf(['x'.repeat(320) + ' Tranquility 2945678'], ['a', 'b']), 'build').ok);
@@ -450,7 +469,8 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
         const it = attOf(ATT.concat([{ filename: 'shot.png', size: 9 }]), { attachments: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08', sig: C._attSig(ATT) } });
         return !it.ok && /^They changed since Hunter checked them on 2026-11-08: check them again\./.test(it.why);
     })(), attOf(ATT.concat([{ filename: 'shot.png', size: 9 }]), { attachments: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08', sig: C._attSig(ATT) } }).why);
-    ok('...none at all is asked about too', (() => { const it = attOf([], {}); return !it.ok && it.none && /There are none/.test(it.why); })());
+    ok('...none at all is asked about too, the tick saying None needed', (() => { const it = attOf([], {}); return !it.ok && it.tickLabel === 'None needed' && it.tickTitle === 'This defect needs no attachments' && /There are none/.test(it.why); })());
+    ok('...some, They are good', (() => { const it = attOf(ATT, {}); return it.tickLabel === 'They are good' && /belong to this defect/.test(it.tickTitle); })());
     ok('...and the tick carries the set it is for', attOf(ATT, {}).sig === C._attSig(ATT));
     const fieldsOf = (sev, imp) => { const i = finished(); i.fields.customfield_101 = sev; i.fields.customfield_102 = imp; return byId(C.items(factsOf(i)), 'fields'); };
     ok('Severity and Impact: an unset one is named', fieldsOf({ value: 'A' }, null).why === 'Not set yet: Impact.', fieldsOf({ value: 'A' }, null).why);
@@ -466,19 +486,36 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
         const it = byId(C.items(factsOf(i)), 'fields'); return it && !it.ok && it.why === 'Not set yet: Impact.';
     })());
     ok('Priority, Team and Epic Link: one the reporter set is named', (() => { const i = finished(); i.fields.customfield_10001 = { name: 'Core' }; const it = byId(C.items(factsOf(i)), 'fc'); return !it.ok && /Set on this defect by its reporter: Team/.test(it.why); })());
-    ok('a label in lower case is named', (() => { const i = finished(); i.fields.labels = ['undock', 'Crash']; const it = byId(C.items(factsOf(i)), 'caps'); return !it.ok && /undock/.test(it.why); })());
+    ok('a label in lower case is fine now: there is no such item', (() => { const i = finished(); i.fields.labels = ['undock', 'Crash']; return !byId(C.items(factsOf(i)), 'caps'); })());
     ok('a defect written from scratch has no rewrite or report-label items', (() => { const ids = C.items(C._facts(finished(), [], null)).map((it) => it.id).join(','); return ids.indexOf('desc') < 0 && ids.indexOf('replabels') < 0 && ids.indexOf('attachments') >= 0; })());
-    ok('a defect outside EDR is open, and may be marked not needed', (() => { const i = finished(); i.key = 'EO-5'; const it = byId(C.items(factsOf(i)), 'project'); return !it.ok && it.waivable; })());
+    ok('a defect outside EDR is fine: there is no project item', (() => { const i = finished(); i.key = 'EO-5'; return !byId(C.items(factsOf(i)), 'project'); })());
+    // labels: the report's taken off, and some of its own added
+    const labelsOf = (labels, src) => { const i = finished(); i.fields.labels = labels; return C.items(C._facts(i, [], src === undefined ? srcObj() : src)); };
+    ok('the report\'s labels left on can only be taken off: Not needed is not offered', (() => { const it = byId(labelsOf(['PlatformWin', 'Crash']), 'replabels'); return !it.ok && !it.waivable && /^Still the bug report's: PlatformWin\. Take them off; cloned and jira_escalated stay\.$/.test(it.why); })(),
+        byId(labelsOf(['PlatformWin', 'Crash']), 'replabels').why);
+    ok('right after it: Add appropriate labels, with the suggestions under it', (() => {
+        const its = labelsOf(['cloned']), ids = its.map((x) => x.id), it = byId(its, 'labels');
+        return ids.indexOf('labels') === ids.indexOf('replabels') + 1 && it.label === 'Add appropriate labels' && !it.ok && it.suggest && it.waivable &&
+            /^No labels of its own yet\. Add the ones that fit the bug/.test(it.why);
+    })());
+    ok('...done with one of its own', byId(labelsOf(['Undock', 'cloned']), 'labels').ok);
+    ok('...the report\'s, cloned and jira_escalated are none of its own', !byId(labelsOf(['PlatformWin', 'Russian', 'cloned', 'jira_escalated']), 'labels').ok);
+    ok('...and a defect from scratch has the item too, any label but cloned and jira_escalated counting', byId(labelsOf(['PlatformWin'], null), 'labels').ok && !byId(labelsOf(['cloned'], null), 'labels').ok);
     // the exception item
     const withExc = (descParas, exc) => { const s = srcObj(); s.exc = exc; const i = finished(); if (descParas) { i.fields.description = adf(descParas, ['a', 'b']); } return byId(C.items(C._facts(i, [], s)), 'exc'); };
     ok('no exception item while the report\'s logs hold none', !withExc(null, []) && !withExc(null, undefined));
     ok('...an open one when they hold some the description does not', (() => { const it = withExc(['Tranquility 2945678', 'no exception here'], [EXC]); return it && !it.ok && it.waivable && /logs hold 1 exception/.test(it.why); })());
+    ok('...saying to add the exceptions related to the bug', withExc(['x'], [EXC]).label === 'Add exceptions related to the bug to your defect description', withExc(['x'], [EXC]).label);
     ok('...done once the description holds one of them', withExc(['Tranquility 2945678', 'EXC[' + EXC.sig + ']'], [EXC]).ok);
     // waivers
     const waived = (ids) => { const i = converted(); i.properties = { 'jita.checklist': { v: 1, w: ids } }; return C.items(factsOf(i)); };
-    ok('an item marked Not needed counts as done, and says who marked it', (() => { const it = byId(waived({ replabels: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08' } }), 'replabels'); return !it.ok && it.waived && it.by.name === 'Hunter'; })());
-    ok('...only items the guide lets a defect go without', (() => { const its = waived({ summary: { by: 'x' }, steps: { by: 'x' }, attachments: { by: 'x' } }); return !byId(its, 'summary').waived && !byId(its, 'steps').waived && !byId(its, 'attachments').waived; })());
-    ok('...which are the project, the report\'s labels and the exception', (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).filter((it) => it.waivable).map((it) => it.id).join(',') === 'project,replabels,exc'; })());
+    ok('an item marked Not needed counts as done, and says who marked it', (() => { const it = byId(waived({ labels: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08' } }), 'labels'); return !it.ok && it.waived && it.by.name === 'Hunter'; })());
+    ok('...only items the guide lets a defect go without: a Not needed the report\'s labels had before counts no more', (() => {
+        const its = waived({ summary: { by: 'x' }, steps: { by: 'x' }, attachments: { by: 'x' }, replabels: { by: 'x' }, build: { by: 'x' } });
+        return ['summary', 'steps', 'attachments', 'replabels', 'build'].every((id) => !byId(its, id).waived);
+    })());
+    ok('...which are labels of its own and the exception', (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).filter((it) => it.waivable).map((it) => it.id).join(',') === 'labels,exc'; })(),
+        (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).filter((it) => it.waivable).map((it) => it.id).join(','); })());
 
     // ---- the state ----
     let s0 = srcObj(), st = C._judge(C._facts(finished(), [], s0), 'reporter', 'acc-rep', []);
@@ -487,7 +524,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     st = C._judge(C._facts(finished(), [], s0), 'reporter', 'acc-rep', []);
     ok('...logs that could not be read hold nothing up', !st.pending && st.complete);
     st = C._judge(C._facts(converted(), [], srcObj()), 'reporter', 'acc-rep', []);
-    ok('the open items are counted', st.open === 7 && !st.complete, String(st.open));
+    ok('the open items are counted', st.open === 8 && !st.complete, String(st.open));
 
     // ================= who sees it =================
     const whoOf = (rep, name) => C._who({ fields: { reporter: { accountId: rep, displayName: name } } }, 'acc-me');
@@ -524,6 +561,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     delete gmStore[C.SERVERS_KEY];
     editmetaOf = { 'EDR-1': { fields: { customfield_105: { allowedValues: [{ value: 'Chaos' }] } } } };
     const iChaos = converted(); iChaos.fields.description = adf(['Chaos 2945678', 'Undocking crashes the client.']);
+    iChaos.fields.customfield_105 = null; iChaos.fields.customfield_106 = null;   // empty: the old way decides
     issueOf = { 'EDR-1': iChaos };
     last2 = await C.load('EDR-1', () => {});
     ok('a load reads the top of the description for the servers the EVE Server field offers', byId(last2.items, 'build').ok, byId(last2.items, 'build').why);
@@ -549,11 +587,16 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     // the bug report's steps, from a steps field of their own
     sourceOf['EBR-11'] = { key: 'EBR-11', fields: { summary: 's', description: REPORT_DESC(), labels: [], attachment: [], customfield_107: adf([], ['Open the map', 'Zoom']) } };
     gets = [];
-    const s11 = await C._readSource('EBR-11', 'customfield_107');
+    const s11 = await C._readSource('EBR-11', { steps: 'customfield_107' });
     ok('the bug report\'s steps are read from the steps field when the defect\'s Jira has one', s11.steps === 'Open the map Zoom' &&
         gets.some((p) => /EBR-11\?fields=summary,description,labels,attachment,customfield_107$/.test(p)), s11.steps + ' / ' + J(gets));
-    const s10 = await C._readSource('EBR-10', '');
+    gets = [];
+    const s10 = await C._readSource('EBR-10', { server: 'customfield_105', build: 'customfield_106' });
     ok('...else from its description\'s Reproduction Steps', s10.steps.trim() === '1. undock 2. it crashes', s10.steps);
+    ok('its EVE Server and EVE Build, the player\'s, are read too', s10.eveServer === 'Tranquility' && s10.eveBuild === '2900123' &&
+        gets.some((p) => /EBR-10\?fields=summary,description,labels,attachment,customfield_105,customfield_106$/.test(p)), J([s10.eveServer, s10.eveBuild]) + ' ' + J(gets));
+    const sNone = await C._readSource('EBR-10', {});
+    ok('...and nothing is asked for where this Jira has no such fields', sNone.eveServer === '' && sNone.eveBuild === '', J([sNone.eveServer, sNone.eveBuild]));
 
     // ---- the card ----
     meta = {}; C._labelsP = null;
@@ -563,21 +606,25 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     await settle();
     let g = document.getElementById(C.GROUP_ID), body = g && g.find('#jita-cl');
     ok('the card is mounted right under Details', !!g && anchor.nextSibling === g);
-    ok('...its title says how many items are open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent === 'Defect checklist · 8 open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent);
+    ok('...its title says how many items are open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent === 'Defect checklist · 9 open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent);
     ok('...it names the bug report it was compared with', /Compared with EBR-10, the bug report it was converted from/.test(byCls(body, 'jcl-src')[0].textContent));
     const rows = byCls(body, 'jcl-item');
     ok('...one row per item, open ones marked ○, done ones ✓', rows.length === C.items(C._facts(converted(), [], Object.assign(srcObj(), { exc: [EXC] }))).length &&
         byCls(rows.filter((r) => r.attrs['data-item'] === 'summary')[0], 'jcl-mark')[0].textContent === '○' &&
-        byCls(rows.filter((r) => r.attrs['data-item'] === 'caps')[0], 'jcl-mark')[0].textContent === '✓');
-    ok('...with what is missing in the hover', /Still the bug report's summary/.test(byCls(rows.filter((r) => r.attrs['data-item'] === 'summary')[0], 'jcl-lbl')[0].attrs.title));
+        byCls(rows.filter((r) => r.attrs['data-item'] === 'fc')[0], 'jcl-mark')[0].textContent === '✓');
+    ok('...with what is missing in the hover', byCls(rows.filter((r) => r.attrs['data-item'] === 'summary')[0], 'jcl-lbl')[0].attrs.title === 'Give your defect a fitting title.');
     const actsOf = (id) => byCls(rows.filter((r) => r.attrs['data-item'] === id)[0], 'jcl-act').map((a) => a.textContent).join(',');
-    ok('the reporter may take the report\'s labels off, or mark them not needed', actsOf('replabels') === 'Take off,Not needed', actsOf('replabels'));
-    ok('...copy a template for the steps (the build has fields of its own here)', actsOf('build') === '' && actsOf('steps') === 'Copy', actsOf('build') + ' / ' + actsOf('steps'));
+    ok('the reporter may take the report\'s labels off, but not mark them not needed', actsOf('replabels') === 'Take off', actsOf('replabels'));
+    ok('...mark the player\'s EVE Server and EVE Build as correct, copy a template for the steps', actsOf('build') === 'They are correct' && actsOf('steps') === 'Copy', actsOf('build') + ' / ' + actsOf('steps'));
+    ok('...and mark labels of its own not needed, the suggested ones listed right under that item', (() => {
+        const list = byCls(body, 'jcl-items')[0], kids = list.kids, at = kids.findIndex((k) => k.attrs && k.attrs['data-item'] === 'labels');
+        return actsOf('labels') === 'Not needed' && at >= 0 && kids[at + 1] && kids[at + 1].hasClass('jcl-sugg') && byCls(body, 'jcl-sugg').length === 1;
+    })(), actsOf('labels'));
     copied = []; copiedHtml = [];
     byCls(rows.filter((r) => r.attrs['data-item'] === 'steps')[0], 'jcl-act')[0].fire('click');
     await settle();
     ok('...which copies the steps as text, and as a numbered list for Jira\'s editor', copied[0] === C.STEPS_TEXT && copiedHtml[0] === C.STEPS_HTML, J(copied) + ' ' + J(copiedHtml));
-    ok('...and nothing on a done item, nor a way to skip the summary', actsOf('caps') === '' && actsOf('summary') === '');
+    ok('...and nothing on a done item, nor a way to skip the summary', actsOf('fc') === '' && actsOf('summary') === '');
     const excRows = byCls(body, 'jcl-erow');
     ok('the report\'s exceptions are listed with the defects holding them', excRows.length === 1 && /KeyError/.test(byCls(excRows[0], 'jcl-emsg')[0].textContent) &&
         byCls(excRows[0], 'jcl-edef')[0].textContent === 'EDR-7');
@@ -598,7 +645,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     await waitRefresh();
     ok('...with no reload once Jira shows it, and the card read again', reloads === 0 && gets.some((p) => /fields=\*all/.test(p)), reloads + ' ' + J(gets));
     let fin = byCls(body, 'jcl-finish')[0];
-    ok('the hand-off waits for the last item', fin && fin.props.disabled === true && /8 items still open/.test(fin.attrs.title), fin && fin.attrs.title);
+    ok('the hand-off waits for the last item', fin && fin.props.disabled === true && /9 items still open/.test(fin.attrs.title), fin && fin.attrs.title);
     ok('a defect that is no exploit keeps the exploit steps folded away', !byCls(body, 'jcl-warn').length && byCls(body, 'jcl-mline').some((l) => /Exploit/.test(l.textContent)));
 
     // a Lead's view
@@ -648,7 +695,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     };
     toasts = [];
     ok('"Unassigned" picked in Jira\'s assignee field is refused while items are open', !!pick('Unassigned'));
-    ok('...saying why', toasts.length === 1 && /stays assigned until the Defect checklist is done: 8 items still open/.test(toasts[0]), toasts.join(' | '));
+    ok('...saying why', toasts.length === 1 && /stays assigned until the Defect checklist is done: 9 items still open/.test(toasts[0]), toasts.join(' | '));
     ok('...the mousedown too, so the picker never hears of it', !!pick('Unassigned', 'mousedown') && toasts.length === 1);
     ok('...but nobody else is picked for', !pick('Bob Builder') && !pick('Assign to me'));
     ok('the guard is bound in the capture phase', listeners.some((l) => l.ev === 'click' && l.cap === true && l.fn === C._onPick) && listeners.some((l) => l.ev === 'mousedown' && l.cap === true));
@@ -751,6 +798,16 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...a click ticks them for the set they are, asking nothing', confirms.length === 0 && puts().length === 1 && puts()[0].body.ok.attachments.sig === C._attSig(converted().fields.attachment), J(puts()));
     ok('...and Jira\'s empty answer counts as saved: no "Could not save", and the card is read again', !toasts.some((t) => /Could not save/.test(t)) &&
         gets.some((p) => /fields=\*all/.test(p)), toasts.join(' | ') + ' ' + J(gets));
+    // ...and the player's EVE Server and EVE Build marked as correct
+    const buildRow = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-item').filter((r) => r.attrs['data-item'] === 'build')[0];
+    const buildAct = byCls(buildRow, 'jcl-act')[0];
+    ajaxLog = []; confirms = [];
+    answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: false, status: 404 } };
+    ok('the reporter marks the player\'s EVE Server and EVE Build as correct on the card, saying what that means', buildAct.textContent === 'They are correct' && buildAct.attrs.title === 'You reproduced it on this server and build too');
+    buildAct.fire('click');
+    await settle();
+    ok('...a click ticks them for the values they are, asking nothing', confirms.length === 0 && puts().length === 1 && puts()[0].body.ok.build.sig === 'tranquility|2900123' &&
+        puts()[0].body.ok.build.by === 'acc-rep', J(puts()));
     answers = {};
     const iNone = converted(); iNone.fields.attachment = [];
     issueOf['EDR-1'] = iNone;
