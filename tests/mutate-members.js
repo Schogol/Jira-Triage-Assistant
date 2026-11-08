@@ -269,7 +269,7 @@ const muts = [
     [MB, 'the page\'s rank is not heeded when a role is set', "var want = role === M.defaultRole(name, rank) ? '' : role;", "var want = role === M.defaultRole(name) ? '' : role;"],
     [MB, 'the same role is written again', "            if ((e.role || '') === want) { return false; }\n", '', ROLE],
     [MB, 'a non-Lead can set a note', '        if (!L.isLead()) { return Promise.reject(M._notLead()); }\n', '', NOTE],
-    [MB, 'a note is stored as typed', 'var want = L._note(note);', "var want = String(note || '');"],
+    [MB, 'a note is stored as typed', 'var want = L._note(note);', "var want = String(note || '');", NOTE],
     [MB, 'the same note is written again', "            if ((e.note || '') === want) { return false; }\n", '', NOTE],
     [MB, 'an entry with nothing left is kept', '            if (!e.role && !e.note) { delete v.m[acc]; return v; }\n', '', PERSON],
     [MB, 'who set it is not stored', '            e.by = M._meName();\n', '', PERSON],
@@ -354,7 +354,7 @@ const muts = [
     [MB, 'a forced load does not read the team page again', 'var team = M.team(force).then(', 'var team = M.team().then('],
     [MB, 'the tab draws without the team page', 'rows = M.model(st.act, st.mem, st.live, st.cur, st.team);', 'rows = M.model(st.act, st.mem, st.live, st.cur);'],
     [MB, 'the team page read is not kept with the members', '            st.team = r[1];\n', ''],
-    [MB, 'a note saved draws its row without the team page', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team)', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur)'],
+    [MB, 'a note saved draws its row without the team page', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team)', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur)', EDITNOTE],
     [MB, 'a role over the page\'s rank does not say what the page says', 'if (r.roleSet && r.rank && r.rank !== r.role) { why += ', 'if (false) { why += '],
     [MB, 'a role from the page reads as the default', "((r.rank && r.rank === r.role) ? 'From the ECAID - Team Members page' : ('The default, ' + r.role))", "('The default, ' + r.role)"],
     [MB, 'the tab does not hand on the page\'s rank', 'return M.setRole(r.acc, role, r.name, r.rank).then(function (w) { drawn(w);', 'return M.setRole(r.acc, role, r.name).then(function (w) { drawn(w);'],
@@ -461,7 +461,9 @@ const muts = [
     [MB, 'the internal note shares the public note\'s draft', "draft = 'inote:' + r.acc", "draft = 'member:' + r.acc", EDITIN],
     [MB, 'an internal note saved stays a draft', '                delete U._drafts[draft];\n', '', EDITIN],
     [MB, 'an internal note saved is not taken into the tab', '                if (v && U._mem) { U._mem.inotes = v; }\n', '', EDITIN],
-    [MB, 'an internal note saved draws nothing again', '                if (fresh) { U._swapRow(r.acc, U._memberRow(fresh, wins, cur)); }\n', '', EDITIN]
+    [MB, 'an internal note saved draws nothing again', '                if (fresh) { U._swapRow(r.acc, U._memberRow(fresh, wins, cur)); }\n', '', EDITIN],
+    [MB, 'an internal note saved draws its row without the team page', 'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur, U._mem.team)',
+        'M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur)', EDITIN]
 ];
 function within(fn) {
     if (!fn) { return [0, src.length]; }

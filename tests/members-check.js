@@ -1219,6 +1219,10 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
         /^Second one\n\nOnly Leads see this note: it stays in the Lead Ledger, and no page shows it\.\nSet by schogol on \d{4}-\d\d-\d\d$/.test(inoteOf('acc-ast').attrs.title), inoteOf('acc-ast').attrs.title);
     ok('...one with none invites one', inoteOf('acc-me').text() === 'Add an internal note' && inoteOf('acc-me').hasClass('empty') &&
         inoteOf('acc-me').attrs.title === 'Only Leads see this note: it stays in the Lead Ledger, and no page shows it.', inoteOf('acc-me').attrs.title);
+    // a row as drawn: every element of it but its internal note, with its classes, attributes, properties and text
+    const sigOf = (n) => ((n && n.cls) ? (n.tag + '.' + n.cls.join('.') + J(n.attrs) + J(n.props) + n._text + '[' + n.kids.map(sigOf).join(',') + ']') : J(n && n.data));
+    const restOf = (acc) => rowFor(acc).kids.filter((k) => !(k.hasClass && k.hasClass('ld-minote'))).map(sigOf).join('\n');
+    const restBefore = restOf('acc-me');
     pubs = 0; pageWrites = []; answer = 'Asked for a break\nuntil December'; asked = null;
     U._drafts['inote:acc-me'] = 'typed before';
     inoteOf('acc-me').fire('click');
@@ -1228,6 +1232,7 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...saved, it is kept apart in the Lead Ledger, its draft let go, and only its row drawn again', props[L.INOTES_KEY].value.m['acc-me'].t === 'Asked for a break\nuntil December' &&
         !('inote:acc-me' in U._drafts) && inoteOf('acc-me').text() === 'Asked for a break' && rowFor('acc-ast') && inoteOf('acc-ast').text() === 'Second one',
         J(props[L.INOTES_KEY].value.m['acc-me']));
+    ok('...the rest of its row drawn as it was, the team page\'s rank and note included', restOf('acc-me') === restBefore, restOf('acc-me'));
     asked = null;
     inoteOf('acc-me').fire('click');
     await settle();
