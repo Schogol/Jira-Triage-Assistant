@@ -160,13 +160,13 @@ function gmSet(key, val) {
 // so an existing install's orphaned "dropdowns" value is ignored and credits simply defaults on. The index of
 // each feature is now recorded ONCE in the FLAG map below and read via flagOn(name) - so if a slot ever moves,
 // only FLAG needs updating (not scattered numeric reads); the persisted gm key per slot must still stay stable.
-var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""], ["screenOcr", ""], ["defectProfile", ""]];
+var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""], ["screenOcr", ""], ["defectProfile", ""], ["defectChecklist", ""]];
 
 // Named accessors over savedVariables (the [gmKey, enabled] pairs above): map a stable feature name to its
 // fixed index so a wrong index breaks loudly at one named site instead of silently misreading a slot. flagOn
 // reads, setFlag writes - both go through the SAME savedVariables + GM persistence, so behavior is unchanged.
 // Index 0 ("key") is a reserved legacy slot with no boolean feature and is deliberately omitted.
-var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7, defectProfile: 8 };
+var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7, defectProfile: 8, defectChecklist: 9 };
 function flagOn(name) { var i = FLAG[name]; return i != null && !!savedVariables[i][1]; }
 function setFlag(name, val) {
     var i = FLAG[name];
@@ -9547,6 +9547,13 @@ JiTA.menu = {
             $zipRow.append($zipSw);
             $feat.append($zipRow);
         }
+        // Defect checklist: on a defect you wrote (for Leads, any ISD member's), what the ISD guide asks of it. While it is
+        // on, an unfinished defect cannot be unassigned; switched off, its card goes at once and nothing is refused.
+        var $cl = JiTA.menu._toggleRow('Defect checklist', 9, function () {
+            if (!JITA_NO_JIRA_UI) { JiTA.checklist.ensure(); }
+        });
+        $cl.find('.lbl').append($('<span class="sub"></span>').text('On a defect you wrote (for Leads, any ISD member\'s): what the ISD guide asks of it, checked as you edit. While it is on, an unfinished defect cannot be unassigned.'));
+        $feat.append($cl);
         // ISD Credits: mount / tear down the corner badge (and start the scheduler) on toggle. The badge and
         // its crawl belong to Jira tabs only - toggling from Confluence still persists the flag for them.
         $feat.append(JiTA.menu._toggleRow('ISD Credits', 3, function () {
@@ -13849,8 +13856,12 @@ JiTA.profile = {
  * needs, a project other than EDR) take a "Not needed", kept on the issue itself (issue property PROP), so Leads see what
  * was waived and by whom.
  *
- * What it writes to Jira, each asked first: the report's labels taken off, an exception from the report's logs added to the
- * description in an expand, and the unassign; and the waivers, which ask nothing. Nothing else here edits an issue.
+ * It also suggests labels in use on other defects that the defect's text calls for (its summary, its steps, its
+ * description), counted once a week.
+ *
+ * What it writes to Jira, each asked first: the report's labels taken off, a suggested label added, an exception from the
+ * report's logs added to the description in an expand, and the unassign; and the waivers, which ask nothing. Nothing else
+ * here edits an issue. Settings > Features switches the card off, and the unassign block with it.
  */
 JiTA.checklist = {
     TITLE: 'Defect checklist',
@@ -13858,11 +13869,17 @@ JiTA.checklist = {
     COLLAPSE_KEY: 'jitaChecklistCollapsed',
     PROP: 'jita.checklist',                       // the issue property: { v: 1, w: { item id: { by, name, at } } }
     KEEP_LABELS: ['cloned', 'jira_escalated'],    // the guide: these stay when the report's labels go
-    TAG_RE: /^\s*(\[[^\]]*\]|\([^)]*\)|[A-Z][A-Z0-9]+:\s)/,   // "[UI] ...", "(NPE) ...", "NPE: ...": the guide puts these in labels
     SERVER_RE: /\b(tranquility|tq|singularity|sisi|duality|thunderdome|serenity|infinity|multiplicity)\b/i,
     BUILD_RE: /\b\d{6,8}\b/,                      // the build number at the top of "About EVE"
     TOP_CHARS: 300,                               // "at the top of the description": this far in
     STEPS_RE: /(^|\s)1[.)]\s+\S[\s\S]*?\s2[.)]\s+\S/,   // "1. ... 2. ..." written as text, not as a list
+    // The steps section of a description, as the in-game reporter writes it: "Reproduction Steps:" up to the next section.
+    STEPS_SECTION_RE: /reproduction steps\s*:?\s*([\s\S]*?)(?=\b(?:session info|computer info)\s*:|$)/i,
+    LABELS_KEY: 'checklistLabels',                // meta store: { at, n, c: { label: how many defects carry it } }
+    LABELS_MS: 7 * 24 * 3600 * 1000,              // the labels in use are counted again after this long
+    LABELS_JQL: 'project = EDR AND labels is not EMPTY AND created >= -365d',
+    LABEL_MIN: 2,                                 // a label on fewer defects is not suggested: a typo, or a one-off
+    SUGGEST: 6,                                   // labels suggested at most
     REVERT_MS: 2 * 60 * 1000,                     // an unassign by this browser's user this recent is put back while items are open
     RECHECK_MS: 1500,                             // a field edited in Jira: checked again this long after the page changed
     FOCUS_MS: 10000,                              // back in the tab: checked again, at most this often
@@ -13886,6 +13903,7 @@ JiTA.checklist = {
     _lastLoad: 0,
     _reverted: {},           // defect key -> the unassign put back, so one is put back only once
     _rawCache: {},           // report key -> { signature: the block as its log has it }
+    _labelsP: null,          // the labels in use, being counted or counted (_labelCounts)
     _excOpen: false,
     _moreOpen: false,
     _bound: false,
@@ -13899,10 +13917,11 @@ JiTA.checklist = {
         if (typeof v === 'object') { return String(v.value || v.name || v.displayName || v.title || v.key || v.id || ''); }
         return String(v);
     },
-    // The custom fields the items read, found by their names in this Jira (expand=names): { severity, impact, state, epic }.
-    // Of two fields with one name, the one holding a value.
+    // The custom fields the items read, found by their names in this Jira (expand=names): { severity, impact, epic, server,
+    // build, steps }. Of two fields with one name, the one holding a value.
     _ids: function (names, fields) {
-        var out = {}, want = { severity: /^severity$/i, impact: /^impact$/i, state: /^state$/i, epic: /^epic link$/i };
+        var out = {}, want = { severity: /^severity$/i, impact: /^impact$/i, epic: /^epic link$/i, server: /^eve server$/i, build: /^eve build$/i,
+            steps: /^(steps to reproduce|reproduction steps)$/i };
         Object.keys(names || {}).forEach(function (id) {
             var name = String(names[id] || '').trim();
             Object.keys(want).forEach(function (k) {
@@ -13986,14 +14005,38 @@ JiTA.checklist = {
         if (same.length) { return same[0].key; }
         return (pool.length === 1 && (f.labels || []).indexOf('cloned') >= 0) ? pool[0].key : null;
     },
-    _readSource: function (key) {
-        return JiTA.leadduty._get('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=summary,description,labels,attachment').then(function (iss) {
+    // The bug report, as the items compare with it. `stepsId` is the steps field of the defect's Jira, when it has one: the
+    // report's steps are read from it, else from its description.
+    _readSource: function (key, stepsId) {
+        var C = JiTA.checklist;
+        return JiTA.leadduty._get('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=summary,description,labels,attachment' + (stepsId ? ',' + stepsId : '')).then(function (iss) {
             var f = (iss && iss.fields) || {};
             return {
                 key: key, summary: f.summary || '', desc: JiTA.util.toPlainText(f.description), labels: f.labels || [],
+                steps: C._steps(f.description, stepsId ? f[stepsId] : null).text,
                 attachments: (f.attachment || []).map(function (a) { return { filename: a.filename, size: a.size, content: a.content }; })
             };
         });
+    },
+    // The reproduction steps: the field of their own where the issue has one filled in, else the description's numbered
+    // lists (the hunter's own, over a player's section left below them), else its "Reproduction Steps" section (as the
+    // in-game reporter writes it). { text, ordered }: `ordered` when they are a numbered list.
+    _steps: function (desc, field) {
+        var C = JiTA.checklist, U = JiTA.util, ft = U.toPlainText(field);
+        if (C._squash(ft)) { return { text: ft, ordered: C._hasNode(field, 'orderedList') || C.STEPS_RE.test(ft) }; }
+        var plain = U.toPlainText(desc), list = C._listText(desc), m = C.STEPS_SECTION_RE.exec(plain);
+        return { text: C._squash(list) ? list : (m ? m[1] : ''), ordered: C._hasNode(desc, 'orderedList') || C.STEPS_RE.test(plain) };
+    },
+    // The text of a description's numbered lists.
+    _listText: function (adf) {
+        var out = [];
+        (function walk(n, inList) {
+            if (!n || typeof n !== 'object') { return; }
+            var here = inList || n.type === 'orderedList';
+            if (here && n.type === 'text' && typeof n.text === 'string') { out.push(n.text); }
+            (n.content || []).forEach(function (c) { walk(c, here); });
+        })(adf, false);
+        return out.join(' ');
     },
     // The exceptions and stacktraces in the report's logs that count (JiTA.excnoise), as the Defect Profile's reader reads
     // them (and caches them), each with the other defects that hold it: [{ sig, msg, defects }]. Rejects when the logs could
@@ -14017,13 +14060,9 @@ JiTA.checklist = {
     },
 
     // ---- the items --------------------------------------------------------------------------------------------------
+    // A log file: one from LogLite (a .lsw, or a text file named for it), or the player's own logs.txt. The player's logs,
+    // copied from the bug report, are logs too.
     _isLog: function (name) { return /\.lsw$/i.test(name || '') || (/log/i.test(name || '') && /\.(txt|log|zip|csv)$/i.test(name || '')); },
-    // The log files attached to the defect that are not the report's own (the same name and size).
-    _newLogs: function (att, srcAtt) {
-        var C = JiTA.checklist, had = {};
-        (srcAtt || []).forEach(function (a) { had[(a.filename || '') + ':' + (a.size || 0)] = true; });
-        return (att || []).filter(function (a) { return C._isLog(a.filename) && !had[(a.filename || '') + ':' + (a.size || 0)]; });
-    },
     _reportLabels: function (labels, srcLabels) {
         var C = JiTA.checklist;
         return (labels || []).filter(function (l) { return C.KEEP_LABELS.indexOf(l) < 0 && (srcLabels || []).indexOf(l) >= 0; });
@@ -14031,6 +14070,63 @@ JiTA.checklist = {
     _lowerLabels: function (labels) {
         var C = JiTA.checklist;
         return (labels || []).filter(function (l) { var c = String(l).charAt(0); return C.KEEP_LABELS.indexOf(l) < 0 && c !== c.toUpperCase(); });
+    },
+
+    // ---- label suggestions ------------------------------------------------------------------------------------------
+    // The labels in use on EDR defects of the last year, with how many defects carry each ({ label: n }): counted once a
+    // week in this browser, kept in the meta store. A count that fails is tried again on the next card.
+    _labelCounts: function () {
+        var C = JiTA.checklist;
+        if (C._labelsP) { return C._labelsP; }
+        C._labelsP = Promise.resolve().then(function () { return JiTA.db.getMeta(C.LABELS_KEY); }).then(null, function () { return null; }).then(function (m) {
+            if (m && m.c && Date.now() - (m.at || 0) < C.LABELS_MS) { return m.c; }
+            return JiTA.leadduty._search(C.LABELS_JQL, ['labels']).then(function (issues) {
+                var c = {};
+                (issues || []).forEach(function (iss) { ((iss.fields || {}).labels || []).forEach(function (l) { c[l] = (c[l] || 0) + 1; }); });
+                return JiTA.db.setMeta(C.LABELS_KEY, { at: Date.now(), n: (issues || []).length, c: c }).then(function () { return c; }, function () { return c; });
+            });
+        });
+        C._labelsP.then(null, function () { C._labelsP = null; });
+        return C._labelsP;
+    },
+    // A text's words, lowercased.
+    _words: function (t) { return String(t || '').toLowerCase().split(/[^a-z0-9]+/).filter(function (w) { return !!w; }); },
+    // The words a label can be found by: "FittingWindow", "Fitting_Window" and "Fitting-Window" by "fitting window", and
+    // any label by itself as one word ("PvE" by "pve", "SKINR" by "skinr").
+    _labelForms: function (label) {
+        var C = JiTA.checklist, l = String(label);
+        var split = C._words(l.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')), whole = C._words(l).join('');
+        return split.length > 1 ? [split, [whole]] : [[whole]];
+    },
+    // Whether `words` holds `run` word for word, a plural counting as its singular.
+    _hasRun: function (words, run) {
+        var same = function (a, b) { return a === b || a === b + 's' || a === b + 'es'; };
+        for (var i = 0; i + run.length <= words.length; i++) {
+            var j = 0;
+            while (j < run.length && same(words[i + j], run[j])) { j++; }
+            if (j === run.length) { return true; }
+        }
+        return false;
+    },
+    // Labels to suggest for the defect `d`: ones in use on other defects whose words its text holds, its summary counting
+    // most, then its steps, then its description. Left out: the ones it has, cloned and jira_escalated, the bug report's
+    // own, ones on fewer than LABEL_MIN defects, and any not starting with a capital letter. [{ label, n, where }], the best
+    // first, SUGGEST at most.
+    suggest: function (d, counts) {
+        var C = JiTA.checklist, have = {}, out = [];
+        (d.labels || []).concat((d.src && d.src.labels) || [], C.KEEP_LABELS).forEach(function (l) { have[String(l).toLowerCase()] = true; });
+        var parts = [['summary', C._words(d.summary), 3], ['steps', C._words(d.steps && d.steps.text), 2], ['description', C._words(d.desc), 1]];
+        Object.keys(counts || {}).forEach(function (label) {
+            var n = counts[label], c0 = String(label).charAt(0);
+            if (!(n >= C.LABEL_MIN) || have[label.toLowerCase()] || c0 !== c0.toUpperCase()) { return; }
+            var forms = C._labelForms(label), score = 0, where = [];
+            parts.forEach(function (p) {
+                if (forms.some(function (f) { return f.length && C._hasRun(p[1], f); })) { score += p[2]; where.push(p[0]); }
+            });
+            if (score) { out.push({ label: label, n: n, where: where, score: score }); }
+        });
+        out.sort(function (a, b) { return b.score - a.score || b.n - a.n || (a.label < b.label ? -1 : 1); });
+        return out.slice(0, C.SUGGEST).map(function (x) { return { label: x.label, n: x.n, where: x.where }; });
     },
     // Whether the description holds one of these exceptions: one with the same signature or the same crash site, or one
     // whose message it has.
@@ -14063,9 +14159,9 @@ JiTA.checklist = {
         var desc = JiTA.util.toPlainText(f.description), reporter = (f.reporter || {}).accountId || '';
         var field = function (id) { return id ? C._val(f[id]) : null; };
         return {
-            key: issue.key, summary: f.summary || '', desc: desc, ordered: C._hasNode(f.description, 'orderedList'), fps: JiTA.excfind._fps(desc),
+            key: issue.key, summary: f.summary || '', desc: desc, steps: C._steps(f.description, ids.steps ? f[ids.steps] : null), fps: JiTA.excfind._fps(desc),
             labels: f.labels || [], attachments: (f.attachment || []).map(function (a) { return { filename: a.filename, size: a.size }; }),
-            severity: field(ids.severity), impact: field(ids.impact), state: field(ids.state),
+            severity: field(ids.severity), impact: field(ids.impact), eveServer: field(ids.server), eveBuild: field(ids.build), stepsId: ids.steps || '',
             fcSet: C._fcSet(f, hist, ids, reporter), reporter: reporter, assignee: (f.assignee || {}).accountId || '', assigneeName: (f.assignee || {}).displayName || '',
             cloned: (f.labels || []).indexOf('cloned') >= 0, src: src, waived: w
         };
@@ -14084,30 +14180,40 @@ JiTA.checklist = {
         }
         add('project', 'In the EDR project', /^EDR-\d+$/.test(d.key || ''), 'Bug hunters write their defects in EDR (EVE Defect Reports).', { waivable: true });
 
-        var tag = C.TAG_RE.exec(d.summary || ''), sameSum = !!s && C._squash(d.summary) === C._squash(s.summary);
-        add('summary', 'Summary says what, where and when, with no tags', !tag && !sameSum && !!C._squash(d.summary),
-            tag ? ('It starts with a tag, ' + tag[1].trim() + ': labels hold those.')
-                : (sameSum ? 'Still the bug report\'s summary. Say what the bug is, where it happens, and in which circumstances.' : 'No summary yet.'));
+        var sameSum = !!s && C._squash(d.summary) === C._squash(s.summary);
+        add('summary', 'Summary says what, where and when', !sameSum && !!C._squash(d.summary),
+            sameSum ? 'Still the bug report\'s summary. Say what the bug is, where it happens, and in which circumstances.' : 'No summary yet.');
 
         if (s) {
             add('desc', 'Description rewritten', !!C._squash(d.desc) && C._squash(d.desc) !== C._squash(s.desc),
                 'Still the bug report\'s description. Describe the bug in full, and take out what the player wrote that it does not need.');
         }
+        // Where it was tested: in the EVE Server and EVE Build fields, or, the old way, at the top of the description.
         var top = String(d.desc || '').slice(0, C.TOP_CHARS), srv = C.SERVER_RE.test(top), bld = C.BUILD_RE.test(top);
-        add('build', 'Server and build number at the top', srv && bld,
-            (!srv && !bld ? 'Neither the server nor the build number you tested on is at the top of the description.'
-                : (!srv ? 'No server name (Tranquility, Singularity, ...) at the top of the description.'
-                    : 'No build number at the top of the description. It is at the top of "About EVE" in the Esc menu.')) +
-            (s && s.build ? ' The bug report\'s log was written by build ' + s.build + '.' : ''),
-            { copy: 'Server: \nBuild: ' });
-        add('steps', 'Reproduction steps as a numbered list', !!d.ordered || C.STEPS_RE.test(d.desc || ''),
-            'Break the reproduction steps down into a numbered list. One of the last steps says what to look for.',
+        var hasFields = (d.eveServer !== null && d.eveServer !== undefined) || (d.eveBuild !== null && d.eveBuild !== undefined);
+        var empty = [['EVE Server', d.eveServer], ['EVE Build', d.eveBuild]].filter(function (x) { return !x[1]; }).map(function (x) { return x[0]; });
+        var built = s && s.build ? ' The bug report\'s log was written by build ' + s.build + '.' : '';
+        if (hasFields) {
+            add('build', 'EVE Server and EVE Build set', !empty.length || (srv && bld),
+                'Fill in ' + empty.join(' and ') + ' with where you tested it (the old way, the server and build number at the top of the description, does as well).' + built);
+        } else {
+            add('build', 'Server and build number at the top', srv && bld,
+                (!srv && !bld ? 'Neither the server nor the build number you tested on is at the top of the description.'
+                    : (!srv ? 'No server name (Tranquility, Singularity, ...) at the top of the description.'
+                        : 'No build number at the top of the description. It is at the top of "About EVE" in the Esc menu.')) + built,
+                { copy: 'Server: \nBuild: ' });
+        }
+        // Reproduction steps: a numbered list, and not the bug report's own steps.
+        var st = d.steps || { text: '', ordered: false }, sameSteps = !!s && !!C._squash(st.text) && C._squash(st.text) === C._squash(s.steps);
+        add('steps', 'Reproduction steps as a numbered list', !!st.ordered && !sameSteps,
+            sameSteps ? 'Still the bug report\'s reproduction steps. Keep the ones that matter, as a numbered list; one of the last says what to look for.'
+                : 'Break the reproduction steps down into a numbered list. One of the last steps says what to look for.',
             { copy: 'Reproduction steps:\n1. \n2. \n3. Observe that ' });
 
-        // A field this Jira does not have on the defect (null) is not asked for; with none of the three, neither is the item.
-        var known = [['Severity', d.severity], ['Impact', d.impact], ['State', d.state]].filter(function (x) { return x[1] !== null && x[1] !== undefined; });
+        // A field this Jira does not have on the defect (null) is not asked for; with neither, neither is the item.
+        var known = [['Severity', d.severity], ['Impact', d.impact]].filter(function (x) { return x[1] !== null && x[1] !== undefined; });
         var unset = known.filter(function (x) { return x[1] === ''; }).map(function (x) { return x[0]; });
-        if (known.length) { add('fields', 'Severity, Impact and State set', !unset.length, 'Not set yet: ' + unset.join(', ') + '.'); }
+        if (known.length) { add('fields', 'Severity and Impact set', !unset.length, 'Not set yet: ' + unset.join(', ') + '.'); }
         var fc = d.fcSet || [];
         add('fc', 'Priority, Team and Epic Link left to FC', !fc.length,
             'FC sets these, never a bug hunter. Set on this defect by its reporter: ' + fc.map(function (x) { return x.name; }).join(', ') +
@@ -14121,10 +14227,9 @@ JiTA.checklist = {
                 'Still the bug report\'s: ' + left.join(', ') + '. Take off the ones the defect does not need; cloned and jira_escalated stay.',
                 { waivable: true, fix: 'labels', left: left });
         }
-        var logs = C._newLogs(d.attachments, s && s.attachments);
-        add('logs', 'Logs from LogLite attached', logs.length > 0,
-            'Attach logs from LogLite. Only the simplest defects (a typo, a description, an issue outside the game) go without them' +
-            (s ? '; the bug report\'s own logs do not count.' : '.'), { waivable: true });
+        var logs = (d.attachments || []).filter(function (a) { return C._isLog(a.filename); });
+        add('logs', 'Logs attached', logs.length > 0,
+            'Attach logs, from LogLite or the player\'s own. Only the simplest defects (a typo, a description, an issue outside the game) go without them.', { waivable: true });
         if (s && s.exc && s.exc.length) {
             add('exc', 'The exception behind the bug in the description', C._hasExc(d, s.exc),
                 'The bug report\'s logs hold ' + s.exc.length + ' exception' + (s.exc.length === 1 ? '' : 's') + ' (listed below). Add the one behind this bug, in an expand.',
@@ -14172,8 +14277,8 @@ JiTA.checklist = {
     },
     // The defect read in full, judged: first on itself and its bug report, then again once the report's logs are read.
     _judgeAll: function (key, issue, hist, sees, me, onState) {
-        var C = JiTA.checklist, srcKey = C._source(issue.fields || {}, hist);
-        return (srcKey ? C._readSource(srcKey).then(null, function () { return null; }) : Promise.resolve(null)).then(function (src) {
+        var C = JiTA.checklist, f = issue.fields || {}, srcKey = C._source(f, hist), stepsId = C._ids(issue.names, f).steps;
+        return (srcKey ? C._readSource(srcKey, stepsId).then(null, function () { return null; }) : Promise.resolve(null)).then(function (src) {
             var d = C._facts(issue, hist, src), s = C._judge(d, sees, me, hist);
             onState(s);
             if (!src) { return s; }
@@ -14209,7 +14314,7 @@ JiTA.checklist = {
     ensure: function () {
         var C = JiTA.checklist, key = (typeof jitaCurrentKey === 'function') ? jitaCurrentKey() : '';
         C._bind();
-        if (!/^(EDR|EO|PLAT)-\d+$/.test(key || '')) {
+        if (!flagOn('defectChecklist') || !/^(EDR|EO|PLAT)-\d+$/.test(key || '')) {
             if (C._key) { C._key = null; C.clear(); }
             return;
         }
@@ -14230,7 +14335,7 @@ JiTA.checklist = {
     reensure: function () {
         var C = JiTA.checklist, s = C._key && C._state[C._key];
         if (!s || !s.sees || document.getElementById(C.GROUP_ID)) { return; }
-        C._draw(C._key, s);
+        C._draw(C._key, s);   // which draws nothing while the card is switched off
     },
     // The defect's fields as the page shows them: its summary, its description, the Details fields the items read and
     // how many attachment parts there are, so an edit made in Jira itself can be told.
@@ -14262,7 +14367,7 @@ JiTA.checklist = {
     // hears of it. Whatever gets past this (a keyboard shortcut) is put back once the card reads the defect again (_guard).
     _onPick: function (e) {
         var C = JiTA.checklist, s = C._key && C._state[C._key];
-        if (!s || !s.sees || !s.open || !s.held) { return; }
+        if (!s || !s.sees || !s.open || !s.held || !flagOn('defectChecklist')) { return; }
         var t = e.target, opt = t && t.closest && t.closest('[role="option"], [id*="-option-"]');
         if (!opt || !/^\s*(unassigned\s*)+$/i.test(opt.textContent || '')) { return; }
         e.preventDefault();
@@ -14278,7 +14383,7 @@ JiTA.checklist = {
     // once.
     _guard: function (key, s) {
         var C = JiTA.checklist;
-        if (!s || !s.sees || s.assignee || !s.open) { return; }
+        if (!s || !s.sees || s.assignee || !s.open || !flagOn('defectChecklist')) { return; }
         var back = C._revertTo(s.hist, s.me, Date.now());
         if (!back || back.from !== s.d.reporter || C._reverted[key] === back.at) { return; }
         C._reverted[key] = back.at;
@@ -14334,6 +14439,15 @@ JiTA.checklist = {
             JiTA.ui.toast('Taken off ' + key + ': ' + labels.join(', ') + '. Reload the page to see it in Jira\'s fields.');
             C.refresh(key);
         }, function (e) { JiTA.ui.toast('Could not take the labels off ' + key + ': ' + (e && e.message || e)); });
+    },
+    // A suggested label added to the defect, asked first.
+    _addLabel: function (key, label) {
+        var C = JiTA.checklist;
+        if (!window.confirm('Add the label ' + label + ' to ' + key + '?')) { return Promise.resolve(); }
+        return C._req('PUT', C._issuePath(key), { update: { labels: [{ add: label }] } }).then(function () {
+            JiTA.ui.toast('Added ' + label + ' to ' + key + '. Reload the page to see it in Jira\'s fields.');
+            C.refresh(key);
+        }, function (e) { JiTA.ui.toast('Could not add ' + label + ' to ' + key + ': ' + (e && e.message || e)); });
     },
     // An expand at the end of the description, titled `title` and holding `text` as a code block. A defect without a
     // description gets one.
@@ -14445,7 +14559,7 @@ JiTA.checklist = {
 
     _draw: function (key, s) {
         var C = JiTA.checklist;
-        if (C._key !== key) { return; }
+        if (C._key !== key || !flagOn('defectChecklist')) { return; }
         if (!s || !s.sees) { C.clear(); return; }
         var $b = C._card(true);
         if (!$b.length) { return; }
@@ -14461,6 +14575,7 @@ JiTA.checklist = {
         C._srcLine(s).appendTo($b);
         var $list = $('<div class="jcl-items"></div>').appendTo($b);
         s.items.forEach(function (it) { C._itemRow(key, s, it, mine).appendTo($list); });
+        if (mine) { C._suggestRow(key, s).appendTo($b); }
         if (s.src && s.src.failed) { $('<div class="jcl-line"></div>').text('The bug report\'s logs could not be read.').appendTo($b); }
         if (s.src && s.src.exc && s.src.exc.length) { C._excList(key, s, mine).appendTo($b); }
         C._more(s).appendTo($b);
@@ -14502,6 +14617,24 @@ JiTA.checklist = {
                 function () { C._waive(key, it.id, !it.waived); });
         }
         return $r;
+    },
+    // Labels in use on other defects that the defect's text calls for, each added with a click (asked first). Filled in
+    // once the labels in use are counted; gone when there is nothing to suggest.
+    _suggestRow: function (key, s) {
+        var C = JiTA.checklist, $w = $('<div class="jcl-sugg"></div>');
+        $('<span class="jcl-slbl"></span>').text('Suggested labels:').appendTo($w);
+        var $l = $('<span class="jcl-chips"></span>').text('counting the labels in use…').appendTo($w);
+        C._labelCounts().then(function (counts) {
+            var sug = C.suggest(s.d, counts);
+            $l.empty();
+            if (!sug.length) { $w.remove(); return; }
+            sug.forEach(function (x) {
+                $('<a class="jcl-chip" href="#"></a>').text('+ ' + x.label)
+                    .attr('title', 'On ' + x.n + ' other defects, and its words are in the ' + x.where.join(' and ') + '. Click to add it.')
+                    .on('click', function (e) { e.preventDefault(); C._addLabel(key, x.label); }).appendTo($l);
+            });
+        }, function () { $w.remove(); });
+        return $w;
     },
     // The report's exceptions, each with the defects that hold it already, Copy, and (for the reporter) Add.
     _excList: function (key, s, mine) {
@@ -14588,6 +14721,11 @@ JiTA.checklist = {
                 '#jita-cl a.jcl-act, #jita-cl .jcl-open, #jita-cl .jcl-src a, #jita-cl .jcl-edef a { color: var(--ds-link, #0c66e4); text-decoration: none; cursor: pointer; }' +
                 '#jita-cl a.jcl-act:hover, #jita-cl .jcl-open:hover, #jita-cl .jcl-src a:hover, #jita-cl .jcl-edef a:hover { text-decoration: underline; }' +
                 '#jita-cl .jcl-sub { font-weight: 600; margin: 8px 0 2px; }' +
+                '#jita-cl .jcl-sugg { margin-top: 4px; color: var(--ds-text-subtlest, #626f86); }' +
+                '#jita-cl .jcl-slbl { margin-right: 6px; }' +
+                '#jita-cl .jcl-chips { display: inline-flex; flex-wrap: wrap; gap: 4px 6px; vertical-align: top; }' +
+                '#jita-cl a.jcl-chip { color: var(--ds-text-subtle, #44546f); background: var(--ds-background-neutral, #091e420f); border-radius: 8px; padding: 0 7px; text-decoration: none; cursor: pointer; }' +
+                '#jita-cl a.jcl-chip:hover { color: var(--ds-link, #0c66e4); }' +
                 '#jita-cl .jcl-erow { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }' +
                 '#jita-cl .jcl-emsg { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-subtle, #44546f); }' +
                 '#jita-cl .jcl-edef { flex: 0 0 auto; display: flex; gap: 4px; color: var(--ds-text-subtlest, #626f86); }' +
@@ -24059,8 +24197,9 @@ JiTA.changelog = {
     ENTRIES: [
         { v: '3.51.0', date: '2026-11-08', features: [
             'New Defect checklist card on a defect you wrote: what the ISD guide asks of a defect, each item checked against the defect, and against the bug report it was converted from.',
-            'A defect cannot be unassigned (handed to FC) until every item is done. Items the guide lets a defect go without, such as logs for a typo, can be marked Not needed.',
-            'One click takes the bug report\'s labels off the defect, or adds an exception from its logs to the description in an expand. Leads see the card on every ISD member\'s defect.'
+            'A defect cannot be unassigned (handed to FC) until every item is done. Items the guide lets a defect go without, such as logs for a typo, can be marked Not needed. Settings > Features switches it off.',
+            'It suggests labels already in use that the defect\'s text calls for, and one click adds one, takes the bug report\'s labels off, or adds an exception from its logs to the description in an expand.',
+            'Leads see the card on every ISD member\'s defect.'
         ] },
         { v: '3.50.0', date: '2026-11-08', fixes: [
             'Triage mode, the full-screen queue opened by double-tapping <, has been removed. The Triage Assistant in the sidebar, the detail view and the other double-tap shortcuts (>, # and +) stay as they are.'

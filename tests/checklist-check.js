@@ -45,6 +45,7 @@ function N(html) {
         return c;
     };
     n.removeChild = (c) => { n.kids = n.kids.filter((k) => k !== c); c.parentNode = null; return c; };
+    n.remove = () => { if (n.parentNode) { n.parentNode.removeChild(n); } return n; };
     n.on = (ev, fn) => { (n.handlers[ev] = n.handlers[ev] || []).push(fn); return n; };
     n.fire = (ev) => (n.handlers[ev] || []).forEach((fn) => fn.call(n, { preventDefault() {}, stopPropagation() {} }));
     n.empty = () => { n.kids = []; n._text = ''; return n; };
@@ -118,7 +119,8 @@ let toasts = [], isLead = false, groupMembers = [], issueOf = {}, histOf = {}, s
 global.gmGet = (k, d) => d;
 global.gmSet = () => {};
 global.jitaCurrentKey = () => onScreen;
-let onScreen = '';
+let onScreen = '', checklistOn = true;
+global.flagOn = (name) => (name === 'defectChecklist' ? checklistOn : true);
 global.JiTA = {
     HOST: 'https://x.atlassian.net', dlog: () => {},
     util: { fmtDate: (iso) => 'on ' + String(iso).slice(0, 10), copy: (t) => { copied.push(t); return copyAnswer ? Promise.resolve() : Promise.reject(new Error('no')); } },
@@ -139,7 +141,9 @@ global.JiTA = {
     } },
     link: { currentUser: () => Promise.resolve(me) },
     declutter: { _fieldRows: () => fieldRows },
+    db: { getMeta: (k) => Promise.resolve(meta[k] || null), setMeta: (k, v) => { meta[k] = JSON.parse(J(v)); return Promise.resolve(); } },
     leadduty: {
+        _search: (jql, fields) => { searches.push({ jql, fields }); return searchAnswer instanceof Error ? Promise.reject(searchAnswer) : Promise.resolve(JSON.parse(J(searchAnswer))); },
         isLead: () => isLead, me: () => ({ accountId: me, displayName: 'ISD BH Hunter' }),
         group: { members: () => Promise.resolve(groupMembers) },
         _get: (path) => {
@@ -153,7 +157,7 @@ global.JiTA = {
         _changelog: (key) => { gets.push('changelog ' + key); return Promise.resolve(JSON.parse(J(histOf[key] || []))); }
     }
 };
-let gets = [];
+let gets = [], meta = {}, searches = [], searchAnswer = [];
 let copied = [], copyAnswer = true, built = 0, fieldRows = [], logText = {};
 // The fingerprints of a description: "EXC[<sig>]" for each exception pasted in it.
 function fpsOf(text) { const out = [], re = /EXC\[([^\]]+)\]/g; let m; while ((m = re.exec(String(text)))) { out.push({ sig: m[1], msg: m[1] }); } return out; }
@@ -166,13 +170,18 @@ const C = JiTA.checklist;
 const EXC = { sig: "keyerror: 'x'|a.py:f>b.py:g>c.py:h", msg: "KeyError: 'x' raised while undocking" };
 const adf = (paras, list) => ({ type: 'doc', version: 1, content: paras.map((p) => ({ type: 'paragraph', content: [{ type: 'text', text: p }] }))
     .concat(list ? [{ type: 'orderedList', content: list.map((t) => ({ type: 'listItem', content: [{ type: 'paragraph', content: [{ type: 'text', text: t }] }] })) }] : []) });
-const NAMES = { summary: 'Summary', customfield_101: 'Severity', customfield_102: 'Impact', customfield_103: 'State', customfield_10001: 'Team', customfield_104: 'Epic Link' };
-// A defect as the conversion leaves it: the report's summary, description and labels, its log copied, nothing set.
+const NAMES = { summary: 'Summary', customfield_101: 'Severity', customfield_102: 'Impact', customfield_10001: 'Team', customfield_104: 'Epic Link',
+    customfield_105: 'EVE Server', customfield_106: 'EVE Build' };
+// The bug report's description, as the in-game reporter writes it, steps and all.
+const REPORT_DESC = () => adf(['i undock and the game crashes', 'Reproduction Steps: 1. undock 2. it crashes', 'Session Info: Jita']);
+// A defect as the conversion leaves it: the report's summary, description (steps and all) and labels, its log copied,
+// nothing set.
 function converted() {
     return { key: 'EDR-1', names: NAMES, properties: {}, fields: {
-        summary: 'game crash when undock', description: adf(['i undock and the game crashes']), labels: ['PlatformWin', 'cloned'],
+        summary: 'game crash when undock', description: REPORT_DESC(), labels: ['PlatformWin', 'cloned'],
         attachment: [{ filename: 'logs.txt', size: 100 }], reporter: { accountId: 'acc-rep', displayName: 'ISD BH Hunter' }, assignee: { accountId: 'acc-rep' },
-        priority: { id: '3', name: '3 - Medium' }, customfield_101: null, customfield_102: null, customfield_103: null, customfield_10001: null, customfield_104: null,
+        priority: { id: '3', name: '3 - Medium' }, customfield_101: null, customfield_102: null, customfield_10001: null, customfield_104: null,
+        customfield_105: null, customfield_106: null,
         issuelinks: [{ type: { name: 'Duplicate' }, inwardIssue: { key: 'EBR-10', fields: { summary: 'game crash when undock' } } }]
     } };
 }
@@ -183,22 +192,27 @@ function finished() {
     f.description = adf(['Singularity, build 2945678', 'Undocking from any station crashes the client to desktop.', 'EXC[' + EXC.sig + ']'], ['Dock in Jita 4-4', 'Undock', 'Observe the client crashes']);
     f.labels = ['Undock', 'Crash', 'cloned'];
     f.attachment = [{ filename: 'logs.txt', size: 100 }, { filename: 'loglite_undock.txt', size: 5000 }];
-    f.customfield_101 = { value: 'A - Crash / Exploit' }; f.customfield_102 = { value: 'Moderate / Limited' }; f.customfield_103 = { value: 'Live Issue' };
+    f.customfield_101 = { value: 'A - Crash / Exploit' }; f.customfield_102 = { value: 'Moderate / Limited' };
+    f.customfield_105 = { value: 'Singularity' }; f.customfield_106 = '2945678';
     return i;
 }
-const SRC = { key: 'EBR-10', fields: { summary: 'game crash when undock', description: adf(['i undock and the game crashes']), labels: ['PlatformWin', 'Russian'],
+const SRC = { key: 'EBR-10', fields: { summary: 'game crash when undock', description: REPORT_DESC(), labels: ['PlatformWin', 'Russian'],
     attachment: [{ filename: 'logs.txt', size: 100, content: 'u-logs' }] } };
 const srcObj = () => ({ key: 'EBR-10', summary: SRC.fields.summary, desc: JiTA.util.toPlainText(SRC.fields.description), labels: SRC.fields.labels.slice(),
-    attachments: SRC.fields.attachment.map((a) => Object.assign({}, a)) });
+    steps: C._steps(SRC.fields.description, null).text, attachments: SRC.fields.attachment.map((a) => Object.assign({}, a)) });
+// Without the EVE Server and EVE Build fields: the old way, the server and build at the top of the description.
+const OLD_NAMES = { summary: 'Summary', customfield_101: 'Severity', customfield_102: 'Impact', customfield_10001: 'Team', customfield_104: 'Epic Link' };
 const byId = (items, id) => items.filter((it) => it.id === id)[0];
 
 (async () => {
     // ================= small parts =================
     ok('a field\'s value reads as text: a select, a user, a list, nothing', C._val({ value: 'A - Crash' }) === 'A - Crash' && C._val({ displayName: 'Bob' }) === 'Bob' &&
         C._val([{ value: 'a' }, { value: 'b' }]) === 'a, b' && C._val(null) === '' && C._val('x') === 'x');
-    ok('the fields are found by their names', J(C._ids(NAMES, {})) === J({ severity: 'customfield_101', impact: 'customfield_102', state: 'customfield_103', epic: 'customfield_104' }), J(C._ids(NAMES, {})));
-    ok('...and of two fields with one name, the one holding a value', C._ids({ cf_a: 'State', cf_b: 'State' }, { cf_b: { value: 'Live Issue' } }).state === 'cf_b' &&
-        C._ids({ cf_a: 'State', cf_b: 'State' }, { cf_a: { value: 'None' } }).state === 'cf_a');
+    ok('the fields are found by their names', J(C._ids(NAMES, {})) === J({ severity: 'customfield_101', impact: 'customfield_102', epic: 'customfield_104', server: 'customfield_105', build: 'customfield_106' }), J(C._ids(NAMES, {})));
+    ok('...no State, which this Jira does not have', !('state' in C._ids({ cf_s: 'State' }, {})));
+    ok('...the steps field by either of its names', C._ids({ cf_7: 'Steps to Reproduce' }, {}).steps === 'cf_7' && C._ids({ cf_8: 'Reproduction Steps' }, {}).steps === 'cf_8');
+    ok('...and of two fields with one name, the one holding a value', C._ids({ cf_a: 'Impact', cf_b: 'Impact' }, { cf_b: { value: 'Minor' } }).impact === 'cf_b' &&
+        C._ids({ cf_a: 'Impact', cf_b: 'Impact' }, { cf_a: { value: 'Minor' } }).impact === 'cf_a');
     const hist = [
         { author: { accountId: 'acc-rep' }, created: '2026-11-08T10:00:00.000+0000', items: [{ field: 'summary', fromString: 'first summary', toString: 'second' }] },
         { author: { accountId: 'acc-rep' }, created: '2026-11-08T10:05:00.000+0000', items: [{ field: 'summary', fromString: 'second', toString: 'third' }, { field: 'labels', fromString: 'a', toString: 'a b' }] }
@@ -244,10 +258,50 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...defects linked are no source', C._source({ summary: 'x', labels: ['cloned'], issuelinks: [link('Relates', 'EDR-9', 'x')] }, []) === null);
 
     // ---- logs, labels, exceptions ----
-    const srcAtt = [{ filename: 'logs.txt', size: 100 }];
-    ok('a log attached by the reporter counts', C._newLogs([{ filename: 'logs.txt', size: 100 }, { filename: 'LogLite export.txt', size: 9 }], srcAtt).length === 1);
-    ok('...the report\'s own log (same name and size) does not', C._newLogs([{ filename: 'logs.txt', size: 100 }], srcAtt).length === 0);
-    ok('...a LogLite workspace counts, an image named like a log does not', C._newLogs([{ filename: 'session.lsw', size: 1 }, { filename: 'catalog.png', size: 1 }], []).length === 1);
+    ok('logs are the player\'s logs.txt, a LogLite export and a LogLite workspace', C._isLog('logs.txt') && C._isLog('LogLite export.txt') && C._isLog('session.lsw'));
+    ok('...not an image named like one', !C._isLog('catalog.png') && !C._isLog('dialog.jpg'));
+    // ---- label suggestions ----
+    ok('a label is found by its words: FittingWindow and Fitting_Window by "fitting window", or as one word',
+        J(C._labelForms('FittingWindow')) === J([['fitting', 'window'], ['fittingwindow']]) && J(C._labelForms('Fitting_Window')) === J([['fitting', 'window'], ['fittingwindow']]) &&
+        J(C._labelForms('SKINR')) === J([['skinr']]) && C._labelForms('PvE').some((f) => J(f) === J(['pve'])));
+    ok('...a plural counts as its singular, and the words must follow each other', C._hasRun(['two', 'drones', 'lost'], ['drone']) && C._hasRun(['the', 'fitting', 'windows'], ['fitting', 'window']) &&
+        !C._hasRun(['fitting', 'the', 'window'], ['fitting', 'window']) && !C._hasRun(['dronesx'], ['drone']));
+    const COUNTS = { Overview: 10, Undock: 5, FittingWindow: 3, lowercase: 9, Rare: 1, PlatformWin: 50, cloned: 99, Crash: 40, Window: 7 };
+    const sugD = { summary: 'Undock from a station breaks the Overview', steps: { text: 'open the fitting window' }, desc: 'lowercase rare crash window platform win cloned',
+        labels: ['Crash'], src: { labels: ['PlatformWin'] } };
+    const sug = C.suggest(sugD, COUNTS);
+    ok('suggested: labels in use whose words the defect\'s text holds, the summary counting most', J(sug.map((x) => x.label)) === J(['Overview', 'Window', 'Undock', 'FittingWindow']), J(sug));
+    ok('...each saying on how many defects and where its words are', sug[0].n === 10 && J(sug[0].where) === J(['summary']) && J(sug[1].where) === J(['steps', 'description']), J(sug.slice(0, 2)));
+    ok('...never one it has, cloned or jira_escalated, the report\'s own, a rare one, nor one in lower case',
+        !sug.some((x) => ['Crash', 'cloned', 'PlatformWin', 'Rare', 'lowercase'].indexOf(x.label) >= 0));
+    ok('...at most SUGGEST of them', (() => { const many = {}; for (let i = 0; i < 20; i++) { many['Word' + i] = 5; } return C.suggest({ summary: Object.keys(many).join(' '), labels: [] }, many).length === C.SUGGEST; })());
+    ok('...nothing when the text calls for none', C.suggest({ summary: 'nothing here', labels: [] }, COUNTS).length === 0);
+    meta = {}; searches = []; C._labelsP = null;
+    searchAnswer = [{ fields: { labels: ['Overview', 'Undock'] } }, { fields: { labels: ['Overview'] } }];
+    let counts = await C._labelCounts();
+    ok('the labels in use are counted by one search of the last year\'s defects', J(counts) === J({ Overview: 2, Undock: 1 }) && searches.length === 1 &&
+        searches[0].jql === C.LABELS_JQL && /project = EDR/.test(C.LABELS_JQL) && /created >= -365d/.test(C.LABELS_JQL) && J(searches[0].fields) === J(['labels']), J(searches));
+    ok('...and kept in the meta store', !!meta[C.LABELS_KEY] && J(meta[C.LABELS_KEY].c) === J(counts) && meta[C.LABELS_KEY].n === 2);
+    C._labelsP = null;
+    await C._labelCounts();
+    ok('...a count under a week old is not done again', searches.length === 1);
+    meta[C.LABELS_KEY].at = Date.now() - 8 * 24 * 3600 * 1000; C._labelsP = null;
+    await C._labelCounts();
+    ok('...an older one is', searches.length === 2);
+    meta = {}; C._labelsP = null; searchAnswer = new Error('HTTP 500');
+    let countFailed = false;
+    try { await C._labelCounts(); } catch (e) { countFailed = true; }
+    await settle();
+    ok('...and a count that failed is tried again on the next card', countFailed && C._labelsP === null);
+    searchAnswer = [];
+
+    // the reproduction steps
+    const stepsOf = (desc, field) => C._steps(desc, field);
+    ok('the steps are the description\'s "Reproduction Steps" section, as the in-game reporter writes it', stepsOf(REPORT_DESC(), null).text.trim() === '1. undock 2. it crashes', J(stepsOf(REPORT_DESC(), null)));
+    ok('...or its numbered lists', stepsOf(adf(['intro'], ['Dock', 'Undock']), null).text === 'Dock Undock' && stepsOf(adf(['intro'], ['Dock', 'Undock']), null).ordered);
+    ok('...the hunter\'s own list over the player\'s section left below it', stepsOf(adf(['Reproduction Steps: 1. undock 2. it crashes'], ['Dock', 'Undock', 'Observe']), null).text === 'Dock Undock Observe');
+    ok('...or a steps field of its own, when it has one filled in', stepsOf(REPORT_DESC(), adf([], ['Open the map', 'Zoom'])).text === 'Open the map Zoom' &&
+        stepsOf(REPORT_DESC(), adf([], ['Open the map', 'Zoom'])).ordered && stepsOf(REPORT_DESC(), adf([])).text.trim() === '1. undock 2. it crashes');
     ok('the report\'s labels left on the defect, cloned and jira_escalated aside', J(C._reportLabels(['PlatformWin', 'cloned', 'jira_escalated', 'Crash'], ['PlatformWin', 'cloned', 'jira_escalated'])) === J(['PlatformWin']));
     ok('labels not starting with a capital letter, cloned and jira_escalated aside', J(C._lowerLabels(['ui', 'UI', '3D', 'cloned', 'jira_escalated', 'überlay'])) === J(['ui', 'überlay']));
     ok('an exception in the description by its signature', C._hasExc({ desc: '', fps: [{ sig: EXC.sig }] }, [EXC]));
@@ -267,34 +321,54 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     let d = factsOf(converted()), items = C.items(d);
     const openIds = (its) => its.filter((it) => !it.ok && !it.waived).map((it) => it.id).join(',');
     ok('a defect as the conversion leaves it has every item open but the ones it cannot get wrong',
-        openIds(items) === 'summary,desc,build,steps,fields,replabels,logs', openIds(items));
+        openIds(items) === 'summary,desc,build,steps,fields,replabels', openIds(items));
     ok('...its summary is still the report\'s', /Still the bug report's summary/.test(byId(items, 'summary').why));
     ok('...so is its description, and its labels', /Still the bug report's description/.test(byId(items, 'desc').why) && /PlatformWin/.test(byId(items, 'replabels').why) && J(byId(items, 'replabels').left) === J(['PlatformWin']));
-    ok('...and the report\'s log does not count as its own', /the bug report's own logs do not count/.test(byId(items, 'logs').why));
-    ok('...Severity, Impact and State are named as not set', byId(items, 'fields').why === 'Not set yet: Severity, Impact, State.', byId(items, 'fields').why);
+    ok('...and its reproduction steps, though numbered', /Still the bug report's reproduction steps/.test(byId(items, 'steps').why));
+    ok('...the player\'s log copied from the report counts as a log', byId(items, 'logs').ok);
+    ok('...EVE Server and EVE Build are named as empty', /^Fill in EVE Server and EVE Build with where you tested it/.test(byId(items, 'build').why), byId(items, 'build').why);
+    ok('...Severity and Impact are named as not set', byId(items, 'fields').why === 'Not set yet: Severity, Impact.', byId(items, 'fields').why);
     d = factsOf(finished());
     items = C.items(d);
     ok('a finished defect has every item done', openIds(items) === '' && items.every((it) => it.ok), openIds(items));
     ok('...and says nothing is missing', items.every((it) => it.why === ''));
     const sumOf = (summary) => { const i = finished(); i.fields.summary = summary; return byId(C.items(factsOf(i)), 'summary'); };
-    ok('a summary starting with a [tag] is open, saying labels hold those', !sumOf('[UI] Overview flickers').ok && /\[UI\]/.test(sumOf('[UI] Overview flickers').why));
-    ok('...so is "NPE: ...", and "(Exploit) ..."', !sumOf('NPE: wallet fails').ok && !sumOf('(Exploit) free isk').ok);
-    ok('...but not a time, nor a plain one', sumOf('10:30 downtime shows twice').ok && sumOf('Overview: tabs reset').ok === true);
-    const descOf = (paras, list) => { const i = finished(); i.fields.description = adf(paras, list); return C.items(factsOf(i)); };
-    ok('the server and build at the top', byId(descOf(['Tranquility 2945678', 'x'], ['a', 'b']), 'build').ok);
-    ok('...a missing build is named, with the report\'s build when its log said', (() => { const s = srcObj(); s.build = 2900000; const i = finished(); i.fields.description = adf(['Singularity', 'no number'], ['a', 'b']); const it = byId(C.items(C._facts(i, [], s)), 'build'); return !it.ok && /No build number/.test(it.why) && /build 2900000/.test(it.why); })());
+    ok('a summary with a tag is fine: only the report\'s summary is not', sumOf('[UI] Overview flickers').ok && sumOf('NPE: wallet fails').ok && !sumOf('Game crash when undock').ok);
+    ok('...and its label says nothing of tags', !/tag/i.test(byId(items, 'summary').label));
+    // where it was tested: the EVE Server and EVE Build fields
+    const eveOf = (server, build, paras) => { const i = finished(); i.fields.customfield_105 = server; i.fields.customfield_106 = build; if (paras) { i.fields.description = adf(paras, ['a', 'b']); } return byId(C.items(factsOf(i)), 'build'); };
+    ok('EVE Server and EVE Build filled in', eveOf({ value: 'Tranquility' }, '2945678', ['no server here']).ok && eveOf({ value: 'Tranquility' }, '2945678', ['no server here']).label === 'EVE Server and EVE Build set');
+    ok('...one empty is named', (() => { const it = eveOf({ value: 'Tranquility' }, null, ['no server here']); return !it.ok && /^Fill in EVE Build /.test(it.why); })());
+    ok('...the old way, at the top of the description, does as well', eveOf(null, null, ['Tranquility 2945678', 'x']).ok);
+    ok('...and the report\'s build is named when its log said', (() => { const s = srcObj(); s.build = 2900000; const i = finished(); i.fields.customfield_106 = null; i.fields.description = adf(['nothing'], ['a', 'b']); const it = byId(C.items(C._facts(i, [], s)), 'build'); return !it.ok && /written by build 2900000/.test(it.why); })());
+    ok('...with the fields, no template to copy', !byId(items, 'build').copy);
+    // the old way, where the defect has no such fields
+    const descOf = (paras, list, names) => { const i = finished(); i.names = names || OLD_NAMES; i.fields.description = adf(paras, list); return C.items(factsOf(i)); };
+    ok('without the fields: the server and build at the top', byId(descOf(['Tranquility 2945678', 'x'], ['a', 'b']), 'build').ok && byId(descOf(['Tranquility 2945678', 'x'], ['a', 'b']), 'build').label === 'Server and build number at the top');
+    ok('...a missing build is named, with the report\'s build when its log said', (() => { const s = srcObj(); s.build = 2900000; const i = finished(); i.names = OLD_NAMES; i.fields.description = adf(['Singularity', 'no number'], ['a', 'b']); const it = byId(C.items(C._facts(i, [], s)), 'build'); return !it.ok && /No build number/.test(it.why) && /build 2900000/.test(it.why); })());
     ok('...a missing server too', /No server name/.test(byId(descOf(['build 2945678'], ['a', 'b']), 'build').why));
-    ok('...and both far down the description are not at the top', !byId(descOf(['x'.repeat(320) + ' Tranquility 2945678'], ['a', 'b']), 'build').ok);
+    ok('...both far down the description are not at the top', !byId(descOf(['x'.repeat(320) + ' Tranquility 2945678'], ['a', 'b']), 'build').ok);
+    ok('...and a template to copy', /Server: \nBuild: /.test(byId(descOf(['nothing'], ['a', 'b']), 'build').copy));
+    // reproduction steps
     ok('reproduction steps as a list', byId(descOf(['Tranquility 2945678'], ['a', 'b']), 'steps').ok);
     ok('...or written "1. ... 2. ..."', byId(descOf(['Tranquility 2945678', '1. Dock 2. Undock 3. Observe the crash']), 'steps').ok);
     ok('...but not as prose', !byId(descOf(['Tranquility 2945678', 'Dock, then undock and it crashes.']), 'steps').ok);
     ok('...nor as one step', !byId(descOf(['Tranquility 2945678', 'Steps: 1. undock and it crashes.']), 'steps').ok);
-    ok('the build and steps items offer a template to copy', /Server: \nBuild: /.test(byId(items, 'build').copy) && /^Reproduction steps:\n1\. /.test(byId(items, 'steps').copy));
-    const fieldsOf = (sev, imp, st) => { const i = finished(); i.fields.customfield_101 = sev; i.fields.customfield_102 = imp; i.fields.customfield_103 = st; return byId(C.items(factsOf(i)), 'fields'); };
-    ok('Severity, Impact and State: an unset one is named', fieldsOf({ value: 'A' }, null, { value: 'None' }).why === 'Not set yet: Impact.', fieldsOf({ value: 'A' }, null, { value: 'None' }).why);
-    ok('...State "None" is set (it is one of its values)', fieldsOf({ value: 'A' }, { value: 'Minor' }, { value: 'None' }).ok);
+    ok('...nor as the bug report\'s own steps, numbered as they are', (() => { const it = byId(descOf(['Tranquility 2945678', 'Reproduction Steps: 1. undock 2. it crashes']), 'steps'); return !it.ok && /Still the bug report's reproduction steps/.test(it.why); })());
+    ok('...a steps field of its own is read first', (() => {
+        const i = finished(); i.names = Object.assign({ customfield_107: 'Steps to Reproduce' }, NAMES); i.fields.customfield_107 = adf([], ['Open the map', 'Zoom']);
+        i.fields.description = adf(['Tranquility 2945678', 'no list here']);
+        return byId(C.items(factsOf(i)), 'steps').ok;
+    })());
+    ok('the steps item offers a template to copy', /^Reproduction steps:\n1\. /.test(byId(items, 'steps').copy));
+    const fieldsOf = (sev, imp) => { const i = finished(); i.fields.customfield_101 = sev; i.fields.customfield_102 = imp; return byId(C.items(factsOf(i)), 'fields'); };
+    ok('Severity and Impact: an unset one is named', fieldsOf({ value: 'A' }, null).why === 'Not set yet: Impact.', fieldsOf({ value: 'A' }, null).why);
+    ok('...both set is done, and nothing asks for a State', fieldsOf({ value: 'A' }, { value: 'Minor' }).ok && fieldsOf({ value: 'A' }, { value: 'Minor' }).label === 'Severity and Impact set');
     ok('...a field this Jira does not have is not asked for, and with none of them, no item', (() => {
         const i = finished(); i.names = { summary: 'Summary' }; return !byId(C.items(factsOf(i)), 'fields');
+    })());
+    ok('...with Severity and no Impact field, Severity alone', (() => {
+        const i = finished(); i.names = { customfield_101: 'Severity' }; const it = byId(C.items(factsOf(i)), 'fields'); return it && it.ok;
     })());
     ok('...with some of them, those are asked for', (() => {
         const i = finished(); i.names = { customfield_101: 'Severity', customfield_102: 'Impact' }; i.fields.customfield_102 = null;
@@ -311,7 +385,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...an open one when they hold some the description does not', (() => { const it = withExc(['Tranquility 2945678', 'no exception here'], [EXC]); return it && !it.ok && it.waivable && /logs hold 1 exception/.test(it.why); })());
     ok('...done once the description holds one of them', withExc(['Tranquility 2945678', 'EXC[' + EXC.sig + ']'], [EXC]).ok);
     // waivers
-    const waived = (ids) => { const i = finished(); i.fields.attachment = [{ filename: 'logs.txt', size: 100 }]; i.properties = { 'jita.checklist': { v: 1, w: ids } }; return C.items(factsOf(i)); };
+    const waived = (ids) => { const i = finished(); i.fields.attachment = [{ filename: 'screenshot.png', size: 100 }]; i.properties = { 'jita.checklist': { v: 1, w: ids } }; return C.items(factsOf(i)); };
     ok('an item marked Not needed counts as done, and says who marked it', (() => { const it = byId(waived({ logs: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08' } }), 'logs'); return !it.ok && it.waived && it.by.name === 'Hunter'; })());
     ok('...only items the guide lets a defect go without', (() => { const i = converted(); i.properties = { 'jita.checklist': { v: 1, w: { summary: { by: 'x' }, steps: { by: 'x' } } } }; const its = C.items(factsOf(i)); return !byId(its, 'summary').waived && !byId(its, 'steps').waived; })());
     ok('...which are the project, the report\'s labels, the logs and the exception', (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).filter((it) => it.waivable).map((it) => it.id).join(',') === 'project,replabels,logs,exc'; })());
@@ -323,7 +397,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     st = C._judge(C._facts(finished(), [], s0), 'reporter', 'acc-rep', []);
     ok('...logs that could not be read hold nothing up', !st.pending && st.complete);
     st = C._judge(C._facts(converted(), [], srcObj()), 'reporter', 'acc-rep', []);
-    ok('the open items are counted', st.open === 7 && !st.complete, String(st.open));
+    ok('the open items are counted', st.open === 6 && !st.complete, String(st.open));
 
     // ================= who sees it =================
     const whoOf = (rep, name) => C._who({ fields: { reporter: { accountId: rep, displayName: name } } }, 'acc-me');
@@ -363,13 +437,24 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('someone the card is not for reads nothing more than who wrote the defect', last2.sees === '' && !last2.items && J(gets) === J(['/rest/api/3/issue/EDR-1?fields=reporter']), J(gets));
     me = 'acc-rep';
 
+    // the bug report's steps, from a steps field of their own
+    sourceOf['EBR-11'] = { key: 'EBR-11', fields: { summary: 's', description: REPORT_DESC(), labels: [], attachment: [], customfield_107: adf([], ['Open the map', 'Zoom']) } };
+    gets = [];
+    const s11 = await C._readSource('EBR-11', 'customfield_107');
+    ok('the bug report\'s steps are read from the steps field when the defect\'s Jira has one', s11.steps === 'Open the map Zoom' &&
+        gets.some((p) => /EBR-11\?fields=summary,description,labels,attachment,customfield_107$/.test(p)), s11.steps + ' / ' + J(gets));
+    const s10 = await C._readSource('EBR-10', '');
+    ok('...else from its description\'s Reproduction Steps', s10.steps.trim() === '1. undock 2. it crashes', s10.steps);
+
     // ---- the card ----
+    meta = {}; C._labelsP = null;
+    searchAnswer = [{ fields: { labels: ['Undock', 'Overview'] } }, { fields: { labels: ['Undock', 'Overview'] } }];
     onScreen = 'EDR-1';
     C.ensure();
     await settle();
     let g = document.getElementById(C.GROUP_ID), body = g && g.find('#jita-cl');
     ok('the card is mounted right under Details', !!g && anchor.nextSibling === g);
-    ok('...its title says how many items are open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent === 'Defect checklist · 8 open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent);
+    ok('...its title says how many items are open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent === 'Defect checklist · 7 open', g && g.querySelector('[data-jita-title]') && g.querySelector('[data-jita-title]').textContent);
     ok('...it names the bug report it was compared with', /Compared with EBR-10, the bug report it was converted from/.test(byCls(body, 'jcl-src')[0].textContent));
     const rows = byCls(body, 'jcl-item');
     ok('...one row per item, open ones marked ○, done ones ✓', rows.length === C.items(C._facts(converted(), [], Object.assign(srcObj(), { exc: [EXC] }))).length &&
@@ -378,14 +463,25 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...with what is missing in the hover', /Still the bug report's summary/.test(byCls(rows.filter((r) => r.attrs['data-item'] === 'summary')[0], 'jcl-lbl')[0].attrs.title));
     const actsOf = (id) => byCls(rows.filter((r) => r.attrs['data-item'] === id)[0], 'jcl-act').map((a) => a.textContent).join(',');
     ok('the reporter may take the report\'s labels off, or mark them not needed', actsOf('replabels') === 'Take off,Not needed', actsOf('replabels'));
-    ok('...copy a template for the build line and the steps', actsOf('build') === 'Copy' && actsOf('steps') === 'Copy');
-    ok('...and mark the logs not needed, but not the summary', actsOf('logs') === 'Not needed' && actsOf('summary') === '');
+    ok('...copy a template for the steps (the build has fields of its own here)', actsOf('build') === '' && actsOf('steps') === 'Copy', actsOf('build') + ' / ' + actsOf('steps'));
+    ok('...and nothing on a done item, nor a way to skip the summary', actsOf('logs') === '' && actsOf('summary') === '');
     const excRows = byCls(body, 'jcl-erow');
     ok('the report\'s exceptions are listed with the defects holding them', excRows.length === 1 && /KeyError/.test(byCls(excRows[0], 'jcl-emsg')[0].textContent) &&
         byCls(excRows[0], 'jcl-edef')[0].textContent === 'EDR-7');
     ok('...each with Copy and Add', byCls(excRows[0], 'jcl-act').map((a) => a.textContent).join(',') === 'Copy,Add');
+    const chips = byCls(body, 'jcl-chip');
+    ok('the reporter gets labels suggested from the defect\'s text', chips.map((c) => c.textContent).join(',') === '+ Undock' && /On 2 other defects/.test(chips[0].attrs.title),
+        chips.map((c) => c.textContent).join(','));
+    ajaxLog = []; confirms = []; confirmAnswer = false;
+    chips[0].fire('click');
+    await settle();
+    ok('...a click asks first, and a no adds nothing', confirms.length === 1 && /Add the label Undock to EDR-1/.test(confirms[0]) && !puts().length);
+    confirmAnswer = true;
+    chips[0].fire('click');
+    await settle();
+    ok('...a yes adds it', puts().length === 1 && J(puts()[0].body) === J({ update: { labels: [{ add: 'Undock' }] } }), J(puts()));
     let fin = byCls(body, 'jcl-finish')[0];
-    ok('the hand-off waits for the last item', fin && fin.props.disabled === true && /8 items still open/.test(fin.attrs.title), fin && fin.attrs.title);
+    ok('the hand-off waits for the last item', fin && fin.props.disabled === true && /7 items still open/.test(fin.attrs.title), fin && fin.attrs.title);
     ok('a defect that is no exploit keeps the exploit steps folded away', !byCls(body, 'jcl-warn').length && byCls(body, 'jcl-mline').some((l) => /Exploit/.test(l.textContent)));
 
     // a Lead's view
@@ -395,6 +491,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     g = document.getElementById(C.GROUP_ID); body = g.find('#jita-cl');
     const leadActs = byCls(body, 'jcl-act').map((a) => a.textContent);
     ok('a Lead sees the card, but marks nothing and takes nothing off', leadActs.indexOf('Not needed') < 0 && leadActs.indexOf('Take off') < 0 && leadActs.indexOf('Add') < 0 && leadActs.indexOf('Copy') >= 0, leadActs.join(','));
+    ok('...nor gets labels suggested to add', !byCls(body, 'jcl-sugg').length);
     isLead = false; me = 'acc-rep';
 
     // a finished defect
@@ -431,7 +528,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     };
     toasts = [];
     ok('"Unassigned" picked in Jira\'s assignee field is refused while items are open', !!pick('Unassigned'));
-    ok('...saying why', toasts.length === 1 && /stays assigned until the Defect checklist is done: 8 items still open/.test(toasts[0]), toasts.join(' | '));
+    ok('...saying why', toasts.length === 1 && /stays assigned until the Defect checklist is done: 7 items still open/.test(toasts[0]), toasts.join(' | '));
     ok('...the mousedown too, so the picker never hears of it', !!pick('Unassigned', 'mousedown') && toasts.length === 1);
     ok('...but nobody else is picked for', !pick('Bob Builder') && !pick('Assign to me'));
     ok('the guard is bound in the capture phase', listeners.some((l) => l.ev === 'click' && l.cap === true && l.fn === C._onPick) && listeners.some((l) => l.ev === 'mousedown' && l.cap === true));
@@ -581,6 +678,42 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     C._place();
     ok('...and goes back under Details when another card went in between', anchor.nextSibling === document.getElementById(C.GROUP_ID));
     ok('the card\'s style is added once', styles.length === 1);
+
+    // ================= switched off in Settings =================
+    issueOf['EDR-1'] = converted();
+    histOf['EDR-1'] = [];
+    onScreen = 'EDR-1';
+    await C.refresh('EDR-1');
+    await settle();
+    ok('switched on, the card is there (control)', !!document.getElementById(C.GROUP_ID));
+    checklistOn = false;
+    C.ensure();
+    ok('switched off in Settings, the card goes at once', !document.getElementById(C.GROUP_ID));
+    C._key = 'EDR-1';
+    C.reensure();
+    ok('...and is not put back, nor drawn on any read', !document.getElementById(C.GROUP_ID));
+    toasts = [];
+    C._key = 'EDR-1';
+    ok('...nothing is refused', !pick('Unassigned') && !toasts.length);
+    const offState = { key: 'EDR-1', sees: 'reporter', me: 'acc-rep', assignee: '', open: 3, d: { reporter: 'acc-rep' },
+        hist: [{ author: { accountId: 'acc-rep' }, created: new Date(Date.now() - 5000).toISOString(), items: [{ field: 'assignee', fieldId: 'assignee', from: 'acc-rep', to: null }] }] };
+    ajaxLog = [];
+    C._guard('EDR-1', offState);
+    await settle();
+    ok('...and no unassign is put back', !puts().length);
+    checklistOn = true;
+    C._guard('EDR-1', offState);
+    await settle();
+    ok('...which, switched on, it would be (control)', puts().length === 1);
+    C._key = null;
+    const lineOf = (head) => { const i = src.indexOf(head); return src.slice(i, src.indexOf('\n', i) + 1); };
+    const flags = eval('(function () { ' + lineOf('var savedVariables = ') + lineOf('var FLAG = ') + ' return { savedVariables: savedVariables, FLAG: FLAG }; })()');
+    ok('the checklist is a feature of its own, on by default like every feature', flags.FLAG.defectChecklist === 9 && J(flags.savedVariables[9]) === J(['defectChecklist', '']),
+        J(flags.savedVariables[9]));
+    const ms = src.indexOf('\nJiTA.menu = {'), menuSrc = src.slice(ms, src.indexOf('\n};\n', ms));
+    ok('...switched in Settings > Features, which mounts or takes the card at once',
+        /\$feat\.append\(\$cl\);/.test(menuSrc) && /JiTA\.menu\._toggleRow\('Defect checklist', 9, function \(\) \{\n\s+if \(!JITA_NO_JIRA_UI\) \{ JiTA\.checklist\.ensure\(\); \}/.test(menuSrc) &&
+        menuSrc.indexOf('$feat.append($cl);') < menuSrc.indexOf("pane('features').append($feat);"));
 
     // ================= the page observer =================
     const bs = src.indexOf('// ---- Jira boot: watch the DOM'), boot = src.slice(bs, src.indexOf('observer.observe(document.body', bs));

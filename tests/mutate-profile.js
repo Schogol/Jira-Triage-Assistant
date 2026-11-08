@@ -109,7 +109,7 @@ const muts = [
     [H, 'a hardware value names nobody', 'return { value: x, count: counts[x], keys: keys[x] };', 'return { value: x, count: counts[x], keys: [] };'],
     [H, 'a crash module names nobody', ' s.count++; s.keys.push(v.key); });', ' s.count++; });'],
     // the switch in Settings > Features
-    [H, 'the profile has no feature switch', ', ["defectProfile", ""]];', '];'],
+    [H, 'the profile has no feature switch', ', ["defectProfile", ""], ["defectChecklist", ""]];', ', ["defectChecklist", ""]];'],
     [H, 'switched off, a defect page still builds the profile', "        if (!flagOn('defectProfile')) { P.clear(); return; }\n", ''],
     [H, 'switched off, new reads still start', "        var still = function () { return JiTA.ui.currentKey === key && flagOn('defectProfile'); };", '        var still = function () { return JiTA.ui.currentKey === key; };'],
     [H, 'switched off, a card is still painted', "        if (JiTA.ui.currentKey !== key || !flagOn('defectProfile')) { return; }", '        if (JiTA.ui.currentKey !== key) { return; }'],
