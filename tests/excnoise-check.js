@@ -140,15 +140,14 @@ const fO2 = fpOf(TIMEOUT([B + 'packages/other/place.py(1) Elsewhere', B + 'packa
     R.reset = ((real) => () => { resets++; real(); })(R.reset);
     L.rematch = () => { rematches++; };
     JiTA.ui.scheduleRender = () => { renders++; };
-    JiTA.triage = { _cache: { 'EBR-1': 1 } };
     const reads0 = metaReads;
     await N.load(); await N.load();
     ok('the count is read at most every few minutes', metaReads === reads0);
     const gen0 = N.gen;
     meta[N.FREQ_KEY] = { at: Date.now() - 3600e3, n: 100, c: { [fK.sig]: 50, [fO.sig]: 30 } };
     await reread();
-    ok('a count read later that makes more of them common changes what counts: worked out anew, drawn again', N.gen === gen0 + 1 && resets === 1 && rematches === 1 && renders === 1 &&
-        J(JiTA.triage._cache) === '{}', J({ gen: N.gen - gen0, resets, rematches, renders }));
+    ok('a count read later that makes more of them common changes what counts: worked out anew, drawn again', N.gen === gen0 + 1 && resets === 1 && rematches === 1 && renders === 1,
+        J({ gen: N.gen - gen0, resets, rematches, renders }));
     meta[N.FREQ_KEY] = { at: Date.now() - 1000, n: 100, c: { [fK.sig]: 51, [fO.sig]: 31 } };
     await reread();
     ok('...one that changes no one\'s standing changes nothing', N.gen === gen0 + 1 && renders === 1);

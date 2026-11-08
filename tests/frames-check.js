@@ -27,8 +27,8 @@ ok('...nor the Lead duties window, its pill or its daily reminder', near('JiTA.l
     near('JiTA.leadduty.reminder = {', /shouldShow: function \(\) \{\n[^\n]*\n\s+if \(JITA_IS_SUBFRAME \|\| !L\.isLead\(\)\) \{ return false; \}/, 3000) &&
     near('JiTA.leadduty.reminder = {', /if \(R\._nagged \|\| JITA_IS_SUBFRAME \|\| !L\.isLead\(\)\) \{ return; \}/, 8000));
 ok('...nor the What\'s new pill', /shouldShow: function \(\) \{ return !JITA_IS_SUBFRAME && JiTA\.changelog\.unseenFeatures\(\)\.length > 0; \}/.test(src));
-ok('...nor Triage mode, the duplicate finder, or the shared worker', /if \(JITA_IS_SUBFRAME \|\| T\._open\) \{ return; \}/.test(src) &&
-    /var D = JiTA\.dupfind;\n\s+if \(JITA_IS_SUBFRAME\) \{ return; \}/.test(src) && /if \(JiTA\.worker\._started \|\| JITA_IS_SUBFRAME\) \{ return; \}/.test(src));
+ok('...nor the duplicate finder, or the shared worker', /var D = JiTA\.dupfind;\n\s+if \(JITA_IS_SUBFRAME\) \{ return; \}/.test(src) &&
+    /if \(JiTA\.worker\._started \|\| JITA_IS_SUBFRAME\) \{ return; \}/.test(src));
 ok('the canned-response dropdown still looks in every frame: it is the one thing the Zendesk panel runs',
     near('/* ---- canned responses: inject the dropdown', /\(function \(\) \{\n\s+if \(JITA_IS_WIKI\) \{ return; \}/));
 

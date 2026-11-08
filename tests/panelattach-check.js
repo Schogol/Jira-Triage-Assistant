@@ -5,7 +5,8 @@
 //  - a refused link or transition carries Jira's own reason; a link type is remembered only when it was found, and a
 //    failed read of the types is an error, not a guess
 //  - a failed on-demand translation is not cached; one log scan per report, a failed one tried again; an attachment
-//    fetch that 403s is no text; an unreadable Original Reporter ID is an error, not "none"; the closed-report rule matches
+//    fetch that 403s, hangs or fails is no text; an unreadable Original Reporter ID is an error, not "none"; the
+//    closed-report rule matches
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const member = (head, from) => {
@@ -52,7 +53,7 @@ global.gmGet = (k, dflt) => (k in store ? store[k] : dflt);
 global.gmSet = (k, v) => { store[k] = v; };
 global.confirm = () => true;
 global.SELECTORS = { SUMMARY_HEADING: 'h1', DESC_CONTAINER: 'desc' };
-global.JiTA = { HOST: 'https://jira', MAX_RETRIES: 2, link: {}, ui: {}, db: {}, sync: {}, util: {}, triage: {} };
+global.JiTA = { HOST: 'https://jira', MAX_RETRIES: 2, link: {}, ui: {}, db: {}, sync: {}, util: {} };
 const log0 = console.log;
 
 (async () => {
@@ -136,10 +137,18 @@ const log0 = console.log;
     ok('...so the next look translates it (control)', txt === 'Crash on undock' && JiTA.ui._qtx && JiTA.ui._qtx.text === 'Crash on undock', txt);
 
     // ================= attachments and the log scan =================
-    JiTA.triage._fetchText = eval('({' + member('    _fetchText: function (url) {', src.indexOf('\nJiTA.triage = {')) + '})')._fetchText;
     Object.assign(JiTA.ui, eval('({' + member('    _fetchText: function (url) {', uiStart) + member('    _logScanCache: {},', uiStart).replace(/,\n$/, ',') + '\n' + member('    scanIssueLog: function (key) {', uiStart) + member('    _scanIssueLog: function (key) {', uiStart) + '})'));
     global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onload({ status: 403, responseText: '<html>Forbidden</html>' }));
     ok('an attachment fetch that 403s is no text, not the error page', (await JiTA.ui._fetchText('https://media/x')) === '');
+    let asked = null;
+    global.GM_xmlhttpRequest = (o) => { asked = o; setImmediate(() => { if (typeof o.ontimeout === 'function') { o.ontimeout(); } }); };
+    const hung = await Promise.race([JiTA.ui._fetchText('https://media/slow'), new Promise((r) => setTimeout(() => r('hung'), 500))]);
+    ok('...one that hangs gives up after a minute, as no text', asked && asked.timeout === 60000 && hung === '', (asked && asked.timeout) + ' / ' + JSON.stringify(hung));
+    global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onerror());
+    const failed = await Promise.race([JiTA.ui._fetchText('https://media/x'), new Promise((r) => setTimeout(() => r('hung'), 500))]);
+    ok('...and one that fails is no text either', failed === '', JSON.stringify(failed));
+    global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onload({ status: 200, responseText: 'the log' }));
+    ok('...while a good one is its text (control)', (await JiTA.ui._fetchText('https://media/x')) === 'the log');
     let matched = 0;
     JiTA.logsig = { matchText: () => { matched++; return Promise.resolve({ 'EDR-7': { count: 1, msg: 'boom' } }); } };
     global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onload({ status: 200, responseText: 'log text' }));

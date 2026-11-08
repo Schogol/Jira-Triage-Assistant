@@ -3,7 +3,7 @@
 // Similar defects (on a bug report) are raised by the exceptions in the report's own log; Matching bug reports (on a
 // defect) by the defect's exceptions found in each candidate report's cached log reading, which JiTA.logread reads
 // ahead for every open report. Evals the real JiTA.rank boost path, JiTA.repexc, JiTA.logread, the logsig 'holding' and
-// 'sigsOf' lookups (tab and worker, which must agree), the log scan's exception list, triage's ranking and the row badge.
+// 'sigsOf' lookups (tab and worker, which must agree), the log scan's exception list and the row badge.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 
@@ -383,7 +383,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     JiTA.ui._showTip = () => {}; JiTA.ui._hideTip = () => {};
     JiTA.util.shortDate = () => '';   // cardfoot-check.js covers the footer's date
     Object.assign(JiTA.ui, eval('({' + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + object('    STATUS_CAT: {') + member('    _statusCat: function (r) {') +
-        member('    _meta: function (r, withDate) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + '})'));
+        member('    _meta: function (r) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + '})'));
     const all = (j) => [j].concat(...j.kids.map(all));
     const marksOf = (row) => all(row).filter((k) => k.cls.indexOf('jita-mark') >= 0 && (k.cls.indexOf('exact') >= 0 || k.cls.indexOf('site') >= 0));
     let row = JiTA.ui._row({ key: 'EDR-1', pct: 91, excHit: 'exact', status: 'Open' }, '_self', () => El('<span>'));
@@ -400,7 +400,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
         /#jita-side-group \.jita-foot-st\.todo \.jita-foot-dot, #jita-side-group \.jita-mark\.exact, #jita-side-group \.jita-mark-down \{ color: var\(--ds-icon-success/.test(css) &&
         /#jita-side-group \.jita-mark\.site, #jita-side-group \.jita-mark-stale, #jita-side-group \.jita-mark-steady \{ color: var\(--ds-icon-subtle/.test(css));
 
-    // ================= the panel and triage are wired to it =================
+    // ================= the panel is wired to it =================
     const uiStart = once('\nJiTA.ui = {');
     const render = member('    render: function (key, background) {', uiStart), reports = member('    renderReports: function (key, background) {', uiStart);
     const append = member('    _appendNextReport: function (defectKey, shown) {', uiStart), similar = member('    renderSimilarReports: function (key, background) {', uiStart);
@@ -437,36 +437,6 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     const section = member('    renderSection: function (key, background) {');
     ok('a finished profile tells the boost', /if \(s\.done\) \{ JiTA\.repexc\.profileReady\(key\); \}/.test(section));
 
-    // triage: its _resolve, run against stubbed rankers.
-    const tStart = once('\nJiTA.triage = {');
-    const resolve = eval('({' + member('    _resolve: function (item) {', tStart) + '})')._resolve;
-    let calls = [], soonCalls = 0;
-    const T = { _mode: 'ebr', _view: () => null, _cache: {}, _open: true, _queue: [{ key: 'EBR-7' }], _idx: 0, _render() {} };
-    const saved = { db: JiTA.db, ui: JiTA.ui, rank: JiTA.rank, repexc: JiTA.repexc, triage: JiTA.triage };
-    JiTA.triage = T;
-    JiTA.db = { getDefect: () => Promise.resolve({ key: 'EBR-7', created: '2026-10-01' }) };
-    JiTA.util.effectiveText = () => 'text';
-    JiTA.ui = { _filterTerms: () => [], modeOverride: null };
-    JiTA.rank = {
-        suggestBest: function () { calls.push(['best', Array.prototype.slice.call(arguments)]); return Promise.resolve({ mode: 'Keyword', results: [] }); },
-        suggestEbrBest: function () { calls.push(['ebr', Array.prototype.slice.call(arguments)]); return Promise.resolve({ mode: 'Keyword', results: [] }); }
-    };
-    const BOOST = () => ({}), DEFB = () => ({});
-    JiTA.repexc = { soon: (p, onLate) => { soonCalls++; T._late = onLate; return Promise.resolve(BOOST); }, forReport: () => Promise.resolve({}), forDefect: (k) => { DEFB.key = k; return DEFB; } };
-    await resolve.call(T, { key: 'EBR-7' });
-    ok('triage, bug-report queue: the report\'s exceptions boost its defect matches', calls[0][0] === 'best' && calls[0][1][6] === BOOST && soonCalls === 1, JSON.stringify(calls[0][1].map((x) => typeof x)));
-    ok('...and a late answer ranks it again, as a late Hybrid one does', T._late === calls[0][1][5]);
-    calls = []; T._cache = {}; T._mode = 'defect';
-    await resolve.call(T, { key: 'EDR-7' });
-    ok('...defect queue: the defect\'s exceptions boost its report matches', calls[0][0] === 'ebr' && calls[0][1][5] === DEFB && DEFB.key === 'EDR-7');
-    calls = []; T._cache = {}; T._mode = 'ebr'; T._view = () => 'simreports';
-    await resolve.call(T, { key: 'EBR-7' });
-    ok('...similar open reports: none', calls[0][0] === 'ebr' && calls[0][1].length === 5);
-    Object.assign(JiTA, saved);
-    const trow = src.slice(once("                    $('<span class=\"jt-msum\"></span>').text(r.summary || '').appendTo($li);"), once('                    // Feature C hover preview, same as the panel rows:'));
-    ok('triage rows carry the mark, in the panel\'s footer', /JiTA\.ui\._foot\(r, \{ score: view === 'trending' \}\)\.appendTo\(\$li\);/.test(trow), trow);
-    ok('...at the bottom of the card', /'\.jita-triage-view \.jt-list li \{[^']*display: flex; flex-direction: column; \}'/.test(src) && /'\.jita-triage-view \.jt-list \.jita-foot \{ padding-top: 5px; \}'/.test(src));
-
     // ================= the background reading of the open reports' logs =================
     ok('the reader is switched on by default', LR.on() === true);
     gm.jitaLogRead = false;
@@ -490,7 +460,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     setup();
     pages = [{ issues: [iss('EBR-1'), iss('EBR-2', { status: { name: 'Attached' } }), iss('EBR-3', { customfield_10001: 'abc-38' })], nextPageToken: 't1' }, { issues: [iss('EBR-4')], isLast: true }];
     readScript = { 'EBR-4': 'cached' };
-    JiTA.ui = saved.ui; JiTA.ui.currentKey = 'EDR-5';
+    JiTA.ui.currentKey = 'EDR-5';
     let n = await LR.prepare();
     ok('the first pass lists every report the exception search looks in (not the launcher\'s), newest first', posted.length === 2 && posted[0].jql === JiTA.excfind.SCOPE + ' ORDER BY created DESC' && posted[1].nextPageToken === 't1', JSON.stringify(posted.map((p) => p.jql)));
     ok('...asks for what the reader needs', JSON.stringify(posted[0].fields) === JSON.stringify(['status', 'labels', 'attachment', 'customfield_10001']));

@@ -12,11 +12,7 @@ const muts = [
     [H, 'the panel row no longer greys a closed report', "        if (r.closed) { $li.addClass('jita-sd-closed'); }", "        if (false) { $li.addClass('jita-sd-closed'); }"],
     [H, 'the panel\'s reporter list keeps the old flag', '                        closed: JiTA.util.isClosedStatus(status)   // grey out closed reports so the open ones stand out',
         '                        stale: JiTA.util.isClosedStatus(status)   // grey out closed reports so the open ones stand out'],
-    [H, 'Triage mode\'s reporter list keeps the old flag', '                        closed: JiTA.util.isClosedStatus(status)   // grey the closed ones so the open ones stand out',
-        '                        stale: JiTA.util.isClosedStatus(status)   // grey the closed ones so the open ones stand out'],
-    [H, 'Triage mode greys a demoted defect', "                    if (r.closed) { $li.addClass('jt-closed'); }", "                    if (r.closed || r.staleNote) { $li.addClass('jt-closed'); }"],
-    [H, 'the panel stylesheet keeps the old class', '#jita-sd-list li.jita-sd-closed { opacity: .6; }', '#jita-sd-list li.jita-sd-stale { opacity: .6; }'],
-    [H, 'Triage mode\'s stylesheet keeps the old class', "'.jita-triage-view .jt-list li.jt-closed { opacity: .55; }'", "'.jita-triage-view .jt-list li.jt-stale { opacity: .55; }'"]
+    [H, 'the panel stylesheet keeps the old class', '#jita-sd-list li.jita-sd-closed { opacity: .6; }', '#jita-sd-list li.jita-sd-stale { opacity: .6; }']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

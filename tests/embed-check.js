@@ -154,7 +154,7 @@ const quiet = { log() {}, warn() {} };
     ok('the worker answers no \'embed\' request and keeps no bulkPut nobody calls', src.indexOf("type === 'embed')") === -1 && src.indexOf('    function bulkPut(records) {') === -1);
     let toasts = [], rerenders = 0;
     const U = { modeOverride: null, toast: (m) => { toasts.push(m); }, _rerenderCurrent: () => { rerenders++; } };
-    const cyc = new Function('JiTA', '$', 'return ({' + cut('    _cycleMode: function (rerender) {', '\n    },') + '\n    }}).\_cycleMode;')({ ui: U, worker: { usable: () => usable }, triage: null }, () => ({ text: () => 'Keyword' }));
+    const cyc = new Function('JiTA', '$', 'return ({' + cut('    _cycleMode: function () {', '\n    },') + '\n    }}).\_cycleMode;')({ ui: U, worker: { usable: () => usable } }, () => ({ text: () => 'Keyword' }));
     usable = false;
     cyc.call(U);
     ok('the ranking-mode badge says Hybrid needs the worker when there is none', toasts.length === 1 && /shared worker/.test(toasts[0]) && U.modeOverride === null && !rerenders, toasts.join());

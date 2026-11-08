@@ -188,19 +188,24 @@ const translate = async (r) => { results = r.slice(); alerts = []; logs = []; co
     // ================= the launcher =================
     let opened = 0, keydown = null;
     global.document = { addEventListener: (ev, fn) => { if (ev === 'keydown') { keydown = fn; } }, querySelector: () => null };
-    global.JiTA = { triage: { _open: false, open: () => { opened++; } } };
+    global.JiTA = { dupfind: { openView: () => { opened++; } } };
     let t = 5000000;
     Date.now = () => t;
-    (0, eval)('(function () {\n' + cut('        var lastLt = 0, lastGt = 0, lastHash = 0, lastPlus = 0;', '\n    })();') + '\n})();');
+    (0, eval)('(function () {\n' + cut('        var lastGt = 0, lastHash = 0, lastPlus = 0;', '\n    })();') + '\n})();');
     const key = (k, extra) => keydown(Object.assign({ key: k, target: { tagName: 'DIV' } }, extra || {}));
-    key('<'); t += 150; key('<');
-    ok('two taps of < open Triage mode (control)', opened === 1, String(opened));
+    key('>'); t += 150; key('>');
+    ok('two taps of > open the duplicate finder (control)', opened === 1, String(opened));
     t += 1000; opened = 0;
-    key('<'); t += 30; key('<', { repeat: true }); t += 30; key('<', { repeat: true });
-    ok('holding < does not', opened === 0, String(opened));
+    key('>'); t += 30; key('>', { repeat: true }); t += 30; key('>', { repeat: true });
+    ok('holding > does not', opened === 0, String(opened));
     t += 1000;
-    key('<', { isComposing: true }); t += 100; key('<', { isComposing: true });
+    key('>', { isComposing: true }); t += 100; key('>', { isComposing: true });
     ok('...nor does typing it through an input method', opened === 0, String(opened));
+    t += 1000;
+    let threw = null;
+    try { key('<'); t += 150; key('<'); } catch (e) { threw = e; }
+    ok('two taps of < do nothing now that Triage mode is gone', !threw && opened === 0 && !/e\.key [!=]== '<'/.test(cut('        var lastGt = 0, lastHash = 0, lastPlus = 0;', '\n    })();')),
+        threw ? threw.message : String(opened));
     Date.now = realNow;
 
     // ================= the wiki pills, the scrollbar =================

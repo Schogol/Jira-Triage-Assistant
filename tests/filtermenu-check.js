@@ -1,8 +1,7 @@
-// Eval the real JiTA.ui filter-menu functions out of the file. _showFilterMenu is now shared by TWO funnels -
-// the sidebar panel's and the triage overlay's - so what is pinned here is that the panel's behaviour is
-// unchanged when no options are passed (it still derives everything from the Jira page it is on), and that
-// the triage funnel's options actually reach the controls: no report<->report view switches, a Status segment
-// that follows the triage queue rather than the page, and ITS callbacks rather than the panel's.
+// Eval the real JiTA.ui filter-menu functions out of the file. The panel's funnel derives everything from the Jira
+// page it is on: on a bug report it offers the report<->report view switches, the trending one and the Status
+// segment; on a defect only Created within. Pinned here: those controls, what each click changes and re-renders,
+// when the funnel lights up, and the filter box's words.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 
@@ -44,11 +43,11 @@ global.window = { innerWidth: 1512, innerHeight: 900 };
 global.setTimeout = (fn) => fn;   // the dismiss handlers are registered next tick; we never need them
 global.$ = () => ({ length: 0, val: () => '', text: () => '', toggleClass: () => {} });
 
-global.JiTA = { ui: {}, triage: { _open: false } };
+global.JiTA = { ui: {} };
 eval('Object.assign(global.JiTA.ui, {' + [
     slice('_filterTerms: function () {'),
-    slice('_filtersActive: function (ctx) {'),
-    slice('_showFilterMenu: function (anchor, opts) {'),
+    slice('_filtersActive: function () {'),
+    slice('_showFilterMenu: function (anchor) {'),
     slice('_closeFilterMenu: function () {')
 ].join('\n') + '\n});');
 const U = global.JiTA.ui;
@@ -62,9 +61,9 @@ U.reporterMode = false; U.simReportsMode = false;
 
 let panelSynced = 0, panelRendered = 0;
 const anchor = makeEl();
-function open(opts) {
+function open() {
     body = [];
-    U._showFilterMenu(anchor, opts);
+    U._showFilterMenu(anchor);
     const menu = body[0];
     const flat = [];
     (function walk(n) { flat.push(n); n._kids.forEach(walk); })(menu);
@@ -77,7 +76,7 @@ function open(opts) {
     };
 }
 
-// ---- the PANEL, unchanged: no options, everything derived from the key it is rendering ----
+// ---- the panel: everything derived from the key it is rendering ----
 U.currentKey = 'EBR-1234';
 let m = open();
 ok('on a bug report the panel offers both report views and the trending one', m.views.length === 3, String(m.views.length));
@@ -126,81 +125,37 @@ m = open();
 m.views[2]._click();
 ok('...and trending turns the reporter view off', U.trendMode === true && U.reporterMode === false);
 U.filters = { status: 'all', createdDays: 0 };
-ok('with no context, an active trending view lights the funnel', U._filtersActive() === true);
+ok('an active trending view lights the funnel', U._filtersActive() === true);
 m = open();
 m.views[2]._click();
 ok('its own switch turns it off', U.trendMode === false);
 ok('and the funnel goes dark again', U._filtersActive() === false);
 U.reporterMode = false; U.simReportsMode = false; U.trendMode = false;
 
-// ---- the TRIAGE funnel: its options decide, not the page underneath ----
-// Both report<->report views apply on the bug-report queue (the issue on screen IS a report) and neither on
-// the defect queue - the same condition as the Status segment, so triage passes one answer for both.
-global.JiTA.triage._open = true;
-let tSynced = 0, tRendered = 0;
-const tOpts = (onReports) => ({ views: onReports, status: onReports, rerender: () => { tRendered++; }, syncBtn: () => { tSynced++; } });
-
-U.currentKey = 'EDR-99';   // the page behind the overlay must not leak into the menu
-m = open(tOpts(true));
-ok('the bug-report queue offers both report views and the trending one', m.views.length === 3, String(m.views.length));
-ok('and a Status segment', m.labels.indexOf('Status') !== -1, m.labels.join(','));
-
-// Toggling a view re-ranks TRIAGE, and the ranking filters hide while it is on (they do not apply to a
-// report<->report list) - exactly as they do in the panel.
-panelRendered = 0;
-m.views[1]._click();                     // "Similar open reports"
-ok('a triage view toggle re-ranks triage', tRendered === 1 && tSynced === 1);
-ok('and leaves the panel alone', panelRendered === 0);
-ok('the view is on', U.simReportsMode === true);
-m = open(tOpts(true));
-ok('the ranking filters hide while a view is on', m.labels.indexOf('Created within') === -1, m.labels.join(','));
-ok('but the view switches stay, to turn it back off', m.views.length === 3);
-m.views[1]._click();                     // back to the defect matches
-ok('toggling it off restores them', U.simReportsMode === false);
-m = open(tOpts(true));
-ok('...literally', m.labels.indexOf('Created within') !== -1, m.labels.join(','));
-tRendered = 0; tSynced = 0;
-
-panelSynced = 0; panelRendered = 0;
-m.segs[0]._click();                      // "Open"
-ok('a triage Status click re-ranks TRIAGE', tRendered === 1 && tSynced === 1);
-ok('and leaves the panel alone', panelRendered === 0 && panelSynced === 0);
-m.reset._click();
-ok('Reset from triage re-ranks triage too', tRendered === 2 && panelRendered === 0);
-
-m = open(tOpts(false));
-ok('the defect queue offers no report views', m.views.length === 0, String(m.views.length));
-ok('and no Status segment', m.labels.indexOf('Status') === -1, m.labels.join(','));
-ok('but keeps Created within', m.labels.indexOf('Created within') !== -1);
-
-// A view flag left on from the panel must not blank the DEFECT queue's menu: the flag applies to the
-// bug-report queue only, and triage clears it when switching queues anyway.
-U.reporterMode = true;
-m = open(tOpts(false));
-ok('a stale view flag does not empty the defect queue menu', m.labels.indexOf('Created within') !== -1, m.labels.join(','));
-U.reporterMode = false;
-
-// ---- _filtersActive: the caller states whether Status applies; without a context it guesses from the page ----
-U.filters = { status: 'fixed', createdDays: 0 };
-ok('Status counts where it is offered', U._filtersActive({ status: true }) === true);
-ok('and not where it is not', U._filtersActive({ status: false }) === false);
-U.filters = { status: 'all', createdDays: 30 };
-ok('Created counts either way', U._filtersActive({ status: false }) === true);
+// ---- _filtersActive: Status counts only where it is offered (a bug report), Created everywhere ----
 U.filters = { status: 'fixed', createdDays: 0 };
 U.currentKey = 'EBR-1';
-ok('with no context the panel still reads its own page', U._filtersActive() === true);
+ok('Status lights the funnel on a bug report', U._filtersActive() === true);
 U.currentKey = 'EDR-1';
-ok('...on both kinds of page', U._filtersActive() === false);
+ok('...and not on a defect, where it is not offered', U._filtersActive() === false);
+U.filters = { status: 'all', createdDays: 30 };
+ok('Created lights it on a defect too', U._filtersActive() === true);
+U.currentKey = 'EBR-1';
+ok('...and on a bug report', U._filtersActive() === true);
+U.filters = { status: 'all', createdDays: 0 };
+U.reporterMode = true;
+U.currentKey = 'EDR-1';
+ok('a view flag left on lights nothing on a defect, where there are no views', U._filtersActive() === false);
+U.reporterMode = false;
 
-// ---- _filterTerms reads whichever box is actually in front of the user ----
-const boxes = { '#jita-sd-filter': 'panel words', '#jt-filter': 'TRIAGE Words' };
-global.$ = (sel) => ({ length: 1, val: () => boxes[sel] });
-global.JiTA.triage._open = false;
-ok('the panel reads its own box', U._filterTerms().join(' ') === 'panel words', U._filterTerms().join(' '));
-global.JiTA.triage._open = true;
-ok('the open triage overlay reads ITS box', U._filterTerms().join(' ') === 'triage words', U._filterTerms().join(' '));
-boxes['#jt-filter'] = '   ';
+// ---- _filterTerms reads the panel's box ----
+const boxes = { '#jita-sd-filter': '  Panel   WORDS ' };
+global.$ = (sel) => ({ length: boxes[sel] === undefined ? 0 : 1, val: () => boxes[sel] });
+ok('the box\'s words, lowercased, one space apart', U._filterTerms().join('|') === 'panel|words', U._filterTerms().join('|'));
+boxes['#jita-sd-filter'] = '   ';
 ok('a blank box is no filter at all', U._filterTerms().length === 0);
+delete boxes['#jita-sd-filter'];
+ok('...nor is no box', U._filterTerms().length === 0);
 
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'filter-menu checks passed.'));
 process.exit(fail ? 1 : 0);
