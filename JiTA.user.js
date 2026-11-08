@@ -873,8 +873,9 @@ function jitaLinkedKeys(links) {
 var JITA_REFRESH_EVENT = 'legacy_refreshIssuePage';
 var JITA_REFRESH_MS = 8000;        // how long the page is given to show a write before the caller's fallback runs
 var JITA_REFRESH_STEP_MS = 250;    // how often it is looked at meanwhile
-var JITA_NAV_MS = 4000;            // an issue opened in-app: how long Jira's router is given to take it
+var JITA_NAV_MS = 15000;           // an issue opened in-app: how long the issue before may stay on screen (jitaOpenIssue)
 var JITA_NAV_GIVEUP_MS = 30000;    // ...and how long an issue still loading is waited for
+var JITA_NAV_NOTE_KEY = 'jitaNavFell';   // sessionStorage: why jitaOpenIssue fell back to a page load, said after it
 function jitaRefreshIssueView() {
     try { document.dispatchEvent(new CustomEvent(JITA_REFRESH_EVENT)); } catch (e) { /* the caller's fallback */ }
 }
@@ -894,23 +895,39 @@ function jitaShowWritten(key, shown, missed) {
 function jitaStatusText() {
     return $.trim($(SELECTORS.STATUS_FIELD_WRAP).find('button').first().text());
 }
+// Said once in the console after a page load jitaOpenIssue fell back to, so a reload that was JiTA's can be told from
+// one of Jira's.
+function jitaNavSaid() {
+    var v = null;
+    try {
+        var raw = sessionStorage.getItem(JITA_NAV_NOTE_KEY);
+        if (raw == null) { return; }
+        sessionStorage.removeItem(JITA_NAV_NOTE_KEY);   // first: a note that cannot be read is not kept either
+        v = JSON.parse(raw);
+    } catch (e) { return; }
+    if (!v || !(Date.now() - (v.at || 0) < 2 * 60 * 1000)) { return; }
+    console.log('[JiTA] ' + v.key + ' was loaded the ordinary way: ' + Math.round((v.waited || 0) / 1000) + ' s after it was opened in-app, ' +
+        (v.on ? 'the page still showed ' + v.on + '.' : 'it had still not loaded.'));
+}
 // Opens `key` in-app, as a link in Jira does: the URL pushed and Jira's router told with a synthetic popstate (JiTA.dv
-// switches issues the same way). Should the issue on screen still be the one it was JITA_NAV_MS later (the router
-// ignored it), an ordinary page load; one still loading (Jira's skeleton has no breadcrumb) is waited for, up to
-// JITA_NAV_GIVEUP_MS. Nothing happens once the user has gone somewhere else meanwhile.
+// switches issues the same way). Jira keeps the issue before on screen, breadcrumb and all, until the new one has loaded,
+// which for a defect created a moment ago can take a while; so only when that one is still there JITA_NAV_MS later is the
+// switch taken as ignored, and the issue loaded the ordinary way (saying why after it, jitaNavSaid). One still loading
+// (no breadcrumb at all) is waited for, up to JITA_NAV_GIVEUP_MS. Nothing happens once the user has gone somewhere else.
 function jitaOpenIssue(key) {
     var path = '/browse/' + encodeURIComponent(key), from = jitaCurrentKey(), t0 = Date.now();
     try {
         history.pushState(null, '', path);
         window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
     } catch (e) { window.location.href = path; return; }
-    setTimeout(function check() {
+    (function check() {
         if (window.location.pathname !== path) { return; }   // gone somewhere else meanwhile
-        var on = jitaCurrentKey();
+        var on = jitaCurrentKey(), waited = Date.now() - t0;
         if (on && on !== from) { return; }                    // the router took it (a moved issue shows its new key)
-        if (!on && Date.now() - t0 < JITA_NAV_GIVEUP_MS) { setTimeout(check, 1000); return; }
+        if (waited < (on ? JITA_NAV_MS : JITA_NAV_GIVEUP_MS)) { setTimeout(check, 1000); return; }
+        try { sessionStorage.setItem(JITA_NAV_NOTE_KEY, JSON.stringify({ key: key, on: on, waited: waited, at: Date.now() })); } catch (e2) { /* only the note is lost */ }
         window.location.href = path;
-    }, JITA_NAV_MS);
+    })();
 }
 
 // After Convert-to-Defect, the automation creates a defect and links it to the EBR. Poll the EBR's links for one that
@@ -939,7 +956,11 @@ function jitaGoToNewDefect(ebrKey, beforeKeys) {
             .done(function (d) {
                 var fresh = jitaLinkedKeys(d.fields && d.fields.issuelinks).filter(function (k) { return !before[k]; });
                 var defect = fresh.filter(function (k) { return /^(EDR|EO|PLAT)-/.test(k); })[0] || fresh[0];
-                if (defect) { jitaOpenIssue(defect); return; }
+                if (defect) {
+                    JiTA.ui.toast('Opening the new defect ' + defect + '…');   // the report stays on screen until it has loaded
+                    jitaOpenIssue(defect);
+                    return;
+                }
                 again();
             })
             .fail(again);
@@ -25554,6 +25575,7 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
     // "What's new" after an update. Scheduled first, so nothing that boots after it can keep it from showing; start()
     // still waits for the page to settle, and the observer below puts the pill back if anything takes it away.
     try { JiTA.changelog.start(); } catch (eCl) { /* swallow */ }
+    try { jitaNavSaid(); } catch (eNs) { /* swallow */ }   // a page load an in-app switch fell back to says why
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
     try { JiTA.dv._bindGlobal(); } catch (eDv) { /* swallow */ }   // the detail view's click hook works off /browse/ too (see _takeAll)
     var scheduled = false;

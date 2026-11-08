@@ -17,7 +17,8 @@ const muts = [
     [H, 'the defect poll follows the user to another issue', '        if (jitaCurrentKey() !== ebrKey) { return; }\n', ''],
     [H, 'the defect poll never gives up', '        if (tries >= 30) {\n            delete jitaConvertBusy[ebrKey];', '        if (false) {\n            delete jitaConvertBusy[ebrKey];'],
     // ---- v3.51.1: the new defect opened in-app, a poll that gives up shown without a reload ----
-    [H, 'the new defect opened with a page load', 'if (defect) { jitaOpenIssue(defect); return; }', "if (defect) { window.location.href = '/browse/' + defect; return; }"],
+    [H, 'the new defect opened with a page load', '                    jitaOpenIssue(defect);\n', "                    window.location.href = '/browse/' + defect;\n"],
+    [H, 'the new defect opens unannounced', "                    JiTA.ui.toast('Opening the new defect ' + defect + '…');   // the report stays on screen until it has loaded\n", ''],
     [H, 'a poll that gave up keeps the report busy', '            delete jitaConvertBusy[ebrKey];\n            jitaConvertButtonState();\n            jitaRefreshIssueView();', '            jitaConvertButtonState();\n            jitaRefreshIssueView();'],
     [H, 'a poll that gave up leaves its button disabled', '            jitaConvertButtonState();\n            jitaRefreshIssueView();', '            jitaRefreshIssueView();'],
     [H, 'a poll that gave up reloads the page', "            jitaRefreshIssueView();\n            JiTA.ui.toast('No new defect", "            window.location.reload(false);\n            JiTA.ui.toast('No new defect"],

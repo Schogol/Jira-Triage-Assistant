@@ -40,6 +40,12 @@ const loc = { pathname: '/browse/EBR-1', loads: [] };
 Object.defineProperty(loc, 'href', { get: () => loc.pathname, set: (v) => { loc.loads.push(v); } });
 global.window = { location: loc, dispatchEvent: (e) => { pops.push(e); return true; } };
 global.history = { pushState: (state, title, url) => { if (pushThrows) { throw new Error('SecurityError'); } pushed.push(url); loc.pathname = url; } };
+let session = {}, sessionThrows = false;
+global.sessionStorage = {
+    getItem: (k) => { if (sessionThrows) { throw new Error('SecurityError'); } return k in session ? session[k] : null; },
+    setItem: (k, v) => { if (sessionThrows) { throw new Error('SecurityError'); } session[k] = String(v); },
+    removeItem: (k) => { delete session[k]; }
+};
 (0, eval)(src.slice(hs, he));
 
 // ================= telling Jira =================
@@ -51,8 +57,8 @@ let threw = false;
 try { jitaRefreshIssueView(); } catch (e) { threw = true; }
 ok('a dispatch that throws is the caller\'s fallback\'s business, not an error', !threw);
 dispatchThrows = false;
-ok('as shipped: the event Jira hears, 8 seconds looked at every quarter second, 4 seconds for the router, 30 for an issue still loading',
-    JITA_REFRESH_EVENT === 'legacy_refreshIssuePage' && JITA_REFRESH_MS === 8000 && JITA_REFRESH_STEP_MS === 250 && JITA_NAV_MS === 4000 && JITA_NAV_GIVEUP_MS === 30000,
+ok('as shipped: the event Jira hears, 8 seconds looked at every quarter second, 15 for the issue before to give way, 30 for one still loading',
+    JITA_REFRESH_EVENT === 'legacy_refreshIssuePage' && JITA_REFRESH_MS === 8000 && JITA_REFRESH_STEP_MS === 250 && JITA_NAV_MS === 15000 && JITA_NAV_GIVEUP_MS === 30000,
     J([JITA_REFRESH_EVENT, JITA_REFRESH_MS, JITA_REFRESH_STEP_MS, JITA_NAV_MS, JITA_NAV_GIVEUP_MS]));
 
 // ================= watching for the write =================
@@ -91,23 +97,49 @@ ok('...none when the page shows no lozenge', jitaStatusText() === '');
 status = 'Open';
 
 // ================= opening an issue in-app =================
-const open = (key) => { pushed = []; pops = []; loc.loads = []; timers = []; jitaOpenIssue(key); };
+const open = (key) => { pushed = []; pops = []; loc.loads = []; timers = []; session = {}; jitaOpenIssue(key); };
 onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
 open('EDR-77');
 ok('an issue is opened in-app: its URL pushed and Jira\'s router told with a popstate on the window', J(pushed) === J(['/browse/EDR-77']) && pops.length === 1 &&
     pops[0].type === 'popstate' && pops[0].state === null && !loc.loads.length, J(pushed) + ' ' + J(pops));
-onScreen = 'EDR-77';   // the router took it
+advance(6000);
+ok('Jira keeps the issue before on screen while the new one loads: 6 seconds of that is no ignored switch', !loc.loads.length && timers.length === 1, J(loc.loads));
+onScreen = 'EDR-77';   // loaded: the router took it
 advance(60000);
-ok('...the router taking it, nothing more', !loc.loads.length && !timers.length, J(loc.loads));
+ok('...the new one there, nothing more', !loc.loads.length && !timers.length, J(loc.loads));
 onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
+let checks = 0;
+const crumbOf = global.jitaCurrentKey;
+global.jitaCurrentKey = () => { checks++; return onScreen; };
 open('EDR-78');
-advance(3999);
-ok('the router ignoring it: nothing for 4 seconds', !loc.loads.length);
-advance(1);
-ok('...then an ordinary page load of the issue', J(loc.loads) === J(['/browse/EDR-78']), J(loc.loads));
+checks = 0;
+advance(5000);
+global.jitaCurrentKey = crumbOf;
+ok('...looked at once a second', checks === 5, String(checks));
+advance(9999);
+ok('the issue before still there after almost 15 seconds: still no page load', !loc.loads.length);
+advance(1000);
+ok('...after 15, the switch is taken as ignored: an ordinary page load of the issue', J(loc.loads) === J(['/browse/EDR-78']), J(loc.loads));
+const note = JSON.parse(session[JITA_NAV_NOTE_KEY] || 'null');
+ok('...noting why for after the page load', !!note && note.key === 'EDR-78' && note.on === 'EBR-1' && note.waited >= 15000 && typeof note.at === 'number', J(note));
+const said = [], log0 = console.log;
+console.log = (...a) => { said.push(a.join(' ')); };
+jitaNavSaid();
+console.log = log0;
+ok('...which the page load says in the console, once', said.length === 1 && said[0] === '[JiTA] EDR-78 was loaded the ordinary way: 15 s after it was opened in-app, the page still showed EBR-1.' &&
+    !(JITA_NAV_NOTE_KEY in session), J(said));
+said.length = 0;
+console.log = (...a) => { said.push(a.join(' ')); };
+jitaNavSaid();
+session[JITA_NAV_NOTE_KEY] = JSON.stringify({ key: 'EDR-1', on: 'EBR-1', waited: 15000, at: now - 3 * 60 * 1000 });
+jitaNavSaid();
+session[JITA_NAV_NOTE_KEY] = 'not json';
+jitaNavSaid();
+console.log = log0;
+ok('...and nothing without a note, for an old one, or for one that cannot be read', said.length === 0 && !(JITA_NAV_NOTE_KEY in session), J(said));
 onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
 open('EDR-79');
-onScreen = '';   // Jira's skeleton: the issue is still loading
+onScreen = '';   // no breadcrumb at all: still loading
 advance(25000);
 ok('an issue still loading is waited for, not taken for an ignored switch', !loc.loads.length && timers.length === 1, J(loc.loads));
 onScreen = 'EDR-79';
@@ -116,10 +148,16 @@ ok('...and once it is there, nothing more', !loc.loads.length && !timers.length,
 onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
 open('EDR-80');
 onScreen = '';
-advance(29999);
-ok('one still loading after 30 seconds...', !loc.loads.length);
-advance(1);
-ok('...gets the page load', J(loc.loads) === J(['/browse/EDR-80']), J(loc.loads));
+advance(28000);
+ok('one still loading after almost 30 seconds...', !loc.loads.length);
+advance(2000);
+ok('...gets the page load, its note saying it had not loaded', J(loc.loads) === J(['/browse/EDR-80']) && JSON.parse(session[JITA_NAV_NOTE_KEY]).on === '', J(loc.loads));
+onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
+open('EDR-83');
+sessionThrows = true;
+advance(16000);
+sessionThrows = false;
+ok('a note that cannot be kept does not stop the page load', J(loc.loads) === J(['/browse/EDR-83']), J(loc.loads));
 onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
 open('EDR-81');
 loc.pathname = '/browse/EBR-5';   // the user went somewhere else meanwhile
@@ -131,6 +169,10 @@ ok('a browser refusing the pushed URL gets the page load at once, and no popstat
 pushThrows = false;
 open('X/1');
 ok('the key goes into the URL encoded', J(pushed) === J(['/browse/X%2F1']), J(pushed));
+
+// ================= the note is said after the page load =================
+const bs = src.indexOf('// ---- Jira boot: watch the DOM'), bdb = src.indexOf('if (!window.indexedDB) { return; }', bs);
+ok('the Jira boot says the note at once, before what needs the database', bs > 0 && bdb > bs && src.slice(bs, bdb).indexOf('try { jitaNavSaid(); }') > 0);
 
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'soft refresh checks passed.'));
 process.exit(fail ? 1 : 0);

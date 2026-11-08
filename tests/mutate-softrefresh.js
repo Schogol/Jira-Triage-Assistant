@@ -1,12 +1,12 @@
 // mutate-softrefresh.js - breaks each guard of the issue on screen shown without a reload (v3.51.1: Jira's issue view told
 // to read the issue again, the write watched for with a fallback, the status lozenge read, an issue opened in-app) in turn
 // and requires softrefresh-check to go red. A crashed harness counts as red. Every anchor is looked for in the helpers'
-// own block (HELP), once: [harness, name, anchor, replacement].
+// own block (HELP), once, unless the breakage names another part: [harness, name, anchor, replacement, part].
 const fs = require('fs');
 const { execSync } = require('child_process');
 const src = fs.readFileSync((process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js')), 'utf8').replace(/\r\n/g, '\n');
 const SR = 'softrefresh-check.js';
-const HELP = ['\nvar JITA_REFRESH_EVENT = ', '\n// After Convert-to-Defect'];
+const HELP = ['\nvar JITA_REFRESH_EVENT = ', '\n// After Convert-to-Defect'], BOOT = ['// ---- Jira boot: watch the DOM', 'observer.observe(document.body'];
 const muts = [
     // ---- telling Jira ----
     [SR, 'Jira told an event it does not hear', "var JITA_REFRESH_EVENT = 'legacy_refreshIssuePage';", "var JITA_REFRESH_EVENT = 'refreshIssuePage';"],
@@ -17,7 +17,7 @@ const muts = [
         'document.dispatchEvent(new CustomEvent(JITA_REFRESH_EVENT));'],
     [SR, 'Jira given half a second to show a write', 'var JITA_REFRESH_MS = 8000;', 'var JITA_REFRESH_MS = 500;'],
     [SR, 'the page looked at once a second', 'var JITA_REFRESH_STEP_MS = 250;', 'var JITA_REFRESH_STEP_MS = 1000;'],
-    [SR, 'the router given 15 seconds', 'var JITA_NAV_MS = 4000;', 'var JITA_NAV_MS = 15000;'],
+    [SR, 'the issue before given 4 seconds, as when slow defects were reloaded', 'var JITA_NAV_MS = 15000;', 'var JITA_NAV_MS = 4000;'],
     [SR, 'an issue still loading given 3 seconds', 'var JITA_NAV_GIVEUP_MS = 30000;', 'var JITA_NAV_GIVEUP_MS = 3000;'],
     // ---- watching for the write ----
     [SR, 'a write watched for but never told to Jira', '    jitaRefreshIssueView();\n    (function look() {', '    (function look() {'],
@@ -36,11 +36,24 @@ const muts = [
     [SR, 'the key not encoded', "var path = '/browse/' + encodeURIComponent(key),", "var path = '/browse/' + key,"],
     [SR, 'the user taken back from where they went', '        if (window.location.pathname !== path) { return; }   // gone somewhere else meanwhile\n', ''],
     [SR, 'the router taking it is not seen', '        if (on && on !== from) { return; }                    // the router took it (a moved issue shows its new key)\n', ''],
-    [SR, 'an issue still loading taken for an ignored switch', '        if (!on && Date.now() - t0 < JITA_NAV_GIVEUP_MS) { setTimeout(check, 1000); return; }\n', ''],
-    [SR, 'an issue still loading waited for forever', 'if (!on && Date.now() - t0 < JITA_NAV_GIVEUP_MS) {', 'if (!on) {'],
-    [SR, 'an ignored switch left at that', '        window.location.href = path;\n    }, JITA_NAV_MS);', '    }, JITA_NAV_MS);']
+    [SR, 'the issue before taken for an ignored switch at once', 'if (waited < (on ? JITA_NAV_MS : JITA_NAV_GIVEUP_MS)) {', 'if (waited < (on ? 0 : JITA_NAV_GIVEUP_MS)) {'],
+    [SR, 'an issue still loading given no time', 'if (waited < (on ? JITA_NAV_MS : JITA_NAV_GIVEUP_MS)) {', 'if (waited < (on ? JITA_NAV_MS : 0)) {'],
+    [SR, 'an issue still loading given only as long as the issue before', 'if (waited < (on ? JITA_NAV_MS : JITA_NAV_GIVEUP_MS)) {', 'if (waited < JITA_NAV_MS) {'],
+    [SR, 'the switch looked at every 5 seconds', '{ setTimeout(check, 1000); return; }', '{ setTimeout(check, 5000); return; }'],
+    [SR, 'an ignored switch left at that', '        window.location.href = path;\n    })();', '    })();'],
+    [SR, 'no note for after the page load', "        try { sessionStorage.setItem(JITA_NAV_NOTE_KEY, JSON.stringify({ key: key, on: on, waited: waited, at: Date.now() })); } catch (e2) { /* only the note is lost */ }\n", ''],
+    [SR, 'a note that cannot be kept stops the page load', "        try { sessionStorage.setItem(JITA_NAV_NOTE_KEY, JSON.stringify({ key: key, on: on, waited: waited, at: Date.now() })); } catch (e2) { /* only the note is lost */ }",
+        '        sessionStorage.setItem(JITA_NAV_NOTE_KEY, JSON.stringify({ key: key, on: on, waited: waited, at: Date.now() }));'],
+    // ---- the note, said after the page load ----
+    [SR, 'the note said again on every page load', '        sessionStorage.removeItem(JITA_NAV_NOTE_KEY);   // first: a note that cannot be read is not kept either\n', ''],
+    [SR, 'a note that cannot be read is kept', '        sessionStorage.removeItem(JITA_NAV_NOTE_KEY);   // first: a note that cannot be read is not kept either\n        v = JSON.parse(raw);',
+        '        v = JSON.parse(raw);\n        sessionStorage.removeItem(JITA_NAV_NOTE_KEY);'],
+    [SR, 'an old note said', 'if (!v || !(Date.now() - (v.at || 0) < 2 * 60 * 1000)) { return; }', 'if (!v) { return; }'],
+    [SR, 'the note never said', "    console.log('[JiTA] ' + v.key + ' was loaded the ordinary way: '", "    void ('[JiTA] ' + v.key + ' was loaded the ordinary way: '"],
+    [SR, 'the note does not say what was on screen', "(v.on ? 'the page still showed ' + v.on + '.' : 'it had still not loaded.')", "'it had still not loaded.'"],
+    [SR, 'the boot never says the note', "    try { jitaNavSaid(); } catch (eNs) { /* swallow */ }   // a page load an in-app switch fell back to says why\n", '', BOOT]
 ];
-// Where an anchor is looked for: the helpers' block, between its first line and its end.
+// Where an anchor is looked for: the helpers' block (or the part named), between its first line and its end.
 function within(fn) {
     const p = fn || HELP, s = src.indexOf(p[0]);
     if (s < 0 || src.indexOf(p[0], s + 1) >= 0) { return null; }

@@ -101,6 +101,7 @@ ok('no new link yet: it looks again a second later', timers.length === 1 && !ope
 timers.shift()();
 gets[1].d.resolve({ fields: { issuelinks: [{ key: 'EDR-5' }, { key: 'EDR-77' }] } });
 ok('...and opens the new defect in-app once it is linked, with no page load', opened.join() === 'EDR-77' && window.location.href === '/browse/EBR-1' && reloads === 0, opened.join() + ' ' + window.location.href);
+ok('...saying so, as the report stays on screen until the defect has loaded', toasts.some((t) => t === 'Opening the new defect EDR-77…'), toasts.join('|'));
 current = 'EBR-2'; gets = []; timers = []; reloads = 0; opened = [];
 go('EBR-2', []);
 current = 'EBR-9';   // the user moves on to another issue while it converts
