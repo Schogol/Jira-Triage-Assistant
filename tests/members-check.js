@@ -966,8 +966,8 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...a month before joining shown as - with its reason', cell(rowFor('acc-new'), 0).text() === '-' && /Not in the group yet/.test(cell(rowFor('acc-new'), 0).attrs.title));
     ok('...the state dot saying why', rowFor('acc-byte').kids[0].hasClass('inactive') && /^Inactive: nothing actioned in Aug 2026 to Oct 2026/.test(rowFor('acc-byte').kids[0].attrs.title), rowFor('acc-byte').kids[0].attrs.title);
     const byteNote = rowFor('acc-byte').kids.filter((k) => k.hasClass('ld-mnote'))[0];
-    ok('...and a member with no note invites a public one, saying who sees it', byteNote.text() === 'Add a public note' && byteNote.hasClass('empty') &&
-        byteNote.attrs.title === 'Add a public note on this member: every Lead sees it, and the ECAID Member Productivity page shows it', byteNote.text());
+    ok('...and a member with no note invites a public one, saying everyone can read it', byteNote.text() === 'Add a public note' && byteNote.hasClass('empty') &&
+        byteNote.attrs.title === 'Add a public note on this member. Everyone can read it: it is published on the ECAID Member Productivity page', byteNote.attrs.title);
     ok('...a Bug Hunter\'s dot judged on their average, not on Sep\'s 40 nor Oct\'s 23 alone', ast.kids[0].hasClass('below') &&
         ast.kids[0].attrs.title === 'Below the minimum: 22.4 a month on average over their 5 months in the group, of the 40 a month ECAID asks for', ast.kids[0].attrs.title);
     ok('the status line counts them', /5 members · \d+ meet the minimum · \d+ below · \d+ inactive/.test(status.textContent), status.textContent);
@@ -989,7 +989,8 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     noteEl.fire('click');
     await settle();
     ok('a note saved lets its draft go', !('member:acc-ast' in U._drafts), J(U._drafts));
-    ok('a note clicked opens the dialog with the note as it is', asked && asked.value === 'Ask for <update>?\nTwice & more' && asked.draft === 'member:acc-ast', J(asked));
+    ok('a note clicked opens the dialog with the note as it is, saying everyone can read it', asked && asked.value === 'Ask for <update>?\nTwice & more' && asked.draft === 'member:acc-ast' &&
+        asked.hint === 'Everyone can read it: it is published on the ECAID Member Productivity page.', J(asked));
     ok('...saved, only its row is drawn again', props[L.MEMBERS_KEY].value.m['acc-ast'].note === 'Cross trained to NEC' && rowFor('acc-ast') !== before.filter((r) => r.attrs['data-key'] === 'acc-ast')[0] &&
         rowsOf().filter((r) => r.attrs['data-key'] !== 'acc-ast').every((r) => before.indexOf(r) >= 0) && rowFor('acc-ast').kids.filter((k) => k.hasClass('ld-mnote'))[0].text() === 'Cross trained to NEC');
     // the Count button
@@ -1213,8 +1214,10 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     await settle();
     const headI = body.kids.filter((k) => k.hasClass('ld-mhead'))[0];
     const inoteOf = (acc) => rowFor(acc).kids.filter((k) => k.hasClass('ld-minote'))[0];
-    ok('the tab has a public and an internal note column, the internal one saying who sees it', headI.kids.filter((k) => k.hasClass('ld-mnote')).map((k) => k.text()).join('|') === 'Public note|Internal note' &&
-        /^Only Leads see these/.test(headI.kids.filter((k) => k.hasClass('ld-minote'))[0].attrs.title), headI.kids.filter((k) => k.hasClass('ld-mnote')).map((k) => k.text()).join('|'));
+    ok('the tab has a public and an internal note column, each saying who can read its notes', headI.kids.filter((k) => k.hasClass('ld-mnote')).map((k) => k.text()).join('|') === 'Public note|Internal note' &&
+        /^Only Leads see these/.test(headI.kids.filter((k) => k.hasClass('ld-minote'))[0].attrs.title) &&
+        /^Everyone can read these: they are published on the ECAID Member Productivity page/.test(headI.kids.filter((k) => k.hasClass('ld-mnote') && !k.hasClass('ld-minote'))[0].attrs.title),
+        headI.kids.filter((k) => k.hasClass('ld-mnote')).map((k) => k.text() + ': ' + k.attrs.title).join(' | '));
     const noteCss = (/\.jita-leadduty-view \.ld-mnote \{([^}]*)\}/.exec(src) || [])[1] || '';
     ok('...the two note columns sharing the room alike, so they line up with the header whatever a note says, a long one cut short with a mark',
         /(^|;)\s*flex: 1 1 0;/.test(noteCss) && /\bmin-width: 0;/.test(noteCss) && /\boverflow: hidden;/.test(noteCss) && /\btext-overflow: ellipsis;/.test(noteCss) &&
