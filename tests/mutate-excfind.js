@@ -277,7 +277,10 @@ const muts = [
     [XF, '+ never reaches the launcher', "&& e.key !== '#' && e.key !== '+') { return; }", "&& e.key !== '#') { return; }"],
     [XF, 'one + opens it', "                if (now - lastPlus >= 400) { lastPlus = now; return; }\n", ''],
     [XF, 'a third tap opens it again', "                lastPlus = 0;\n                try { JiTA.excfind.openView(); }", "                try { JiTA.excfind.openView(); }"],
-    [XF, 'opened twice', "if (!JiTA.excfind || document.querySelector('#jita-menu.jita-excfind-view')) { return; }", "if (!JiTA.excfind) { return; }"]
+    [XF, 'opened twice', "if (!JiTA.excfind || document.querySelector('#jita-menu.jita-excfind-view')) { return; }", "if (!JiTA.excfind) { return; }"],
+    // ---- Jira shows the defect's new link without a reload (v3.51.1) ----
+    [XF, 'an attach refreshes whatever issue is on screen', 'if (res.linked && jitaCurrentKey() === defectKey) { jitaRefreshIssueView(); }', 'if (res.linked) { jitaRefreshIssueView(); }'],
+    [XF, 'an attach never shows the defect its new link', 'if (res.linked && jitaCurrentKey() === defectKey) { jitaRefreshIssueView(); }', 'if (false) { jitaRefreshIssueView(); }']
 ];
 // JITA_BREAK_SHARD=k/n (run-breakages.js splits this suite over several workers) makes only the breakages whose index
 // % n === k, each with its anchor check; without it, every breakage.

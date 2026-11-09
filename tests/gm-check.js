@@ -127,9 +127,17 @@ let ticket, notePost, invoke, closedD, notes = [], invokes = [], toasts = [], wa
 global.JITA_GM_CATEGORIES = ['Account', 'Billing'];
 global.jitaZdTicketState = () => ticket.promise;
 global.jitaInvokeGmAutomation = (key, cat) => { invokes.push(key + ' ' + cat); return invoke.promise; };
-global.jitaCloseAsWontDo = () => { throw new Error('not in these tests'); };
+// A jQuery-style deferred, as jitaCloseAsWontDo answers.
+const jq = () => { const d = { _d: [], _f: [] }; d.done = (f) => { d._d.push(f); return d; }; d.fail = (f) => { d._f.push(f); return d; };
+    d.resolve = () => { d._d.forEach((f) => f()); }; d.reject = (x) => { d._f.forEach((f) => f(x)); }; return d; };
+let wontDo = null;
+global.jitaCloseAsWontDo = (k) => { wontDo = { key: k, d: jq() }; return wontDo.d; };
 global.jitaWaitClosed = (key, tries) => { waits.push(key + ' ' + tries); return closedD.promise; };
 global.jitaCurrentKey = () => onKey;
+// Jira's issue view, told to read the issue on screen again and watched for its status (softrefresh-check.js covers them).
+let shows = [], statusNow = 'Open';
+global.jitaShowWritten = (k, shown, missed) => { shows.push({ key: k, shown, missed }); };
+global.jitaStatusText = () => statusNow;
 JiTA.ui.toast = (m) => { toasts.push(m); };
 global.window = { location: { reload: () => { reloads++; } } };
 eval(src.slice(ms, me));
@@ -141,7 +149,7 @@ const statusText = () => findEl(menu, (n) => n.html.indexOf('min-height:15px') >
 // Open the modal, pick a category, type the note (if any) and press Convert.
 function convert(note) {
     ticket = deferred(); notePost = deferred(); invoke = deferred(); closedD = deferred();
-    notes = []; invokes = []; toasts = []; waits = []; closes = 0; reloads = 0; onKey = 'EBR-77';
+    notes = []; invokes = []; toasts = []; waits = []; closes = 0; reloads = 0; onKey = 'EBR-77'; shows = []; statusNow = 'Open';
     JiTA.responses.postInternalNote = (n) => { notes.push(n); return notePost.promise; };
     jitaOpenGmModal('EBR-77');
     tap(buttonOf('Billing'));
@@ -207,7 +215,14 @@ const cancel = () => tap(buttonOf('Cancel'));
         waits.join() === 'EBR-77 10', statusText() + ' / ' + waits.join());
     closedD.resolve(true);
     await advance(0);
-    ok('...and reloads the page once it has', reloads === 1, String(reloads));
+    ok('...and once it has, the modal goes, saying so, with no reload', reloads === 0 && closes === 1 &&
+        toasts.some((t) => t === 'Converted EBR-77 to a support ticket. The bug report is closed.'), reloads + ' ' + closes + ' ' + toasts.join('|'));
+    ok('...Jira is told to show the closed report, watched for its status to change', shows.length === 1 && shows[0].key === 'EBR-77' && !shows[0].shown(),
+        JSON.stringify(shows.map((x) => x.key)));
+    statusNow = 'Closed';
+    ok('...which counts as shown once the lozenge reads anything other than it did', shows[0].shown() === true);
+    shows[0].missed();
+    ok('...and a Jira that never shows it is reloaded, as before', reloads === 1, String(reloads));
 
     convert('for the GMs');
     ticket.resolve('ticket'); notePost.resolve({ ok: true }); invoke.resolve({});
@@ -224,7 +239,34 @@ const cancel = () => tap(buttonOf('Cancel'));
     onKey = 'EBR-99';   // the user moved on to another issue meanwhile
     closedD.resolve(true);
     await advance(0);
-    ok('a report that closes while the user is on another issue does not reload that issue', reloads === 0 && closes === 1, reloads + ' ' + closes);
+    ok('a report that closes while the user is on another issue does not reload that issue, nor refresh it', reloads === 0 && closes === 1 && shows.length === 0, reloads + ' ' + closes + ' ' + shows.length);
+    ok('...though the toast says it is converted', toasts.some((t) => /^Converted EBR-77 to a support ticket\./.test(t)), toasts.join('|'));
+
+    // ---- no linked ticket: the report is closed as Won't Do instead ----
+    convert('');
+    ticket.resolve('noticket');
+    await advance(0);
+    ok('a report with no linked ticket is offered closing instead', !!buttonOf('Close bug report'));
+    tap(buttonOf('Close bug report'));
+    ok('...as Won\'t Do', !!wontDo && wontDo.key === 'EBR-77');
+    wontDo.d.resolve();
+    ok('...and once closed, Jira is told to show it, with no reload', /Closed as Won't Do\./.test(statusText()) && shows.length === 1 && shows[0].key === 'EBR-77' && !shows[0].shown() && reloads === 0,
+        statusText() + ' ' + shows.length + ' ' + reloads);
+    statusNow = 'Closed';
+    ok('...shown once its status reads anything other than it did', shows[0].shown() === true);
+    shows[0].missed();
+    ok('...a Jira that never shows it is reloaded, as before', reloads === 1, String(reloads));
+    await advance(1000);
+    ok('...and the modal closes a second later', closes === 1, String(closes));
+    convert('');
+    ticket.resolve('noticket');
+    await advance(0);
+    tap(buttonOf('Close bug report'));
+    onKey = 'EBR-99';   // the user moved on before the close came back
+    wontDo.d.resolve();
+    await advance(1000);
+    ok('...a report closed while another issue is on screen is neither shown there nor reloaded', shows.length === 0 && reloads === 0 && closes === 1, shows.length + ' ' + reloads + ' ' + closes);
+    onKey = 'EBR-77';
 
     convert('');
     ticket.resolve('ticket'); invoke.resolve({});

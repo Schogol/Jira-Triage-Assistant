@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.51.0
+// @version     3.51.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -339,10 +339,12 @@ function removeFeedbackButton() {
 };
 
 
-// Bug reports whose Convert to Defect is under way (EBR key -> true). Kept apart from the button: Jira's own
-// re-render replaces it with a fresh, enabled one about two seconds after a click, while the conversion goes on for
-// up to 30 seconds (jitaGoToNewDefect polls for the new defect), and a second click on that one created a second
-// defect. Success always leaves the page (to the defect, or a reload), which clears this; a failure clears its key.
+// Bug reports whose Convert to Defect is under way or done (EBR key -> true while it converts and its defect opens; then
+// the defect's key; 'left' when the user went to another issue before the defect turned up). Kept apart from the button:
+// Jira's own re-render replaces it with a fresh, enabled one about two seconds after a click, while the conversion goes
+// on for up to 30 seconds (jitaGoToNewDefect polls for the new defect), and a second click on that one created a second
+// defect. A converted report's Convert stays disabled for as long as the tab lives. A failure clears its key, as does
+// no defect turning up within 30 seconds.
 // Set up HERE, before the waitForKeyElements call below: when the breadcrumb is already on the page that call adds
 // the buttons on the spot, and adding them reads this. Declared further down, it was still undefined then, and the
 // error stopped the whole script from loading on a bug report opened from a link or a reload.
@@ -863,26 +865,107 @@ function jitaLinkedKeys(links) {
     return keys;
 }
 
-// After Convert-to-Defect, the automation creates a defect and links it to the EBR. Poll the EBR's links for one
-// that wasn't there before (prefer a defect project) and navigate to it. Falls back to reloading the EBR after
-// ~30s if none appears (e.g. the conversion linked it some other way).
+// ---- the issue on screen, shown without a reload ----------------------------------------------------------------
+// Jira's issue view keeps the issue as it read it, so after JiTA writes to the issue on screen it is told to read it
+// again: the DOM event Jira's own comment box fires after it posts a comment, and Connect's AP.jira.refreshIssuePage()
+// fires. The issue view then runs its issue query again and redraws the fields; nothing reloads. Sent with no detail:
+// an object made in a userscript's sandbox is one the page cannot read in Firefox, and without one the issue view
+// reads the issue on screen.
+var JITA_REFRESH_EVENT = 'legacy_refreshIssuePage';
+var JITA_REFRESH_MS = 8000;        // how long the page is given to show a write before the caller's fallback runs
+var JITA_REFRESH_STEP_MS = 250;    // how often it is looked at meanwhile
+var JITA_NAV_MS = 15000;           // an issue opened in-app: how long the issue before may stay on screen (jitaOpenIssue)
+var JITA_NAV_GIVEUP_MS = 30000;    // ...and how long an issue still loading is waited for
+var JITA_NAV_NOTE_KEY = 'jitaNavFell';   // sessionStorage: why jitaOpenIssue fell back to a page load, said after it
+function jitaRefreshIssueView() {
+    try { document.dispatchEvent(new CustomEvent(JITA_REFRESH_EVENT)); } catch (e) { /* the caller's fallback */ }
+}
+// jitaRefreshIssueView, then the page watched: `shown()` is looked at every JITA_REFRESH_STEP_MS, and `missed()` runs when
+// it is still false JITA_REFRESH_MS later (a Jira that no longer hears the event), unless `key` is no longer the issue
+// on screen by then.
+function jitaShowWritten(key, shown, missed) {
+    var t0 = Date.now();
+    jitaRefreshIssueView();
+    (function look() {
+        if (jitaCurrentKey() !== key || shown()) { return; }
+        if (Date.now() - t0 < JITA_REFRESH_MS) { setTimeout(look, JITA_REFRESH_STEP_MS); return; }
+        missed();
+    })();
+}
+// The status of the issue on screen as its lozenge reads; '' when the page shows none.
+function jitaStatusText() {
+    return $.trim($(SELECTORS.STATUS_FIELD_WRAP).find('button').first().text());
+}
+// Said once in the console after a page load jitaOpenIssue fell back to, so a reload that was JiTA's can be told from
+// one of Jira's.
+function jitaNavSaid() {
+    var v = null;
+    try {
+        var raw = sessionStorage.getItem(JITA_NAV_NOTE_KEY);
+        if (raw == null) { return; }
+        sessionStorage.removeItem(JITA_NAV_NOTE_KEY);   // first: a note that cannot be read is not kept either
+        v = JSON.parse(raw);
+    } catch (e) { return; }
+    if (!v || !(Date.now() - (v.at || 0) < 2 * 60 * 1000)) { return; }
+    console.log('[JiTA] ' + v.key + ' was loaded the ordinary way: ' + Math.round((v.waited || 0) / 1000) + ' s after it was opened in-app, ' +
+        (v.on ? 'the page still showed ' + v.on + '.' : 'it had still not loaded.'));
+}
+// Opens `key` in-app, as a link in Jira does: the URL pushed and Jira's router told with a synthetic popstate (JiTA.dv
+// switches issues the same way). Jira keeps the issue before on screen, breadcrumb and all, until the new one has loaded,
+// which for a defect created a moment ago can take a while; so only when that one is still there JITA_NAV_MS later is the
+// switch taken as ignored, and the issue loaded the ordinary way (saying why after it, jitaNavSaid). One still loading
+// (no breadcrumb at all) is waited for, up to JITA_NAV_GIVEUP_MS. Nothing happens once the user has gone somewhere else.
+// `done`, when given, hears how it ended: 'shown' (on screen), 'away' (the user went elsewhere), 'load' (a page load).
+function jitaOpenIssue(key, done) {
+    var path = '/browse/' + encodeURIComponent(key), from = jitaCurrentKey(), t0 = Date.now();
+    var end = function (how) { if (done) { try { done(how); } catch (e) { /* the switch goes on */ } } };
+    try {
+        history.pushState(null, '', path);
+        window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+    } catch (e) { end('load'); window.location.href = path; return; }
+    (function check() {
+        if (window.location.pathname !== path) { end('away'); return; }   // gone somewhere else meanwhile
+        var on = jitaCurrentKey(), waited = Date.now() - t0;
+        if (on && on !== from) { end('shown'); return; }                    // the router took it (a moved issue shows its new key)
+        if (waited < (on ? JITA_NAV_MS : JITA_NAV_GIVEUP_MS)) { setTimeout(check, 1000); return; }
+        try { sessionStorage.setItem(JITA_NAV_NOTE_KEY, JSON.stringify({ key: key, on: on, waited: waited, at: Date.now() })); } catch (e2) { /* only the note is lost */ }
+        end('load');
+        window.location.href = path;
+    })();
+}
+
+// After Convert-to-Defect, the automation creates a defect and links it to the EBR. Poll the EBR's links for one that
+// wasn't there before (prefer a defect project) and open it in-app (jitaOpenIssue). When none appears within ~30 s (the
+// conversion linked it some other way, or never finished), the report is shown as Jira has it now and let go, and the
+// toast says to look at its links before converting it again.
 function jitaGoToNewDefect(ebrKey, beforeKeys) {
     var before = {};
     (beforeKeys || []).forEach(function (k) { before[k] = true; });
     var tries = 0;
     function again() {
-        if (tries >= 30) { window.location.reload(false); return; }
+        if (tries >= 30) {
+            delete jitaConvertBusy[ebrKey];
+            jitaConvertButtonState();
+            jitaRefreshIssueView();
+            JiTA.ui.toast('No new defect showed up among ' + ebrKey + '\'s links within 30 seconds. Check its links before converting it again.');
+            return;
+        }
         tries++; setTimeout(poll, 1000);
     }
     function poll() {
         // The user has moved on to another issue (Jira is one page): neither take them away from it nor reload it
-        // under a comment they may be typing. The report shows the result when they come back to it.
-        if (jitaCurrentKey() !== ebrKey) { return; }
+        // under a comment they may be typing. The report shows the result when they come back to it, its Convert
+        // still disabled, no longer spinning.
+        if (jitaCurrentKey() !== ebrKey) { jitaConvertBusy[ebrKey] = 'left'; return; }
         $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
             .done(function (d) {
                 var fresh = jitaLinkedKeys(d.fields && d.fields.issuelinks).filter(function (k) { return !before[k]; });
                 var defect = fresh.filter(function (k) { return /^(EDR|EO|PLAT)-/.test(k); })[0] || fresh[0];
-                if (defect) { window.location.href = '/browse/' + defect; return; }
+                if (defect) {
+                    // The report stays on screen, its button spinning, until the defect has loaded; then it is converted.
+                    jitaOpenIssue(defect, function () { jitaConvertBusy[ebrKey] = defect; jitaConvertButtonState(); });
+                    return;
+                }
                 again();
             })
             .fail(again);
@@ -952,7 +1035,14 @@ function jitaOpenGmModal(key) {
                 $status.css('color', '#7fdca4').text('Automation started - waiting for the report to close…');
                 return jitaWaitClosed(key, 10).then(function (closed) {
                     if (closed) {
-                        if (jitaCurrentKey() === key) { window.location.reload(false); } else if (alive()) { ov.close(); }
+                        // Converted: the modal goes, and Jira shows the closed report and the rule's comment once told to
+                        // read the issue again. A Jira that does not hear that gets the reload this used to be.
+                        if (alive()) { ov.close(); }
+                        JiTA.ui.toast('Converted ' + key + ' to a support ticket. The bug report is closed.');
+                        if (jitaCurrentKey() === key) {
+                            var was = jitaStatusText();
+                            jitaShowWritten(key, function () { return jitaStatusText() !== was; }, function () { window.location.reload(false); });
+                        }
                         return;
                     }
                     var msg = 'The report is still open 20 seconds later. The rule may have stopped: with no linked Zendesk ticket, or more than one, it leaves a comment and the report open. Check its comments before converting again.';
@@ -987,7 +1077,12 @@ function jitaOpenGmModal(key) {
             $s2.css('color', '#9aa6b2').text('Closing the bug report as Won\'t Do…');
             jitaCloseAsWontDo(key).done(function () {
                 $s2.css('color', '#7fdca4').text('Closed as Won\'t Do.');
-                setTimeout(function () { ov.close(); window.location.reload(false); }, 1000);
+                // Jira shows the closed report once told to read the issue again; one that does not hear that is reloaded.
+                if (jitaCurrentKey() === key) {
+                    var was = jitaStatusText();
+                    jitaShowWritten(key, function () { return jitaStatusText() !== was; }, function () { window.location.reload(false); });
+                }
+                setTimeout(function () { ov.close(); }, 1000);
             }).fail(function (xhr) {
                 $close.prop('disabled', false).css('opacity', '').text('Close bug report');
                 $s2.css('color', '#ff8f8f').text('Failed to close: HTTP ' + (xhr && xhr.status));
@@ -997,11 +1092,27 @@ function jitaOpenGmModal(key) {
 }
 
 
-// The Convert to Defect button reflects whether the report on screen is being converted (jitaConvertBusy, set up
-// near the top of the file, before the first call that can add the buttons).
+// The Convert to Defect button reflects the report on screen (jitaConvertBusy, set up near the top of the file, before
+// the first call that can add the buttons): a spinner in it while it converts and its defect opens, and disabled then
+// and once it has been converted in this tab, the hover saying which.
 function jitaConvertButtonState() {
-    var key = jitaCurrentKey();
-    $('#convertToDefectButton').prop('disabled', !!(key && jitaConvertBusy[key]));
+    var key = jitaCurrentKey(), state = key ? jitaConvertBusy[key] : null;
+    jitaConvertCss();
+    $('#convertToDefectButton').prop('disabled', !!state).toggleClass('jita-converting', state === true)
+        .attr('title', state === true ? 'Converting to a defect…'
+            : (state === 'left' ? 'Being converted: its links show the new defect once it is made.' : (state ? 'Converted to ' + state + '.' : null)));
+}
+// The spinner: drawn before the button's label, turning as long as the class is on; added to the page once.
+function jitaConvertCss() {
+    if (jitaConvertCss.done) { return; }
+    jitaConvertCss.done = true;
+    try {
+        GM_addStyle('#convertToDefectButton.jita-converting { cursor: progress; }' +
+            '#convertToDefectButton.jita-converting > span:last-child::before { content: ""; display: inline-block; box-sizing: border-box; width: 11px; height: 11px;' +
+            ' margin-right: 6px; vertical-align: -1px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;' +
+            ' animation: jita-convert-spin .8s linear infinite; }' +
+            '@keyframes jita-convert-spin { to { transform: rotate(360deg); } }');
+    } catch (e) { /* the button is disabled all the same */ }
 }
 
 function jitaConvertClick() {
@@ -7468,11 +7579,9 @@ JiTA.ui = {
         close();
     },
 
-    // Soft-refresh the open issue after a "Mark dup": patch the status lozenge text in place instead of a
-    // full page reload (Jira's SPA exposes no clean "refetch this issue" hook). Mirrors how the GM / Close
-    // buttons update fields in the DOM. Returns true if it found and updated the status; false otherwise so
-    // the caller can fall back to a full reload. (The new duplicate link is created server-side and shows in
-    // the Linked Issues section on the next natural refresh.)
+    // The status lozenge of the issue on screen patched to `statusName` by hand: what Attach falls back to when Jira does
+    // not show the new status after being told to read the issue again (jitaShowWritten). Only the text changes; Jira
+    // itself still holds the old status until the page reloads. Returns true if it found and updated the status.
     softRefreshStatus: function (statusName) {
         if (!statusName) { return false; }
         var $wrap = $(SELECTORS.STATUS_FIELD_WRAP);
@@ -8229,15 +8338,18 @@ JiTA.ui = {
                     ? ('Linked ' + ebr + ' as a duplicate of ' + defectKey + ' and set it to Attached.')
                     : ('Linked ' + ebr + ' as a duplicate of ' + defectKey + ' (could not set Attached).');
                 if (!res.linked) { msg = 'Set ' + ebr + ' to Attached, but the duplicate link failed.'; }
-                // Soft-patch the status lozenge in place - no full reload. The duplicate link is created
-                // server-side and shows in Jira's "Linked work items" section on the next natural refresh.
+                // Jira shows the new status and the duplicate link once told to read the issue again. A Jira that
+                // does not hear that gets the status patched in by hand, as before, and the link on a reload.
                 if (res.attached) {
-                    JiTA.ui.softRefreshStatus('Attached');
+                    var was = jitaStatusText();
+                    jitaShowWritten(ebr, function () { return jitaStatusText() !== was; }, function () { JiTA.ui.softRefreshStatus('Attached'); });
                     // Drop the now-Attached report from the local open-report DB immediately so it no longer
                     // shows up as an open match on defects before the next EBR sync prunes it.
                     JiTA.db.deleteDefects([ebr]).then(function () {
                         JiTA.sync._ebrRemoved([ebr]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
                     }, function (e) { console.log('[JiTA] could not drop ' + ebr + ' from the local DB:', e && e.message || e); });
+                } else if (res.linked) {
+                    jitaRefreshIssueView();   // the link alone
                 }
                 JiTA.ui.toast(msg);
             }, function (e) {
@@ -8339,6 +8451,7 @@ JiTA.ui = {
                             : ('Linked ' + reportKey + ' to ' + defectKey + ' (could not set Attached).');
                         if (!res.linked) { msg = 'Set ' + reportKey + ' to Attached, but the duplicate link failed.'; }
                         JiTA.ui.toast(msg);
+                        if (res.linked && jitaCurrentKey() === defectKey) { jitaRefreshIssueView(); }   // the defect's own Linked work items
                         // Only remove it once the Attached transition actually succeeded (so it's genuinely
                         // resolved). Drop it from the local open-report DB, mark the EBR indexes dirty, then
                         // collapse/fade its row out (the rows below slide up) and re-render so a fresh
@@ -13945,12 +14058,6 @@ JiTA.checklist = {
     RECHECK_MS: 1000,
     INPUT_MS: [1500, 5000],
     FOCUS_MS: 10000,                              // back in the tab: a check that failed is tried again, at most this often
-    // After a write, Jira's issue view is told to read the issue again (_written) by the DOM event its own comment box and
-    // Connect's AP.jira.refreshIssuePage() fire. The page is looked at every REFRESH_STEP_MS, and reloads when it has not
-    // changed REFRESH_MS after.
-    REFRESH_EVENT: 'legacy_refreshIssuePage',
-    REFRESH_MS: 8000,
-    REFRESH_STEP_MS: 250,
     SHOW_EXC: 5,                                  // exceptions listed before "N more"
     // What the Copy buttons give: as text, and as rich text that pastes into Jira's editor as a real numbered list (Enter on
     // a step makes the next).
@@ -14561,7 +14668,7 @@ JiTA.checklist = {
         C._reverted[key] = back.at;
         C._req('PUT', '/rest/api/3/issue/' + encodeURIComponent(key) + '/assignee', { accountId: back.from }).then(function () {
             JiTA.ui.toast(C._refusal(s) + ' It was put back to its assignee.');
-            C._jiraRefresh();
+            jitaRefreshIssueView();
             C.refresh(key);
         }, function (e) { JiTA.ui.toast('The Defect checklist could not put ' + key + '\'s assignee back: ' + (e && e.message || e)); });
     },
@@ -14623,27 +14730,18 @@ JiTA.checklist = {
     _waive: function (key, id, on) { return JiTA.checklist._keep(key, 'w', id, on); },
     // An item ticked off, or not any more: the attachments said to be good, for the set they are (`sig`).
     _tick: function (key, id, sig, on) { return JiTA.checklist._keep(key, 'ok', id, on, { sig: sig }); },
-    // A field written here: Jira's issue view keeps what it read, so it is told to read the issue again (_jiraRefresh).
+    // A field written here: Jira's issue view keeps what it read, so it is told to read the issue again (jitaShowWritten).
     // Left showing the old value, an edit of that field in it would write the old value back: a label taken off would
-    // return, the expand would go. Should the page not change within REFRESH_MS (a Jira that no longer hears the event),
-    // it reloads instead. Said in a toast, and the card read again.
+    // return, the expand would go. Should the page's fields not change (a Jira that no longer hears the event), it
+    // reloads instead. Said in a toast, and the card read again.
     _written: function (key, msg) {
-        var C = JiTA.checklist, before = C._pageSig(), t0 = Date.now();
+        var C = JiTA.checklist, before = C._pageSig();
         JiTA.ui.toast(msg);
         C.refresh(key);
-        C._jiraRefresh();
-        (function look() {
-            if (C._key !== key || C._pageSig() !== before) { return; }   // left, or Jira shows it
-            if (Date.now() - t0 < C.REFRESH_MS) { setTimeout(look, C.REFRESH_STEP_MS); return; }
+        jitaShowWritten(key, function () { return C._pageSig() !== before; }, function () {
             console.log('[JiTA] checklist: Jira did not show the change on ' + key + ', so the page reloads to show it.');
             try { window.location.reload(); } catch (e) { /* the toast and the card say it */ }
-        })();
-    },
-    // Tells Jira's issue view to read the issue on screen again, as Jira's own comment box does after it writes one. With
-    // no detail: an object made in a userscript's sandbox is one the page cannot read in Firefox, and without one the
-    // issue view reads the issue on screen (the form Connect's AP.jira.refreshIssuePage() fires).
-    _jiraRefresh: function () {
-        try { document.dispatchEvent(new CustomEvent(JiTA.checklist.REFRESH_EVENT)); } catch (e) { /* _written reloads */ }
+        });
     },
     // The bug report's labels taken off the defect, asked first; cloned and jira_escalated stay (they are never in `labels`).
     _takeLabels: function (key, labels) {
@@ -24436,6 +24534,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.51.1', date: '2026-11-08', fixes: [
+            'Attach and Convert to Support Ticket (its Close bug report too) no longer reload the page: Jira shows the new status and links at once.',
+            'Convert to Defect opens the new defect without reloading Jira, so it is there sooner.',
+            'Convert to Defect shows a spinner in its button until the new defect is open, and the button stays off on a bug report you converted.',
+            'Attaching a bug report to the defect you are on shows it in the defect\'s linked work items at once.'
+        ] },
         { v: '3.51.0', date: '2026-11-08', features: [
             'New Defect checklist card on a defect you wrote: what the ISD guide asks of a defect, each item checked against the defect, and against the bug report it was converted from.',
             'A defect cannot be unassigned (handed to FC) until every item is done, its attachments checked included. Items the guide lets a defect go without can be marked Not needed. Settings > Features switches it off.',
@@ -25505,6 +25609,7 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
     // "What's new" after an update. Scheduled first, so nothing that boots after it can keep it from showing; start()
     // still waits for the page to settle, and the observer below puts the pill back if anything takes it away.
     try { JiTA.changelog.start(); } catch (eCl) { /* swallow */ }
+    try { jitaNavSaid(); } catch (eNs) { /* swallow */ }   // a page load an in-app switch fell back to says why
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
     try { JiTA.dv._bindGlobal(); } catch (eDv) { /* swallow */ }   // the detail view's click hook works off /browse/ too (see _takeAll)
     var scheduled = false;

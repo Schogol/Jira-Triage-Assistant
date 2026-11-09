@@ -100,6 +100,8 @@ global.confirm = () => true;
 global.JITA_NO_JIRA_UI = false;
 let crumb = 'EDR-77';
 global.jitaCurrentKey = () => crumb;
+let viewRefreshes = 0;   // Jira's issue view told to read the issue on screen again (softrefresh-check.js covers the real one)
+global.jitaRefreshIssueView = () => { viewRefreshes++; };
 global.jitaLinkedKeys = (links) => (links || []).map((l) => (l.outwardIssue || l.inwardIssue).key);
 global.JiTA = { HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, link: {} };
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isClosedStatus: function (status) {') + '})'));
@@ -929,10 +931,11 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     click(b[0]);
     await flush();
     ok('...refused once its list is off screen', attaches.length === 0 && toasts.some((t) => /This list was drawn for EDR-77/.test(t)), toasts.join());
-    on = true;
+    on = true; viewRefreshes = 0;
     click(b[0]);
     await flush();
     ok('...attached to the defect it was given, not the issue the panel shows', attaches.join() === 'EBR-9->EDR-77', attaches.join());
+    ok('...and Jira, that defect being on screen, is told to show its new link', viewRefreshes === 1, String(viewRefreshes));
     ok('...an unassigned report going to the user, as from the panel', assigned.join() === 'me', String(assigned));
     ok('...and the list\'s own step takes the row away, not the panel\'s slide-out', dones.join() === 'EBR-9' && fades === 0, dones.join() + ' ' + fades);
     live = { 'EBR-8': 'Attached' };
@@ -956,10 +959,12 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('with anyAssignee it is offered, saying whose it is', b.text() === 'Attach' && /Assigned to Bob, who stays its assignee/.test(b.attr('title')) && whos.join() === 'Bob/me', b.attr('title'));
     let asked = '';
     global.confirm = (q) => { asked = q; return true; };
-    toasts = [];
+    toasts = []; viewRefreshes = 0; crumb = 'EBR-1';   // another issue on screen by now
     click(b[0]);
     await flush();
+    crumb = 'EDR-77';
     ok('...the confirm names its assignee', /It is assigned to Bob, who stays its assignee/.test(asked), asked);
+    ok('...and Jira is not told to show the link when the defect is no longer on screen', viewRefreshes === 0, String(viewRefreshes));
     ok('...it is attached without changing its assignee', attaches.pop() === 'EBR-7->EDR-77' && assigned.pop() === null, String(assigned));
     ok('...the toast says whose it still is', toasts.some((x) => /Attached EBR-7 to EDR-77, still assigned to Bob\./.test(x)), toasts.join());
     ok('...and who is told again from the fresh read', whos.join() === 'Bob/me,Bob/me', whos.join());
