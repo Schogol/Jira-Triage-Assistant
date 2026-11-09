@@ -35,11 +35,12 @@ const SHARDS = { 'mutate-members.js': 4, 'mutate-checklist.js': 4, 'mutate-excfi
 const runners = fs.readdirSync(DIR).filter((f) => /^mutate-.*\.js$/.test(f));
 const needsRepo = (f) => /ci-static\.js|'git'/.test(fs.readFileSync(path.join(DIR, f), 'utf8'));
 // A suite's size stands in for its time (about half a second per KB), except for one that starts a real browser for each
-// breakage (mutate-layout.js): that takes about 8 times as long as its size says.
+// breakage (mutate-layout.js): that takes about 8 times as long as its size says. The size is counted with LF endings,
+// so a Windows checkout (CRLF) deals the parts exactly as CI does, and a part that failed there can be run here.
 const BROWSER_WEIGHT = 8;
 const jobsOf = (f) => {
-    const browser = /layout-check\.js/.test(fs.readFileSync(path.join(DIR, f), 'utf8'));
-    const n = SHARDS[f] || 1, size = fs.statSync(path.join(DIR, f)).size * (browser ? BROWSER_WEIGHT : 1), out = [];
+    const text = fs.readFileSync(path.join(DIR, f), 'utf8').replace(/\r\n/g, '\n'), browser = /layout-check\.js/.test(text);
+    const n = SHARDS[f] || 1, size = text.length * (browser ? BROWSER_WEIGHT : 1), out = [];
     for (let k = 0; k < n; k++) { out.push({ f: f, k: k, shard: n > 1 ? k + '/' + n : '', weight: size }); }
     return out;
 };

@@ -36,6 +36,20 @@ ok('in 3 parts the shards of a big suite are spread, not all on one machine', he
 ok('the browser suite goes first in its part, not last (it takes many times its size)', third.some((p) => p.jobs.indexOf('mutate-layout.js') >= 0 && p.jobs.indexOf('mutate-layout.js') < 4),
     J(third.map((p) => p.jobs.indexOf('mutate-layout.js'))));
 ok('the same deal every time, as each machine deals for itself', J(list('1/3').jobs) === J(third[1].jobs));
+// The same deal from a checkout with LF endings (CI) and one with CRLF (Windows), so a part that failed on CI can be run here.
+const fs = require('fs'), os = require('os');
+const ends = (eol) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jita-breakparts-'));
+    try {
+        fs.readdirSync(__dirname).filter((f) => /^mutate-.*\.js$|^run-breakages\.js$/.test(f)).forEach((f) => {
+            fs.writeFileSync(path.join(dir, f), fs.readFileSync(path.join(__dirname, f), 'utf8').replace(/\r\n/g, '\n').replace(/\n/g, eol));
+        });
+        const env = Object.assign({}, process.env, { JITA_BREAK_LIST: '1', JITA_BREAK_PART: '2/3' });
+        return spawnSync(process.execPath, [path.join(dir, 'run-breakages.js')], { cwd: dir, encoding: 'utf8', env: env, timeout: 30000 }).stdout || '';
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+};
+const lf = ends('\n'), crlf = ends('\r\n');
+ok('...whether the checkout has LF endings, as on CI, or CRLF, as on Windows', lf.length > 0 && lf === crlf && lf === third[2].out, J([lf.length, crlf.length, third[2].out.length]));
 ['3/3', '1/0', 'x', '1', '-1/3'].forEach((bad) => {
     const r = list(bad);
     ok('a part that cannot be (' + bad + ') stops the run', r.status === 1 && !r.jobs.length && /JITA_BREAK_PART/.test(r.out), r.status + ' ' + J(r.out));
