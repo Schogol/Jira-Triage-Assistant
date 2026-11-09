@@ -13959,7 +13959,7 @@ JiTA.checklist = {
     BUILD_TEXT: 'Server: \nBuild: ',
     BUILD_HTML: '<p>Server: </p><p>Build: </p>',
     MARKS: { ok: '✓', todo: '○', waived: '⊘' },
-    FIELDS_SEEN: /^(assignee|labels|priority|severity|impact|team|epic link|parent|eve server|eve build)$/i,
+    FIELDS_SEEN: /^(assignee|labels|priority|severity|impact|team|eve server|eve build)$/i,
     MORE: [
         'Searched the existing defects first, and attached the other reports of the same bug.',
         'Reproduction steps that hold only what matters, one of the last saying what to look for.',
@@ -13995,10 +13995,10 @@ JiTA.checklist = {
         if (typeof v === 'object') { return String(v.value || v.name || v.displayName || v.title || v.key || v.id || ''); }
         return String(v);
     },
-    // The custom fields the items read, found by their names in this Jira (expand=names): { severity, impact, epic, server,
-    // build, steps }. Of two fields with one name, the one holding a value.
+    // The custom fields the items read, found by their names in this Jira (expand=names): { severity, impact, server, build,
+    // steps }. Of two fields with one name, the one holding a value.
     _ids: function (names, fields) {
-        var out = {}, want = { severity: /^severity$/i, impact: /^impact$/i, epic: /^epic link$/i, server: /^eve server$/i, build: /^eve build$/i,
+        var out = {}, want = { severity: /^severity$/i, impact: /^impact$/i, server: /^eve server$/i, build: /^eve build$/i,
             steps: /^(steps to reproduce|reproduction steps)$/i };
         Object.keys(names || {}).forEach(function (id) {
             var name = String(names[id] || '').trim();
@@ -14032,9 +14032,9 @@ JiTA.checklist = {
         }
         return null;
     },
-    // Priority, Team and Epic Link are FC's to set. Which of them the reporter set, [{ name, at }]: Priority when it holds
-    // something other than what it held when the defect was made, or what someone else last set it to; Team and Epic Link
-    // when they hold anything that nobody else set (a value they had when the defect was made counts as the reporter's).
+    // Priority and Team are FC's to set. Which of them the reporter set, [{ name, at }]: Priority when it holds something
+    // other than what it held when the defect was made, or what someone else last set it to; Team when it holds anything
+    // that nobody else set (a value it had when the defect was made counts as the reporter's).
     _fcSet: function (f, hist, ids, reporter) {
         var C = JiTA.checklist, out = [];
         var isPr = function (it) { return it.fieldId === 'priority' || it.field === 'priority'; };
@@ -14045,9 +14045,8 @@ JiTA.checklist = {
             prs.forEach(function (p) { if (p.by !== reporter) { fair = p.it.to; } else { mine = p; } });
             if (String(f.priority.id) !== String(fair) && mine) { out.push({ name: 'Priority', at: mine.at }); }
         }
-        [{ name: 'Team', id: 'customfield_10001', field: /^team$/i }, { name: 'Epic Link', id: ids.epic, field: /^(epic link|parent|issueparentassociation)$/i }].forEach(function (x) {
+        [{ name: 'Team', id: 'customfield_10001', field: /^team$/i }].forEach(function (x) {
             var v = x.id ? f[x.id] : null;
-            if (x.name === 'Epic Link' && !C._val(v) && f.parent && /epic/i.test(((f.parent.fields || {}).issuetype || {}).name || '')) { v = f.parent; }
             if (!C._val(v)) { return; }
             var last = C._last(hist, function (it) { return (x.id && it.fieldId === x.id) || x.field.test(it.field || ''); });
             if (!last || last.by === reporter) { out.push({ name: x.name, at: last ? last.at : '' }); }
@@ -14293,6 +14292,7 @@ JiTA.checklist = {
             if (it.waived) { it.by = d.waived[id]; }
             out.push(it);
         }
+        // In the order a hunter works through a converted defect: its text, its attachments and labels, then its fields.
         var sameSum = !!s && C._squash(d.summary) === C._squash(s.summary);
         add('summary', 'Summary rewritten', !sameSum && !!C._squash(d.summary), 'Give your defect a fitting title.');
 
@@ -14300,6 +14300,34 @@ JiTA.checklist = {
             add('desc', 'Description rewritten', !!C._squash(d.desc) && C._squash(d.desc) !== C._squash(s.desc),
                 'Still the bug report\'s description. Describe the bug in full, and take out what the player wrote that it does not need.');
         }
+        // Reproduction steps, in any form: not the bug report's own, still in the defect word for word; or, without a
+        // report's steps to go by, the steps field filled in where the defect has one. A defect written from scratch with no
+        // such field has nothing here to check (Also check reminds of it).
+        var rs = C._squash(s && s.steps), STEPS = { copy: C.STEPS_TEXT, html: C.STEPS_HTML };
+        if (rs.length >= C.STEPS_MIN) {
+            add('steps', 'Reproduction steps rewritten', C._squash(d.text).indexOf(rs) < 0,
+                'Still the bug report\'s reproduction steps, word for word. Keep the steps that matter; one of the last says what to look for.', STEPS);
+        } else if (d.stepsField) {
+            add('steps', d.stepsField + ' filled in', !!d.stepsFilled, 'Write the reproduction steps into ' + d.stepsField + '. One of the last says what to look for.', STEPS);
+        }
+        // The attachments: the bug report's are copied to the defect, so its writer says they are good. A tick of theirs, for
+        // the attachments as they were: one added or taken off since asks for it again.
+        var sig = C._attSig(d.attachments), mark = (d.checked || {}).attachments, ticked = !!mark && mark.sig === sig, none = !(d.attachments || []).length;
+        add('attachments', 'Attachments checked', ticked, C._attWhy(d, s, mark), { tick: true, sig: sig, mark: ticked ? mark : null,
+            tickLabel: none ? 'None needed' : 'They are good', tickTitle: none ? 'This defect needs no attachments' : 'You checked them: they belong to this defect, and nothing is missing' });
+        if (s) {
+            var left = C._reportLabels(d.labels, s.labels);
+            add('replabels', 'The bug report\'s labels taken off', !left.length,
+                'Still the bug report\'s: ' + left.join(', ') + '. Take them off; cloned and jira_escalated stay.', { fix: 'labels', left: left });
+        }
+        // Labels of its own, the suggested ones listed under the item (_suggestRow); a defect no label fits takes a Not needed.
+        add('labels', 'Add appropriate labels', C._ownLabels(d.labels, s && s.labels).length > 0,
+            'No labels of its own yet. Add the ones that fit the bug, so it is found with others like it.', { waivable: true, suggest: true });
+
+        // A field this Jira does not have on the defect (null) is not asked for; with neither, neither is the item.
+        var known = [['Severity', d.severity], ['Impact', d.impact]].filter(function (x) { return x[1] !== null && x[1] !== undefined; });
+        var unset = known.filter(function (x) { return x[1] === ''; }).map(function (x) { return x[0]; });
+        if (known.length) { add('fields', 'Severity and Impact set', !unset.length, 'Not set yet: ' + unset.join(', ') + '.'); }
         // Where it was tested: in the EVE Server and EVE Build fields, or, the old way, at the top of the description, its
         // server named as the EVE Server field's options name them (d.servers). The conversion copies the bug report's
         // fields, the player's: as long as both still are the report's, they count only once the reporter ticks them off as
@@ -14325,39 +14353,10 @@ JiTA.checklist = {
                         : 'No build number at the top of the description. It is at the top of "About EVE" in the Esc menu.')) + built,
                 { copy: C.BUILD_TEXT, html: C.BUILD_HTML });
         }
-        // Reproduction steps, in any form: not the bug report's own, still in the defect word for word; or, without a
-        // report's steps to go by, the steps field filled in where the defect has one. A defect written from scratch with no
-        // such field has nothing here to check (Also check reminds of it).
-        var rs = C._squash(s && s.steps), STEPS = { copy: C.STEPS_TEXT, html: C.STEPS_HTML };
-        if (rs.length >= C.STEPS_MIN) {
-            add('steps', 'Reproduction steps rewritten', C._squash(d.text).indexOf(rs) < 0,
-                'Still the bug report\'s reproduction steps, word for word. Keep the steps that matter; one of the last says what to look for.', STEPS);
-        } else if (d.stepsField) {
-            add('steps', d.stepsField + ' filled in', !!d.stepsFilled, 'Write the reproduction steps into ' + d.stepsField + '. One of the last says what to look for.', STEPS);
-        }
-
-        // A field this Jira does not have on the defect (null) is not asked for; with neither, neither is the item.
-        var known = [['Severity', d.severity], ['Impact', d.impact]].filter(function (x) { return x[1] !== null && x[1] !== undefined; });
-        var unset = known.filter(function (x) { return x[1] === ''; }).map(function (x) { return x[0]; });
-        if (known.length) { add('fields', 'Severity and Impact set', !unset.length, 'Not set yet: ' + unset.join(', ') + '.'); }
         var fc = d.fcSet || [];
-        add('fc', 'Priority, Team and Epic Link left to FC', !fc.length,
+        add('fc', 'Priority and Team fields left empty for FC to set', !fc.length,
             'FC sets these, never a bug hunter. Set on this defect by its reporter: ' + fc.map(function (x) { return x.name; }).join(', ') +
-            '. Put Priority back, and leave Team and Epic Link empty.');
-
-        if (s) {
-            var left = C._reportLabels(d.labels, s.labels);
-            add('replabels', 'The bug report\'s labels taken off', !left.length,
-                'Still the bug report\'s: ' + left.join(', ') + '. Take them off; cloned and jira_escalated stay.', { fix: 'labels', left: left });
-        }
-        // Labels of its own, the suggested ones listed under the item (_suggestRow); a defect no label fits takes a Not needed.
-        add('labels', 'Add appropriate labels', C._ownLabels(d.labels, s && s.labels).length > 0,
-            'No labels of its own yet. Add the ones that fit the bug, so it is found with others like it.', { waivable: true, suggest: true });
-        // The attachments: the bug report's are copied to the defect, so its writer says they are good. A tick of theirs, for
-        // the attachments as they were: one added or taken off since asks for it again.
-        var sig = C._attSig(d.attachments), mark = (d.checked || {}).attachments, ticked = !!mark && mark.sig === sig, none = !(d.attachments || []).length;
-        add('attachments', 'Attachments checked', ticked, C._attWhy(d, s, mark), { tick: true, sig: sig, mark: ticked ? mark : null,
-            tickLabel: none ? 'None needed' : 'They are good', tickTitle: none ? 'This defect needs no attachments' : 'You checked them: they belong to this defect, and nothing is missing' });
+            '. Put Priority back, and leave Team empty.');
         if (s && s.exc && s.exc.length) {
             add('exc', 'Add exceptions related to the bug to your defect description', C._hasExc(d, s.exc),
                 'The bug report\'s logs hold ' + s.exc.length + ' exception' + (s.exc.length === 1 ? '' : 's') + ' (listed below). Add the ones related to the bug, each in an expand.',

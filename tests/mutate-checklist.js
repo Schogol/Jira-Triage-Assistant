@@ -16,7 +16,8 @@ const muts = [
     [CK, 'FC setting Priority is the reporter\'s too', 'prs.forEach(function (p) { if (p.by !== reporter) { fair = p.it.to; } else { mine = p; } });', 'prs.forEach(function (p) { if (p.by === reporter) { mine = p; } });'],
     [CK, 'a Team set when the defect was made is nobody\'s', "if (!last || last.by === reporter) { out.push({ name: x.name, at: last ? last.at : '' }); }", "if (last && last.by === reporter) { out.push({ name: x.name, at: last.at }); }"],
     [CK, 'a Team FC set is the reporter\'s', "if (!last || last.by === reporter) { out.push({ name: x.name, at: last ? last.at : '' }); }", "out.push({ name: x.name, at: last ? last.at : '' });"],
-    [CK, 'an epic parent is not an Epic Link', "            if (x.name === 'Epic Link' && !C._val(v) && f.parent && /epic/i.test(((f.parent.fields || {}).issuetype || {}).name || '')) { v = f.parent; }\n", ''],
+    [CK, 'the Epic Link judged again', "[{ name: 'Team', id: 'customfield_10001', field: /^team$/i }].forEach(function (x) {",
+        "[{ name: 'Team', id: 'customfield_10001', field: /^team$/i }, { name: 'Epic Link', id: 'customfield_104', field: /^epic link$/i }].forEach(function (x) {"],
     // ---- the unassign to put back ----
     [CK, 'anyone\'s unassign is put back', 'if (!last || !me || last.by !== me || last.item.to || !last.item.from) { return null; }', 'if (!last || !me || last.item.to || !last.item.from) { return null; }'],
     [CK, 'an old unassign is put back', "        if (isNaN(t) || now - t > C.REVERT_MS) { return null; }\n", ''],
@@ -144,7 +145,10 @@ const muts = [
     [CK, 'without the fields, the item all the same', "        if (known.length) { add('fields', 'Severity and Impact set', !unset.length, 'Not set yet: ' + unset.join(', ') + '.'); }",
         "        add('fields', 'Severity and Impact set', !unset.length, 'Not set yet: ' + unset.join(', ') + '.');"],
     [CK, 'a State asked for again', "var known = [['Severity', d.severity], ['Impact', d.impact]].filter(", "var known = [['Severity', d.severity], ['Impact', d.impact], ['State', '']].filter("],
-    [CK, 'what FC sets is never asked', "add('fc', 'Priority, Team and Epic Link left to FC', !fc.length,", "add('fc', 'Priority, Team and Epic Link left to FC', true,"],
+    [CK, 'what FC sets is never asked', "add('fc', 'Priority and Team fields left empty for FC to set', !fc.length,", "add('fc', 'Priority and Team fields left empty for FC to set', true,"],
+    [CK, 'the FC item named as before', "add('fc', 'Priority and Team fields left empty for FC to set',", "add('fc', 'Priority, Team and Epic Link left to FC',"],
+    [CK, 'the fields judged before the text', "        // In the order a hunter works through a converted defect: its text, its attachments and labels, then its fields.\n        var sameSum",
+        "        add('fc', 'Priority and Team fields left empty for FC to set', !(d.fcSet || []).length, '');\n        var sameSum"],
     [CK, 'no way to take the report\'s labels off', "'. Take them off; cloned and jira_escalated stay.', { fix: 'labels', left: left });", "'. Take them off; cloned and jira_escalated stay.', { left: left });"],
     [CK, 'the report\'s labels may be marked not needed again', "'. Take them off; cloned and jira_escalated stay.', { fix: 'labels', left: left });", "'. Take them off; cloned and jira_escalated stay.', { waivable: true, fix: 'labels', left: left });"],
     // ---- labels of its own ----
