@@ -1,6 +1,7 @@
 // Eval the real JiTA.leadduty.sched literal out of the file and drive one tick against stubs, to prove the
 // background scheduler freezes BOTH months and mirrors both locally - i.e. that neither ledger depends on a
 // Lead opening the overlay, and that a QC failure cannot cost the wiki half its refresh.
+require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync((process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js')), 'utf8').replace(/\r\n/g, '\n');
 const ss = src.indexOf('JiTA.leadduty.sched = {');
