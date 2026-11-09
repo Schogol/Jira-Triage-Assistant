@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.51.1
+// @version     3.51.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -14013,9 +14013,10 @@ JiTA.profile = {
  * got through some other way (a keyboard shortcut) is put back, once, saying why. A defect converted from an unassigned
  * bug report starts out unassigned, where FC picks defects up already: JiTA's Convert to Defect takes such a report first
  * (jitaConvertClick), and a defect that starts out unassigned all the same offers its reporter to take it until it is done.
- * Items the guide lets a defect go without (an exception when none of the report's belongs to the bug, labels when none
- * fits) take a "Not needed". That, and what was ticked off, is kept on the issue itself (issue property PROP), so Leads see
- * who marked what.
+ * The item the guide lets a defect go without (an exception, when none of the report's belongs to the bug) takes a "Not
+ * needed". That, and what was ticked off, is kept on the issue itself (issue property PROP), so Leads see who marked what.
+ * A label of the bug report taken off and put back since (a language label, for a bug in that language) was put back on
+ * purpose: it counts as taken off, and as one of the defect's own (_dropped).
  *
  * Under its labels item it suggests labels in use on other defects that the defect's text calls for (its summary, its
  * steps, its description), counted once a week.
@@ -14267,14 +14268,31 @@ JiTA.checklist = {
     },
 
     // ---- the items --------------------------------------------------------------------------------------------------
-    _reportLabels: function (labels, srcLabels) {
-        var C = JiTA.checklist;
-        return (labels || []).filter(function (l) { return C.KEEP_LABELS.indexOf(l) < 0 && (srcLabels || []).indexOf(l) >= 0; });
+    // The labels a change in the defect's history took off (on it before the change, not after), each once. A label of the
+    // bug report taken off and put back since was put back on purpose. Labels hold no spaces, so a change's lists split on
+    // them.
+    _dropped: function (hist) {
+        var out = [], words = function (s) { return String(s == null ? '' : s).split(/\s+/).filter(function (w) { return !!w; }); };
+        (hist || []).forEach(function (h) {
+            (h.items || []).forEach(function (it) {
+                if (it.field !== 'labels' && it.fieldId !== 'labels') { return; }
+                var after = words(it.toString);
+                words(it.fromString).forEach(function (l) { if (after.indexOf(l) < 0 && out.indexOf(l) < 0) { out.push(l); } });
+            });
+        });
+        return out;
     },
-    // The labels the defect has of its own: any but cloned, jira_escalated and the bug report's.
-    _ownLabels: function (labels, srcLabels) {
+    // The bug report's labels still on the defect: cloned and jira_escalated aside, and those taken off and put back since
+    // (`dropped`, from _dropped).
+    _reportLabels: function (labels, srcLabels, dropped) {
         var C = JiTA.checklist;
-        return (labels || []).filter(function (l) { return C.KEEP_LABELS.indexOf(l) < 0 && (srcLabels || []).indexOf(l) < 0; });
+        return (labels || []).filter(function (l) { return C.KEEP_LABELS.indexOf(l) < 0 && (srcLabels || []).indexOf(l) >= 0 && (dropped || []).indexOf(l) < 0; });
+    },
+    // The labels the defect has of its own: any but cloned, jira_escalated and the bug report's, a report label taken off and
+    // put back since counting as its own.
+    _ownLabels: function (labels, srcLabels, dropped) {
+        var C = JiTA.checklist;
+        return (labels || []).filter(function (l) { return C.KEEP_LABELS.indexOf(l) < 0 && ((srcLabels || []).indexOf(l) < 0 || (dropped || []).indexOf(l) >= 0); });
     },
 
     // ---- label suggestions ------------------------------------------------------------------------------------------
@@ -14370,7 +14388,7 @@ JiTA.checklist = {
             fps: JiTA.excfind._fps(desc), labels: f.labels || [], attachments: (f.attachment || []).map(function (a) { return { filename: a.filename, size: a.size }; }),
             severity: field(ids.severity), impact: field(ids.impact), eveServer: field(ids.server), eveBuild: field(ids.build), servers: servers || C.SERVER_NAMES,
             fcSet: C._fcSet(f, hist, ids, reporter), reporter: reporter, assignee: (f.assignee || {}).accountId || '', assigneeName: (f.assignee || {}).displayName || '',
-            cloned: (f.labels || []).indexOf('cloned') >= 0, src: src, waived: map(prop.w), checked: map(prop.ok)
+            cloned: (f.labels || []).indexOf('cloned') >= 0, dropped: C._dropped(hist), src: src, waived: map(prop.w), checked: map(prop.ok)
         };
     },
     // The attachments as a set: their names and sizes. A tick is for a set; one added or taken off since asks for it again.
@@ -14422,13 +14440,13 @@ JiTA.checklist = {
         add('attachments', 'Attachments checked', ticked, C._attWhy(d, s, mark), { tick: true, sig: sig, mark: ticked ? mark : null,
             tickLabel: none ? 'None needed' : 'They are good', tickTitle: none ? 'This defect needs no attachments' : 'You checked them: they belong to this defect, and nothing is missing' });
         if (s) {
-            var left = C._reportLabels(d.labels, s.labels);
+            var left = C._reportLabels(d.labels, s.labels, d.dropped);
             add('replabels', 'The bug report\'s labels taken off', !left.length,
-                'Still the bug report\'s: ' + left.join(', ') + '. Take them off; cloned and jira_escalated stay.', { fix: 'labels', left: left });
+                'Still the bug report\'s: ' + left.join(', ') + '. Take them off; cloned and jira_escalated stay, and one the bug needs may go back on afterwards.', { fix: 'labels', left: left });
         }
-        // Labels of its own, the suggested ones listed under the item (_suggestRow); a defect no label fits takes a Not needed.
-        add('labels', 'Add appropriate labels', C._ownLabels(d.labels, s && s.labels).length > 0,
-            'No labels of its own yet. Add the ones that fit the bug, so it is found with others like it.', { waivable: true, suggest: true });
+        // Labels of its own, the suggested ones listed under the item (_suggestRow). No Not needed: every defect gets some.
+        add('labels', 'Add appropriate labels', C._ownLabels(d.labels, s && s.labels, d.dropped).length > 0,
+            'No labels of its own yet. Add the ones that fit the bug, so it is found with others like it.', { suggest: true });
 
         // A field this Jira does not have on the defect (null) is not asked for; with neither, neither is the item.
         var known = [['Severity', d.severity], ['Impact', d.impact]].filter(function (x) { return x[1] !== null && x[1] !== undefined; });
@@ -24534,6 +24552,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.51.2', date: '2026-11-09', fixes: [
+            'Defect checklist: a bug report label taken off and put back, say a language label for a bug in that language, counts as taken off and as one of the defect\'s own.',
+            'Defect checklist: Add appropriate labels can no longer be marked Not needed.'
+        ] },
         { v: '3.51.1', date: '2026-11-08', fixes: [
             'Attach and Convert to Support Ticket (its Close bug report too) no longer reload the page: Jira shows the new status and links at once.',
             'Convert to Defect opens the new defect without reloading Jira, so it is there sooner.',

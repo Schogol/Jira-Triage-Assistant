@@ -364,6 +364,14 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('the report\'s labels left on the defect, cloned and jira_escalated aside', J(C._reportLabels(['PlatformWin', 'cloned', 'jira_escalated', 'Crash'], ['PlatformWin', 'cloned', 'jira_escalated'])) === J(['PlatformWin']));
     ok('the labels a defect has of its own: none of the report\'s, nor cloned and jira_escalated', J(C._ownLabels(['PlatformWin', 'cloned', 'jira_escalated', 'Crash', 'ui'], ['PlatformWin'])) === J(['Crash', 'ui']) &&
         J(C._ownLabels(['Crash'], undefined)) === J(['Crash']));
+    // a report label taken off and put back since: put back on purpose
+    const labelHist = (pairs) => pairs.map((p, n) => ({ author: { accountId: 'acc-rep' }, created: '2026-11-09T10:0' + n + ':00.000+0000', items: [{ field: 'labels', fromString: p[0], toString: p[1] }] }));
+    const offPutBack = labelHist([['PlatformWin Chinese cloned', 'cloned'], ['cloned', 'Chinese cloned'], ['Chinese cloned', 'cloned']]);
+    ok('the labels a change took off are read from the history, each once', J(C._dropped(offPutBack)) === J(['PlatformWin', 'Chinese']), J(C._dropped(offPutBack)));
+    ok('...a label added takes none off, and other fields\' changes count for nothing', J(C._dropped(hist)) === J([]) && J(C._dropped(undefined)) === J([]), J(C._dropped(hist)));
+    ok('...a change known by its field id counts too', J(C._dropped([{ items: [{ fieldId: 'labels', field: 'Labels', fromString: 'Russian', toString: '' }] }])) === J(['Russian']));
+    ok('a report label taken off and put back is not left on', J(C._reportLabels(['Chinese', 'PlatformWin', 'cloned'], ['Chinese', 'PlatformWin'], ['Chinese'])) === J(['PlatformWin']));
+    ok('...it counts as one of the defect\'s own', J(C._ownLabels(['Chinese', 'PlatformWin', 'cloned'], ['Chinese', 'PlatformWin'], ['Chinese'])) === J(['Chinese']));
     ok('an exception in the description by its signature', C._hasExc({ desc: '', fps: [{ sig: EXC.sig }] }, [EXC]));
     ok('...or by its crash site', C._hasExc({ desc: '', fps: [{ sig: "keyerror: 'x'|z.py:q>b.py:g>c.py:h" }] }, [EXC]));
     ok('...or by its message', C._hasExc({ desc: 'see KeyError: \'x\' raised while undocking, every time', fps: [] }, [EXC]));
@@ -499,16 +507,26 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('a defect outside EDR is fine: there is no project item', (() => { const i = finished(); i.key = 'EO-5'; return !byId(C.items(factsOf(i)), 'project'); })());
     // labels: the report's taken off, and some of its own added
     const labelsOf = (labels, src) => { const i = finished(); i.fields.labels = labels; return C.items(C._facts(i, [], src === undefined ? srcObj() : src)); };
-    ok('the report\'s labels left on can only be taken off: Not needed is not offered', (() => { const it = byId(labelsOf(['PlatformWin', 'Crash']), 'replabels'); return !it.ok && !it.waivable && /^Still the bug report's: PlatformWin\. Take them off; cloned and jira_escalated stay\.$/.test(it.why); })(),
+    ok('the report\'s labels left on can only be taken off: Not needed is not offered', (() => { const it = byId(labelsOf(['PlatformWin', 'Crash']), 'replabels'); return !it.ok && !it.waivable &&
+        /^Still the bug report's: PlatformWin\. Take them off; cloned and jira_escalated stay, and one the bug needs may go back on afterwards\.$/.test(it.why); })(),
         byId(labelsOf(['PlatformWin', 'Crash']), 'replabels').why);
-    ok('right after it: Add appropriate labels, with the suggestions under it', (() => {
+    ok('right after it: Add appropriate labels, with the suggestions under it and no Not needed', (() => {
         const its = labelsOf(['cloned']), ids = its.map((x) => x.id), it = byId(its, 'labels');
-        return ids.indexOf('labels') === ids.indexOf('replabels') + 1 && it.label === 'Add appropriate labels' && !it.ok && it.suggest && it.waivable &&
+        return ids.indexOf('labels') === ids.indexOf('replabels') + 1 && it.label === 'Add appropriate labels' && !it.ok && it.suggest && !it.waivable &&
             /^No labels of its own yet\. Add the ones that fit the bug/.test(it.why);
     })());
     ok('...done with one of its own', byId(labelsOf(['Undock', 'cloned']), 'labels').ok);
     ok('...the report\'s, cloned and jira_escalated are none of its own', !byId(labelsOf(['PlatformWin', 'Russian', 'cloned', 'jira_escalated']), 'labels').ok);
     ok('...and a defect from scratch has the item too, any label but cloned and jira_escalated counting', byId(labelsOf(['PlatformWin'], null), 'labels').ok && !byId(labelsOf(['cloned'], null), 'labels').ok);
+    const relabeled = (h) => { const i = finished(); i.fields.labels = ['Russian', 'cloned']; return C.items(C._facts(i, labelHist(h), srcObj())); };
+    ok('a report label taken off and put back since counts as taken off, and as one of its own', (() => {
+        const its = relabeled([['PlatformWin Russian cloned', 'cloned'], ['cloned', 'Russian cloned']]);
+        return byId(its, 'replabels').ok && byId(its, 'labels').ok;
+    })());
+    ok('...one never taken off is still the report\'s, and none of its own', (() => {
+        const its = relabeled([['PlatformWin Russian cloned', 'Russian cloned']]), it = byId(its, 'replabels');
+        return !it.ok && J(it.left) === J(['Russian']) && !byId(its, 'labels').ok;
+    })());
     // the exception item
     const withExc = (descParas, exc) => { const s = srcObj(); s.exc = exc; const i = finished(); if (descParas) { i.fields.description = adf(descParas, ['a', 'b']); } return byId(C.items(C._facts(i, [], s)), 'exc'); };
     ok('no exception item while the report\'s logs hold none', !withExc(null, []) && !withExc(null, undefined));
@@ -516,13 +534,13 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...saying to add the exceptions related to the bug', withExc(['x'], [EXC]).label === 'Add exceptions related to the bug to your defect description', withExc(['x'], [EXC]).label);
     ok('...done once the description holds one of them', withExc(['Tranquility 2945678', 'EXC[' + EXC.sig + ']'], [EXC]).ok);
     // waivers
-    const waived = (ids) => { const i = converted(); i.properties = { 'jita.checklist': { v: 1, w: ids } }; return C.items(factsOf(i)); };
-    ok('an item marked Not needed counts as done, and says who marked it', (() => { const it = byId(waived({ labels: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08' } }), 'labels'); return !it.ok && it.waived && it.by.name === 'Hunter'; })());
-    ok('...only items the guide lets a defect go without: a Not needed the report\'s labels had before counts no more', (() => {
-        const its = waived({ summary: { by: 'x' }, steps: { by: 'x' }, attachments: { by: 'x' }, replabels: { by: 'x' }, build: { by: 'x' } });
-        return ['summary', 'steps', 'attachments', 'replabels', 'build'].every((id) => !byId(its, id).waived);
+    const waived = (ids) => { const i = converted(); i.properties = { 'jita.checklist': { v: 1, w: ids } }; const s = srcObj(); s.exc = [EXC]; return C.items(factsOf(i, [], s)); };
+    ok('an item marked Not needed counts as done, and says who marked it', (() => { const it = byId(waived({ exc: { by: 'acc-rep', name: 'Hunter', at: '2026-11-08' } }), 'exc'); return !it.ok && it.waived && it.by.name === 'Hunter'; })());
+    ok('...only the item the guide lets a defect go without: a Not needed the report\'s labels or labels of its own had before counts no more', (() => {
+        const its = waived({ summary: { by: 'x' }, steps: { by: 'x' }, attachments: { by: 'x' }, replabels: { by: 'x' }, labels: { by: 'x' }, build: { by: 'x' } });
+        return ['summary', 'steps', 'attachments', 'replabels', 'labels', 'build'].every((id) => !byId(its, id).waived);
     })());
-    ok('...which are labels of its own and the exception', (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).filter((it) => it.waivable).map((it) => it.id).join(',') === 'labels,exc'; })(),
+    ok('...which is the exception alone', (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).filter((it) => it.waivable).map((it) => it.id).join(',') === 'exc'; })(),
         (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).filter((it) => it.waivable).map((it) => it.id).join(','); })());
 
     // ---- the state ----
@@ -624,9 +642,9 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     const actsOf = (id) => byCls(rows.filter((r) => r.attrs['data-item'] === id)[0], 'jcl-act').map((a) => a.textContent).join(',');
     ok('the reporter may take the report\'s labels off, but not mark them not needed', actsOf('replabels') === 'Take off', actsOf('replabels'));
     ok('...mark the player\'s EVE Server and EVE Build as correct, copy a template for the steps', actsOf('build') === 'They are correct' && actsOf('steps') === 'Copy', actsOf('build') + ' / ' + actsOf('steps'));
-    ok('...and mark labels of its own not needed, the suggested ones listed right under that item', (() => {
+    ok('...but not mark labels of its own not needed, the suggested ones listed right under that item', (() => {
         const list = byCls(body, 'jcl-items')[0], kids = list.kids, at = kids.findIndex((k) => k.attrs && k.attrs['data-item'] === 'labels');
-        return actsOf('labels') === 'Not needed' && at >= 0 && kids[at + 1] && kids[at + 1].hasClass('jcl-sugg') && byCls(body, 'jcl-sugg').length === 1;
+        return actsOf('labels') === '' && at >= 0 && kids[at + 1] && kids[at + 1].hasClass('jcl-sugg') && byCls(body, 'jcl-sugg').length === 1;
     })(), actsOf('labels'));
     copied = []; copiedHtml = [];
     byCls(rows.filter((r) => r.attrs['data-item'] === 'steps')[0], 'jcl-act')[0].fire('click');
