@@ -1,7 +1,7 @@
 // overlay-check.js - overlays are not torn down by stray input (v3.38.8). A drag that starts in the box and is let
 // go on the backdrop used to close the overlay (and discard a half-edited canned response); Esc in a text field
 // closed it too; and Esc on a popover (the funnel's filter menu, the hide menu) closed the popover AND, bubbling on,
-// the whole overlay under it - Triage mode included. Evals the real JiTA.menu.close / _openOverlay / _isTextField
+// the whole overlay under it. Evals the real JiTA.menu.close / _openOverlay / _isTextField
 // and JiTA.ui._popDismiss against a fake DOM.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');

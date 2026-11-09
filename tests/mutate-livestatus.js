@@ -20,10 +20,6 @@ const muts = [
     [H, 'Attach links a report already attached in Jira', "if (Object.prototype.hasOwnProperty.call(st, reportKey) && !JiTA.ui._isOpenStatus(st[reportKey])) {", 'if (false) {'],
     [H, 'a collapsed row never hands on', "            if (done) { done(); }\n        }, 320);", '        }, 320);'],
     [H, '_ebrRemoved resolves before the worker dropped its indexes', "        return JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });", "        JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); }); return Promise.resolve();"],
-    [H, 'the re-verify no longer says closed', "return { ok: false, closed: true, reason: 'already '", "return { ok: false, reason: 'already '"],
-    [H, 'triage leaves a closed match in the local copy', '                if (v.closed) { T._dropClosed(ebrKey, key, v.reason); }\n', ''],
-    [H, 'triage keeps the stale rankings', "            T._cache = {};   // any defect's cached ranking may list it\n", ''],
-    [H, 'triage redraws under another defect', "if (!T._open || T._busy || !T._queue[T._idx] || T._queue[T._idx].key !== key) { return; }", 'if (!T._open || T._busy) { return; }'],
     [H, 'a defect\'s Matching bug reports are never checked', '                        JiTA.ui._checkReportRows(function () { return !stale(); });   // one attached or closed in Jira itself leaves now, not at the next sync\n', ''],
     [H, 'a report\'s Similar open reports are never checked', '                        JiTA.ui._checkReportRows(function () { return JiTA.ui.currentKey === key && JiTA.ui.simReportsMode; });\n', '']
 ];

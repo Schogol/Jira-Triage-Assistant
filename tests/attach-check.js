@@ -1,10 +1,8 @@
 // attach-check.js - attach targets (v3.38.4). An attach must only ever link a bug report onto a defect, and only the
-// issue on screen. Three ways that went wrong: Triage kept rankings cached under the "reports by this reporter"
-// view after the view was switched off on the way to the defect queue, so back on the bug-report queue a digit
-// attached a report to another report; the side panel painted a slow answer for the previous issue under the
+// issue on screen. Two ways that went wrong: the side panel painted a slow answer for the previous issue under the
 // next one, and its Attach then acted on the issue on screen; and JiTA.link.attachDuplicate accepted any pair.
-// Evals the real attachDuplicate, JiTA.triage (_switchMode, _armAttach) and JiTA.ui (render, renderReports,
-// _markDupButton, _attachReportButton) against stubs, holding each asynchronous step open to move on mid-way.
+// Evals the real attachDuplicate and JiTA.ui (render, renderReports, _markDupButton, _attachReportButton) against
+// stubs, holding each asynchronous step open to move on mid-way.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const END = '\n    },';
@@ -14,8 +12,6 @@ const slice = (head) => {
     const a = src.indexOf(END, s), b = src.indexOf('\n    }\n};', s);   // a member, or the last one in its object
     return (b >= 0 && b < a) ? src.slice(s, b + '\n    }'.length) + ',' : src.slice(s, a + END.length);
 };
-const ts = src.indexOf('JiTA.triage = {'), te = src.indexOf('\n};', ts) + 3;
-if (ts < 0 || te < 3) { throw new Error('could not slice JiTA.triage'); }
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
@@ -85,8 +81,6 @@ Object.assign(JiTA.ui, {
     _liveStatus: (keys) => Promise.resolve(keys.reduce((o, k) => { o[k] = 'Open'; return o; }, {})),   // livestatus-check.js covers the real one
     _isOpenStatus: (s) => !!s && !/closed|attached/i.test(s), _checkReportRows: () => Promise.resolve([])
 });
-eval('JiTA.triage = ' + src.slice(ts, te - 1) + ';');
-const T = JiTA.triage;
 
 (async () => {
     // ================= the backstop =================
@@ -106,49 +100,6 @@ const T = JiTA.triage;
     const allowed = [];
     for (const d of ['EDR-2', 'EO-3', 'PLAT-4']) { r = await tryAttach('EBR-1', d); allowed.push(!r.err && r.sent > 0); }
     ok('a report onto an EDR, EO or PLAT defect goes ahead', allowed.every(Boolean), allowed.join(','));
-
-    // ================= Triage =================
-    Object.assign(T, {
-        _disarm() {}, _closeJqlEditor() {}, _flushPos() {}, _syncModeUi() {}, _renderLegend() {}, _renderList() {},
-        _render() {}, _prefetch() {}, _renderShell() {}, _fetchQueue: () => Promise.resolve(), _trySeekResume: () => true,
-        _lastKey: () => 'k'
-    });
-    let msgs = [], armed = [];
-    T._setMsg = (m) => { msgs.push(m); };
-    const realArm = T._arm;
-    T._arm = (a) => { armed.push(a); };
-
-    T._mode = 'ebr'; T._busy = false; T._stash = {};
-    JiTA.ui.reporterMode = true;
-    T._cache = { 'EBR-100': 'reporter list' };
-    T._switchMode('defect');
-    ok('the move to the defect queue with a report view on drops every cached ranking', Object.keys(T._cache).length === 0, JSON.stringify(T._cache));
-    T._switchMode('ebr');
-    T._mode = 'ebr'; JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false;
-    T._cache = { 'EBR-100': 'ranked matches' };
-    T._switchMode('defect');
-    ok('...with no view on, the rankings are still good and are kept', T._cache['EBR-100'] === 'ranked matches');
-    T._switchMode('ebr');
-
-    T._open = true; T._queue = [{ key: 'EBR-100' }]; T._idx = 0;
-    T._shownKey = 'EBR-100';   // its list is on screen, as _render leaves it (v3.38.27)
-    T._cache = { 'EBR-100': Promise.resolve({ view: 'reporter', results: [{ key: 'EBR-200' }] }) };
-    msgs = []; armed = [];
-    T._armAttach(1, '1');
-    await flush();
-    ok('a digit on a list cached under the reporter view arms nothing', armed.length === 0, JSON.stringify(armed));
-    ok('...and says the rows are bug reports', msgs.some((m) => /These rows are bug reports/.test(m)), msgs.join(' | '));
-    T._cache = { 'EBR-100': Promise.resolve({ view: 'simreports', results: [{ key: 'EBR-200' }] }) };
-    armed = [];
-    T._armAttach(1, '1');
-    await flush();
-    ok('...nor one cached under the similar reports view', armed.length === 0);
-    T._cache = { 'EBR-100': Promise.resolve({ view: null, results: [{ key: 'EDR-9', pct: 80 }] }) };
-    armed = [];
-    T._armAttach(1, '1');
-    await flush();
-    ok('a digit on the ranked defect matches arms the attach', armed.length === 1 && armed[0].matchKey === 'EDR-9', JSON.stringify(armed));
-    T._arm = realArm;
 
     // ================= the panel =================
     // Each step of a render is held open; `at` names the step during which the user moves on (or flips the view).

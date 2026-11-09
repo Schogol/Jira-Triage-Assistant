@@ -3,7 +3,7 @@
 const fs = require('fs');
 const { execSync } = require('child_process');
 const src = fs.readFileSync((process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js')), 'utf8').replace(/\r\n/g, '\n');
-const TR = 'trend-check.js', FM = 'filtermenu-check.js', TG = 'triage-check.js', TK = 'trendkey-check.js';
+const TR = 'trend-check.js', FM = 'filtermenu-check.js', TK = 'trendkey-check.js';
 const muts = [
     // ---- counting ----
     [TR, 'window edge inclusive', 'if (age < win) { d.recent.push(f.created); }', 'if (age <= win) { d.recent.push(f.created); }'],
@@ -51,12 +51,6 @@ const muts = [
     [FM, 'ranking filters shown under trending', "if (!(views && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode))) {", "if (!(views && (JiTA.ui.reporterMode || JiTA.ui.simReportsMode))) {"],
     [FM, 'funnel dark under trending', "(JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode)) { return true; }", "(JiTA.ui.reporterMode || JiTA.ui.simReportsMode)) { return true; }"],
     [FM, 'no trending switch', "            menu.appendChild(tb);\n", ''],
-    // ---- triage ----
-    [TG, 'triage never sees the trending view', "        if (JiTA.ui.trendMode) { return 'trending'; }\n", ''],
-    [TG, 'digits inert under trending', "if (tv === 'reporter' || tv === 'simreports') {", "if (tv) {"],
-    [TG, 'defect queue keeps trending', "            JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false; JiTA.ui.trendMode = false;\n        }", "            JiTA.ui.reporterMode = false; JiTA.ui.simReportsMode = false;\n        }"],
-    [TG, 'trending view ranked instead', "            if (view === 'trending') {\n                var tterms", "            if (false) {\n                var tterms"],
-    [TG, 'filter box ignored under trending', "results: tr.rows.filter(function (r) { return JiTA.trend.matches(r, tterms); }) };", "results: tr.rows };"],
     // ---- the note names its unit ----
     [TR, 'note mislabels a steady defect', "{ up: 'rising', steady: 'steady', down: 'falling' }[r.trend]); }", "{ up: 'rising', steady: 'rising', down: 'falling' }[r.trend]); }"],
     [TR, 'note brings the baseline back', "{ up: 'rising', steady: 'steady', down: 'falling' }[r.trend]); }", "{ up: 'rising', steady: 'steady', down: 'falling' }[r.trend] + ', usually about ' + T.usual(r.base)); }"],
@@ -74,12 +68,6 @@ const muts = [
     [TK, 'launcher switches the panel under an overlay', "if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) {", "if (!JiTA.ui.toggleTrend()) {"],
     [TK, 'launcher never falls back to the list', "if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) { JiTA.trend.openView(); }", "if (!JiTA.menu.isOpen()) { JiTA.ui.toggleTrend(); }"],
     [TK, 'launcher still always opens the list', "if (JiTA.menu.isOpen() || !JiTA.ui.toggleTrend()) { JiTA.trend.openView(); }", "JiTA.trend.openView();"],
-    // ---- double-tap '#' in triage ----
-    [TG, 'triage # not wired', "        if (k === '#') { T._hashKey(); return; }", ''],
-    [TG, 'triage # acts on one tap', "        if (now - T._lastHash >= 400) { T._lastHash = now; return; }   // the first tap only arms it, as on the page\n", ''],
-    [TG, 'triage # on the defect queue', "        if (T._mode === 'defect') { T._setMsg('Trending defects go with the bug-report queue", "        if (false) { T._setMsg('Trending defects go with the bug-report queue"],
-    [TG, 'triage # leaves the report views on', "        if (U.trendMode) { U.reporterMode = false; U.simReportsMode = false; }   // mutually exclusive with the report views\n        try {", "        try {"],
-    [TG, 'triage # never re-ranks', "        try { U._closeFilterMenu(); } catch (e) { /* ignore */ }\n        T._onFilterChange();", "        try { U._closeFilterMenu(); } catch (e) { /* ignore */ }"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

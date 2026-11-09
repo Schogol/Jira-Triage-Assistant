@@ -1,8 +1,7 @@
 // ranklog-check.js - ranking and the "Defects in log" panel (v3.38.24). Evals the real code against stubs:
 //  - a late ranking result redraws only when it is a Hybrid upgrade (a late Keyword fallback looped the panel), and
-//    goes to whoever asked; Triage drops its cached Keyword ranking and redraws the report on screen
-//  - the panel cycles only through occurrences on screen, and lives inside Triage mode's attachment viewer when the
-//    log is parsed there
+//    goes to whoever asked
+//  - the panel cycles only through occurrences on screen, and a second render reuses it
 //  - the tab and worker fingerprint copies agree, end a block at EXCEPTION END and strip every log-column prefix
 //  - a sync write that lands while the tab builds its own index leaves that index dirty
 const fs = require('fs');
@@ -56,32 +55,6 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
     JiTA.rank.suggestEbrBest('t', 'EDR-1', null, [], cb2);
     ok('suggestBest and suggestEbrBest hand the upgrade hook on', picked[0] === cb1 && picked[1] === cb2);
 
-    // ================= Triage =================
-    let rendered = 0, hook = null;
-    const T = { _mode: 'ebr', _view: () => 'defects', _cache: {}, _open: true, _queue: [{ key: 'EBR-7', created: '2026-10-01' }], _idx: 0, _render: () => { rendered++; } };
-    global.JiTA = {
-        triage: T,
-        db: { getDefect: () => Promise.resolve({ key: 'EBR-7', summary: 's' }) },
-        util: { effectiveText: () => 'text' },
-        ui: { _filterTerms: () => [], modeOverride: null },
-        rank: { suggestBest: (text, key, created, mode, terms, up) => { hook = up; return Promise.resolve({ mode: 'Keyword', results: [] }); } },
-        repexc: { soon: () => Promise.resolve(null), forReport: () => Promise.resolve({}) }   // excboost-check.js covers the boost
-    };
-    const tStart = src.indexOf('\nJiTA.triage = {');
-    Object.assign(T, eval('({' + cut('    _resolve: function (item) {', '\n    },\n', tStart) + '\n    }})'));
-    const r1 = await T._resolve(T._queue[0]);
-    ok('Triage ranks a report and caches it (control)', r1.mode === 'Keyword' && !!T._cache['EBR-7'] && typeof hook === 'function');
-    hook({ mode: 'Hybrid' });
-    ok('a late Hybrid result drops Triage\'s cached Keyword ranking and redraws the report on screen', !T._cache['EBR-7'] && rendered === 1, rendered + ' / ' + !!T._cache['EBR-7']);
-    await T._resolve(T._queue[0]);
-    const again = hook;
-    T._idx = 1; T._queue.push({ key: 'EBR-8' });
-    again({ mode: 'Hybrid' });
-    ok('...for a report not on screen it only drops the cache', !T._cache['EBR-7'] && rendered === 1, String(rendered));
-    T._cache['EBR-7'] = Promise.resolve('newer');
-    again({ mode: 'Hybrid' });
-    ok('...and leaves a newer ranking of the same report alone', !!T._cache['EBR-7'] && rendered === 1);
-
     // ================= the "Defects in log" panel =================
     function El(tag) {
         const e = { tag: tag, children: [], parentNode: null, listeners: {}, style: {}, attrs: {}, id: '', className: '', textContent: '', innerHTML: '' };
@@ -90,12 +63,9 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
         e.addEventListener = (t, f) => { (e.listeners[t] = e.listeners[t] || []).push(f); };
         e.classList = { add() {}, remove() {}, toggle: () => false, contains: () => false };
         e.setAttribute = (k, v) => { e.attrs[k] = v; };
-        e.closest = (s) => { for (let n = e; n; n = n.parentNode) { if (s === '#jt-viewer' && n.id === 'jt-viewer') { return n; } } return null; };
         return e;
     }
-    const body = El('body'), viewer = El('div'), table = El('table');
-    viewer.id = 'jt-viewer';
-    body.appendChild(viewer);
+    const body = El('body'), table = El('table');
     let toasts = [];
     const find = (root, id) => { if (root.id === id) { return root; } for (const c of root.children) { const f = find(c, id); if (f) { return f; } } return null; };
     global.document = { body: body, createElement: (t) => El(t), getElementById: (id) => (id === 'tableContent' ? (table.parentNode ? table : null) : find(body, id)) };
@@ -111,7 +81,7 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
     body.appendChild(table);
     JiTA.logsig.renderPanel({ 'EDR-1': { count: 3, rows: rows, raw: 'KeyError' } });
     const panel = find(body, 'jita-logmatch-panel');
-    ok('on the page the panel is put on the page (control)', !!panel && panel.parentNode === body);
+    ok('the panel is put on the page (control)', !!panel && panel.parentNode === body);
     const li = find(panel, 'jita-logmatch-list').children[0];
     const click = () => li.listeners.click.forEach((f) => f({ stopPropagation() {} }));
     click(); click(); click();
@@ -119,10 +89,9 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
     rows[1].offsetParent = null; rows[2].offsetParent = null;
     click();
     ok('...and says so when the filters hide every one', toasts.length === 1 && /hidden/.test(toasts[0]), toasts.join());
-    body.removeChild(table); viewer.appendChild(table);   // the same log, now parsed in Triage mode's viewer
     JiTA.logsig.renderPanel({ 'EDR-1': { count: 1, rows: [row(true)], raw: 'KeyError' } });
-    const p2 = find(body, 'jita-logmatch-panel');
-    ok('a log parsed in Triage mode\'s viewer gets its panel inside the viewer', !!p2 && p2.parentNode === viewer && body.children.indexOf(p2) === -1, p2 && p2.parentNode && (p2.parentNode.id || p2.parentNode.tag));
+    const panels = body.children.filter((c) => c.id === 'jita-logmatch-panel');
+    ok('a second render fills the same panel, never a second one', panels.length === 1 && panels[0] === panel, panels.length + ' panels');
 
     // ================= the fingerprint, in both copies =================
     global.JiTA = { logsig: { MIN_FRAMES: 2, CRASH_FRAMES: 2 } };

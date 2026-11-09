@@ -2,7 +2,7 @@
 //  - suggestBest still demotes a defect fixed long before the report and notes the gap, in Keyword and in Hybrid,
 //    but no longer flags it for greying
 //  - the panel row greys only a closed report from the reporter's list, never a demoted defect
-//  - both reporter lists (panel and Triage mode) flag their closed reports, and both stylesheets dim that flag
+//  - the panel's reporter list flags its closed reports, and its stylesheet dims that flag
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cut = (from, to) => {
@@ -49,7 +49,7 @@ JiTA.repexc = { FACTOR: { exact: 1.3, site: 1.15 }, PCT_MAX: 99 };   // excboost
 const line = (head) => { const s = src.indexOf(head); return src.slice(s, src.indexOf('\n', s) + 1); };
 const object = (head) => { const s = src.indexOf(head); return src.slice(s, src.indexOf(' },\n', s) + 4); };   // a property over several lines, ending " },"
 Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + object('    STATUS_CAT: {') + member('    _statusCat: function (r) {') +
-    member('    _meta: function (r, withDate) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + member('    _reporterRow: function (r) {') + '})'));
+    member('    _meta: function (r) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + member('    _reporterRow: function (r) {') + '})'));
 
 const REPORT = '2026-09-01T00:00:00.000Z';
 const fixedLongAgo = () => ({ key: 'EDR-1', status: 'Closed', resolution: 'Fixed', resolutiondate: '2024-09-01T00:00:00.000Z', summary: 'old fix' });
@@ -90,13 +90,10 @@ const flagged = (r) => ['stale', 'closed'].filter((k) => k in r);
     row = JiTA.ui._reporterRow({ key: 'EBR-6', status: 'Open', closed: false, summary: 'their open report' });
     ok('...an open one is not (control)', Object.keys(li(row).classes).length === 0);
 
-    // ================= the reporter lists and the stylesheets =================
+    // ================= the reporter list and the stylesheet =================
     ok('the panel\'s reporter list flags its closed reports',
         src.indexOf('                        closed: JiTA.util.isClosedStatus(status)   // grey out closed reports so the open ones stand out') >= 0);
-    ok('Triage mode\'s reporter list flags its closed reports',
-        src.indexOf('                        closed: JiTA.util.isClosedStatus(status)   // grey the closed ones so the open ones stand out') >= 0);
-    ok('Triage mode greys a row on that flag alone', src.indexOf("                    if (r.closed) { $li.addClass('jt-closed'); }") >= 0);
-    ok('both stylesheets dim the closed flag', src.indexOf('#jita-sd-list li.jita-sd-closed { opacity: .6; }') >= 0 && src.indexOf("'.jita-triage-view .jt-list li.jt-closed { opacity: .55; }'") >= 0);
+    ok('the stylesheet dims the closed flag', src.indexOf('#jita-sd-list li.jita-sd-closed { opacity: .6; }') >= 0);
     ok('no stale-grey class is left anywhere', !/jita-sd-stale|jt-stale/.test(src));
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'no-grey checks passed.'));

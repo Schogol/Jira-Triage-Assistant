@@ -11,11 +11,6 @@ const muts = [
     [H, 'any pair can be attached', "if (!/^EBR-\\d+$/.test(String(ebrKey || '')) || !/^(EDR|EO|PLAT)-\\d+$/.test(String(otherKey || ''))) {", 'if (false) {'],
     [H, 'the transitioned issue is not checked', "!/^EBR-\\d+$/.test(String(ebrKey || '')) || ", ''],
     [H, 'the target is not checked', " || !/^(EDR|EO|PLAT)-\\d+$/.test(String(otherKey || ''))", ''],
-    // ---- Triage ----
-    [H, 'rankings cached under a report view survive the switch', 'if (JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode) { T._cache = {}; }', ''],
-    [H, 'good rankings are dropped on every switch', 'if (JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode) { T._cache = {}; }', 'T._cache = {};'],
-    [H, 'a digit arms an attach on a list of reports', "if (r.view === 'reporter' || r.view === 'simreports') { T._setMsg(", 'if (false) { T._setMsg('],
-    [H, 'only the reporter view is refused', "if (r.view === 'reporter' || r.view === 'simreports') {", "if (r.view === 'reporter') {"],
     // ---- render(): each step's check ----
     [H, 'render never goes stale', 'var stale = function () { return JiTA.ui.currentKey !== key || JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode; };',
         'var stale = function () { return false; };'],

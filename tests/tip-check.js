@@ -55,10 +55,10 @@ const lp = place(LEFTPANEL);
 ok('a panel at the left edge flips the card to its right', lp.left === LEFTPANEL.right + 10, JSON.stringify(lp));
 ok('and never overlaps the row', !overlaps(lp, LEFTPANEL));
 
-// ---- the triage match cards (a ~580px column in a full-screen sheet) still fit beside ----
-const TRIAGE = { left: 780, right: 1360, top: 400, bottom: 460 };
-const t = place(TRIAGE);
-ok('a triage match row keeps the card beside it', !overlaps(t, TRIAGE), JSON.stringify(t));
+// ---- a mid-width column (~580px, in the middle of the screen) still fits beside ----
+const MID = { left: 780, right: 1360, top: 400, bottom: 460 };
+const t = place(MID);
+ok('a row in a mid-width column keeps the card beside it', !overlaps(t, MID), JSON.stringify(t));
 
 // ---- a tall card on a wide row: it is clamped on screen, and the roomier side is chosen ----
 const tall = place(LD, 700);

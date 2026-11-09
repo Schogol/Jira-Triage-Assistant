@@ -985,11 +985,11 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     // ================= the launcher =================
     let opened = 0, keydown = null, open = null;
     global.document = { addEventListener: (ev, fn) => { if (ev === 'keydown') { keydown = fn; } }, querySelector: (q) => (q === '#jita-menu.jita-excfind-view' ? open : null) };
-    global.JiTA = { triage: { _open: false, open() {} }, excfind: { openView: () => { opened++; } }, trend: { openView() {} }, dupfind: { openView() {} }, menu: { isOpen: () => false }, ui: { toggleTrend: () => true } };
+    global.JiTA = { excfind: { openView: () => { opened++; } }, trend: { openView() {} }, dupfind: { openView() {} }, menu: { isOpen: () => false }, ui: { toggleTrend: () => true } };
     let t = 9000000;
     const realNow = Date.now;
     Date.now = () => t;
-    (0, eval)('(function () {\n' + cut('        var lastLt = 0, lastGt = 0, lastHash = 0, lastPlus = 0;', '\n    })();') + '\n})();');
+    (0, eval)('(function () {\n' + cut('        var lastGt = 0, lastHash = 0, lastPlus = 0;', '\n    })();') + '\n})();');
     const key = (k, extra) => keydown(Object.assign({ key: k, target: { tagName: 'DIV' } }, extra || {}));
     key('+');
     ok('one + does nothing', opened === 0);

@@ -55,7 +55,6 @@ const muts = [
     [N, 'every read changes what counts', "if (!quiet && before !== N._common().join('\\n')) { N._changed(); }", 'if (!quiet) { N._changed(); }', EXCN],
     [N, 'what counts changing leaves its generation', '        N.gen++;\n', '', EXCN],
     [N, 'the boost\'s answers kept', '        try { JiTA.repexc.reset(); } catch (e) { /* ignore */ }\n', '', EXCN],
-    [N, 'the Triage Assistant\'s answers kept', '        try { if (JiTA.triage) { JiTA.triage._cache = {}; } } catch (e) { /* ignore */ }\n', '', EXCN],
     [N, 'the parsed log\'s marks kept', '        try { JiTA.logsig.rematch(); } catch (e) { /* ignore */ }\n', '', EXCN],
     [N, 'the exception search not told', '        try { if (X && X._st) { X._st.tsig = null; X._retarget(X._st); } } catch (e) { /* ignore */ }\n', '', EXCN],
     [N, 'nothing drawn again', '        try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }\n', '', EXCN],

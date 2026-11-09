@@ -1,8 +1,8 @@
 // livestatus-check.js - a bug report attached or closed directly in Jira leaves the open-report lists at once (v3.40.2).
 // The lists of open reports (a defect's Matching bug reports, a report's Similar open reports) come from the local copy,
 // which hears of such a report only at the next sync, up to 30 minutes later. Evals the real JiTA.ui._liveStatus /
-// _checkReportRows / _takeOffList / _collapseRow, the Attach refusal in _attachReportButton, JiTA.sync._ebrRemoved and
-// the triage drop (_verifyActionable / _dropClosed) against stubs.
+// _checkReportRows / _takeOffList / _collapseRow, the Attach refusal in _attachReportButton and JiTA.sync._ebrRemoved
+// against stubs.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const member = (head) => {
@@ -54,7 +54,7 @@ $.ajax = (o) => {
 let toasts = [], deleted = [], removed = [], renders = 0, collapsed = [], removedD = null, deleteFails = {};
 global.gmSet = () => {};
 global.confirm = () => true;
-global.JiTA = { HOST: 'https://jira', sched: { tabId: 't1' }, rank: {}, link: {}, ui: {}, db: {}, sync: {}, util: {}, triage: {} };
+global.JiTA = { HOST: 'https://jira', sched: { tabId: 't1' }, rank: {}, link: {}, ui: {}, db: {}, sync: {}, util: {} };
 Object.assign(JiTA.util, eval('({' + member('    isClosedStatus: function (status) {') + '})'));
 JiTA.sync._apiPost = (path, body) => { posts.push(body); return postAnswer(body); };
 JiTA.db.deleteDefects = (keys) => { deleted.push(keys.join()); return keys.some((k) => deleteFails[k]) ? Promise.reject(new Error('QuotaExceededError')) : Promise.resolve(); };
@@ -208,38 +208,8 @@ Date.now = () => clock;
     let remote = JiTA.sync._ebrRemoved(['EBR-1'], true);
     ok('...a removal heard from another tab resolves at once', remote && typeof remote.then === 'function');
 
-    // ================= Triage mode =================
-    Object.assign(JiTA.sync, { _ebrRemoved: (keys) => { removed.push(keys.join()); return Promise.resolve(); } });
-    const T = JiTA.triage;
-    Object.assign(T, eval('({' + member('    _verifyActionable: function (key) {') + member('    _dropClosed: function (ebrKey, key, reason) {') + '})'));
-    ajaxScript = { 'EBR-5': { ok: true, data: { fields: { status: { name: 'Attached' }, assignee: null } } },
-        'EBR-6': { ok: true, data: { fields: { status: { name: 'Open' }, assignee: { accountId: 'bob', displayName: 'Bob' } } } } };
-    let v = await T._verifyActionable('EBR-5');
-    ok('the re-verify marks a report attached in Jira as closed', v.ok === false && v.closed === true && v.reason === 'already Attached', JSON.stringify(v));
-    v = await T._verifyActionable('EBR-6');
-    ok('...but not one that is merely assigned to someone else', v.ok === false && !v.closed, JSON.stringify(v));
-
-    let tRenders = 0, msgs = [];
-    Object.assign(T, { _mode: 'defect', _open: true, _busy: false, _queue: [{ key: 'EDR-1' }], _idx: 0, _cache: { 'EDR-1': 1 },
-        _render() { tRenders++; }, _prefetch() {}, _setMsg(m) { msgs.push(m); } });
-    deleted = []; removed = [];
-    await T._dropClosed('EBR-5', 'EDR-1', 'already Attached');
-    ok('triage: a match attached in Jira leaves the local copy', deleted.join('|') === 'EBR-5' && removed.join('|') === 'EBR-5', deleted.join('|'));
-    ok('...the defect\'s matches are ranked again without it', Object.keys(T._cache).length === 0 && tRenders === 1, tRenders);
-    ok('...and the message says so', /EBR-5 is already Attached in Jira - taken off the list/.test(msgs[msgs.length - 1] || ''), msgs.join(' | '));
-
-    T._cache = { 'EDR-2': 1 }; tRenders = 0;
-    T._queue = [{ key: 'EDR-2' }];
-    await T._dropClosed('EBR-5', 'EDR-1', 'already Attached');
-    ok('...moved on to another defect meanwhile: the cache goes, but nothing is redrawn under it', Object.keys(T._cache).length === 0 && tRenders === 0, tRenders);
-    T._mode = 'ebr'; T._cache = { 'EBR-4': 1 }; T._queue = [{ key: 'EBR-4' }]; tRenders = 0; deleted = [];
-    await T._dropClosed('EBR-4', 'EBR-4', 'already Closed');
-    ok('in the bug-report queue the closed report itself leaves the local copy, and its message stays', deleted.join('|') === 'EBR-4' && tRenders === 0 && Object.keys(T._cache).length === 1, deleted.join('|') + ' ' + tRenders);
-
     // ================= wiring =================
-    const exec = member('    _exec: function (type, a) {');
-    ok('a closed report found by the re-verify is dropped', exec.indexOf('if (v.closed) { T._dropClosed(ebrKey, key, v.reason); }') >= 0);
-    const rr = member('    renderReports: function (key, background) {'), sr = member('    renderSimilarReports: function (key, background) {'), ap = member('    _appendNextReport: function (defectKey, shown) {');
+    const rr =member('    renderReports: function (key, background) {'), sr = member('    renderSimilarReports: function (key, background) {'), ap = member('    _appendNextReport: function (defectKey, shown) {');
     ok('a defect\'s Matching bug reports are checked once drawn', rr.indexOf('JiTA.ui._checkReportRows(function () { return !stale(); });') > rr.indexOf('$list.append(JiTA.ui._reportItem(results[i]));'));
     ok('a report\'s Similar open reports are checked once drawn', sr.indexOf('JiTA.ui._checkReportRows(function () { return JiTA.ui.currentKey === key && JiTA.ui.simReportsMode; });') > sr.indexOf('$list.append(JiTA.ui._simReportItem(results[i]));'));
     ok('a report slid in after an attach is checked too', ap.indexOf('JiTA.ui._checkReportRows(function () { return JiTA.ui.currentKey === defectKey; });') > ap.indexOf('_slideInRow('));

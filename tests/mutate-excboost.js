@@ -116,10 +116,6 @@ const muts = [
     [X, 'a fingerprinting error hangs the scan', '                        } catch (e) { /* the matching below still runs */ }', '                        } catch (e) { throw e; }'],
     [X, 'a new reading leaves the ranking\'s copy', 'var stored = function () { JiTA.repexc.forget(issue.key); return rec; };', 'var stored = function () { return rec; };'],
     [X, 'a finished profile is not told', '            if (s.done) { JiTA.repexc.profileReady(key); }', '            if (s.done) { }'],
-    [X, 'triage\'s report matches get no boost', 'JiTA.ui.modeOverride, terms, upgrade, boost);', 'JiTA.ui.modeOverride, terms, upgrade);'],
-    [X, 'triage\'s defect matches get no boost', 'terms, upgrade, JiTA.repexc.forDefect(key)); }', 'terms, upgrade); }'],
-    [X, 'triage never ranks a late boost', 'JiTA.repexc.soon(JiTA.repexc.forReport(key), upgrade)', 'JiTA.repexc.soon(JiTA.repexc.forReport(key), null)'],
-    [X, 'triage rows have no footer, and so no mark', "                    JiTA.ui._foot(r, { score: view === 'trending' }).appendTo($li);", ''],
 
     // ---- the background reader ----
     [X, 'the reader off by default', '    on: function () { return gmGet(JiTA.logread.KEY, true) !== false; },', '    on: function () { return !!gmGet(JiTA.logread.KEY, false); },'],

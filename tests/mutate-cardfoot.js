@@ -53,8 +53,8 @@ const muts = [
     [CF, 'the meta line back on the card', '        JiTA.ui._foot(r, opts).appendTo($li);', "        $('<div class=\"jita-sd-meta\"></div>').text(meta).appendTo($li);\n        JiTA.ui._foot(r, opts).appendTo($li);", ROW],
     [CF, 'no footer on the card', '        JiTA.ui._foot(r, opts).appendTo($li);\n', '', ROW],
     [CF, 'the hover preview without the meta line', "$li.on('mouseenter', function () { JiTA.ui._showTip(r, this, meta); });", "$li.on('mouseenter', function () { JiTA.ui._showTip(r, this, ''); });", ROW],
-    [CF, 'the meta line without the stale note', 'var bits = [r.status, r.resolution, r.staleNote, r.note]', 'var bits = [r.status, r.resolution, r.note]'],
-    [CF, 'the meta line with the date always', "var when = withDate ? JiTA.util.fmtDate(r.created) : '';", 'var when = JiTA.util.fmtDate(r.created);'],
+    [CF, 'the meta line without the stale note', 'return [r.status, r.resolution, r.staleNote, r.note]', 'return [r.status, r.resolution, r.note]'],
+    [CF, 'the meta line with the date', 'return [r.status, r.resolution, r.staleNote, r.note]', 'return [r.status, r.resolution, r.staleNote, r.note, JiTA.util.fmtDate(r.created)]'],
     [CF, 'the key off the top line', ".attr('target', target).text(r.key).appendTo($top);", ".attr('target', target).text(r.key).appendTo($li);", ROW],
     [CF, 'a % on reporter rows', "        else if (!(opts && opts.noScore)) { $('<span class=\"jita-sd-score\"></span>')", "        else { $('<span class=\"jita-sd-score\"></span>')", ROW],
     // ---- the stylesheets ----
@@ -71,10 +71,7 @@ const muts = [
     [CF, 'the sidebar\'s open dot in no theme green', '#jita-side-group .jita-foot-st.todo .jita-foot-dot, #jita-side-group .jita-mark.exact', '#jita-side-group .jita-mark.exact'],
     [CF, 'the sidebar\'s in-progress dot blue again', 'var(--ds-icon-accent-yellow, #b38600)', 'var(--ds-icon-information, #1d7afc)'],
     [CF, 'the sidebar\'s closed dot in no theme red', '\n#jita-side-group .jita-foot-st.done .jita-foot-dot { color: var(--ds-icon-danger, #c9372c); }\\', ''],
-    [CF, 'a checking Attach link blue again', '\n#jita-side-group .jita-sd-link.jita-sd-linking { color: var(--ds-text-subtlest, #626f86); cursor: default; text-decoration: none; }\\', ''],
-    [CF, 'triage cards no flex column', "background: #22272b; display: flex; flex-direction: column; }' +", "background: #22272b; }' +"],
-    [CF, 'triage numbers off the top line', "$('<span class=\"jt-n\"></span>').text(n).appendTo($top);", "$('<span class=\"jt-n\"></span>').text(n).appendTo($li);"],
-    [CF, 'triage\'s reporter view without its dates', "var meta = JiTA.ui._meta(r, view === 'reporter');", 'var meta = JiTA.ui._meta(r, false);']
+    [CF, 'a checking Attach link blue again', '\n#jita-side-group .jita-sd-link.jita-sd-linking { color: var(--ds-text-subtlest, #626f86); cursor: default; text-decoration: none; }\\', '']
 ];
 // Where an anchor is looked for: the whole file, or the one part named.
 function within(fn) {

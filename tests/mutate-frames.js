@@ -23,7 +23,6 @@ const muts = [
     [NG, 'the Lead duties pill shows in a frame', 'if (JITA_IS_SUBFRAME || !L.isLead()) { return false; }', 'if (!L.isLead()) { return false; }'],
     [NG, 'the daily reminder opens in a frame', 'if (R._nagged || JITA_IS_SUBFRAME || !L.isLead()) { return; }', 'if (R._nagged || !L.isLead()) { return; }'],
     [CL, 'the What\'s new pill shows in a frame', 'return !JITA_IS_SUBFRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return JiTA.changelog.unseenFeatures().length > 0;'],
-    [FR, 'Triage mode opens in a frame', 'if (JITA_IS_SUBFRAME || T._open) { return; }', 'if (T._open) { return; }'],
     [FR, 'the duplicate finder opens in a frame', 'var D = JiTA.dupfind;\n        if (JITA_IS_SUBFRAME) { return; }', 'var D = JiTA.dupfind;'],
     [FR, 'the shared worker starts in a frame', 'if (JiTA.worker._started || JITA_IS_SUBFRAME) { return; }', 'if (JiTA.worker._started) { return; }']
 ];

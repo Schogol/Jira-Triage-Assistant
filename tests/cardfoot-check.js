@@ -1,7 +1,7 @@
 // cardfoot-check.js - the cards' footer (v3.47.0): one row of symbols (unicode text CSS colours, never emoji) and the date
 // at its right, in place of the status line, the exception line and the Created line. Evals the real card helpers,
 // JiTA.ui._row, the exception mark, the trend badge and the dates against a recording jQuery stand-in, and checks the
-// stylesheets that put the footer at the bottom of the card in both themes and in Triage mode.
+// stylesheets that put the footer at the bottom of the card in both themes.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const once = (head, from) => {
@@ -39,7 +39,7 @@ Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, r
     src.slice(once('    fmtDate: function (iso) {'), src.indexOf('\n    }\n};', once('    fmtDate: function (iso) {'))) + '\n    }' + '})'));   // fmtDate and shortDate, the last members
 const UI_AT = once('\nJiTA.ui = {');
 Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + object('    STATUS_CAT: {') + member('    _statusCat: function (r) {') +
-    member('    _meta: function (r, withDate) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + '})'));
+    member('    _meta: function (r) {') + member('    _foot: function (r, opts) {') + member('    _row: function (r, target, action, opts) {') + '})'));
 JiTA.ui._showTip = (r, el, meta) => { tips.push(meta); };
 JiTA.ui._hideTip = () => {};
 const T_AT = once('\nJiTA.trend = {');
@@ -124,8 +124,9 @@ const tli = U._row({ key: 'EDR-9', count: 9, status: 'Open', trend: 'up', base: 
 ok('a trending row\'s top line shows its count, its footer no ▲', tli.kids[0].kids[1].text() === '9 in 14d' && !find(tli, 'jita-hot').length && find(tli, 'jita-mark-up').length === 1);
 const rli = U._row({ key: 'EBR-5', status: 'Closed', closed: true, created: '2026-01-02T00:00:00.000+0000' }, '_self', () => El('<span></span>'), { noScore: true });
 ok('a reporter-list row: no %, greyed when closed, the date in its footer', !find(rli, 'jita-sd-score').length && rli.has('jita-sd-closed') && find(rli, 'jita-foot-date').length === 1);
-ok('_meta adds the created date only when asked (Triage mode\'s reporter view)', U._meta({ status: 'Open', created: '2026-01-02T00:00:00.000+0000' }, true) === 'Open · 02 Jan 2026' &&
-    U._meta({ status: 'Open', created: '2026-01-02T00:00:00.000+0000' }, false) === 'Open');
+ok('_meta is the status, the resolution, the stale note and the trend note, the date left to the footer', U._meta({ status: 'Closed', resolution: 'Fixed', staleNote: 'fixed 2y before report',
+    note: 'rising', created: '2026-01-02T00:00:00.000+0000' }) === 'Closed · Fixed · fixed 2y before report · rising', U._meta({ status: 'Closed', resolution: 'Fixed', staleNote: 'fixed 2y before report',
+    note: 'rising', created: '2026-01-02T00:00:00.000+0000' }));
 
 // ================= the stylesheets =================
 const css = src.slice(once("    css: '\\\n#jita-sd-panel"), once('    injectCss: function () {'));
@@ -141,12 +142,6 @@ ok('...in the sidebar in Jira\'s own green, yellow and red', /\n#jita-side-group
     /\n#jita-side-group \.jita-foot-st\.prog \.jita-foot-dot \{ color: var\(--ds-icon-accent-yellow,/.test(css) && /\n#jita-side-group \.jita-foot-st\.done \.jita-foot-dot \{ color: var\(--ds-icon-danger,/.test(css) &&
     !/\.jita-foot-st\.(todo|done) \.jita-foot-dot, #jita-side-group \.jita-mark\.site/.test(css));
 ok('...and an Attach still checking is grey, not link blue', /\n#jita-side-group \.jita-sd-link\.jita-sd-linking \{ color: var\(--ds-text-subtlest/.test(css));
-const tcss = src.slice(once("'.jita-triage-view .jt-list { list-style: none;"), once("'.jita-triage-view .jt-empty {"));
-ok('Triage mode: its cards are flex columns too, with the panel\'s footer', /\.jt-list li \{[^']*display: flex; flex-direction: column; \}'/.test(tcss) && /\.jt-list \.jita-foot \{ padding-top: 5px; \}'/.test(tcss) &&
-    !/jt-mmeta|jt-mexc/.test(src));
-const trow = src.slice(once("                    var $top = $('<div class=\"jt-mtop\"></div>').appendTo($li);"), once('                    // Feature C hover preview, same as the panel rows:'));
-ok('...the number, key and % on its top line, then the summary and the footer', /\.text\(n\)\.appendTo\(\$top\)/.test(trow) && /\.text\(r\.key\)\.appendTo\(\$top\)/.test(trow) &&
-    /var meta = JiTA\.ui\._meta\(r, view === 'reporter'\);/.test(trow) && /JiTA\.ui\._foot\(r, \{ score: view === 'trending' \}\)\.appendTo\(\$li\);/.test(trow));
 
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'card footer checks passed.'));
 process.exit(fail ? 1 : 0);

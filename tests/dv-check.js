@@ -52,7 +52,6 @@ global.document = {
 let menuOpen = false, viewerOpen = false;
 global.JiTA = {
     HOST: 'https://example.invalid',
-    triage: { DEFAULT_JQL: 'project = EBR AND status = Open' },
     menu: { isOpen: () => menuOpen },
     ui: { _attachmentViewerOpen: () => viewerOpen }
 };
@@ -159,7 +158,9 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     section('4. persisted state');
     reset();
     let st = D._load();
-    eq([st.mode, st.jql], ['jql', 'project = EBR AND status = Open ORDER BY created DESC'], 'first run starts on the Triage backlog query, newest first');
+    const BACKLOG = 'project = EBR AND issuetype = "EVE Bug Report" AND status = Open AND assignee in (currentUser(), EMPTY) AND labels not in ("Vanguard", "Launcher") AND component not in (Launcher)';
+    eq(D.DEFAULT_JQL, BACKLOG, 'the default query is the bug hunters\' backlog filter');
+    eq([st.mode, st.jql], ['jql', BACKLOG + ' ORDER BY created DESC'], 'first run starts on the backlog query, newest first');
     eq(st.basic, D._emptyBasic(), 'first run has empty basic filters');
     reset();
     store[D.STATE_KEY] = { mode: 'weird', jql: 'a = 1', basic: { text: 5, project: 'x' } };
@@ -167,7 +168,7 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     eq([st.mode, st.basic.text, st.basic.project, st.basic.status], ['jql', '', [], []], 'a damaged stored state is repaired, not trusted');
     reset();
     store[D.STATE_KEY] = { jql: 42 };
-    eq(D._load().jql, 'project = EBR AND status = Open ORDER BY created DESC', 'a state without a string query falls back to the default');
+    eq(D._load().jql, BACKLOG + ' ORDER BY created DESC', 'a state without a string query falls back to the default');
 
     // ---- 5. mode switching ----------------------------------------------------------------------------------------
     section('5. Basic / JQL switching');
