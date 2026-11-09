@@ -19,7 +19,9 @@ const DIR = __dirname, REPO = path.join(DIR, '..');
 // Measured on 16 cores with 8 workers: members alone took 195 s, and so did the run; excfind took 55 s, and all suites
 // together about 450 s of work. Split 4 and 2 (shards of about 50 s and 27 s) the run takes 60 s, what 8 workers need for
 // the whole load, so more shards would not shorten it. With 4 workers, as CI's runner has: 193 s before, 106 s after.
-const SHARDS = { 'mutate-members.js': 4, 'mutate-excfind.js': 2 };
+// Then the Defect checklist came (v3.51.0): its suite alone took 228 s of the 680 s of work, and the run took as long.
+// Split 4 like members, its shards take about 57 s each and the run 89 s, close to the 87 s 8 workers need for the work.
+const SHARDS = { 'mutate-members.js': 4, 'mutate-checklist.js': 4, 'mutate-excfind.js': 2 };
 const runners = fs.readdirSync(DIR).filter((f) => /^mutate-.*\.js$/.test(f));
 const needsRepo = (f) => /ci-static\.js|'git'/.test(fs.readFileSync(path.join(DIR, f), 'utf8'));
 const jobsOf = (f) => {
