@@ -435,7 +435,10 @@ const muts = [
     [MB, 'a note written but not read back is lost', '}, function () { return M.setNote(r.acc, note, r.pageNote); })', '}, function () { return null; })', EDITNOTE],
     [MB, 'a failed note write loses the note', "return tabOnly('the ECAID - Team Members page was not changed (' + (e && e.message || e) + ')');", 'throw e;', EDITNOTE],
     [MB, 'an empty note invites a note, not a public one', ": 'Add a public note')", ": 'Add a note')"],
-    [MB, 'an empty note does not say who sees it', ": 'Add a public note on this member: every Lead sees it, and the ECAID Member Productivity page shows it')", ": 'Add a note')"],
+    [MB, 'an empty note does not say who sees it', ": 'Add a public note on this member. Everyone can read it: it is published on the ECAID Member Productivity page')", ": 'Add a note')"],
+    [MB, 'an empty public note says only Leads see it', 'Everyone can read it: it is published on the ECAID Member Productivity page\')', 'Every Lead sees it\')'],
+    [MB, 'the public note dialog says only Leads see it', "hint: 'Everyone can read it: it is published on the ECAID Member Productivity page.'", "hint: 'Shared with every Lead.'"],
+    [MB, 'the public note header says only Leads see them', "attr('title', 'Everyone can read these:", "attr('title', 'Every Lead sees these:"],
     [MB, 'a note from the page does not say so', "var whence = !r.noteSet ? '\\n\\nFrom the ECAID - Team Members page' :", "var whence = !r.noteSet ? '' :"],
     [MB, 'a note set in the tab does not give the page\'s', "(r.pageNote ? ('\\nThe ECAID - Team Members page has: ' + r.pageNote) : '')", "''"],
     // ---- internal notes (v3.49.0): Leads only, kept apart, never on a page ----
@@ -479,8 +482,14 @@ function within(fn) {
     const e = src.indexOf(fn[1], s + fn[0].length);
     return e < 0 ? null : [s, e];
 }
+// JITA_BREAK_SHARD=k/n (run-breakages.js splits this suite over several workers) makes only the breakages whose index
+// % n === k, each with its anchor check; without it, every breakage.
+const SHARD = /^(\d+)\/(\d+)$/.exec(process.env.JITA_BREAK_SHARD || '0/1'), K = SHARD ? +SHARD[1] : 0, N = SHARD ? +SHARD[2] : 0;
+if (!SHARD || N < 1 || K >= N) { console.log('JITA_BREAK_SHARD must be k/n with 0 <= k < n, not ' + process.env.JITA_BREAK_SHARD); process.exit(2); }
+if (process.env.JITA_BREAK_SHARD) { console.log('shard ' + K + '/' + N + ': ' + muts.filter((m, i) => i % N === K).length + ' of ' + muts.length + ' breakages'); }
 let allRed = true;
-muts.forEach(([h, name, a, b, fn]) => {
+muts.forEach(([h, name, a, b, fn], i) => {
+    if (i % N !== K) { return; }
     const at = within(fn), part = at ? src.slice(at[0], at[1]) : '';
     if (!at || part.split(a).length !== 2) { console.log('ANCHOR ' + (at ? part.split(a).length - 1 : 'no part') + 'x: ' + name); allRed = false; return; }
     fs.writeFileSync('mutmb.js', src.slice(0, at[0]) + part.replace(a, () => b) + src.slice(at[1]));
