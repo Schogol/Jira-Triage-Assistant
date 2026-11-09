@@ -3,6 +3,7 @@
 // refusing an unassign while items are open, and the writes it offers. Evals the real JiTA.checklist (and JiTA.util's
 // toPlainText, JiTA.logsig's _crashOf) against stubbed Jira requests, a stubbed log reader, and a fake jQuery and DOM big
 // enough for the card.
+require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cs = src.indexOf('\nJiTA.checklist = {'), ce = src.indexOf('\n    _noop: null\n};', cs);
