@@ -19,6 +19,10 @@ jobs:
     name: checks
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # layout-check.js measures the views in a real headless Chrome, which ubuntu-latest has preinstalled. Without a
+      # browser it would skip; here it fails instead, and so does mutate-layout.js.
+      JITA_LAYOUT_REQUIRED: '1'
     steps:
       - uses: actions/checkout@v5
         with:
