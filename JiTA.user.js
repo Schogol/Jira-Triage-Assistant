@@ -13984,19 +13984,20 @@ JiTA.profile = {
  * ISD guide's rules for a defect, each judged on the defect as Jira has it now. A converted defect is also compared with
  * the bug report it was made from (of the reports linked to it, the one linked as its clone, else the one whose summary
  * was the defect's first summary): a summary, a description, reproduction steps or labels still the report's do not count
- * as done. Its attachments (the report's are copied to it) count once its writer says they are good.
+ * as done. Its attachments (the report's are copied to it) count once its writer says they are good, and so do its EVE
+ * Server and EVE Build as long as they are still the player's (the conversion copies them too).
  *
  * A finished defect is handed to FC by unassigning it, so while an item is open nobody can unassign it, Leads included: the
  * card's own button waits for the last item, "Unassigned" picked in Jira's assignee field is refused, and an unassign that
  * got through some other way (a keyboard shortcut) is put back, once, saying why. A defect converted from an unassigned
  * bug report starts out unassigned, where FC picks defects up already: JiTA's Convert to Defect takes such a report first
  * (jitaConvertClick), and a defect that starts out unassigned all the same offers its reporter to take it until it is done.
- * Items the guide lets a defect go without (an exception when none of the report's belongs to the bug, a report label the
- * defect needs, a project other than EDR) take a "Not needed". That, and the attachments ticked off, is kept on the issue
- * itself (issue property PROP), so Leads see who marked what.
+ * Items the guide lets a defect go without (an exception when none of the report's belongs to the bug, labels when none
+ * fits) take a "Not needed". That, and what was ticked off, is kept on the issue itself (issue property PROP), so Leads see
+ * who marked what.
  *
- * It also suggests labels in use on other defects that the defect's text calls for (its summary, its steps, its
- * description), counted once a week.
+ * Under its labels item it suggests labels in use on other defects that the defect's text calls for (its summary, its
+ * steps, its description), counted once a week.
  *
  * What it writes to Jira, each asked first: the report's labels taken off, a suggested label added, an exception from the
  * report's logs added to the description in an expand, the defect taken by its reporter, and the unassign; and the marks,
@@ -14009,7 +14010,8 @@ JiTA.checklist = {
     GROUP_ID: 'jita-checklist-group',
     COLLAPSE_KEY: 'jitaChecklistCollapsed',
     // The issue property: { v: 1, w: { item id: { by, name, at } }, ok: { item id: { by, name, at, sig } } }. `w` holds the
-    // items marked Not needed; `ok` the ones a person ticked off, the attachments checked.
+    // items marked Not needed; `ok` the ones a person ticked off (the attachments; the EVE Server and EVE Build still the
+    // player's), each for the values it had then (`sig`).
     PROP: 'jita.checklist',
     KEEP_LABELS: ['cloned', 'jira_escalated'],    // the guide: these stay when the report's labels go
     // The server names looked for at the top of a description come from the EVE Server field's own options, as Jira
@@ -14167,15 +14169,16 @@ JiTA.checklist = {
         if (same.length) { return same[0].key; }
         return (pool.length === 1 && (f.labels || []).indexOf('cloned') >= 0) ? pool[0].key : null;
     },
-    // The bug report, as the items compare with it. `stepsId` is the steps field of the defect's Jira, when it has one: the
-    // report's steps are read from it, else from its description.
-    _readSource: function (key, stepsId) {
-        var C = JiTA.checklist;
-        return JiTA.leadduty._get('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=summary,description,labels,attachment' + (stepsId ? ',' + stepsId : '')).then(function (iss) {
-            var f = (iss && iss.fields) || {};
+    // The bug report, as the items compare with it. `ids` are the defect's custom fields (_ids): the report's steps are read
+    // from its steps field, when this Jira has one, else from its description; and its EVE Server and EVE Build, the
+    // player's, which the conversion copies to the defect.
+    _readSource: function (key, ids) {
+        var C = JiTA.checklist, more = [ids && ids.steps, ids && ids.server, ids && ids.build].filter(function (x) { return !!x; });
+        return JiTA.leadduty._get('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=summary,description,labels,attachment' + (more.length ? ',' + more.join(',') : '')).then(function (iss) {
+            var f = (iss && iss.fields) || {}, field = function (id) { return id ? C._val(f[id]) : ''; };
             return {
                 key: key, summary: f.summary || '', desc: JiTA.util.toPlainText(f.description), labels: f.labels || [],
-                steps: C._steps(f.description, stepsId ? f[stepsId] : null),
+                steps: C._steps(f.description, ids && ids.steps ? f[ids.steps] : null), eveServer: field(ids && ids.server), eveBuild: field(ids && ids.build),
                 attachments: (f.attachment || []).map(function (a) { return { filename: a.filename, size: a.size, content: a.content }; })
             };
         });
@@ -14249,9 +14252,10 @@ JiTA.checklist = {
         var C = JiTA.checklist;
         return (labels || []).filter(function (l) { return C.KEEP_LABELS.indexOf(l) < 0 && (srcLabels || []).indexOf(l) >= 0; });
     },
-    _lowerLabels: function (labels) {
+    // The labels the defect has of its own: any but cloned, jira_escalated and the bug report's.
+    _ownLabels: function (labels, srcLabels) {
         var C = JiTA.checklist;
-        return (labels || []).filter(function (l) { var c = String(l).charAt(0); return C.KEEP_LABELS.indexOf(l) < 0 && c !== c.toUpperCase(); });
+        return (labels || []).filter(function (l) { return C.KEEP_LABELS.indexOf(l) < 0 && (srcLabels || []).indexOf(l) < 0; });
     },
 
     // ---- label suggestions ------------------------------------------------------------------------------------------
@@ -14363,8 +14367,9 @@ JiTA.checklist = {
         return again + 'Check they belong to this defect: ' + list.join(', ') + '. Add logs from LogLite, and screenshots where they help.';
     },
 
-    // The items, judged on `d` (_facts): [{ id, label, ok, why, waivable, waived, by, copy, fix }]. `why` says what is
-    // missing, for the hover. Pure: the checks feed it what they like.
+    // The items, judged on `d` (_facts): [{ id, label, ok, why, waivable, waived, by, copy, fix, tick, suggest }]. `why` says
+    // what is missing, for the hover; an item with `tick` is one the reporter ticks off by hand (tickLabel, tickTitle), for
+    // the values it has now (`sig`); `suggest` lists the suggested labels under it. Pure: the checks feed it what they like.
     items: function (d) {
         var C = JiTA.checklist, out = [], s = d.src;
         function add(id, label, ok, why, extra) {
@@ -14374,28 +14379,34 @@ JiTA.checklist = {
             if (it.waived) { it.by = d.waived[id]; }
             out.push(it);
         }
-        add('project', 'In the EDR project', /^EDR-\d+$/.test(d.key || ''), 'Bug hunters write their defects in EDR (EVE Defect Reports).', { waivable: true });
-
         var sameSum = !!s && C._squash(d.summary) === C._squash(s.summary);
-        add('summary', 'Summary says what, where and when', !sameSum && !!C._squash(d.summary),
-            sameSum ? 'Still the bug report\'s summary. Say what the bug is, where it happens, and in which circumstances.' : 'No summary yet.');
+        add('summary', 'Summary rewritten', !sameSum && !!C._squash(d.summary), 'Give your defect a fitting title.');
 
         if (s) {
             add('desc', 'Description rewritten', !!C._squash(d.desc) && C._squash(d.desc) !== C._squash(s.desc),
                 'Still the bug report\'s description. Describe the bug in full, and take out what the player wrote that it does not need.');
         }
         // Where it was tested: in the EVE Server and EVE Build fields, or, the old way, at the top of the description, its
-        // server named as the EVE Server field's options name them (d.servers).
+        // server named as the EVE Server field's options name them (d.servers). The conversion copies the bug report's
+        // fields, the player's: as long as both still are the report's, they count only once the reporter ticks them off as
+        // right (tested there too), for the values they are.
         var names = d.servers || C.SERVER_NAMES, top = String(d.desc || '').slice(0, C.TOP_CHARS), srv = C._serverRe(names).test(top), bld = C.BUILD_RE.test(top);
         var hasFields = (d.eveServer !== null && d.eveServer !== undefined) || (d.eveBuild !== null && d.eveBuild !== undefined);
         var empty = [['EVE Server', d.eveServer], ['EVE Build', d.eveBuild]].filter(function (x) { return !x[1]; }).map(function (x) { return x[0]; });
         var built = s && s.build ? ' The bug report\'s log was written by build ' + s.build + '.' : '';
-        if (hasFields) {
-            add('build', 'EVE Server and EVE Build set', !empty.length || (srv && bld),
-                'Fill in ' + empty.join(' and ') + ' with where you tested it (the old way, the server and build number at the top of the description, does as well).' + built);
+        var BUILD_LBL = 'EVE Server and EVE Build set to where you reproduced it';
+        if (hasFields && empty.length) {
+            add('build', BUILD_LBL, srv && bld,
+                'Fill in ' + empty.join(' and ') + ' with the server and build you reproduced it on (the old way, the server and build number at the top of the description, does as well).' + built);
+        } else if (hasFields) {
+            var asReport = !!s && C._squash(d.eveServer) === C._squash(s.eveServer) && C._squash(d.eveBuild) === C._squash(s.eveBuild);
+            var bsig = C._squash(d.eveServer) + '|' + C._squash(d.eveBuild), bmark = (d.checked || {}).build, bticked = asReport && !!bmark && bmark.sig === bsig;
+            add('build', BUILD_LBL, !asReport || bticked,
+                'Still the bug report\'s, where the player was: ' + d.eveServer + ', build ' + d.eveBuild + '. Set them to the server and build you reproduced it on, or mark them as correct if you reproduced it there.' + built,
+                asReport ? { tick: true, sig: bsig, mark: bticked ? bmark : null, tickLabel: 'They are correct', tickTitle: 'You reproduced it on this server and build too' } : null);
         } else {
-            add('build', 'Server and build number at the top', srv && bld,
-                (!srv && !bld ? 'Neither the server nor the build number you tested on is at the top of the description.'
+            add('build', 'Server and build you reproduced it on, at the top', srv && bld,
+                (!srv && !bld ? 'Neither the server nor the build number you reproduced it on is at the top of the description.'
                     : (!srv ? 'No server name (' + names.join(', ') + ') at the top of the description.'
                         : 'No build number at the top of the description. It is at the top of "About EVE" in the Esc menu.')) + built,
                 { copy: C.BUILD_TEXT, html: C.BUILD_HTML });
@@ -14420,21 +14431,22 @@ JiTA.checklist = {
             'FC sets these, never a bug hunter. Set on this defect by its reporter: ' + fc.map(function (x) { return x.name; }).join(', ') +
             '. Put Priority back, and leave Team and Epic Link empty.');
 
-        var lower = C._lowerLabels(d.labels);
-        add('caps', 'Labels start with a capital letter', !lower.length, 'Not starting with a capital letter: ' + lower.join(', ') + '. (cloned and jira_escalated stay as they are.)');
         if (s) {
             var left = C._reportLabels(d.labels, s.labels);
             add('replabels', 'The bug report\'s labels taken off', !left.length,
-                'Still the bug report\'s: ' + left.join(', ') + '. Take off the ones the defect does not need; cloned and jira_escalated stay.',
-                { waivable: true, fix: 'labels', left: left });
+                'Still the bug report\'s: ' + left.join(', ') + '. Take them off; cloned and jira_escalated stay.', { fix: 'labels', left: left });
         }
+        // Labels of its own, the suggested ones listed under the item (_suggestRow); a defect no label fits takes a Not needed.
+        add('labels', 'Add appropriate labels', C._ownLabels(d.labels, s && s.labels).length > 0,
+            'No labels of its own yet. Add the ones that fit the bug, so it is found with others like it.', { waivable: true, suggest: true });
         // The attachments: the bug report's are copied to the defect, so its writer says they are good. A tick of theirs, for
         // the attachments as they were: one added or taken off since asks for it again.
-        var sig = C._attSig(d.attachments), mark = (d.checked || {}).attachments, ticked = !!mark && mark.sig === sig;
-        add('attachments', 'Attachments checked', ticked, C._attWhy(d, s, mark), { tick: true, sig: sig, none: !(d.attachments || []).length, mark: ticked ? mark : null });
+        var sig = C._attSig(d.attachments), mark = (d.checked || {}).attachments, ticked = !!mark && mark.sig === sig, none = !(d.attachments || []).length;
+        add('attachments', 'Attachments checked', ticked, C._attWhy(d, s, mark), { tick: true, sig: sig, mark: ticked ? mark : null,
+            tickLabel: none ? 'None needed' : 'They are good', tickTitle: none ? 'This defect needs no attachments' : 'You checked them: they belong to this defect, and nothing is missing' });
         if (s && s.exc && s.exc.length) {
-            add('exc', 'The exception behind the bug in the description', C._hasExc(d, s.exc),
-                'The bug report\'s logs hold ' + s.exc.length + ' exception' + (s.exc.length === 1 ? '' : 's') + ' (listed below). Add the one behind this bug, in an expand.',
+            add('exc', 'Add exceptions related to the bug to your defect description', C._hasExc(d, s.exc),
+                'The bug report\'s logs hold ' + s.exc.length + ' exception' + (s.exc.length === 1 ? '' : 's') + ' (listed below). Add the ones related to the bug, each in an expand.',
                 { waivable: true });
         }
         return out;
@@ -14490,7 +14502,7 @@ JiTA.checklist = {
     // The defect read in full, judged: first on itself and its bug report, then again once the report's logs are read.
     _judgeAll: function (key, issue, hist, sees, me, onState) {
         var C = JiTA.checklist, f = issue.fields || {}, srcKey = C._source(f, hist), ids = C._ids(issue.names, f);
-        return Promise.all([srcKey ? C._readSource(srcKey, ids.steps).then(null, function () { return null; }) : null, C._serverNames(key, ids.server)]).then(function (r) {
+        return Promise.all([srcKey ? C._readSource(srcKey, ids).then(null, function () { return null; }) : null, C._serverNames(key, ids.server)]).then(function (r) {
             var src = r[0], d = C._facts(issue, hist, src, r[1]), s = C._judge(d, sees, me, hist);
             onState(s);
             if (!src) { return s; }
@@ -14854,8 +14866,10 @@ JiTA.checklist = {
         $('<a class="jcl-again" href="#" title="Check again">↻</a>').on('click', function (e) { e.preventDefault(); C.refresh(key); }).appendTo($h);
         C._srcLine(s).appendTo($b);
         var $list = $('<div class="jcl-items"></div>').appendTo($b);
-        s.items.forEach(function (it) { C._itemRow(key, s, it, mine).appendTo($list); });
-        if (mine) { C._suggestRow(key, s).appendTo($b); }
+        s.items.forEach(function (it) {
+            C._itemRow(key, s, it, mine).appendTo($list);
+            if (mine && it.suggest) { C._suggestRow(key, s).appendTo($list); }   // under "Add appropriate labels"
+        });
         if (s.src && s.src.failed) { $('<div class="jcl-line"></div>').text('The bug report\'s logs could not be read.').appendTo($b); }
         if (s.src && s.src.exc && s.src.exc.length) { C._excList(key, s, mine).appendTo($b); }
         C._more(s).appendTo($b);
@@ -14906,21 +14920,18 @@ JiTA.checklist = {
             act(it.waived ? 'Needed after all' : 'Not needed', it.waived ? 'Count this item again' : 'This defect goes without it, as the guide allows: the item counts as done, and Leads see it was skipped',
                 function () { C._waive(key, it.id, !it.waived); });
         }
-        // An item the reporter ticks off by hand (the attachments): ticked for them as they are now, and taken back.
+        // An item the reporter ticks off by hand (the attachments; the EVE Server and EVE Build still the player's): ticked for
+        // the values it has now, and taken back.
         if (mine && it.tick) {
             if (it.ok) { act('Undo', 'Check them again', function () { C._tick(key, it.id, it.sig, false); }); }
-            else {
-                act(it.none ? 'None needed' : 'They are good', it.none ? 'This defect needs no attachments' : 'You checked them: they belong to this defect, and nothing is missing',
-                    function () { C._tick(key, it.id, it.sig, true); });
-            }
+            else { act(it.tickLabel, it.tickTitle, function () { C._tick(key, it.id, it.sig, true); }); }
         }
         return $r;
     },
-    // Labels in use on other defects that the defect's text calls for, each added with a click (asked first). Filled in
-    // once the labels in use are counted; gone when there is nothing to suggest.
+    // Labels in use on other defects that the defect's text calls for, each added with a click (asked first), indented
+    // under the labels item. Filled in once the labels in use are counted; gone when there is nothing to suggest.
     _suggestRow: function (key, s) {
         var C = JiTA.checklist, $w = $('<div class="jcl-sugg"></div>');
-        $('<span class="jcl-slbl"></span>').text('Suggested labels:').appendTo($w);
         var $l = $('<span class="jcl-chips"></span>').text('counting the labels in use…').appendTo($w);
         C._labelCounts().then(function (counts) {
             var sug = C.suggest(s.d, counts);
@@ -15028,8 +15039,7 @@ JiTA.checklist = {
                 '#jita-cl a.jcl-act, #jita-cl .jcl-open, #jita-cl .jcl-src a, #jita-cl .jcl-edef a { color: var(--ds-link, #0c66e4); text-decoration: none; cursor: pointer; }' +
                 '#jita-cl a.jcl-act:hover, #jita-cl .jcl-open:hover, #jita-cl .jcl-src a:hover, #jita-cl .jcl-edef a:hover { text-decoration: underline; }' +
                 '#jita-cl .jcl-sub { font-weight: 600; margin: 8px 0 2px; }' +
-                '#jita-cl .jcl-sugg { margin-top: 4px; color: var(--ds-text-subtlest, #626f86); }' +
-                '#jita-cl .jcl-slbl { margin-right: 6px; }' +
+                '#jita-cl .jcl-sugg { padding: 1px 0 3px 18px; color: var(--ds-text-subtlest, #626f86); }' +   // under the labels item, past its mark
                 '#jita-cl .jcl-chips { display: inline-flex; flex-wrap: wrap; gap: 4px 6px; vertical-align: top; }' +
                 '#jita-cl a.jcl-chip { color: var(--ds-text-subtle, #44546f); background: var(--ds-background-neutral, #091e420f); border-radius: 8px; padding: 0 7px; text-decoration: none; cursor: pointer; }' +
                 '#jita-cl a.jcl-chip:hover { color: var(--ds-link, #0c66e4); }' +
