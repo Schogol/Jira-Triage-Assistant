@@ -4,6 +4,7 @@
 // defect) by the defect's exceptions found in each candidate report's cached log reading, which JiTA.logread reads
 // ahead for every open report. Evals the real JiTA.rank boost path, JiTA.repexc, JiTA.logread, the logsig 'holding' and
 // 'sigsOf' lookups (tab and worker, which must agree), the log scan's exception list and the row badge.
+require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 

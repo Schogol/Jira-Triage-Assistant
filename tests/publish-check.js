@@ -2,6 +2,7 @@
 // PAGE actually tracks the ledger. Schogol reviewed two pages on 2026-09-20, the overlay ticked them, and the
 // published page still said "Outstanding" - which is only ever visible as a stale page, never as an error.
 // Three ways that can happen, all pinned here.
+require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cs = src.indexOf('JiTA.conf = {'), ce = src.indexOf('/* ---- ISD Lead duties', cs);

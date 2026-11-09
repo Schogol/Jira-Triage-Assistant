@@ -6,6 +6,7 @@
 // against a stubbed Confluence (an in-memory property store and pages), stubbed credits caches and counts, and a fake jQuery
 // big enough for the tab. Time is held at 1 Nov 2026, so the window (May to Oct 2026) and the GM switch (21 Aug 2026) stay
 // where the checks expect them.
+require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cs = src.indexOf('JiTA.conf = {'), ce = src.indexOf('/* ---- ISD Lead duties', cs);

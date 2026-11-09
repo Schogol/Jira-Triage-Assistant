@@ -1,6 +1,7 @@
 // excfind-check.js - the exception search (double-tap + on a defect): the open bug reports whose logs hold the
 // defect's exceptions. Evals the real JiTA.excfind, JiTA.logsig's fingerprints, JiTA.profile's cache helpers, the Attach
 // control's options (JiTA.ui._attachReportButton) and the launcher against stubs and a small DOM.
+require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const once = (head) => {

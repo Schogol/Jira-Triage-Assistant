@@ -1,6 +1,7 @@
 // profile-check.js - the defect profile (v3.41.0): what the bug reports attached to a defect have in common, and the
 // reports that do not fit, in a Defect Profile card of its own. Evals the real JiTA.profile, the dxdiag / PDMData parsers, JiTA.logsig._logBlocks /
 // _fingerprint and JiTA.ocr's language labels against stubs, with real zips built here (node zlib).
+require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs'), zlib = require('zlib');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const once = (head) => {
