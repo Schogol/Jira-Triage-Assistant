@@ -2,6 +2,7 @@
 // What is being pinned: the dialog is quiet for 24h after any answer, it never steals an overlay the Lead
 // is already using, it keeps its OWN stamp (the chip's x must not suppress tomorrow's dialog), and it stays
 // silent on a month that is already done.
+require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const rs = src.indexOf('JiTA.leadduty.reminder = {');

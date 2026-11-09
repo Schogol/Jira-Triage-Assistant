@@ -3,6 +3,7 @@
 // which hears of such a report only at the next sync, up to 30 minutes later. Evals the real JiTA.ui._liveStatus /
 // _checkReportRows / _takeOffList / _collapseRow, the Attach refusal in _attachReportButton and JiTA.sync._ebrRemoved
 // against stubs.
+require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const member = (head) => {

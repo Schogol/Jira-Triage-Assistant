@@ -12,6 +12,13 @@
 // A suite much longer than the rest would still be the last to finish however many workers there are, so SHARDS splits
 // it into shards, each a job of its own: shard k of n runs with JITA_BREAK_SHARD=k/n and makes only the breakages whose
 // index % n === k (the suite says so in a "shard k/n" line). A suite passes only if every one of its shards does.
+//
+// Each harness a suite starts stops at its first failing check (failfast.js, put in NODE_OPTIONS here): that settles the
+// breakage, and the rest of the harness would be time spent for nothing. JITA_BREAK_FULL=1 lets every harness run to its
+// end, for the full "(N failing)" counts.
+//
+// CI splits the run over several machines: JITA_BREAK_PART=k/n makes only part k of n of the jobs. Every part deals the
+// jobs the same way (the costliest first, each to the part with the least so far), so together the parts make each once.
 const fs = require('fs'), path = require('path'), os = require('os');
 const { spawn } = require('child_process');
 
@@ -21,11 +28,18 @@ const DIR = __dirname, REPO = path.join(DIR, '..');
 // the whole load, so more shards would not shorten it. With 4 workers, as CI's runner has: 193 s before, 106 s after.
 // Then the Defect checklist came (v3.51.0): its suite alone took 228 s of the 680 s of work, and the run took as long.
 // Split 4 like members, its shards take about 57 s each and the run 89 s, close to the 87 s 8 workers need for the work.
+// Since the harnesses stop at their first failing check and the ones that slept run on clock.js, all of it is about 230
+// s of work, and the shards (members about 10 s each, checklist 6 s, excfind 11 s) mostly let CI's three parts come out
+// even: 18 to 20 s each on 4 workers.
 const SHARDS = { 'mutate-members.js': 4, 'mutate-checklist.js': 4, 'mutate-excfind.js': 2 };
 const runners = fs.readdirSync(DIR).filter((f) => /^mutate-.*\.js$/.test(f));
 const needsRepo = (f) => /ci-static\.js|'git'/.test(fs.readFileSync(path.join(DIR, f), 'utf8'));
+// A suite's size stands in for its time (about half a second per KB), except for one that starts a real browser for each
+// breakage (mutate-layout.js): that takes about 8 times as long as its size says.
+const BROWSER_WEIGHT = 8;
 const jobsOf = (f) => {
-    const n = SHARDS[f] || 1, size = fs.statSync(path.join(DIR, f)).size, out = [];
+    const browser = /layout-check\.js/.test(fs.readFileSync(path.join(DIR, f), 'utf8'));
+    const n = SHARDS[f] || 1, size = fs.statSync(path.join(DIR, f)).size * (browser ? BROWSER_WEIGHT : 1), out = [];
     for (let k = 0; k < n; k++) { out.push({ f: f, k: k, shard: n > 1 ? k + '/' + n : '', weight: size }); }
     return out;
 };
@@ -34,6 +48,22 @@ const jobsOf = (f) => {
 const byWeight = (a, b) => b.weight - a.weight || (a.f < b.f ? -1 : a.f > b.f ? 1 : a.k - b.k);
 const pool = [].concat(...runners.filter((f) => !needsRepo(f)).map(jobsOf)).sort(byWeight);
 const inRepo = [].concat(...runners.filter(needsRepo).sort().map(jobsOf));
+// This machine's part of the jobs. A job costs its suite's size over its shards; ties go in the pool's order.
+const PART = process.env.JITA_BREAK_PART || '';
+const part = /^(\d+)\/(\d+)$/.exec(PART);
+if (PART && !(part && +part[1] < +part[2])) { console.log('JITA_BREAK_PART must read k/n, with k below n: ' + PART); process.exit(1); }
+if (part) {
+    const load = new Array(+part[2]).fill(0), mine = new Set();
+    pool.concat(inRepo).map((j) => ({ j: j, cost: j.weight / (SHARDS[j.f] || 1) })).sort((a, b) => b.cost - a.cost || byWeight(a.j, b.j))
+        .forEach((x) => { const p = load.indexOf(Math.min(...load)); load[p] += x.cost; if (p === +part[1]) { mine.add(x.j); } });
+    [pool, inRepo].forEach((list) => { for (let i = list.length - 1; i >= 0; i--) { if (!mine.has(list[i])) { list.splice(i, 1); } } });
+}
+const suites = new Set(pool.concat(inRepo).map((j) => j.f)).size;
+// JITA_BREAK_LIST=1 only lists the jobs this run would make, one per line (breakparts-check.js deals them all).
+if (process.env.JITA_BREAK_LIST === '1') {
+    pool.concat(inRepo).forEach((j) => console.log(j.f + (j.shard ? ' ' + j.shard : '')));
+    process.exit(0);
+}
 const W = Math.max(1, Math.min(pool.length, +process.env.JITA_BREAK_WORKERS || Math.min(8, os.cpus().length)));
 
 // The runners write their broken copies (mut.js, mutt.js, ...) next to themselves; they are gitignored and
@@ -46,6 +76,11 @@ const cleanup = (dir) => fs.readdirSync(dir).filter(scratch).forEach((f) => { tr
 const env = Object.assign({}, process.env);
 delete env.JITA_SRC;
 delete env.JITA_BREAK_SHARD;
+delete env.JITA_BREAK_PART;
+if (process.env.JITA_BREAK_FULL !== '1') {
+    // Forward slashes: NODE_OPTIONS reads a backslash inside quotes as an escape.
+    env.NODE_OPTIONS = ((env.NODE_OPTIONS || '') + ' --require "' + path.join(DIR, 'failfast.js').split(path.sep).join('/') + '"').trim();
+}
 
 const roots = [];
 const removeCopies = () => roots.splice(0).forEach((r) => { try { fs.rmSync(r, { recursive: true, force: true }); } catch (e) { /* ignore */ } });
@@ -100,7 +135,7 @@ async function repoLane() { for (const job of inRepo) { await run(job, DIR); } }
 Promise.all(copies.map(worker).concat([repoLane()])).then(() => {
     removeCopies();
     const bad = failed.size;
-    console.log('\n' + runners.length + ' breakage suites, ' + breakages + ' breakages, ' + (bad ? bad + ' failed' : 'every breakage caught') +
+    console.log('\n' + (part ? 'part ' + PART + ': ' + suites + ' of ' + runners.length : runners.length) + ' breakage suites, ' + breakages + ' breakages, ' + (bad ? bad + ' failed' : 'every breakage caught') +
         (skipped.size ? ', ' + skipped.size + ' skipped' : '') + '  (' + ((Date.now() - t0) / 1000).toFixed(1) + ' s, ' + W + ' workers)');
     process.exit(bad ? 1 : 0);
 });
