@@ -651,6 +651,16 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     let fin = byCls(body, 'jcl-finish')[0];
     ok('the hand-off waits for the last item', fin && fin.props.disabled === true && /9 items still open/.test(fin.attrs.title), fin && fin.attrs.title);
     ok('a defect that is no exploit keeps the exploit steps folded away', !byCls(body, 'jcl-warn').length && byCls(body, 'jcl-mline').some((l) => /Exploit/.test(l.textContent)));
+    ok('Also check is a bulleted list', byCls(body, 'jcl-mlist').length === 1 && byCls(body, 'jcl-mlist')[0].tag === 'ul' &&
+        byCls(body, 'jcl-mline').length === C.MORE.length + 1 && byCls(body, 'jcl-mline').every((l) => l.tag === 'li') &&
+        styles.some((css) => /#jita-cl \.jcl-mlist \{[^}]*list-style: disc outside;/.test(css)), byCls(body, 'jcl-mline').map((l) => l.tag).join(','));
+    ok('...of what the guide asks that the card cannot check, as worded now', J(C.MORE) === J([
+        'Add all existing bug reports about this issue to this defect.',
+        'Reproduction steps hold only what matters.',
+        'Add screenshots where the bug can be seen.',
+        'On a hardware or graphics issue: DxDiag attached, and your OS, CPU and GPU, etc in the Computer Info section.',
+        'On Missions, dungeons, agents or epic arcs: the mission\'s exact name and faction, an agent offering it, the dungeon, arc and NPC names, and their IDs.'
+    ]) && C.EXPLOIT === 'An exploit: label it Exploit, ask a Liaison to hide the defect and its report.', J(C.MORE));
 
     // a Lead's view
     isLead = true; me = 'acc-lead';

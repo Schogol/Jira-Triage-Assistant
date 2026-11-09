@@ -13961,14 +13961,13 @@ JiTA.checklist = {
     MARKS: { ok: '✓', todo: '○', waived: '⊘' },
     FIELDS_SEEN: /^(assignee|labels|priority|severity|impact|team|eve server|eve build)$/i,
     MORE: [
-        'Searched the existing defects first, and attached the other reports of the same bug.',
-        'Reproduction steps that hold only what matters, one of the last saying what to look for.',
-        'Screenshots, where the bug can be seen.',
-        'A hardware or graphics issue: DxDiag attached, and your OS, CPU and GPU in the description.',
-        'Missions, dungeons, agents or epic arcs: the mission\'s exact name and faction, an agent offering it, the dungeon, arc and NPC names, and their IDs.',
-        'A server-side issue (fitting, dogma): the time frame it happened in.'
+        'Add all existing bug reports about this issue to this defect.',
+        'Reproduction steps hold only what matters.',
+        'Add screenshots where the bug can be seen.',
+        'On a hardware or graphics issue: DxDiag attached, and your OS, CPU and GPU, etc in the Computer Info section.',
+        'On Missions, dungeons, agents or epic arcs: the mission\'s exact name and faction, an agent offering it, the dungeon, arc and NPC names, and their IDs.'
     ],
-    EXPLOIT: 'An exploit: label it Exploit, ask a Liaison to hide the defect and its report, and tell a developer.',
+    EXPLOIT: 'An exploit: label it Exploit, ask a Liaison to hide the defect and its report.',
 
     _key: null,              // the defect on screen
     _state: {},              // defect key -> the state last painted (painted again when Jira wipes the card)
@@ -14902,9 +14901,9 @@ JiTA.checklist = {
         var label = function () { return (C._moreOpen ? '▾ ' : '▸ ') + 'Also check (' + C.MORE.length + ')'; };
         var $t = $('<a class="jcl-open" href="#"></a>').text(label()).attr('title', 'What the guide asks that the card cannot check by itself')
             .appendTo($('<div class="jcl-line"></div>').appendTo($m));
-        var $l = $('<div class="jcl-mlist"></div>').appendTo($m);
-        C.MORE.forEach(function (x) { $('<div class="jcl-mline"></div>').text(x).appendTo($l); });
-        if (!exploit) { $('<div class="jcl-mline"></div>').text(C.EXPLOIT).appendTo($l); }
+        var $l = $('<ul class="jcl-mlist"></ul>').appendTo($m);   // a bulleted list
+        C.MORE.forEach(function (x) { $('<li class="jcl-mline"></li>').text(x).appendTo($l); });
+        if (!exploit) { $('<li class="jcl-mline"></li>').text(C.EXPLOIT).appendTo($l); }
         $t.on('click', function (e) { e.preventDefault(); C._moreOpen = !C._moreOpen; $m.toggleClass('open', C._moreOpen); $t.text(label()); });
         return $m;
     },
@@ -14970,7 +14969,8 @@ JiTA.checklist = {
                 '#jita-cl .jcl-edef { flex: 0 0 auto; display: flex; gap: 4px; color: var(--ds-text-subtlest, #626f86); }' +
                 '#jita-cl .jcl-more { margin-top: 6px; }' +
                 '#jita-cl .jcl-warn { color: var(--ds-text-warning, #974f0c); margin-bottom: 2px; }' +
-                '#jita-cl .jcl-mlist { display: none; padding-left: 12px; }' +
+                '#jita-cl .jcl-mlist { display: none; margin: 2px 0 0; padding-left: 18px; list-style: disc outside; }' +
+                '#jita-cl .jcl-mline { display: list-item; margin: 1px 0; }' +
                 '#jita-cl .jcl-more.open .jcl-mlist { display: block; }' +
                 '#jita-cl .jcl-foot { margin-top: 8px; }' +
                 '#jita-cl .jcl-handed.jcl-early { display: block; margin-bottom: 6px; color: var(--ds-text-warning, #974f0c); }' +
