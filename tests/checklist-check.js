@@ -238,7 +238,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     // ================= small parts =================
     ok('a field\'s value reads as text: a select, a user, a list, nothing', C._val({ value: 'A - Crash' }) === 'A - Crash' && C._val({ displayName: 'Bob' }) === 'Bob' &&
         C._val([{ value: 'a' }, { value: 'b' }]) === 'a, b' && C._val(null) === '' && C._val('x') === 'x');
-    ok('the fields are found by their names', J(C._ids(NAMES, {})) === J({ severity: 'customfield_101', impact: 'customfield_102', epic: 'customfield_104', server: 'customfield_105', build: 'customfield_106' }), J(C._ids(NAMES, {})));
+    ok('the fields are found by their names, Epic Link no longer among them', J(C._ids(NAMES, {})) === J({ severity: 'customfield_101', impact: 'customfield_102', server: 'customfield_105', build: 'customfield_106' }), J(C._ids(NAMES, {})));
     ok('...no State, which this Jira does not have', !('state' in C._ids({ cf_s: 'State' }, {})));
     ok('...the steps field by either of its names', C._ids({ cf_7: 'Steps to Reproduce' }, {}).steps === 'cf_7' && C._ids({ cf_8: 'Reproduction Steps' }, {}).steps === 'cf_8');
     ok('...and of two fields with one name, the one holding a value', C._ids({ cf_a: 'Impact', cf_b: 'Impact' }, { cf_b: { value: 'Minor' } }).impact === 'cf_b' &&
@@ -252,9 +252,9 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     const last = C._last(hist, (it) => it.field === 'summary');
     ok('the last change of a field, with its author and time', last && last.item.toString === 'third' && last.by === 'acc-rep' && last.at === '2026-11-08T10:05:00.000+0000', J(last));
 
-    // ---- Priority, Team and Epic Link are FC's ----
+    // ---- Priority and Team are FC's ----
     const pr = (by, from, to, at) => ({ author: { accountId: by }, created: at || '2026-11-08T11:00:00.000+0000', items: [{ field: 'priority', fieldId: 'priority', from: from, to: to }] });
-    const fcOf = (f, h) => C._fcSet(Object.assign({ priority: { id: '3' } }, f), h, { epic: 'customfield_104' }, 'acc-rep').map((x) => x.name).join(',');
+    const fcOf = (f, h) => C._fcSet(Object.assign({ priority: { id: '3' } }, f), h, {}, 'acc-rep').map((x) => x.name).join(',');
     ok('Priority the reporter changed is theirs', fcOf({ priority: { id: '2' } }, [pr('acc-rep', '3', '2')]) === 'Priority');
     ok('...not once they put it back', fcOf({ priority: { id: '3' } }, [pr('acc-rep', '3', '2'), pr('acc-rep', '2', '3')]) === '');
     ok('...nor when FC set it', fcOf({ priority: { id: '1' } }, [pr('acc-fc', '3', '1')]) === '');
@@ -266,8 +266,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...one the reporter set, too', fcOf({ customfield_10001: { name: 'Core' } }, [tm('acc-rep')]) === 'Team');
     ok('...one FC set does not', fcOf({ customfield_10001: { name: 'Core' } }, [tm('acc-fc')]) === '');
     ok('...nor an empty one', fcOf({ customfield_10001: null }, [tm('acc-rep')]) === '');
-    ok('an Epic Link held as the parent epic counts too', fcOf({ parent: { key: 'EDR-5', fields: { issuetype: { name: 'Epic' } } } }, []) === 'Epic Link' &&
-        fcOf({ parent: { key: 'EDR-5', fields: { issuetype: { name: 'Story' } } } }, []) === '');
+    ok('an Epic Link or a parent epic is not looked at any more', fcOf({ customfield_104: { key: 'EDR-4' }, parent: { key: 'EDR-5', fields: { issuetype: { name: 'Epic' } } } }, []) === '');
 
     // ---- the unassign to put back ----
     const NOW = Date.parse('2026-11-08T12:00:00.000Z');
@@ -381,8 +380,13 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     const factsOf = (issue, h, src) => C._facts(issue, h || [], src === undefined ? srcObj() : src);
     let d = factsOf(converted()), items = C.items(d);
     const openIds = (its) => its.filter((it) => !it.ok && !it.waived).map((it) => it.id).join(',');
-    ok('a defect as the conversion leaves it has every item open but the ones it cannot get wrong',
-        openIds(items) === 'summary,desc,build,steps,fields,replabels,labels,attachments', openIds(items));
+    ok('a defect as the conversion leaves it has every item open but the ones it cannot get wrong, in the order a hunter works through them',
+        openIds(items) === 'summary,desc,steps,attachments,replabels,labels,fields,build', openIds(items));
+    ok('...all of them in that order: text, attachments and labels, then the fields, the exception last', (() => {
+        const s = srcObj(); s.exc = [EXC];
+        return C.items(C._facts(converted(), [], s)).map((it) => it.id).join(',') === 'summary,desc,steps,attachments,replabels,labels,fields,build,fc,exc';
+    })(), (() => { const s = srcObj(); s.exc = [EXC]; return C.items(C._facts(converted(), [], s)).map((it) => it.id).join(','); })());
+    ok('...Priority and Team named as left empty for FC to set', byId(items, 'fc').label === 'Priority and Team fields left empty for FC to set' && byId(items, 'fc').ok);
     ok('...its summary is still the report\'s: Summary rewritten, a fitting title in the hover', byId(items, 'summary').label === 'Summary rewritten' &&
         byId(items, 'summary').why === 'Give your defect a fitting title.', byId(items, 'summary').label + ' / ' + byId(items, 'summary').why);
     ok('...no project item, nor one for capital letters', !byId(items, 'project') && !byId(items, 'caps'));
@@ -489,7 +493,7 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
         const i = finished(); i.names = { customfield_101: 'Severity', customfield_102: 'Impact' }; i.fields.customfield_102 = null;
         const it = byId(C.items(factsOf(i)), 'fields'); return it && !it.ok && it.why === 'Not set yet: Impact.';
     })());
-    ok('Priority, Team and Epic Link: one the reporter set is named', (() => { const i = finished(); i.fields.customfield_10001 = { name: 'Core' }; const it = byId(C.items(factsOf(i)), 'fc'); return !it.ok && /Set on this defect by its reporter: Team/.test(it.why); })());
+    ok('Priority and Team: one the reporter set is named', (() => { const i = finished(); i.fields.customfield_10001 = { name: 'Core' }; const it = byId(C.items(factsOf(i)), 'fc'); return !it.ok && /Set on this defect by its reporter: Team\. Put Priority back, and leave Team empty\.$/.test(it.why); })());
     ok('a label in lower case is fine now: there is no such item', (() => { const i = finished(); i.fields.labels = ['undock', 'Crash']; return !byId(C.items(factsOf(i)), 'caps'); })());
     ok('a defect written from scratch has no rewrite or report-label items', (() => { const ids = C.items(C._facts(finished(), [], null)).map((it) => it.id).join(','); return ids.indexOf('desc') < 0 && ids.indexOf('replabels') < 0 && ids.indexOf('attachments') >= 0; })());
     ok('a defect outside EDR is fine: there is no project item', (() => { const i = finished(); i.key = 'EO-5'; return !byId(C.items(factsOf(i)), 'project'); })());
