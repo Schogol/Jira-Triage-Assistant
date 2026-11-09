@@ -67,8 +67,8 @@ global.document = { body: { contains: () => false } };   // async status lines f
 let lead = true, built = 0;
 global.JITA_IS_WIKI = false;
 global.JITA_NO_JIRA_UI = false;
-global.savedVariables = [['key', ''], ['parser', true], ['scrollbar', true], ['credits', true], ['buttons', true], ['similarDefects', true], ['detailView', true], ['screenOcr', true], ['defectProfile', true]];
-const FLAGS = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7, defectProfile: 8 };
+global.savedVariables = [['key', ''], ['parser', true], ['scrollbar', true], ['credits', true], ['buttons', true], ['similarDefects', true], ['detailView', true], ['screenOcr', true], ['defectProfile', true], ['defectChecklist', true]];
+const FLAGS = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7, defectProfile: 8, defectChecklist: 9 };
 global.flagOn = (name) => !!savedVariables[FLAGS[name]][1];
 global.gmGet = (k, d) => d;
 global.refreshMenu = () => {};

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.50.0
+// @version     3.51.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -160,13 +160,13 @@ function gmSet(key, val) {
 // so an existing install's orphaned "dropdowns" value is ignored and credits simply defaults on. The index of
 // each feature is now recorded ONCE in the FLAG map below and read via flagOn(name) - so if a slot ever moves,
 // only FLAG needs updating (not scattered numeric reads); the persisted gm key per slot must still stay stable.
-var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""], ["screenOcr", ""], ["defectProfile", ""]];
+var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits", ""], ["buttons", ""], ["similarDefects", ""], ["detailView", ""], ["screenOcr", ""], ["defectProfile", ""], ["defectChecklist", ""]];
 
 // Named accessors over savedVariables (the [gmKey, enabled] pairs above): map a stable feature name to its
 // fixed index so a wrong index breaks loudly at one named site instead of silently misreading a slot. flagOn
 // reads, setFlag writes - both go through the SAME savedVariables + GM persistence, so behavior is unchanged.
 // Index 0 ("key") is a reserved legacy slot with no boolean feature and is deliberately omitted.
-var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7, defectProfile: 8 };
+var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7, defectProfile: 8, defectChecklist: 9 };
 function flagOn(name) { var i = FLAG[name]; return i != null && !!savedVariables[i][1]; }
 function setFlag(name, val) {
     var i = FLAG[name];
@@ -1016,19 +1016,35 @@ function jitaConvertClick() {
     }
     // Snapshot the EBR's numeric id + existing issue links, run the conversion automation, then navigate to the
     // newly-created defect (found as the freshly-linked issue that wasn't linked before).
-    $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
+    $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks,assignee', type: 'GET', dataType: 'json' })
         .done(function (d) {
             var before = jitaLinkedKeys(d.fields && d.fields.issuelinks);
-            jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
-                .done(function (resp) {
-                    // As for the GM rule: anything but SUCCESS means nothing is converting. Say so, rather than poll for
-                    // a defect that will never come and then reload the page in silence.
-                    var inv = resp && resp.invocations && resp.invocations[0];
-                    if (!inv || inv.status !== 'SUCCESS') { fail({ status: 0, jitaError: 'The conversion automation did not start (' + ((inv && inv.status) || 'no answer') + ').' }); return; }
-                    jitaGoToNewDefect(ebrKey, before);   // poll the EBR's links for the new defect, then navigate
-                })
-                .fail(fail);
+            jitaTakeToConvert(ebrKey, d, function () {
+                jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
+                    .done(function (resp) {
+                        // As for the GM rule: anything but SUCCESS means nothing is converting. Say so, rather than poll for
+                        // a defect that will never come and then reload the page in silence.
+                        var inv = resp && resp.invocations && resp.invocations[0];
+                        if (!inv || inv.status !== 'SUCCESS') { fail({ status: 0, jitaError: 'The conversion automation did not start (' + ((inv && inv.status) || 'no answer') + ').' }); return; }
+                        jitaGoToNewDefect(ebrKey, before);   // poll the EBR's links for the new defect, then navigate
+                    })
+                    .fail(fail);
+            });
         }).fail(fail);
+}
+
+// The conversion gives the defect the bug report's assignee, and a defect nobody has is where FC picks defects up already,
+// though its Defect checklist has not been worked through (JiTA.checklist). So an unassigned report is taken by the one
+// converting it first, and its defect starts out with them until they hand it over. `then` converts either way: with the
+// checklist switched off, with the report assigned already, or when taking it fails.
+function jitaTakeToConvert(key, d, then) {
+    if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(); return; }
+    JiTA.link.currentUser().then(function (me) {
+        if (!me) { then(); return; }
+        $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/3/issue/' + key + '/assignee', type: 'PUT', contentType: 'application/json',
+            headers: { 'X-Atlassian-Token': 'no-check' }, data: JSON.stringify({ accountId: me }) })
+            .always(function () { then(); });
+    }, function () { then(); });
 }
 
 // The Close button: open the status menu and pick "Closed" once Jira has rendered it. It clicked after a fixed
@@ -4330,8 +4346,10 @@ JiTA.util = {
 
     // Copy to the clipboard, falling back to the old selection + execCommand path where the async API is
     // unavailable or refused (it needs a secure context and a user gesture; a button click is one, but a
-    // browser policy can still say no). Rejects when nothing was copied, so the caller can say so.
-    copy: function (text) {
+    // browser policy can still say no). Rejects when nothing was copied, so the caller can say so. With `html`, the
+    // same as rich text too, so a paste into Jira's editor keeps its shape: a numbered list stays one.
+    copy: function (text, html) {
+        if (html) { return JiTA.util._copyHtml(text, html); }
         try {
             if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(text); }
         } catch (e) { /* fall through */ }
@@ -4344,6 +4362,32 @@ JiTA.util = {
                 ta.select();
                 var ok = document.execCommand('copy');
                 document.body.removeChild(ta);
+                if (ok) { resolve(); } else { reject(new Error('copy refused')); }
+            } catch (e2) { reject(e2); }
+        });
+    },
+    // The rich copy: the async API with both kinds, where the browser has it; else the HTML drawn off screen, selected and
+    // copied, which a browser copies as rich text as well. Decided at once, inside the click, the only place a browser
+    // allows the old way. When the async API refuses, the text alone.
+    _copyHtml: function (text, html) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem === 'function') {
+                var item = new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([text], { type: 'text/plain' }) });
+                return navigator.clipboard.write([item]).then(null, function () { return JiTA.util.copy(text); });
+            }
+        } catch (e) { /* the old way */ }
+        return new Promise(function (resolve, reject) {
+            try {
+                var box = document.createElement('div'), range = document.createRange(), sel = window.getSelection();
+                box.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
+                box.innerHTML = html;
+                document.body.appendChild(box);
+                range.selectNodeContents(box);
+                sel.removeAllRanges();
+                sel.addRange(range);
+                var ok = document.execCommand('copy');
+                sel.removeAllRanges();
+                document.body.removeChild(box);
                 if (ok) { resolve(); } else { reject(new Error('copy refused')); }
             } catch (e2) { reject(e2); }
         });
@@ -9547,6 +9591,13 @@ JiTA.menu = {
             $zipRow.append($zipSw);
             $feat.append($zipRow);
         }
+        // Defect checklist: on a defect you wrote (for Leads, any ISD member's), what the ISD guide asks of it. While it is
+        // on, an unfinished defect cannot be unassigned; switched off, its card goes at once and nothing is refused.
+        var $cl = JiTA.menu._toggleRow('Defect checklist', 9, function () {
+            if (!JITA_NO_JIRA_UI) { JiTA.checklist.ensure(); }
+        });
+        $cl.find('.lbl').append($('<span class="sub"></span>').text('On a defect you wrote (for Leads, any ISD member\'s): what the ISD guide asks of it, checked as you edit. While it is on, an unfinished defect cannot be unassigned.'));
+        $feat.append($cl);
         // ISD Credits: mount / tear down the corner badge (and start the scheduler) on toggle. The badge and
         // its crawl belong to Jira tabs only - toggling from Confluence still persists the flag for them.
         $feat.append(JiTA.menu._toggleRow('ISD Credits', 3, function () {
@@ -13827,6 +13878,1106 @@ JiTA.profile = {
                 '.jita-profile-view .jpv-table th { text-align: left; color: #7a8694; font-weight: 600; padding: 4px 6px; border-bottom: 1px solid #3a434d; }' +
                 '.jita-profile-view .jpv-table td { color: #cfd6dd; padding: 3px 6px; border-bottom: 1px solid #2c333a; }' +
                 '.jita-profile-view .jpv-table a { color: #4c9aff; text-decoration: none; font-weight: 700; }'
+            );
+        } catch (e) { /* ignore */ }
+    },
+
+    _noop: null
+};
+
+
+/* ---- Defect checklist: what a defect still needs before FC picks it up ----------------------------------------------
+ * A card on a defect for the bug hunter who wrote it (its reporter: Convert to EDR Defect makes the one converting it the
+ * reporter, and gives the defect the bug report's assignee) and, on any ISD member's defect, for Leads. Its items are the
+ * ISD guide's rules for a defect, each judged on the defect as Jira has it now. A converted defect is also compared with
+ * the bug report it was made from (of the reports linked to it, the one linked as its clone, else the one whose summary
+ * was the defect's first summary): a summary, a description, reproduction steps or labels still the report's do not count
+ * as done. Its attachments (the report's are copied to it) count once its writer says they are good, and so do its EVE
+ * Server and EVE Build as long as they are still the player's (the conversion copies them too).
+ *
+ * A finished defect is handed to FC by unassigning it, so while an item is open nobody can unassign it, Leads included: the
+ * card's own button waits for the last item, "Unassigned" picked in Jira's assignee field is refused, and an unassign that
+ * got through some other way (a keyboard shortcut) is put back, once, saying why. A defect converted from an unassigned
+ * bug report starts out unassigned, where FC picks defects up already: JiTA's Convert to Defect takes such a report first
+ * (jitaConvertClick), and a defect that starts out unassigned all the same offers its reporter to take it until it is done.
+ * Items the guide lets a defect go without (an exception when none of the report's belongs to the bug, labels when none
+ * fits) take a "Not needed". That, and what was ticked off, is kept on the issue itself (issue property PROP), so Leads see
+ * who marked what.
+ *
+ * Under its labels item it suggests labels in use on other defects that the defect's text calls for (its summary, its
+ * steps, its description), counted once a week.
+ *
+ * What it writes to Jira, each asked first: the report's labels taken off, a suggested label added, an exception from the
+ * report's logs added to the description in an expand, the defect taken by its reporter, and the unassign; and the marks,
+ * which ask nothing. Nothing else here edits an issue. After each field written, Jira's issue view is told to read the
+ * issue again (_written), so it shows the change without a reload. Settings > Features switches the card off, and the
+ * unassign block with it. A check that fails says so on the card, and refuses nothing.
+ */
+JiTA.checklist = {
+    TITLE: 'Defect checklist',
+    GROUP_ID: 'jita-checklist-group',
+    COLLAPSE_KEY: 'jitaChecklistCollapsed',
+    // The issue property: { v: 1, w: { item id: { by, name, at } }, ok: { item id: { by, name, at, sig } } }. `w` holds the
+    // items marked Not needed; `ok` the ones a person ticked off (the attachments; the EVE Server and EVE Build still the
+    // player's), each for the values it had then (`sig`).
+    PROP: 'jita.checklist',
+    KEEP_LABELS: ['cloned', 'jira_escalated'],    // the guide: these stay when the report's labels go
+    // The server names looked for at the top of a description come from the EVE Server field's own options, as Jira
+    // offers them for the defect (its editmeta), kept in GM for a week. These are only for when Jira offers none.
+    SERVER_NAMES: ['Tranquility', 'Singularity', 'Duality', 'Thunderdome', 'Multiplicity'],
+    SERVER_ALIASES: { Tranquility: ['TQ'], Singularity: ['SiSi'] },   // how hunters often write them
+    SERVERS_KEY: 'jitaChecklistServers',          // GM: { at, id, names }
+    SERVERS_MS: 7 * 24 * 3600 * 1000,
+    BUILD_RE: /\b\d{6,8}\b/,                      // the build number at the top of "About EVE"
+    TOP_CHARS: 300,                               // "at the top of the description": this far in
+    // The steps section of a description, as the in-game reporter writes it: "Reproduction Steps:" up to the next section.
+    STEPS_SECTION_RE: /reproduction steps\s*:?\s*([\s\S]*?)(?=\b(?:session info|computer info)\s*:|$)/i,
+    STEPS_MIN: 20,                                // a report's steps shorter than this are not looked for in the defect
+    LABELS_KEY: 'checklistLabels',                // meta store: { at, n, c: { label: how many defects carry it } }
+    LABELS_MS: 7 * 24 * 3600 * 1000,              // the labels in use are counted again after this long
+    LABELS_JQL: 'project = EDR AND labels is not EMPTY AND created >= -365d',
+    LABEL_MIN: 2,                                 // a label on fewer defects is not suggested: a typo, or a one-off
+    SUGGEST: 6,                                   // labels suggested at most
+    REVERT_MS: 2 * 60 * 1000,                     // an unassign by this browser's user this recent is put back while items are open
+    // Whether the defect changed is asked of Jira itself (its `updated`, one small read), and only a change reads it again:
+    // this long after the page changed, and after the last click or key on it (Jira may still be saving the edit), once
+    // soon and once later for a slow save.
+    RECHECK_MS: 1000,
+    INPUT_MS: [1500, 5000],
+    FOCUS_MS: 10000,                              // back in the tab: a check that failed is tried again, at most this often
+    // After a write, Jira's issue view is told to read the issue again (_written) by the DOM event its own comment box and
+    // Connect's AP.jira.refreshIssuePage() fire. The page is looked at every REFRESH_STEP_MS, and reloads when it has not
+    // changed REFRESH_MS after.
+    REFRESH_EVENT: 'legacy_refreshIssuePage',
+    REFRESH_MS: 8000,
+    REFRESH_STEP_MS: 250,
+    SHOW_EXC: 5,                                  // exceptions listed before "N more"
+    // What the Copy buttons give: as text, and as rich text that pastes into Jira's editor as a real numbered list (Enter on
+    // a step makes the next).
+    STEPS_TEXT: 'Reproduction steps:\n1. \n2. \n3. Observe that ',
+    STEPS_HTML: '<p>Reproduction steps:</p><ol><li><p></p></li><li><p></p></li><li><p>Observe that </p></li></ol>',
+    BUILD_TEXT: 'Server: \nBuild: ',
+    BUILD_HTML: '<p>Server: </p><p>Build: </p>',
+    MARKS: { ok: '✓', todo: '○', waived: '⊘' },
+    FIELDS_SEEN: /^(assignee|labels|priority|severity|impact|team|eve server|eve build)$/i,
+    MORE: [
+        'Add all existing bug reports about this issue to this defect.',
+        'Reproduction steps hold only what matters.',
+        'Add screenshots where the bug can be seen.',
+        'On a hardware or graphics issue: DxDiag attached, and your OS, CPU and GPU, etc in the Computer Info section.',
+        'On Missions, dungeons, agents or epic arcs: the mission\'s exact name and faction, an agent offering it, the dungeon, arc and NPC names, and their IDs.'
+    ],
+    EXPLOIT: 'An exploit: label it Exploit, ask a Liaison to hide the defect and its report.',
+
+    _key: null,              // the defect on screen
+    _state: {},              // defect key -> the state last painted (painted again when Jira wipes the card)
+    _gen: 0,                 // goes up with every load: an answer for an older one is dropped
+    _seen: '',               // the defect's fields as the page showed them when last looked at (_pageSig)
+    _timer: 0,
+    _inputT: [],             // the checks after the last click or key
+    _upd: {},                // defect key -> its `updated` as last read in full
+    _checking: false,
+    _lastLoad: 0,
+    _reverted: {},           // defect key -> the unassign put back, so one is put back only once
+    _rawCache: {},           // report key -> { signature: the block as its log has it }
+    _labelsP: null,          // the labels in use, being counted or counted (_labelCounts)
+    _excOpen: false,
+    _moreOpen: false,
+    _bound: false,
+    _styled: false,
+
+    _squash: function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase(); },
+    // A field's value as text: a select's value, a user's or a team's name, a list joined; '' when unset.
+    _val: function (v) {
+        if (v == null) { return ''; }
+        if (Array.isArray(v)) { return v.map(JiTA.checklist._val).filter(function (x) { return !!x; }).join(', '); }
+        if (typeof v === 'object') { return String(v.value || v.name || v.displayName || v.title || v.key || v.id || ''); }
+        return String(v);
+    },
+    // The custom fields the items read, found by their names in this Jira (expand=names): { severity, impact, server, build,
+    // steps }. Of two fields with one name, the one holding a value.
+    _ids: function (names, fields) {
+        var out = {}, want = { severity: /^severity$/i, impact: /^impact$/i, server: /^eve server$/i, build: /^eve build$/i,
+            steps: /^(steps to reproduce|reproduction steps)$/i };
+        Object.keys(names || {}).forEach(function (id) {
+            var name = String(names[id] || '').trim();
+            Object.keys(want).forEach(function (k) {
+                if (!want[k].test(name)) { return; }
+                if (!out[k] || (!JiTA.checklist._val((fields || {})[out[k]]) && JiTA.checklist._val((fields || {})[id]))) { out[k] = id; }
+            });
+        });
+        return out;
+    },
+
+    // ---- the history ------------------------------------------------------------------------------------------------
+    // What a field held before its first change (its value when the defect was made), or what it holds now when it never
+    // changed. `hist` is the changelog, oldest first (JiTA.leadduty._changelog).
+    _first: function (hist, field, now) {
+        for (var i = 0; i < (hist || []).length; i++) {
+            var items = hist[i].items || [];
+            for (var j = 0; j < items.length; j++) {
+                if (items[j].field === field) { return items[j].fromString == null ? '' : items[j].fromString; }
+            }
+        }
+        return now;
+    },
+    // The last change `test` picks out: { item, by (accountId), name, at }, or null.
+    _last: function (hist, test) {
+        for (var i = (hist || []).length - 1; i >= 0; i--) {
+            var items = hist[i].items || [], a = hist[i].author || {};
+            for (var j = items.length - 1; j >= 0; j--) {
+                if (test(items[j])) { return { item: items[j], by: a.accountId || '', name: a.displayName || '', at: hist[i].created || '' }; }
+            }
+        }
+        return null;
+    },
+    // Priority and Team are FC's to set. Which of them the reporter set, [{ name, at }]: Priority when it holds something
+    // other than what it held when the defect was made, or what someone else last set it to; Team when it holds anything
+    // that nobody else set (a value it had when the defect was made counts as the reporter's).
+    _fcSet: function (f, hist, ids, reporter) {
+        var C = JiTA.checklist, out = [];
+        var isPr = function (it) { return it.fieldId === 'priority' || it.field === 'priority'; };
+        var prs = [];
+        (hist || []).forEach(function (h) { (h.items || []).forEach(function (it) { if (isPr(it)) { prs.push({ it: it, by: (h.author || {}).accountId || '', at: h.created || '' }); } }); });
+        if (prs.length && f.priority) {
+            var fair = prs[0].it.from, mine = null;
+            prs.forEach(function (p) { if (p.by !== reporter) { fair = p.it.to; } else { mine = p; } });
+            if (String(f.priority.id) !== String(fair) && mine) { out.push({ name: 'Priority', at: mine.at }); }
+        }
+        [{ name: 'Team', id: 'customfield_10001', field: /^team$/i }].forEach(function (x) {
+            var v = x.id ? f[x.id] : null;
+            if (!C._val(v)) { return; }
+            var last = C._last(hist, function (it) { return (x.id && it.fieldId === x.id) || x.field.test(it.field || ''); });
+            if (!last || last.by === reporter) { out.push({ name: x.name, at: last ? last.at : '' }); }
+        });
+        return out;
+    },
+    // The unassign to put back: the last assignee change, when this user made it, left the field empty and was made within
+    // REVERT_MS. { from (the assignee before), at }, or null.
+    _revertTo: function (hist, me, now) {
+        var C = JiTA.checklist, last = C._last(hist, function (it) { return it.fieldId === 'assignee' || it.field === 'assignee'; });
+        if (!last || !me || last.by !== me || last.item.to || !last.item.from) { return null; }
+        var t = Date.parse(last.at);
+        if (isNaN(t) || now - t > C.REVERT_MS) { return null; }
+        return { from: last.item.from, at: last.at };
+    },
+
+    // ---- the bug report ---------------------------------------------------------------------------------------------
+    // The bug report a converted defect was made from, its key: of the bug reports linked to the defect, the one linked as
+    // its clone; else the one whose summary was the defect's first summary (the conversion copies it); else, on a defect
+    // labelled cloned (a converted one), the only one. Null for a defect written from scratch, or when the linked reports
+    // cannot be told apart.
+    _source: function (f, hist) {
+        var C = JiTA.checklist, reps = [], clones = [];
+        (f.issuelinks || []).forEach(function (l) {
+            var o = l.inwardIssue || l.outwardIssue;
+            if (!o || !/^EBR-\d+$/.test(o.key || '')) { return; }
+            reps.push(o);
+            if (/clone/i.test((l.type && l.type.name) || '')) { clones.push(o); }
+        });
+        if (clones.length === 1) { return clones[0].key; }
+        var pool = clones.length ? clones : reps, first = C._squash(C._first(hist, 'summary', f.summary));
+        var same = pool.filter(function (o) { return C._squash(o.fields && o.fields.summary) === first; });
+        if (same.length) { return same[0].key; }
+        return (pool.length === 1 && (f.labels || []).indexOf('cloned') >= 0) ? pool[0].key : null;
+    },
+    // The bug report, as the items compare with it. `ids` are the defect's custom fields (_ids): the report's steps are read
+    // from its steps field, when this Jira has one, else from its description; and its EVE Server and EVE Build, the
+    // player's, which the conversion copies to the defect.
+    _readSource: function (key, ids) {
+        var C = JiTA.checklist, more = [ids && ids.steps, ids && ids.server, ids && ids.build].filter(function (x) { return !!x; });
+        return JiTA.leadduty._get('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=summary,description,labels,attachment' + (more.length ? ',' + more.join(',') : '')).then(function (iss) {
+            var f = (iss && iss.fields) || {}, field = function (id) { return id ? C._val(f[id]) : ''; };
+            return {
+                key: key, summary: f.summary || '', desc: JiTA.util.toPlainText(f.description), labels: f.labels || [],
+                steps: C._steps(f.description, ids && ids.steps ? f[ids.steps] : null), eveServer: field(ids && ids.server), eveBuild: field(ids && ids.build),
+                attachments: (f.attachment || []).map(function (a) { return { filename: a.filename, size: a.size, content: a.content }; })
+            };
+        });
+    },
+    // The reproduction steps as text, in any form: the field of their own where the issue has one filled in, else the
+    // description's numbered lists (the hunter's own, over a player's section left below them), else its "Reproduction
+    // Steps" section (as the in-game reporter writes it); '' when none of these is there.
+    _steps: function (desc, field) {
+        var C = JiTA.checklist, U = JiTA.util, ft = U.toPlainText(field);
+        if (C._squash(ft)) { return ft; }
+        var list = C._listText(desc), m = C.STEPS_SECTION_RE.exec(U.toPlainText(desc));
+        return C._squash(list) ? list : (m ? m[1] : '');
+    },
+    // The text of a description's numbered lists.
+    _listText: function (adf) {
+        var out = [];
+        (function walk(n, inList) {
+            if (!n || typeof n !== 'object') { return; }
+            var here = inList || n.type === 'orderedList';
+            if (here && n.type === 'text' && typeof n.text === 'string') { out.push(n.text); }
+            (n.content || []).forEach(function (c) { walk(c, here); });
+        })(adf, false);
+        return out.join(' ');
+    },
+    // The server names the top of a description is read for: the EVE Server field's options, as Jira offers them for this
+    // defect (its editmeta), kept in GM for a week. SERVER_NAMES when the defect has no such field, or Jira offers no options
+    // (a text field), or they cannot be read. Never rejects.
+    _serverNames: function (key, id) {
+        var C = JiTA.checklist, fallback = C.SERVER_NAMES.slice();
+        if (!id) { return Promise.resolve(fallback); }
+        var c = gmGet(C.SERVERS_KEY, null);
+        if (c && c.id === id && c.names && c.names.length && Date.now() - (c.at || 0) < C.SERVERS_MS) { return Promise.resolve(c.names); }
+        return JiTA.leadduty._get('/rest/api/3/issue/' + encodeURIComponent(key) + '/editmeta').then(function (m) {
+            var f = ((m && m.fields) || {})[id], names = ((f && f.allowedValues) || []).map(function (v) { return String((v && (v.value || v.name)) || '').trim(); })
+                .filter(function (n) { return !!n; });
+            if (!names.length) { return fallback; }
+            gmSet(C.SERVERS_KEY, { at: Date.now(), id: id, names: names });
+            return names;
+        }, function () { return fallback; });
+    },
+    // A test for any of these server names, or a way hunters often write one (TQ, SiSi), as a word of its own.
+    _serverRe: function (names) {
+        var C = JiTA.checklist, all = [];
+        (names || []).forEach(function (n) { all.push(n); (C.SERVER_ALIASES[n] || []).forEach(function (a) { all.push(a); }); });
+        all = all.map(function (n) { return String(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).filter(function (n) { return !!n; });
+        return all.length ? new RegExp('(^|[^a-z0-9])(' + all.join('|') + ')(?![a-z0-9])', 'i') : /(?!)/;
+    },
+    // The exceptions and stacktraces in the report's logs that count (JiTA.excnoise), as the Defect Profile's reader reads
+    // them (and caches them), each with the other defects that hold it: [{ sig, msg, defects }]. Rejects when the logs could
+    // not be read.
+    _readExc: function (key, src) {
+        var item = { key: src.key, fields: { labels: src.labels, attachment: src.attachments } };
+        return Promise.all([JiTA.excfind._read(item), JiTA.excnoise.load()]).then(function (r) {
+            var rec = r[0] && r[0].rec;
+            if (!rec || !rec.logs) { throw new Error('the logs could not be read'); }
+            src.build = rec.build || null;
+            var exc = (rec.exc || []).filter(function (e) { return JiTA.excnoise.counts(e.sig); });
+            if (!exc.length) { return []; }
+            var bare = function () { return exc.map(function (e) { return { sig: e.sig, msg: e.msg, defects: [] }; }); };
+            return JiTA.logsig.holding(exc.map(function (e) { return e.sig; })).then(function (held) {
+                return exc.map(function (e) {
+                    var keys = Object.keys(held || {}).filter(function (k) { return k !== key && held[k].hits.some(function (h) { return h.sig === e.sig; }); });
+                    return { sig: e.sig, msg: e.msg, defects: keys.sort() };
+                });
+            }, bare);
+        });
+    },
+
+    // ---- the items --------------------------------------------------------------------------------------------------
+    _reportLabels: function (labels, srcLabels) {
+        var C = JiTA.checklist;
+        return (labels || []).filter(function (l) { return C.KEEP_LABELS.indexOf(l) < 0 && (srcLabels || []).indexOf(l) >= 0; });
+    },
+    // The labels the defect has of its own: any but cloned, jira_escalated and the bug report's.
+    _ownLabels: function (labels, srcLabels) {
+        var C = JiTA.checklist;
+        return (labels || []).filter(function (l) { return C.KEEP_LABELS.indexOf(l) < 0 && (srcLabels || []).indexOf(l) < 0; });
+    },
+
+    // ---- label suggestions ------------------------------------------------------------------------------------------
+    // The labels in use on EDR defects of the last year, with how many defects carry each ({ label: n }): counted once a
+    // week in this browser, kept in the meta store. A count that fails is tried again on the next card.
+    _labelCounts: function () {
+        var C = JiTA.checklist;
+        if (C._labelsP) { return C._labelsP; }
+        C._labelsP = Promise.resolve().then(function () { return JiTA.db.getMeta(C.LABELS_KEY); }).then(null, function () { return null; }).then(function (m) {
+            if (m && m.c && Date.now() - (m.at || 0) < C.LABELS_MS) { return m.c; }
+            return JiTA.leadduty._search(C.LABELS_JQL, ['labels']).then(function (issues) {
+                var c = {};
+                (issues || []).forEach(function (iss) { ((iss.fields || {}).labels || []).forEach(function (l) { c[l] = (c[l] || 0) + 1; }); });
+                return JiTA.db.setMeta(C.LABELS_KEY, { at: Date.now(), n: (issues || []).length, c: c }).then(function () { return c; }, function () { return c; });
+            });
+        });
+        C._labelsP.then(null, function () { C._labelsP = null; });
+        return C._labelsP;
+    },
+    // A text's words, lowercased.
+    _words: function (t) { return String(t || '').toLowerCase().split(/[^a-z0-9]+/).filter(function (w) { return !!w; }); },
+    // The words a label can be found by: "FittingWindow", "Fitting_Window" and "Fitting-Window" by "fitting window", and
+    // any label by itself as one word ("PvE" by "pve", "SKINR" by "skinr").
+    _labelForms: function (label) {
+        var C = JiTA.checklist, l = String(label);
+        var split = C._words(l.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')), whole = C._words(l).join('');
+        return split.length > 1 ? [split, [whole]] : [[whole]];
+    },
+    // Whether `words` holds `run` word for word, a plural counting as its singular.
+    _hasRun: function (words, run) {
+        var same = function (a, b) { return a === b || a === b + 's' || a === b + 'es'; };
+        for (var i = 0; i + run.length <= words.length; i++) {
+            var j = 0;
+            while (j < run.length && same(words[i + j], run[j])) { j++; }
+            if (j === run.length) { return true; }
+        }
+        return false;
+    },
+    // Labels to suggest for the defect `d`: ones in use on other defects whose words its text holds, its summary counting
+    // most, then its steps, then its description. Left out: the ones it has, cloned and jira_escalated, the bug report's
+    // own, ones on fewer than LABEL_MIN defects, and any not starting with a capital letter. [{ label, n, where }], the best
+    // first, SUGGEST at most.
+    suggest: function (d, counts) {
+        var C = JiTA.checklist, have = {}, out = [];
+        (d.labels || []).concat((d.src && d.src.labels) || [], C.KEEP_LABELS).forEach(function (l) { have[String(l).toLowerCase()] = true; });
+        var parts = [['summary', C._words(d.summary), 3], ['steps', C._words(d.steps), 2], ['description', C._words(d.desc), 1]];
+        Object.keys(counts || {}).forEach(function (label) {
+            var n = counts[label], c0 = String(label).charAt(0);
+            if (!(n >= C.LABEL_MIN) || have[label.toLowerCase()] || c0 !== c0.toUpperCase()) { return; }
+            var forms = C._labelForms(label), score = 0, where = [];
+            parts.forEach(function (p) {
+                if (forms.some(function (f) { return f.length && C._hasRun(p[1], f); })) { score += p[2]; where.push(p[0]); }
+            });
+            if (score) { out.push({ label: label, n: n, where: where, score: score }); }
+        });
+        out.sort(function (a, b) { return b.score - a.score || b.n - a.n || (a.label < b.label ? -1 : 1); });
+        return out.slice(0, C.SUGGEST).map(function (x) { return { label: x.label, n: x.n, where: x.where }; });
+    },
+    // Whether the description holds one of these exceptions: one with the same signature or the same crash site, or one
+    // whose message it has.
+    _hasExc: function (d, exc) {
+        var C = JiTA.checklist, L = JiTA.logsig, mine = {}, sites = {}, text = C._squash(d.desc);
+        (d.fps || []).forEach(function (fp) { mine[fp.sig] = true; var cs = L._crashOf(fp.sig); if (cs) { sites[cs] = true; } });
+        return (exc || []).some(function (e) {
+            if (mine[e.sig]) { return true; }
+            var cs = L._crashOf(e.sig);
+            if (cs && sites[cs]) { return true; }
+            var m = C._squash(e.msg).slice(0, 80);
+            return m.length >= 12 && text.indexOf(m) >= 0;
+        });
+    },
+    _hasNode: function (adf, type) {
+        var found = false;
+        (function walk(n) {
+            if (found || !n || typeof n !== 'object') { return; }
+            if (n.type === type) { found = true; return; }
+            (n.content || []).forEach(walk);
+        })(adf);
+        return found;
+    },
+
+    // What the items are judged on, out of the defect as read (its fields, their names and its properties), its history,
+    // the bug report it came from (as _readSource gives it, with what _readExc found; or null), and the server names the
+    // top of its description is read for (_serverNames).
+    _facts: function (issue, hist, src, servers) {
+        var C = JiTA.checklist, U = JiTA.util, f = (issue && issue.fields) || {}, ids = C._ids(issue && issue.names, f);
+        var prop = ((issue && issue.properties) || {})[C.PROP] || {}, map = function (o) { return (o && typeof o === 'object') ? o : {}; };
+        var desc = U.toPlainText(f.description), stepsText = ids.steps ? U.toPlainText(f[ids.steps]) : '', reporter = (f.reporter || {}).accountId || '';
+        var field = function (id) { return id ? C._val(f[id]) : null; };
+        return {
+            key: issue.key, summary: f.summary || '', desc: desc, text: desc + ' ' + stepsText, steps: C._steps(f.description, ids.steps ? f[ids.steps] : null),
+            stepsField: ids.steps ? (((issue && issue.names) || {})[ids.steps] || 'the steps field') : '', stepsFilled: !!C._squash(stepsText),
+            fps: JiTA.excfind._fps(desc), labels: f.labels || [], attachments: (f.attachment || []).map(function (a) { return { filename: a.filename, size: a.size }; }),
+            severity: field(ids.severity), impact: field(ids.impact), eveServer: field(ids.server), eveBuild: field(ids.build), servers: servers || C.SERVER_NAMES,
+            fcSet: C._fcSet(f, hist, ids, reporter), reporter: reporter, assignee: (f.assignee || {}).accountId || '', assigneeName: (f.assignee || {}).displayName || '',
+            cloned: (f.labels || []).indexOf('cloned') >= 0, src: src, waived: map(prop.w), checked: map(prop.ok)
+        };
+    },
+    // The attachments as a set: their names and sizes. A tick is for a set; one added or taken off since asks for it again.
+    _attSig: function (att) { return (att || []).map(function (a) { return (a.filename || '') + ':' + (a.size || 0); }).sort().join('|'); },
+    // What the attachments item asks: the attachments named, the ones copied from the bug report said, and, when they
+    // changed since someone ticked them off, who did and when.
+    _attWhy: function (d, s, mark) {
+        var had = {};
+        ((s && s.attachments) || []).forEach(function (a) { had[(a.filename || '') + ':' + (a.size || 0)] = true; });
+        var list = (d.attachments || []).map(function (a) { return a.filename + (had[(a.filename || '') + ':' + (a.size || 0)] ? ' (from the bug report)' : ''); });
+        var again = mark ? ('They changed since ' + (mark.name || 'the reporter') + ' checked them' + (mark.at ? ' on ' + JiTA.util.fmtDate(mark.at) : '') + ': check them again. ') : '';
+        if (!list.length) { return again + 'There are none. Add logs from LogLite, and screenshots where they help, unless this defect needs none.'; }
+        return again + 'Check they belong to this defect: ' + list.join(', ') + '. Add logs from LogLite, and screenshots where they help.';
+    },
+
+    // The items, judged on `d` (_facts): [{ id, label, ok, why, waivable, waived, by, copy, fix, tick, suggest }]. `why` says
+    // what is missing, for the hover; an item with `tick` is one the reporter ticks off by hand (tickLabel, tickTitle), for
+    // the values it has now (`sig`); `suggest` lists the suggested labels under it. Pure: the checks feed it what they like.
+    items: function (d) {
+        var C = JiTA.checklist, out = [], s = d.src;
+        function add(id, label, ok, why, extra) {
+            var it = { id: id, label: label, ok: !!ok, why: ok ? '' : (why || '') };
+            if (extra) { Object.keys(extra).forEach(function (k) { it[k] = extra[k]; }); }
+            it.waived = !it.ok && !!it.waivable && !!(d.waived || {})[id];
+            if (it.waived) { it.by = d.waived[id]; }
+            out.push(it);
+        }
+        // In the order a hunter works through a converted defect: its text, its attachments and labels, then its fields.
+        var sameSum = !!s && C._squash(d.summary) === C._squash(s.summary);
+        add('summary', 'Summary rewritten', !sameSum && !!C._squash(d.summary), 'Give your defect a fitting title.');
+
+        if (s) {
+            add('desc', 'Description rewritten', !!C._squash(d.desc) && C._squash(d.desc) !== C._squash(s.desc),
+                'Still the bug report\'s description. Describe the bug in full, and take out what the player wrote that it does not need.');
+        }
+        // Reproduction steps, in any form: not the bug report's own, still in the defect word for word; or, without a
+        // report's steps to go by, the steps field filled in where the defect has one. A defect written from scratch with no
+        // such field has nothing here to check (Also check reminds of it).
+        var rs = C._squash(s && s.steps), STEPS = { copy: C.STEPS_TEXT, html: C.STEPS_HTML };
+        if (rs.length >= C.STEPS_MIN) {
+            add('steps', 'Reproduction steps rewritten', C._squash(d.text).indexOf(rs) < 0,
+                'Still the bug report\'s reproduction steps, word for word. Keep the steps that matter; one of the last says what to look for.', STEPS);
+        } else if (d.stepsField) {
+            add('steps', d.stepsField + ' filled in', !!d.stepsFilled, 'Write the reproduction steps into ' + d.stepsField + '. One of the last says what to look for.', STEPS);
+        }
+        // The attachments: the bug report's are copied to the defect, so its writer says they are good. A tick of theirs, for
+        // the attachments as they were: one added or taken off since asks for it again.
+        var sig = C._attSig(d.attachments), mark = (d.checked || {}).attachments, ticked = !!mark && mark.sig === sig, none = !(d.attachments || []).length;
+        add('attachments', 'Attachments checked', ticked, C._attWhy(d, s, mark), { tick: true, sig: sig, mark: ticked ? mark : null,
+            tickLabel: none ? 'None needed' : 'They are good', tickTitle: none ? 'This defect needs no attachments' : 'You checked them: they belong to this defect, and nothing is missing' });
+        if (s) {
+            var left = C._reportLabels(d.labels, s.labels);
+            add('replabels', 'The bug report\'s labels taken off', !left.length,
+                'Still the bug report\'s: ' + left.join(', ') + '. Take them off; cloned and jira_escalated stay.', { fix: 'labels', left: left });
+        }
+        // Labels of its own, the suggested ones listed under the item (_suggestRow); a defect no label fits takes a Not needed.
+        add('labels', 'Add appropriate labels', C._ownLabels(d.labels, s && s.labels).length > 0,
+            'No labels of its own yet. Add the ones that fit the bug, so it is found with others like it.', { waivable: true, suggest: true });
+
+        // A field this Jira does not have on the defect (null) is not asked for; with neither, neither is the item.
+        var known = [['Severity', d.severity], ['Impact', d.impact]].filter(function (x) { return x[1] !== null && x[1] !== undefined; });
+        var unset = known.filter(function (x) { return x[1] === ''; }).map(function (x) { return x[0]; });
+        if (known.length) { add('fields', 'Severity and Impact set', !unset.length, 'Not set yet: ' + unset.join(', ') + '.'); }
+        // Where it was tested: in the EVE Server and EVE Build fields, or, the old way, at the top of the description, its
+        // server named as the EVE Server field's options name them (d.servers). The conversion copies the bug report's
+        // fields, the player's: as long as both still are the report's, they count only once the reporter ticks them off as
+        // right (tested there too), for the values they are.
+        var names = d.servers || C.SERVER_NAMES, top = String(d.desc || '').slice(0, C.TOP_CHARS), srv = C._serverRe(names).test(top), bld = C.BUILD_RE.test(top);
+        var hasFields = (d.eveServer !== null && d.eveServer !== undefined) || (d.eveBuild !== null && d.eveBuild !== undefined);
+        var empty = [['EVE Server', d.eveServer], ['EVE Build', d.eveBuild]].filter(function (x) { return !x[1]; }).map(function (x) { return x[0]; });
+        var built = s && s.build ? ' The bug report\'s log was written by build ' + s.build + '.' : '';
+        var BUILD_LBL = 'EVE Server and EVE Build set to where you reproduced it';
+        if (hasFields && empty.length) {
+            add('build', BUILD_LBL, srv && bld,
+                'Fill in ' + empty.join(' and ') + ' with the server and build you reproduced it on (the old way, the server and build number at the top of the description, does as well).' + built);
+        } else if (hasFields) {
+            var asReport = !!s && C._squash(d.eveServer) === C._squash(s.eveServer) && C._squash(d.eveBuild) === C._squash(s.eveBuild);
+            var bsig = C._squash(d.eveServer) + '|' + C._squash(d.eveBuild), bmark = (d.checked || {}).build, bticked = asReport && !!bmark && bmark.sig === bsig;
+            add('build', BUILD_LBL, !asReport || bticked,
+                'Still the bug report\'s, where the player was: ' + d.eveServer + ', build ' + d.eveBuild + '. Set them to the server and build you reproduced it on, or mark them as correct if you reproduced it there.' + built,
+                asReport ? { tick: true, sig: bsig, mark: bticked ? bmark : null, tickLabel: 'They are correct', tickTitle: 'You reproduced it on this server and build too' } : null);
+        } else {
+            add('build', 'Server and build you reproduced it on, at the top', srv && bld,
+                (!srv && !bld ? 'Neither the server nor the build number you reproduced it on is at the top of the description.'
+                    : (!srv ? 'No server name (' + names.join(', ') + ') at the top of the description.'
+                        : 'No build number at the top of the description. It is at the top of "About EVE" in the Esc menu.')) + built,
+                { copy: C.BUILD_TEXT, html: C.BUILD_HTML });
+        }
+        var fc = d.fcSet || [];
+        add('fc', 'Priority and Team fields left empty for FC to set', !fc.length,
+            'FC sets these, never a bug hunter. Set on this defect by its reporter: ' + fc.map(function (x) { return x.name; }).join(', ') +
+            '. Put Priority back, and leave Team empty.');
+        if (s && s.exc && s.exc.length) {
+            add('exc', 'Add exceptions related to the bug to your defect description', C._hasExc(d, s.exc),
+                'The bug report\'s logs hold ' + s.exc.length + ' exception' + (s.exc.length === 1 ? '' : 's') + ' (listed below). Add the ones related to the bug, each in an expand.',
+                { waivable: true });
+        }
+        return out;
+    },
+    // The state the card paints, out of `d`: who it is for, the items, and how many are still open. `pending` while the
+    // report's logs are still being read: then the card cannot be finished yet, though nothing is refused for it either.
+    // `held` while the reporter still has the defect, as the conversion leaves it: only then is there a hand-off to FC to
+    // offer or to refuse. A defect a developer took is with FC already.
+    _judge: function (d, sees, me, hist) {
+        var items = JiTA.checklist.items(d), open = items.filter(function (it) { return !it.ok && !it.waived; }).length;
+        var pending = !!d.src && d.src.exc === undefined && !d.src.failed;
+        return { key: d.key, sees: sees, me: me || '', d: d, hist: hist || [], items: items, open: open, pending: pending, complete: !open && !pending,
+            assignee: d.assignee, held: !!d.assignee && d.assignee === d.reporter, src: d.src };
+    },
+
+    // Who the card is for: the defect's reporter ('reporter'), and a Lead on an ISD member's defect ('lead'); '' for
+    // anyone else, who sees no card and is refused nothing.
+    _who: function (issue, me) {
+        var rep = ((issue && issue.fields) || {}).reporter || {};
+        if (me && rep.accountId === me) { return Promise.resolve('reporter'); }
+        if (!JiTA.leadduty.isLead() || !rep.accountId) { return Promise.resolve(''); }
+        if (/^ISD\b/i.test(rep.displayName || '')) { return Promise.resolve('lead'); }
+        return JiTA.leadduty.group.members().then(function (ms) {
+            return (ms || []).some(function (m) { return m && m.accountId === rep.accountId; }) ? 'lead' : '';
+        }, function () { return ''; });
+    },
+
+    // ---- reading ------------------------------------------------------------------------------------------------------
+    // Everything for `key`, each step handed to onState: who wrote the defect (for anyone else the card stops there, at
+    // one small read), then the defect, its history and its bug report, then what the report's logs hold (a download,
+    // unless the Defect Profile's reader has it already). Resolves the last state. A failure once the viewer is known
+    // carries who it is (sees, me), so the card can say the check failed instead of not showing at all.
+    load: function (key, onState) {
+        var C = JiTA.checklist, L = JiTA.leadduty, path = '/rest/api/3/issue/' + encodeURIComponent(key);
+        return Promise.all([L._get(path + '?fields=reporter'), JiTA.link.currentUser()]).then(function (r0) {
+            var me = r0[1] || '';
+            return C._who(r0[0] || {}, me).then(function (sees) {
+                if (!sees) { var none = { key: key, sees: '' }; onState(none); return none; }
+                return Promise.all([L._get(path + '?fields=*all,-comment,-worklog&expand=names&properties=' + encodeURIComponent(C.PROP)), L._changelog(key)])
+                    .then(function (r) {
+                        C._upd[key] = ((r[0] || {}).fields || {}).updated || '';   // what _check compares with
+                        return C._judgeAll(key, r[0] || {}, r[1] || [], sees, me, onState);
+                    })
+                    .then(null, function (e) {
+                        var err = (e instanceof Error) ? e : new Error(String((e && e.message) || e));
+                        err.sees = sees;
+                        err.me = me;
+                        throw err;
+                    });
+            });
+        });
+    },
+    // The defect read in full, judged: first on itself and its bug report, then again once the report's logs are read.
+    _judgeAll: function (key, issue, hist, sees, me, onState) {
+        var C = JiTA.checklist, f = issue.fields || {}, srcKey = C._source(f, hist), ids = C._ids(issue.names, f);
+        return Promise.all([srcKey ? C._readSource(srcKey, ids).then(null, function () { return null; }) : null, C._serverNames(key, ids.server)]).then(function (r) {
+            var src = r[0], d = C._facts(issue, hist, src, r[1]), s = C._judge(d, sees, me, hist);
+            onState(s);
+            if (!src) { return s; }
+            return C._readExc(key, src).then(function (exc) { src.exc = exc; }, function () { src.failed = true; }).then(function () {
+                var s2 = C._judge(d, sees, me, hist);
+                onState(s2);
+                return s2;
+            });
+        });
+    },
+    // Read `key` again and paint it. An answer for a load since overtaken, or for a defect since left, is dropped.
+    refresh: function (key) {
+        var C = JiTA.checklist, gen = ++C._gen;
+        C._lastLoad = Date.now();
+        var still = function () { return C._gen === gen && C._key === key; };
+        return C.load(key, function (s) {
+            if (!still()) { return; }
+            C._state[key] = s;
+            C._draw(key, s);
+        }).then(function (s) {
+            if (!still()) { return; }
+            C._seen = C._pageSig();   // as the page shows the defect now that it has settled
+            C._guard(key, s);
+        }, function (e) {
+            var why = String((e && e.message) || e), shown = C._state[key];
+            // For the viewer the card is for, said in the console and on the card; for anyone else (their first small read
+            // failed) only with debug logging on.
+            if (e && e.sees) { console.log('[JiTA] checklist: could not check ' + key + ':', e); } else { JiTA.dlog('[JiTA] checklist: could not read ' + key + ':', why); }
+            if (!still()) { return; }
+            C._seen = C._pageSig();   // checked again once the page changes, not on every change of it
+            if (shown && shown.sees && !shown.error) { JiTA.ui.toast('The Defect checklist could not read ' + key + ' again: ' + why); return; }
+            if (!e || !e.sees) { return; }
+            C._state[key] = { key: key, sees: e.sees, me: e.me || '', error: why };
+            C._draw(key, C._state[key]);
+        });
+    },
+
+    // ---- the page -----------------------------------------------------------------------------------------------------
+    // From the page observer: the card follows the defect on screen, stays right under Details, and is judged again once
+    // the defect's fields change on the page (an edit made in Jira itself).
+    ensure: function () {
+        var C = JiTA.checklist, key = (typeof jitaCurrentKey === 'function') ? jitaCurrentKey() : '';
+        C._bind();
+        if (!flagOn('defectChecklist') || !/^(EDR|EO|PLAT)-\d+$/.test(key || '')) {
+            if (C._key) { C._key = null; C.clear(); }
+            return;
+        }
+        if (key !== C._key) {
+            C._key = key;
+            C.clear();
+            if (C._timer) { clearTimeout(C._timer); C._timer = 0; }
+            C.refresh(key);
+            return;
+        }
+        C._place();
+        if (!C._state[key] || !C._state[key].sees) { return; }
+        var sig = C._pageSig();
+        if (sig === C._seen) { return; }
+        C._seen = sig;
+        clearTimeout(C._timer);
+        C._timer = setTimeout(function () { C._timer = 0; if (C._key === key) { C._check(); } }, C.RECHECK_MS);
+    },
+    // Whether the defect on screen changed in Jira since it was last read: its `updated`, one small read. Only a change reads
+    // it in full again, so it can be asked often. A check that failed waits for the focus or a click on ↻.
+    _check: function () {
+        var C = JiTA.checklist, key = C._key, s = key && C._state[key];
+        if (!s || !s.sees || s.error || C._checking) { return Promise.resolve(); }
+        C._checking = true;
+        return JiTA.leadduty._get('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=updated').then(function (iss) {
+            C._checking = false;
+            var up = ((iss && iss.fields) || {}).updated;
+            if (C._key === key && up && up !== C._upd[key]) { return C.refresh(key); }
+        }, function () { C._checking = false; });
+    },
+    // A click or a key on the page: Jira may be saving an edit, so the defect is checked soon after the last one, and again
+    // a while later for a slow save.
+    _onInput: function () {
+        var C = JiTA.checklist, s = C._key && C._state[C._key];
+        if (!s || !s.sees) { return; }
+        C._inputT.forEach(function (t) { clearTimeout(t); });
+        C._inputT = C.INPUT_MS.map(function (ms) { return setTimeout(function () { C._check(); }, ms); });
+    },
+    // Put the card straight back when Jira wipes it, painted from the last state. Called on every change of the page, so
+    // it does nothing unless the card is missing and has something to show.
+    reensure: function () {
+        var C = JiTA.checklist, s = C._key && C._state[C._key];
+        if (!s || !s.sees || document.getElementById(C.GROUP_ID)) { return; }
+        C._draw(C._key, s);   // which draws nothing while the card is switched off
+    },
+    // The defect's fields as the page shows them: its summary, its description, the Details fields the items read and
+    // how many attachment parts there are, so an edit made in Jira itself can be told.
+    _pageSig: function () {
+        var C = JiTA.checklist, bits = [];
+        var h = document.querySelector(SELECTORS.SUMMARY_HEADING), d = document.querySelector(SELECTORS.DESC_CONTAINER);
+        bits.push(h ? h.textContent : '', d ? d.textContent : '', String(document.querySelectorAll('[data-testid*="attachment"]').length));
+        try {
+            JiTA.declutter._fieldRows().forEach(function (r) { if (C.FIELDS_SEEN.test(r.label)) { bits.push(r.label + ':' + (r.el.textContent || '')); } });
+        } catch (e) { /* ignore */ }
+        return bits.join('|');
+    },
+    _bind: function () {
+        var C = JiTA.checklist;
+        if (C._bound) { return; }
+        C._bound = true;
+        document.addEventListener('mousedown', C._onPick, true);
+        document.addEventListener('click', C._onPick, true);
+        document.addEventListener('mouseup', C._onInput, true);
+        document.addEventListener('keyup', C._onInput, true);
+        window.addEventListener('focus', C._onFocus);
+    },
+    // Back in the tab (a log saved from LogLite and attached meanwhile): checked; a check that failed is tried again, at
+    // most every FOCUS_MS.
+    _onFocus: function () {
+        var C = JiTA.checklist, s = C._key && C._state[C._key];
+        if (!s || !s.sees) { return; }
+        if (!s.error) { C._check(); return; }
+        if (Date.now() - C._lastLoad > C.FOCUS_MS) { C.refresh(C._key); }
+    },
+
+    // ---- nobody unassigns an unfinished defect ----------------------------------------------------------------------------
+    // "Unassigned" picked in Jira's assignee field while items are open: refused in the capture phase, so the picker never
+    // hears of it. Whatever gets past this (a keyboard shortcut) is put back once the card reads the defect again (_guard).
+    _onPick: function (e) {
+        var C = JiTA.checklist, s = C._key && C._state[C._key];
+        if (!s || !s.sees || !s.open || !s.held || !flagOn('defectChecklist')) { return; }
+        var t = e.target, opt = t && t.closest && t.closest('[role="option"], [id*="-option-"]');
+        if (!opt || !/^\s*(unassigned\s*)+$/i.test(opt.textContent || '')) { return; }
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.stopImmediatePropagation) { e.stopImmediatePropagation(); }
+        if (e.type === 'click') { JiTA.ui.toast(C._refusal(s)); }
+    },
+    _refusal: function (s) {
+        return s.key + ' stays assigned until the Defect checklist is done: ' + s.open + ' item' + (s.open === 1 ? '' : 's') + ' still open. Hand it to FC from the card once ' +
+            (s.open === 1 ? 'it is' : 'they are') + ' done.';
+    },
+    // Once read: an unassign this user made while items are open, of a defect its reporter still had, is put back to them,
+    // once.
+    _guard: function (key, s) {
+        var C = JiTA.checklist;
+        if (!s || !s.sees || s.assignee || !s.open || !flagOn('defectChecklist')) { return; }
+        var back = C._revertTo(s.hist, s.me, Date.now());
+        if (!back || back.from !== s.d.reporter || C._reverted[key] === back.at) { return; }
+        C._reverted[key] = back.at;
+        C._req('PUT', '/rest/api/3/issue/' + encodeURIComponent(key) + '/assignee', { accountId: back.from }).then(function () {
+            JiTA.ui.toast(C._refusal(s) + ' It was put back to its assignee.');
+            C._jiraRefresh();
+            C.refresh(key);
+        }, function (e) { JiTA.ui.toast('The Defect checklist could not put ' + key + '\'s assignee back: ' + (e && e.message || e)); });
+    },
+
+    // ---- writing ------------------------------------------------------------------------------------------------------
+    // A Jira write (or read) with the token Jira wants for one; a 429 waits as long as Jira asks and tries again, twice.
+    // The answer is read as text and parsed here: Jira answers a saved issue property 200 or 201 with no body, which jQuery,
+    // left to parse it as JSON, took for a failure ("HTTP 200"). A read must answer JSON; a write may answer nothing.
+    // Rejects with an Error carrying .status and Jira's own reason.
+    _req: function (method, path, body) {
+        return new Promise(function (resolve, reject) {
+            (function attempt(n) {
+                var o = { url: JiTA.HOST + path, type: method, dataType: 'text', headers: { 'X-Atlassian-Token': 'no-check', 'Accept': 'application/json' } };
+                if (body !== undefined) { o.contentType = 'application/json'; o.data = JSON.stringify(body); }
+                $.ajax(o).done(function (t) {
+                    if (!t) { resolve({}); return; }
+                    var d;
+                    try { d = JSON.parse(t); } catch (e) {
+                        if (method === 'GET') { reject(new Error('Jira answered with something other than JSON')); } else { resolve({}); }
+                        return;
+                    }
+                    resolve(d == null ? {} : d);
+                }).fail(function (xhr) {
+                    if (xhr && xhr.status === 429 && n > 0) {
+                        var ra = parseInt(xhr.getResponseHeader && xhr.getResponseHeader('Retry-After'), 10);
+                        setTimeout(function () { attempt(n - 1); }, (isNaN(ra) ? 3 : ra) * 1000);
+                        return;
+                    }
+                    var j = null, m = [];
+                    try { j = JSON.parse((xhr && xhr.responseText) || 'null'); } catch (e) { j = null; }
+                    if (j && j.errorMessages) { m = m.concat(j.errorMessages); }
+                    if (j && j.errors) { Object.keys(j.errors).forEach(function (k) { m.push(j.errors[k]); }); }
+                    var err = new Error(m.length ? m.join(' ') : ('HTTP ' + (xhr ? xhr.status : '?')));
+                    err.status = xhr ? xhr.status : 0;
+                    reject(err);
+                });
+            })(2);
+        });
+    },
+    _issuePath: function (key) { return '/rest/api/3/issue/' + encodeURIComponent(key); },
+    // A mark kept on the issue (PROP): `kind` 'w' for an item marked Not needed, 'ok' for one ticked off (with `extra`, the
+    // attachments' set it was ticked for), or taken away when `on` is false. Read and written again, so another browser's
+    // marks are kept. Only the defect's reporter marks.
+    _keep: function (key, kind, id, on, extra) {
+        var C = JiTA.checklist, s = C._state[key], path = C._issuePath(key) + '/properties/' + encodeURIComponent(C.PROP);
+        if (!s || s.sees !== 'reporter') { return Promise.resolve(); }
+        var me = JiTA.leadduty.me() || {};
+        return C._req('GET', path).then(function (p) { return (p && p.value) || null; }, function (e) { if (e && e.status === 404) { return null; } throw e; }).then(function (v) {
+            var map = function (o) { return (o && typeof o === 'object') ? o : {}; }, all = { w: map(v && v.w), ok: map(v && v.ok) };
+            if (on) {
+                var rec = { by: s.me, name: me.displayName || '', at: new Date().toISOString() };
+                Object.keys(extra || {}).forEach(function (k) { rec[k] = extra[k]; });
+                all[kind][id] = rec;
+            } else { delete all[kind][id]; }
+            return C._req('PUT', path, { v: 1, w: all.w, ok: all.ok });
+        }).then(function () { C.refresh(key); }, function (e) { JiTA.ui.toast('Could not save that on ' + key + ': ' + (e && e.message || e)); });
+    },
+    // An item marked "Not needed", or not any more.
+    _waive: function (key, id, on) { return JiTA.checklist._keep(key, 'w', id, on); },
+    // An item ticked off, or not any more: the attachments said to be good, for the set they are (`sig`).
+    _tick: function (key, id, sig, on) { return JiTA.checklist._keep(key, 'ok', id, on, { sig: sig }); },
+    // A field written here: Jira's issue view keeps what it read, so it is told to read the issue again (_jiraRefresh).
+    // Left showing the old value, an edit of that field in it would write the old value back: a label taken off would
+    // return, the expand would go. Should the page not change within REFRESH_MS (a Jira that no longer hears the event),
+    // it reloads instead. Said in a toast, and the card read again.
+    _written: function (key, msg) {
+        var C = JiTA.checklist, before = C._pageSig(), t0 = Date.now();
+        JiTA.ui.toast(msg);
+        C.refresh(key);
+        C._jiraRefresh();
+        (function look() {
+            if (C._key !== key || C._pageSig() !== before) { return; }   // left, or Jira shows it
+            if (Date.now() - t0 < C.REFRESH_MS) { setTimeout(look, C.REFRESH_STEP_MS); return; }
+            console.log('[JiTA] checklist: Jira did not show the change on ' + key + ', so the page reloads to show it.');
+            try { window.location.reload(); } catch (e) { /* the toast and the card say it */ }
+        })();
+    },
+    // Tells Jira's issue view to read the issue on screen again, as Jira's own comment box does after it writes one. With
+    // no detail: an object made in a userscript's sandbox is one the page cannot read in Firefox, and without one the
+    // issue view reads the issue on screen (the form Connect's AP.jira.refreshIssuePage() fires).
+    _jiraRefresh: function () {
+        try { document.dispatchEvent(new CustomEvent(JiTA.checklist.REFRESH_EVENT)); } catch (e) { /* _written reloads */ }
+    },
+    // The bug report's labels taken off the defect, asked first; cloned and jira_escalated stay (they are never in `labels`).
+    _takeLabels: function (key, labels) {
+        var C = JiTA.checklist;
+        if (!labels || !labels.length) { return Promise.resolve(); }
+        if (!window.confirm('Take the bug report\'s labels off ' + key + ': ' + labels.join(', ') + '?\n\ncloned and jira_escalated stay.')) { return Promise.resolve(); }
+        return C._req('PUT', C._issuePath(key), { update: { labels: labels.map(function (l) { return { remove: l }; }) } }).then(function () {
+            C._written(key, 'Taken off ' + key + ': ' + labels.join(', ') + '.');
+        }, function (e) { JiTA.ui.toast('Could not take the labels off ' + key + ': ' + (e && e.message || e)); });
+    },
+    // A suggested label added to the defect, asked first.
+    _addLabel: function (key, label) {
+        var C = JiTA.checklist;
+        if (!window.confirm('Add the label ' + label + ' to ' + key + '?')) { return Promise.resolve(); }
+        return C._req('PUT', C._issuePath(key), { update: { labels: [{ add: label }] } }).then(function () {
+            C._written(key, 'Added ' + label + ' to ' + key + '.');
+        }, function (e) { JiTA.ui.toast('Could not add ' + label + ' to ' + key + ': ' + (e && e.message || e)); });
+    },
+    // An expand at the end of the description, titled `title` and holding `text` as a code block. A defect without a
+    // description gets one.
+    _withExpand: function (adf, title, text) {
+        var doc = (adf && adf.type === 'doc') ? JSON.parse(JSON.stringify(adf)) : { type: 'doc', version: 1, content: [] };
+        doc.content = doc.content || [];
+        doc.content.push({ type: 'expand', attrs: { title: title }, content: [{ type: 'codeBlock', attrs: {}, content: [{ type: 'text', text: text || title }] }] });
+        return doc;
+    },
+    _title: function (e) {
+        var m = String((e && e.msg) || '').split('\n')[0].replace(/\s+/g, ' ').trim();
+        return (m.length > 120 ? m.slice(0, 119) + '…' : m) || 'Exception';
+    },
+    // The exception as the report's log has it: its block, out of the logs read again (a reading keeps only signatures
+    // and messages). Every block of a log read is kept, so the next one is at hand. Falls back to its message and its
+    // stack as the signature has them.
+    _raw: function (src, e) {
+        var C = JiTA.checklist, P = JiTA.profile, L = JiTA.logsig, cache = C._rawCache[src.key] || (C._rawCache[src.key] = {});
+        if (cache[e.sig]) { return Promise.resolve(cache[e.sig]); }
+        var hint = (JiTA.ocr._langFromLabels(src.labels || []) || {}).code, logs = P._logFiles(src.attachments), i = 0;
+        function next() {
+            if (i >= logs.length) { return Promise.resolve(P._sigTip(e.sig, e.msg)); }
+            var a = logs[i++];
+            return P._fetchLog(a.content, hint).then(function (t) {
+                L._logBlocks(t).forEach(function (b) { var fp = L._fingerprint(b); if (fp.sig && !cache[fp.sig]) { cache[fp.sig] = b; } });
+                return cache[e.sig] || next();
+            }, next);
+        }
+        return next();
+    },
+    // The exception added to the end of the description in an expand, asked first. The description is read again just
+    // before it is written, so an edit made since the card was drawn is kept.
+    _addExc: function (key, s, e) {
+        var C = JiTA.checklist, title = C._title(e);
+        if (!window.confirm('Add this exception to the end of the description of ' + key + ', in an expand titled:\n\n' + title +
+            '\n\nSave or cancel an edit of the description first: saved afterwards, it would take the expand out again.')) { return Promise.resolve(); }
+        return C._raw(s.src, e).then(function (text) {
+            return C._req('GET', C._issuePath(key) + '?fields=description').then(function (iss) {
+                return C._req('PUT', C._issuePath(key), { fields: { description: C._withExpand(((iss && iss.fields) || {}).description, title, text) } });
+            });
+        }).then(function () {
+            C._written(key, 'Added to the description of ' + key + '.');
+        }, function (err) { JiTA.ui.toast('Could not add it to ' + key + ': ' + (err && err.message || err)); });
+    },
+    // Taken by its reporter until it is done, asked first: offered on a defect that is unassigned before it is.
+    _hold: function (key, me, $btn) {
+        var C = JiTA.checklist;
+        if (!window.confirm('Assign ' + key + ' to you until its Defect checklist is done? Unassigned, it is where FC picks defects up.')) { return Promise.resolve(); }
+        $btn.prop('disabled', true).text('Assigning…');
+        return C._req('PUT', C._issuePath(key) + '/assignee', { accountId: me }).then(function () {
+            C._written(key, key + ' is assigned to you until the checklist is done.');
+        }, function (e) {
+            $btn.prop('disabled', false).text('Assign to me until it is done');
+            JiTA.ui.toast('Could not assign ' + key + ' to you: ' + (e && e.message || e));
+        });
+    },
+    // Handed to FC: unassigned, asked first. Only offered once every item is done.
+    _unassign: function (key, $btn) {
+        var C = JiTA.checklist;
+        if (!window.confirm('Unassign ' + key + ' and hand it to FC?')) { return Promise.resolve(); }
+        $btn.prop('disabled', true).text('Unassigning…');
+        return C._req('PUT', C._issuePath(key) + '/assignee', { accountId: null }).then(function () {
+            C._written(key, key + ' is unassigned: FC picks it up from here.');
+        }, function (e) {
+            $btn.prop('disabled', false).text('Hand to FC: unassign');
+            JiTA.ui.toast('Could not unassign ' + key + ': ' + (e && e.message || e));
+        });
+    },
+
+    // ---- the card -----------------------------------------------------------------------------------------------------
+    _anchor: function () {
+        var a = document.querySelector('[data-vc="issue-view-context-items-details-panel-slot"]') || document.querySelector(SELECTORS.VC_DETAILS_GROUP);
+        return (a && a.parentNode) ? a : null;
+    },
+    // The card's body, the card created right under Details when `create` asks for it: above the Defect Profile and the
+    // Triage Assistant, which are mounted after it.
+    _card: function (create) {
+        var C = JiTA.checklist, g = document.getElementById(C.GROUP_ID);
+        if (!g && create) {
+            var a = C._anchor();
+            if (!a) { return $(); }
+            C._style();
+            g = JiTA.ui._buildSideGroup({ id: C.GROUP_ID, title: C.TITLE, body: '<div id="jita-cl"></div>', collapseKey: C.COLLAPSE_KEY });
+            C._titleEl(g);
+            a.parentNode.insertBefore(g, a.nextSibling);
+        }
+        return g ? $(g).find('#jita-cl') : $();
+    },
+    // The card's title, marked the first time it is found: the cloned group's own heading, or the hand-built one.
+    _titleEl: function (g) {
+        var t = g.querySelector('[data-jita-title]');
+        if (t) { return t; }
+        var all = g.querySelectorAll('*');
+        for (var i = 0; i < all.length; i++) {
+            if (!all[i].children.length && all[i].textContent === JiTA.checklist.TITLE) { all[i].setAttribute('data-jita-title', '1'); return all[i]; }
+        }
+        return null;
+    },
+    // Back right under Details, where a card mounted after it went in between.
+    _place: function () {
+        var C = JiTA.checklist, g = document.getElementById(C.GROUP_ID), a = C._anchor();
+        if (g && a && a.parentNode === g.parentNode && a.nextSibling !== g) { a.parentNode.insertBefore(g, a.nextSibling); }
+    },
+    clear: function () {
+        var g = document.getElementById(JiTA.checklist.GROUP_ID);
+        if (g && g.parentNode) { g.parentNode.removeChild(g); }
+    },
+
+    _draw: function (key, s) {
+        var C = JiTA.checklist;
+        if (C._key !== key || !flagOn('defectChecklist')) { return; }
+        if (!s || !s.sees) { C.clear(); return; }
+        var $b = C._card(true);
+        if (!$b.length) { return; }
+        $b.empty();
+        if (s.error) { C._failed(key, s, $b); return; }
+        var mine = s.sees === 'reporter', done = s.items.length - s.open;
+        var g = document.getElementById(C.GROUP_ID), t = g && C._titleEl(g);
+        if (t) { t.textContent = C.TITLE + (s.complete ? ' · ready' : (s.open ? ' · ' + s.open + ' open' : '')); }
+        var $h = $('<div class="jcl-head"></div>').appendTo($b);
+        $('<span class="jcl-count"></span>').toggleClass('done', s.complete)
+            .text(s.complete ? 'Ready for FC' : (done + ' of ' + s.items.length + ' done')).appendTo($h);
+        if (s.pending) { $('<span class="jcl-state"></span>').text('reading the bug report\'s logs…').appendTo($h); }
+        $('<a class="jcl-again" href="#" title="Check again">↻</a>').on('click', function (e) { e.preventDefault(); C.refresh(key); }).appendTo($h);
+        C._srcLine(s).appendTo($b);
+        var $list = $('<div class="jcl-items"></div>').appendTo($b);
+        s.items.forEach(function (it) {
+            C._itemRow(key, s, it, mine).appendTo($list);
+            if (mine && it.suggest) { C._suggestRow(key, s).appendTo($list); }   // under "Add appropriate labels"
+        });
+        if (s.src && s.src.failed) { $('<div class="jcl-line"></div>').text('The bug report\'s logs could not be read.').appendTo($b); }
+        if (s.src && s.src.exc && s.src.exc.length) { C._excList(key, s, mine).appendTo($b); }
+        C._more(s).appendTo($b);
+        C._foot(key, s).appendTo($b);
+    },
+    // A check that failed: said, with a way to check again. Nothing is refused while it cannot be checked.
+    _failed: function (key, s, $b) {
+        var C = JiTA.checklist, g = document.getElementById(C.GROUP_ID), t = g && C._titleEl(g);
+        if (t) { t.textContent = C.TITLE + ' · could not check'; }
+        var $h = $('<div class="jcl-head"></div>').appendTo($b);
+        $('<span class="jcl-count jcl-failed"></span>').text('Could not check ' + key).appendTo($h);
+        $('<a class="jcl-again" href="#" title="Check again">↻</a>').on('click', function (e) { e.preventDefault(); C.refresh(key); }).appendTo($h);
+        $('<div class="jcl-line"></div>').text(String(s.error).replace(/[.\s]+$/, '') + '. Nothing is refused until it can be checked.').appendTo($b);
+    },
+    _srcLine: function (s) {
+        var $l = $('<div class="jcl-src"></div>');
+        if (s.src) {
+            $l.append(document.createTextNode('Compared with '));
+            $('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + s.src.key).text(s.src.key).appendTo($l);
+            $l.append(document.createTextNode(', the bug report it was converted from.'));
+        } else if (s.d && s.d.cloned) {
+            $l.text('Converted, but its bug report cannot be told apart from the others attached: nothing is compared with it.');
+        } else {
+            $l.text('Written from scratch: no bug report to compare with.');
+        }
+        return $l;
+    },
+    _itemRow: function (key, s, it, mine) {
+        var C = JiTA.checklist, cls = it.ok ? 'ok' : (it.waived ? 'waived' : 'todo');
+        var $r = $('<div class="jcl-item"></div>').addClass(cls).attr('data-item', it.id);
+        $('<span class="jcl-mark"></span>').text(C.MARKS[cls]).appendTo($r);
+        var who = function (m, verb) { return verb + ' by ' + ((m && m.name) || 'the reporter') + (m && m.at ? ' on ' + JiTA.util.fmtDate(m.at) : ''); };
+        var tip = it.ok ? (it.tick && it.mark ? who(it.mark, 'Checked') : 'Done') : (it.waived ? who(it.by, 'Not needed: marked') : it.why);
+        $('<span class="jcl-lbl"></span>').text(it.label).attr('title', tip).appendTo($r);
+        var $a = $('<span class="jcl-acts"></span>').appendTo($r);
+        var act = function (text, title, fn) {
+            return $('<a class="jcl-act" href="#"></a>').text(text).attr('title', title).on('click', function (e) { e.preventDefault(); fn($(this)); }).appendTo($a);
+        };
+        if (!it.ok && !it.waived && it.copy) {
+            act('Copy', 'Copy a template for it, to paste into the description: a numbered list stays one', function ($x) {
+                JiTA.util.copy(it.copy, it.html).then(function () { $x.text('Copied'); }, function () { JiTA.ui.toast('Could not copy: the browser refused.'); });
+            });
+        }
+        if (mine && !it.ok && !it.waived && it.fix === 'labels' && it.left && it.left.length) {
+            act('Take off', 'Take ' + it.left.join(', ') + ' off this defect', function () { C._takeLabels(key, it.left); });
+        }
+        if (mine && !it.ok && it.waivable) {
+            act(it.waived ? 'Needed after all' : 'Not needed', it.waived ? 'Count this item again' : 'This defect goes without it, as the guide allows: the item counts as done, and Leads see it was skipped',
+                function () { C._waive(key, it.id, !it.waived); });
+        }
+        // An item the reporter ticks off by hand (the attachments; the EVE Server and EVE Build still the player's): ticked for
+        // the values it has now, and taken back.
+        if (mine && it.tick) {
+            if (it.ok) { act('Undo', 'Check them again', function () { C._tick(key, it.id, it.sig, false); }); }
+            else { act(it.tickLabel, it.tickTitle, function () { C._tick(key, it.id, it.sig, true); }); }
+        }
+        return $r;
+    },
+    // Labels in use on other defects that the defect's text calls for, each added with a click (asked first), indented
+    // under the labels item. Filled in once the labels in use are counted; gone when there is nothing to suggest.
+    _suggestRow: function (key, s) {
+        var C = JiTA.checklist, $w = $('<div class="jcl-sugg"></div>');
+        var $l = $('<span class="jcl-chips"></span>').text('counting the labels in use…').appendTo($w);
+        C._labelCounts().then(function (counts) {
+            var sug = C.suggest(s.d, counts);
+            $l.empty();
+            if (!sug.length) { $w.remove(); return; }
+            sug.forEach(function (x) {
+                $('<a class="jcl-chip" href="#"></a>').text('+ ' + x.label)
+                    .attr('title', 'On ' + x.n + ' other defects, and its words are in the ' + x.where.join(' and ') + '. Click to add it.')
+                    .on('click', function (e) { e.preventDefault(); C._addLabel(key, x.label); }).appendTo($l);
+            });
+        }, function () { $w.remove(); });
+        return $w;
+    },
+    // The report's exceptions, each with the defects that hold it already and (for the reporter) Add.
+    _excList: function (key, s, mine) {
+        var C = JiTA.checklist, exc = s.src.exc, $w = $('<div class="jcl-exc"></div>');
+        $('<div class="jcl-sub"></div>').text('Exceptions in ' + s.src.key + '\'s logs (' + exc.length + ')').appendTo($w);
+        (C._excOpen ? exc : exc.slice(0, C.SHOW_EXC)).forEach(function (e) {
+            var $r = $('<div class="jcl-erow"></div>').appendTo($w);
+            $('<span class="jcl-emsg"></span>').text(e.msg || e.sig).attr('title', JiTA.profile._sigTip(e.sig, e.msg)).appendTo($r);
+            if (e.defects.length) {
+                var $d = $('<span class="jcl-edef"></span>').appendTo($r);
+                e.defects.slice(0, 3).forEach(function (k) {
+                    $('<a target="_blank" rel="noopener"></a>').attr('href', '/browse/' + k).attr('title', k + ' holds this exception too: it may be the same bug').text(k).appendTo($d);
+                });
+                if (e.defects.length > 3) { $('<span></span>').text('+' + (e.defects.length - 3)).attr('title', e.defects.slice(3).join(', ')).appendTo($d); }
+            }
+            if (mine && !C._hasExc(s.d, [e])) {
+                $('<a class="jcl-act" href="#">Add</a>').attr('title', 'Add it to the end of the description, in an expand').on('click', function (ev) { ev.preventDefault(); C._addExc(key, s, e); }).appendTo($r);
+            }
+        });
+        if (exc.length > C.SHOW_EXC) {
+            $('<a class="jcl-open" href="#"></a>').text(C._excOpen ? 'Fewer' : (exc.length - C.SHOW_EXC) + ' more').on('click', function (ev) {
+                ev.preventDefault();
+                C._excOpen = !C._excOpen;
+                C._draw(key, s);
+            }).appendTo($('<div class="jcl-line"></div>').appendTo($w));
+        }
+        return $w;
+    },
+    // What the guide asks that the card cannot check, folded away; an exploit's steps in plain sight when the defect is one.
+    _more: function (s) {
+        var C = JiTA.checklist, d = s.d || {}, $m = $('<div class="jcl-more"></div>').toggleClass('open', !!C._moreOpen);
+        var exploit = (d.labels || []).some(function (l) { return /^exploit$/i.test(l); }) || /^A\b/.test(d.severity || '');
+        if (exploit) { $('<div class="jcl-warn"></div>').text(C.EXPLOIT).appendTo($m); }
+        var label = function () { return (C._moreOpen ? '▾ ' : '▸ ') + 'Also check (' + C.MORE.length + ')'; };
+        var $t = $('<a class="jcl-open" href="#"></a>').text(label()).attr('title', 'What the guide asks that the card cannot check by itself')
+            .appendTo($('<div class="jcl-line"></div>').appendTo($m));
+        var $l = $('<ul class="jcl-mlist"></ul>').appendTo($m);   // a bulleted list
+        C.MORE.forEach(function (x) { $('<li class="jcl-mline"></li>').text(x).appendTo($l); });
+        if (!exploit) { $('<li class="jcl-mline"></li>').text(C.EXPLOIT).appendTo($l); }
+        $t.on('click', function (e) { e.preventDefault(); C._moreOpen = !C._moreOpen; $m.toggleClass('open', C._moreOpen); $t.text(label()); });
+        return $m;
+    },
+    // The hand-off: unassign, once every item is done. A defect unassigned before it is done (one converted from an
+    // unassigned bug report with Jira's own Convert action) is where FC picks defects up already: its reporter can take it
+    // until it is.
+    _foot: function (key, s) {
+        var C = JiTA.checklist, $f = $('<div class="jcl-foot"></div>');
+        if (!s.assignee && s.complete) {
+            $('<span class="jcl-handed"></span>').text('Unassigned: with FC.').appendTo($f);
+            return $f;
+        }
+        if (!s.assignee) {
+            $('<span class="jcl-handed jcl-early"></span>').text('Unassigned, so FC can pick it up, though items are still open.').appendTo($f);
+            if (s.sees === 'reporter' && s.me) {
+                var $take = $('<button type="button" class="jcl-finish"></button>').text('Assign to me until it is done').appendTo($f);
+                $take.attr('title', 'Assign ' + key + ' to you, so FC leaves it until you hand it over').on('click', function () { C._hold(key, s.me, $take); });
+            }
+            return $f;
+        }
+        if (!s.held) {
+            $('<span class="jcl-handed"></span>').text('Assigned to ' + ((s.d && s.d.assigneeName) || 'someone else') + ': with FC.').appendTo($f);
+            return $f;
+        }
+        var $btn = $('<button type="button" class="jcl-finish"></button>').text('Hand to FC: unassign').appendTo($f);
+        if (!s.complete) {
+            $btn.prop('disabled', true).attr('title', s.pending ? 'Still reading the bug report\'s logs' : (s.open + ' item' + (s.open === 1 ? '' : 's') + ' still open'));
+        } else {
+            $btn.attr('title', 'Unassign ' + key + ', so FC picks it up').on('click', function () { C._unassign(key, $btn); });
+        }
+        return $f;
+    },
+
+    _style: function () {
+        var C = JiTA.checklist;
+        if (C._styled) { return; }
+        C._styled = true;
+        try {
+            GM_addStyle(
+                '#jita-cl { font-size: 12px; color: var(--ds-text, #172b4d); padding: 0 0 4px; }' +
+                '#jita-cl .jcl-head { display: flex; align-items: baseline; gap: 8px; font-weight: 600; margin-bottom: 2px; }' +
+                '#jita-cl .jcl-count.done { color: var(--ds-text-success, #216e4e); }' +
+                '#jita-cl .jcl-state, #jita-cl .jcl-src, #jita-cl .jcl-line, #jita-cl .jcl-mline, #jita-cl .jcl-handed { color: var(--ds-text-subtlest, #626f86); font-weight: 400; }' +
+                '#jita-cl .jcl-again { margin-left: auto; color: var(--ds-text-subtlest, #626f86); text-decoration: none; font-weight: 400; }' +
+                '#jita-cl .jcl-src { margin-bottom: 4px; }' +
+                '#jita-cl .jcl-item { display: flex; align-items: baseline; gap: 6px; padding: 2px 0; }' +
+                '#jita-cl .jcl-mark { flex: 0 0 12px; text-align: center; }' +
+                '#jita-cl .jcl-item.ok .jcl-mark { color: var(--ds-icon-success, #22a06b); }' +
+                '#jita-cl .jcl-item.todo .jcl-mark { color: var(--ds-icon-warning, #e56910); }' +
+                '#jita-cl .jcl-item.ok .jcl-lbl { color: var(--ds-text-subtle, #44546f); }' +
+                '#jita-cl .jcl-item.waived .jcl-mark, #jita-cl .jcl-item.waived .jcl-lbl { color: var(--ds-text-subtlest, #626f86); }' +
+                '#jita-cl .jcl-lbl { flex: 1 1 auto; min-width: 0; }' +
+                '#jita-cl .jcl-acts { flex: 0 0 auto; display: flex; gap: 8px; }' +
+                '#jita-cl a.jcl-act, #jita-cl .jcl-open, #jita-cl .jcl-src a, #jita-cl .jcl-edef a { color: var(--ds-link, #0c66e4); text-decoration: none; cursor: pointer; }' +
+                '#jita-cl a.jcl-act:hover, #jita-cl .jcl-open:hover, #jita-cl .jcl-src a:hover, #jita-cl .jcl-edef a:hover { text-decoration: underline; }' +
+                '#jita-cl .jcl-sub { font-weight: 600; margin: 8px 0 2px; }' +
+                '#jita-cl .jcl-sugg { padding: 1px 0 3px 18px; color: var(--ds-text-subtlest, #626f86); }' +   // under the labels item, past its mark
+                '#jita-cl .jcl-chips { display: inline-flex; flex-wrap: wrap; gap: 4px 6px; vertical-align: top; }' +
+                '#jita-cl a.jcl-chip { color: var(--ds-text-subtle, #44546f); background: var(--ds-background-neutral, #091e420f); border-radius: 8px; padding: 0 7px; text-decoration: none; cursor: pointer; }' +
+                '#jita-cl a.jcl-chip:hover { color: var(--ds-link, #0c66e4); }' +
+                '#jita-cl .jcl-erow { display: flex; align-items: baseline; gap: 8px; padding: 2px 0; }' +
+                '#jita-cl .jcl-emsg { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-subtle, #44546f); }' +
+                '#jita-cl .jcl-edef { flex: 0 0 auto; display: flex; gap: 4px; color: var(--ds-text-subtlest, #626f86); }' +
+                '#jita-cl .jcl-more { margin-top: 6px; }' +
+                '#jita-cl .jcl-warn { color: var(--ds-text-warning, #974f0c); margin-bottom: 2px; }' +
+                '#jita-cl .jcl-mlist { display: none; margin: 2px 0 0; padding-left: 18px; list-style: disc outside; }' +
+                '#jita-cl .jcl-mline { display: list-item; margin: 1px 0; }' +
+                '#jita-cl .jcl-more.open .jcl-mlist { display: block; }' +
+                '#jita-cl .jcl-foot { margin-top: 8px; }' +
+                '#jita-cl .jcl-handed.jcl-early { display: block; margin-bottom: 6px; color: var(--ds-text-warning, #974f0c); }' +
+                '#jita-cl .jcl-count.jcl-failed { color: var(--ds-text-danger, #ae2a19); }' +
+                '#jita-cl .jcl-finish { font: inherit; font-weight: 600; padding: 4px 10px; border: none; border-radius: 3px; cursor: pointer;' +
+                ' background: var(--ds-background-brand-bold, #0c66e4); color: var(--ds-text-inverse, #fff); }' +
+                '#jita-cl .jcl-finish:disabled { cursor: default; background: var(--ds-background-disabled, #091e4208); color: var(--ds-text-disabled, #091e424f); }'
             );
         } catch (e) { /* ignore */ }
     },
@@ -23285,6 +24436,14 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.51.0', date: '2026-11-08', features: [
+            'New Defect checklist card on a defect you wrote: what the ISD guide asks of a defect, each item checked against the defect, and against the bug report it was converted from.',
+            'A defect cannot be unassigned (handed to FC) until every item is done, its attachments checked included. Items the guide lets a defect go without can be marked Not needed. Settings > Features switches it off.',
+            'It suggests labels already in use that the defect\'s text calls for. One click adds one, takes the bug report\'s labels off, or adds an exception from its logs to the description in an expand, and Jira shows it at once, without a reload.',
+            'Convert to Defect assigns an unassigned bug report to you first, so the defect starts out yours until you hand it to FC. A defect that starts out unassigned anyway offers Assign to me.',
+            'The card follows an edit within seconds, and its Copy gives the reproduction steps as a real numbered list in Jira.',
+            'Leads see the card on every ISD member\'s defect.'
+        ] },
         { v: '3.50.0', date: '2026-11-08', fixes: [
             'Triage mode, the full-screen queue opened by double-tapping <, has been removed. The Triage Assistant in the sidebar, the detail view and the other double-tap shortcuts (>, # and +) stay as they are.'
         ] },
@@ -24353,6 +25512,7 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
         // Synchronous first: if Jira just wiped our sidebar group, put it back THIS tick (with cached content)
         // so it never visibly vanishes. Cheap - a getElementById guard skips it whenever the group is present.
         try { JiTA.ui._reensureFast(); } catch (e0) { /* swallow */ }
+        try { JiTA.checklist.reensure(); } catch (eCl0) { /* swallow */ }   // the Defect checklist card, if Jira wiped it
         try { JiTA.dv._fast(); } catch (e1) { /* swallow */ }   // Jira replaced the layout the detail view pads
         if (scheduled) { return; }
         scheduled = true;
@@ -24364,6 +25524,7 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
             try { JiTA.dv.ensure(); } catch (e4) { /* swallow */ }   // detail view: mount / follow the open issue / unmount off /browse/
             try { JiTA.ocr.ensure(); } catch (e5) { /* swallow */ }  // screenshot translation: button on an open image attachment
             try { JiTA.changelog.ensure(); } catch (e6) { /* swallow */ }   // the "What's new" pill, if something took it away
+            try { JiTA.checklist.ensure(); } catch (e7) { /* swallow */ }   // the Defect checklist: follow the defect on screen, judge it again after an edit
         }, 300);
     });
     observer.observe(document.body, { childList: true, subtree: true });

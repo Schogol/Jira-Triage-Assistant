@@ -19,7 +19,18 @@ const muts = [
     [H, 'Close does not wait for the menu', '        setTimeout(pick, 100);\n    })();', '    })();'],
     [H, 'Close gives up without a word', "        if (Date.now() - t0 >= 3000) { alert('The Closed option did not appear", "        if (Date.now() - t0 >= 3000) { void ('The Closed option did not appear"],
     [H, 'the cloud id is not checked', "    if (!cloudId) { return $.Deferred().reject({ status: 0, jitaError: 'Could not read the Jira cloud id from the page - reload it and try again.' }).promise(); }\n", ''],
-    [H, 'the button is not wired', "$(\"#convertToDefectButton\").off('click.jita').on('click.jita', jitaConvertClick);", "$(\"#convertToDefectButton\").off('click.jita');"]
+    [H, 'the button is not wired', "$(\"#convertToDefectButton\").off('click.jita').on('click.jita', jitaConvertClick);", "$(\"#convertToDefectButton\").off('click.jita');"],
+    // ---- v3.51.0: an unassigned report is taken first, so its defect starts out with the one converting it ----
+    [H, 'an unassigned report is converted untaken', "if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(); return; }", 'if (true) { then(); return; }'],
+    [H, 'a report someone has is taken', "if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(); return; }", "if (!flagOn('defectChecklist')) { then(); return; }"],
+    [H, 'taken with the checklist switched off', "if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(); return; }", 'if ((d && d.fields && d.fields.assignee)) { then(); return; }'],
+    [H, 'the assignee never read', "'?fields=issuelinks,assignee'", "'?fields=issuelinks'"],
+    [H, 'a refused take stops the conversion', '            .always(function () { then(); });', '            .done(function () { then(); });'],
+    [H, 'converted before the take lands', '            .always(function () { then(); });', '            ;\n        then();'],
+    [H, 'taken for nobody', 'data: JSON.stringify({ accountId: me }) })', 'data: JSON.stringify({}) })'],
+    [H, 'the take without the token Jira wants', "headers: { 'X-Atlassian-Token': 'no-check' }, data: JSON.stringify({ accountId: me }) })", 'data: JSON.stringify({ accountId: me }) })'],
+    [H, 'nothing converts without a user', 'if (!me) { then(); return; }', 'if (!me) { return; }'],
+    [H, 'nothing converts when the user cannot be read', '    }, function () { then(); });\n}', '    });\n}']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
