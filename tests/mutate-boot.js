@@ -8,7 +8,7 @@ const TRY = "try { cancelFound = actionFunction(jThis); }\n                catch
 const muts = [
     [H, 'the busy map is declared below the first issue check again', [
         ['var jitaConvertBusy = {};\n\n// waitForKeyElements waits', '\n// waitForKeyElements waits'],
-        ['// The Convert to Defect button reflects whether', 'var jitaConvertBusy = {};\n// The Convert to Defect button reflects whether']]],
+        ['// The Convert to Defect button reflects the report on screen', 'var jitaConvertBusy = {};\n// The Convert to Defect button reflects the report on screen']]],
     [H, 'a callback that throws escapes waitForKeyElements', [[TRY, 'cancelFound = actionFunction(jThis);']]],
     [H, 'a failed callback is retried every poll', [["catch (e) { try { console.error('[JiTA] could not handle '", "catch (e) { cancelFound = true; try { console.error('[JiTA] could not handle '"]]],
     [H, 'a failed callback is swallowed in silence', [["catch (e) { try { console.error('[JiTA] could not handle ' + selectorTxt + ':', e); } catch (e2) { /* ignore */ } }", 'catch (e) { /* ignore */ }']]],

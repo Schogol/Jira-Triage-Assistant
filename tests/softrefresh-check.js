@@ -97,16 +97,22 @@ ok('...none when the page shows no lozenge', jitaStatusText() === '');
 status = 'Open';
 
 // ================= opening an issue in-app =================
-const open = (key) => { pushed = []; pops = []; loc.loads = []; timers = []; session = {}; jitaOpenIssue(key); };
+let ends = [];
+const open = (key, noDone) => { pushed = []; pops = []; loc.loads = []; timers = []; session = {}; ends = []; jitaOpenIssue(key, noDone ? undefined : (how) => { ends.push(how + '@' + loc.loads.length); }); };
 onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
 open('EDR-77');
 ok('an issue is opened in-app: its URL pushed and Jira\'s router told with a popstate on the window', J(pushed) === J(['/browse/EDR-77']) && pops.length === 1 &&
     pops[0].type === 'popstate' && pops[0].state === null && !loc.loads.length, J(pushed) + ' ' + J(pops));
 advance(6000);
-ok('Jira keeps the issue before on screen while the new one loads: 6 seconds of that is no ignored switch', !loc.loads.length && timers.length === 1, J(loc.loads));
+ok('Jira keeps the issue before on screen while the new one loads: 6 seconds of that is no ignored switch', !loc.loads.length && timers.length === 1 && !ends.length, J(loc.loads));
 onScreen = 'EDR-77';   // loaded: the router took it
 advance(60000);
-ok('...the new one there, nothing more', !loc.loads.length && !timers.length, J(loc.loads));
+ok('...the new one there, nothing more, and the caller told it is shown', !loc.loads.length && !timers.length && J(ends) === J(['shown@0']), J(loc.loads) + ' ' + J(ends));
+onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
+open('EDR-76', true);
+onScreen = 'EDR-76';
+advance(2000);
+ok('...a caller that asks for no word is told nothing, and nothing breaks', !loc.loads.length && !timers.length);
 onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
 let checks = 0;
 const crumbOf = global.jitaCurrentKey;
@@ -120,6 +126,7 @@ advance(9999);
 ok('the issue before still there after almost 15 seconds: still no page load', !loc.loads.length);
 advance(1000);
 ok('...after 15, the switch is taken as ignored: an ordinary page load of the issue', J(loc.loads) === J(['/browse/EDR-78']), J(loc.loads));
+ok('...the caller told so before the page load', J(ends) === J(['load@0']), J(ends));
 const note = JSON.parse(session[JITA_NAV_NOTE_KEY] || 'null');
 ok('...noting why for after the page load', !!note && note.key === 'EDR-78' && note.on === 'EBR-1' && note.waited >= 15000 && typeof note.at === 'number', J(note));
 const said = [], log0 = console.log;
@@ -162,10 +169,16 @@ onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
 open('EDR-81');
 loc.pathname = '/browse/EBR-5';   // the user went somewhere else meanwhile
 advance(60000);
-ok('the user gone somewhere else meanwhile: no page load', !loc.loads.length && !timers.length, J(loc.loads));
+ok('the user gone somewhere else meanwhile: no page load, the caller told they went away', !loc.loads.length && !timers.length && J(ends) === J(['away@0']), J(loc.loads) + ' ' + J(ends));
+onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1';
+pushed = []; pops = []; loc.loads = []; timers = [];
+jitaOpenIssue('EDR-84', () => { throw new Error('the caller broke'); });
+advance(16000);
+ok('a caller whose word throws does not stop the switch', J(loc.loads) === J(['/browse/EDR-84']), J(loc.loads));
 onScreen = 'EBR-1'; loc.pathname = '/browse/EBR-1'; pushThrows = true;
 open('EDR-82');
 ok('a browser refusing the pushed URL gets the page load at once, and no popstate', J(loc.loads) === J(['/browse/EDR-82']) && !pops.length && !timers.length, J(loc.loads));
+ok('...the caller told so before it', J(ends) === J(['load@0']), J(ends));
 pushThrows = false;
 open('X/1');
 ok('the key goes into the URL encoded', J(pushed) === J(['/browse/X%2F1']), J(pushed));

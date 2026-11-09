@@ -23,8 +23,16 @@ function Deferred() {
     d.reject = (x) => { d._fail.forEach((f) => f(x)); };
     return d;
 }
-function Button() { const b = { disabled: false }; b.prop = (k, v) => { if (v === undefined) { return b.disabled; } b.disabled = !!v; return b; }; return b; }
-let button = Button(), current = 'EBR-1', gets = [], rules = [], goes = [], errors = 0, lastErr = null;
+function Button() {
+    const b = { disabled: false, cls: {}, attrs: {} };
+    b.prop = (k, v) => { if (v === undefined) { return b.disabled; } b.disabled = !!v; return b; };
+    b.toggleClass = (c, on) => { if (on) { b.cls[c] = true; } else { delete b.cls[c]; } return b; };
+    b.attr = (k, v) => { if (v === undefined) { return b.attrs[k]; } if (v === null) { delete b.attrs[k]; } else { b.attrs[k] = v; } return b; };
+    return b;
+}
+const spinning = (b) => !!b.cls['jita-converting'];
+let button = Button(), current = 'EBR-1', gets = [], rules = [], goes = [], errors = 0, lastErr = null, styles = [];
+global.GM_addStyle = (css) => { styles.push(css); };
 global.$ = (sel) => (sel === '#convertToDefectButton' ? button : { prop() { return this; } });
 $.ajax = (o) => { const d = Deferred(); gets.push({ url: o.url, type: o.type, data: o.data, headers: o.headers, d }); return d; };
 // The Defect checklist's switch, and who is converting (an unassigned report is taken first while the checklist is on).
@@ -42,10 +50,12 @@ global.JITA_CONVERT_DEFECT_RULE = 'rule-9';
 // ---- one conversion, with Jira swapping the button mid-way ----
 jitaConvertClick();
 ok('a click starts the conversion: the report, its links and its assignee are read', gets.length === 1 && /issue\/EBR-1\?fields=issuelinks,assignee$/.test(gets[0].url), gets.map((g) => g.url).join());
-ok('...and the button is disabled', button.disabled === true);
+ok('...and the button is disabled, a spinner in it', button.disabled === true && spinning(button) && button.attrs.title === 'Converting to a defect…', JSON.stringify(button));
 button = Button();             // Jira's re-render puts a fresh, enabled button back
 jitaConvertButtonState();      // as addButtons does for every button it puts back
-ok('a button put back while the report converts comes back disabled', button.disabled === true);
+ok('a button put back while the report converts comes back disabled, spinning', button.disabled === true && spinning(button));
+ok('...the spinner\'s style added to the page once, turning before the label', styles.length === 1 &&
+    /#convertToDefectButton\.jita-converting > span:last-child::before \{[^}]*animation: jita-convert-spin/.test(styles[0]) && /@keyframes jita-convert-spin \{ to \{ transform: rotate\(360deg\); \} \}/.test(styles[0]), String(styles.length));
 jitaConvertClick();            // and a click on it anyway (it went through before the state was applied, say)
 ok('a second click while the report converts starts nothing', gets.length === 1, String(gets.length));
 gets[0].d.resolve({ id: '10001', fields: { issuelinks: [{ key: 'EDR-5' }] } });
@@ -57,14 +67,14 @@ ok('...and then the new defect is looked for, knowing which links were there bef
 current = 'EBR-3';
 button = Button();
 jitaConvertButtonState();
-ok('another report\'s button is not held by the first conversion', button.disabled === false);
+ok('another report\'s button is not held by the first conversion, nor spinning', button.disabled === false && !spinning(button) && button.attrs.title === undefined);
 jitaConvertClick();
 ok('...and converts on its own', gets.length === 2 && /issue\/EBR-3\?/.test(gets[1].url), gets.map((g) => g.url).join());
 
 // ---- a failure frees the report again ----
 gets[1].d.reject({ status: 502 });
 ok('a failed read frees the report and says so', !jitaConvertBusy['EBR-3'] && errors === 1, JSON.stringify(jitaConvertBusy) + ' ' + errors);
-ok('...and the button on the page now is enabled again', button.disabled === false);
+ok('...and the button on the page now is enabled again, its spinner gone', button.disabled === false && !spinning(button));
 jitaConvertClick();
 gets[2].d.resolve({ id: '10003', fields: { issuelinks: [] } });
 rules[1].d.reject({ status: 500 });
@@ -90,25 +100,34 @@ let timers = [], reloads = 0, opened = [], viewRefreshes = 0, toasts = [];
 global.setTimeout = (fn) => { timers.push(fn); return timers.length; };
 global.window = { location: { href: '/browse/EBR-1', reload: () => { reloads++; } } };
 // softrefresh-check.js covers the real ones
-global.jitaOpenIssue = (k) => { opened.push(k); };
+let openDone = null;
+global.jitaOpenIssue = (k, done) => { opened.push(k); openDone = done; };
 global.jitaRefreshIssueView = () => { viewRefreshes++; };
 JiTA.ui = { toast: (m) => { toasts.push(m); } };
 const go = (0, eval)('(' + fnSrc('jitaGoToNewDefect') + ')');
-current = 'EBR-1'; gets = [];
+current = 'EBR-1'; gets = []; button = Button(); jitaConvertBusy['EBR-1'] = true; jitaConvertButtonState();
 go('EBR-1', ['EDR-5']);
 gets[0].d.resolve({ fields: { issuelinks: [{ key: 'EDR-5' }] } });
 ok('no new link yet: it looks again a second later', timers.length === 1 && !opened.length);
 timers.shift()();
 gets[1].d.resolve({ fields: { issuelinks: [{ key: 'EDR-5' }, { key: 'EDR-77' }] } });
 ok('...and opens the new defect in-app once it is linked, with no page load', opened.join() === 'EDR-77' && window.location.href === '/browse/EBR-1' && reloads === 0, opened.join() + ' ' + window.location.href);
-ok('...saying so, as the report stays on screen until the defect has loaded', toasts.some((t) => t === 'Opening the new defect EDR-77…'), toasts.join('|'));
-current = 'EBR-2'; gets = []; timers = []; reloads = 0; opened = [];
+ok('...the button spinning on, and no toast, while the report stays on screen until the defect has loaded', spinning(button) && button.disabled && !toasts.length && jitaConvertBusy['EBR-1'] === true, toasts.join('|'));
+openDone('shown');
+ok('...the defect on screen, the report counts as converted: its button off, no longer spinning, saying to which defect', jitaConvertBusy['EBR-1'] === 'EDR-77' &&
+    button.disabled === true && !spinning(button) && button.attrs.title === 'Converted to EDR-77.', JSON.stringify(button));
+jitaConvertClick();
+ok('...so a click on it, back on that report, converts nothing again', gets.length === 2, String(gets.length));
+current = 'EBR-2'; gets = []; timers = []; reloads = 0; opened = []; jitaConvertBusy['EBR-2'] = true;
 go('EBR-2', []);
 current = 'EBR-9';   // the user moves on to another issue while it converts
 gets[0].d.resolve({ fields: { issuelinks: [] } });
 timers.shift()();
 ok('once the user is on another issue it stops: no request, no navigation, no refresh', gets.length === 1 && reloads === 0 && timers.length === 0 && !opened.length && viewRefreshes === 0,
     gets.length + ' requests, ' + reloads + ' reloads');
+current = 'EBR-2'; button = Button(); jitaConvertButtonState();
+ok('...back on the report, its button is off but no longer spinning: the conversion may yet be done', jitaConvertBusy['EBR-2'] === 'left' && button.disabled && !spinning(button) &&
+    button.attrs.title === 'Being converted: its links show the new defect once it is made.', JSON.stringify(button));
 current = 'EBR-3'; gets = []; timers = []; reloads = 0; button = Button(); jitaConvertBusy['EBR-3'] = true; jitaConvertButtonState();
 go('EBR-3', []);
 for (let i = 0; i < 31; i++) { gets[gets.length - 1].d.reject({ status: 502 }); if (timers.length) { timers.shift()(); } }

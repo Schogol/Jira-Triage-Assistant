@@ -339,11 +339,12 @@ function removeFeedbackButton() {
 };
 
 
-// Bug reports whose Convert to Defect is under way (EBR key -> true). Kept apart from the button: Jira's own
-// re-render replaces it with a fresh, enabled one about two seconds after a click, while the conversion goes on for
-// up to 30 seconds (jitaGoToNewDefect polls for the new defect), and a second click on that one created a second
-// defect. Success opens the new defect in-app and keeps the key: the report is converted, so its Convert stays
-// disabled for as long as the tab lives. A failure clears its key, as does no defect turning up within 30 seconds.
+// Bug reports whose Convert to Defect is under way or done (EBR key -> true while it converts and its defect opens; then
+// the defect's key; 'left' when the user went to another issue before the defect turned up). Kept apart from the button:
+// Jira's own re-render replaces it with a fresh, enabled one about two seconds after a click, while the conversion goes
+// on for up to 30 seconds (jitaGoToNewDefect polls for the new defect), and a second click on that one created a second
+// defect. A converted report's Convert stays disabled for as long as the tab lives. A failure clears its key, as does
+// no defect turning up within 30 seconds.
 // Set up HERE, before the waitForKeyElements call below: when the breadcrumb is already on the page that call adds
 // the buttons on the spot, and adding them reads this. Declared further down, it was still undefined then, and the
 // error stopped the whole script from loading on a bug report opened from a link or a reload.
@@ -914,18 +915,21 @@ function jitaNavSaid() {
 // which for a defect created a moment ago can take a while; so only when that one is still there JITA_NAV_MS later is the
 // switch taken as ignored, and the issue loaded the ordinary way (saying why after it, jitaNavSaid). One still loading
 // (no breadcrumb at all) is waited for, up to JITA_NAV_GIVEUP_MS. Nothing happens once the user has gone somewhere else.
-function jitaOpenIssue(key) {
+// `done`, when given, hears how it ended: 'shown' (on screen), 'away' (the user went elsewhere), 'load' (a page load).
+function jitaOpenIssue(key, done) {
     var path = '/browse/' + encodeURIComponent(key), from = jitaCurrentKey(), t0 = Date.now();
+    var end = function (how) { if (done) { try { done(how); } catch (e) { /* the switch goes on */ } } };
     try {
         history.pushState(null, '', path);
         window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
-    } catch (e) { window.location.href = path; return; }
+    } catch (e) { end('load'); window.location.href = path; return; }
     (function check() {
-        if (window.location.pathname !== path) { return; }   // gone somewhere else meanwhile
+        if (window.location.pathname !== path) { end('away'); return; }   // gone somewhere else meanwhile
         var on = jitaCurrentKey(), waited = Date.now() - t0;
-        if (on && on !== from) { return; }                    // the router took it (a moved issue shows its new key)
+        if (on && on !== from) { end('shown'); return; }                    // the router took it (a moved issue shows its new key)
         if (waited < (on ? JITA_NAV_MS : JITA_NAV_GIVEUP_MS)) { setTimeout(check, 1000); return; }
         try { sessionStorage.setItem(JITA_NAV_NOTE_KEY, JSON.stringify({ key: key, on: on, waited: waited, at: Date.now() })); } catch (e2) { /* only the note is lost */ }
+        end('load');
         window.location.href = path;
     })();
 }
@@ -950,15 +954,16 @@ function jitaGoToNewDefect(ebrKey, beforeKeys) {
     }
     function poll() {
         // The user has moved on to another issue (Jira is one page): neither take them away from it nor reload it
-        // under a comment they may be typing. The report shows the result when they come back to it.
-        if (jitaCurrentKey() !== ebrKey) { return; }
+        // under a comment they may be typing. The report shows the result when they come back to it, its Convert
+        // still disabled, no longer spinning.
+        if (jitaCurrentKey() !== ebrKey) { jitaConvertBusy[ebrKey] = 'left'; return; }
         $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
             .done(function (d) {
                 var fresh = jitaLinkedKeys(d.fields && d.fields.issuelinks).filter(function (k) { return !before[k]; });
                 var defect = fresh.filter(function (k) { return /^(EDR|EO|PLAT)-/.test(k); })[0] || fresh[0];
                 if (defect) {
-                    JiTA.ui.toast('Opening the new defect ' + defect + '…');   // the report stays on screen until it has loaded
-                    jitaOpenIssue(defect);
+                    // The report stays on screen, its button spinning, until the defect has loaded; then it is converted.
+                    jitaOpenIssue(defect, function () { jitaConvertBusy[ebrKey] = defect; jitaConvertButtonState(); });
                     return;
                 }
                 again();
@@ -1087,11 +1092,27 @@ function jitaOpenGmModal(key) {
 }
 
 
-// The Convert to Defect button reflects whether the report on screen is being converted (jitaConvertBusy, set up
-// near the top of the file, before the first call that can add the buttons).
+// The Convert to Defect button reflects the report on screen (jitaConvertBusy, set up near the top of the file, before
+// the first call that can add the buttons): a spinner in it while it converts and its defect opens, and disabled then
+// and once it has been converted in this tab, the hover saying which.
 function jitaConvertButtonState() {
-    var key = jitaCurrentKey();
-    $('#convertToDefectButton').prop('disabled', !!(key && jitaConvertBusy[key]));
+    var key = jitaCurrentKey(), state = key ? jitaConvertBusy[key] : null;
+    jitaConvertCss();
+    $('#convertToDefectButton').prop('disabled', !!state).toggleClass('jita-converting', state === true)
+        .attr('title', state === true ? 'Converting to a defect…'
+            : (state === 'left' ? 'Being converted: its links show the new defect once it is made.' : (state ? 'Converted to ' + state + '.' : null)));
+}
+// The spinner: drawn before the button's label, turning as long as the class is on; added to the page once.
+function jitaConvertCss() {
+    if (jitaConvertCss.done) { return; }
+    jitaConvertCss.done = true;
+    try {
+        GM_addStyle('#convertToDefectButton.jita-converting { cursor: progress; }' +
+            '#convertToDefectButton.jita-converting > span:last-child::before { content: ""; display: inline-block; box-sizing: border-box; width: 11px; height: 11px;' +
+            ' margin-right: 6px; vertical-align: -1px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;' +
+            ' animation: jita-convert-spin .8s linear infinite; }' +
+            '@keyframes jita-convert-spin { to { transform: rotate(360deg); } }');
+    } catch (e) { /* the button is disabled all the same */ }
 }
 
 function jitaConvertClick() {
@@ -24517,6 +24538,7 @@ JiTA.changelog = {
         { v: '3.51.1', date: '2026-11-08', fixes: [
             'Attach and Convert to Support Ticket (its Close bug report too) no longer reload the page: Jira shows the new status and links at once.',
             'Convert to Defect opens the new defect without reloading Jira, so it is there sooner.',
+            'Convert to Defect shows a spinner in its button until the new defect is open, and the button stays off on a bug report you converted.',
             'Attaching a bug report to the defect you are on shows it in the defect\'s linked work items at once.'
         ] },
         { v: '3.51.0', date: '2026-11-08', features: [
