@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.51.1
+// @version     3.51.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -16305,10 +16305,11 @@ JiTA.logread = {
  *
  * Switching issue does not reload the page: the URL is pushed and Jira's router is told with a synthetic
  * popstate, which is what it does itself for an in-app link. That is not a public API, so every switch has a
- * fallback - if the issue switched from is still on screen after NAV_FALLBACK_MS, it becomes an ordinary page
- * load, and after SPA_FAIL_MAX of those in a row the tab stops trying for SPA_FAIL_TTL_MS. An issue still loading
- * (Jira's skeleton has no breadcrumb) is waited for, up to NAV_GIVEUP_MS. The list survives a page load (the
- * query is persisted and the first pages are cached), so the worst case is slower, never broken.
+ * fallback - Jira keeps the issue switched from on screen until the new one has loaded, so only when that one is
+ * still there NAV_FALLBACK_MS later does the switch become an ordinary page load, and after SPA_FAIL_MAX of those in
+ * a row the tab stops trying for SPA_FAIL_TTL_MS. An issue still loading (Jira's skeleton has no breadcrumb) is
+ * waited for, up to NAV_GIVEUP_MS. The list survives a page load (the query is persisted and the first pages are
+ * cached), so the worst case is slower, never broken.
  */
 JiTA.dv = {
     DEFAULT_JQL: 'project = EBR AND issuetype = "EVE Bug Report" AND status = Open AND assignee in (currentUser(), EMPTY) AND labels not in ("Vanguard", "Launcher") AND component not in (Launcher)',   // the bug hunters' standard backlog filter
@@ -16321,8 +16322,9 @@ JiTA.dv = {
     CACHE_ISSUES: 200,
     PAGE_SIZE: 50,
     FIND_MAX: 500,                  // how deep to page for the open issue when the query holds it but it is not loaded yet
-    NAV_FALLBACK_MS: 4000,
+    NAV_FALLBACK_MS: 15000,         // how long the issue switched from may stay on screen before a page load (as JITA_NAV_MS)
     NAV_GIVEUP_MS: 30000,           // how long an issue that is still loading is waited for before a page load
+    NAV_STEP_MS: 1000,              // how often a switch is looked at meanwhile
     SPA_FAIL_MAX: 2,
     SPA_FAIL_TTL_MS: 30 * 60 * 1000,   // fallbacks older than this are forgotten, so a bad spell does not last the tab's life
     STEP_MS: 180,                   // a held arrow key moves the highlight on every repeat but navigates at most this often
@@ -16901,15 +16903,17 @@ JiTA.dv = {
         clearTimeout(D._navTimer);
         D._navTimer = setTimeout(function check() {
             if (D._locKey() !== key) { return; }   // the user has moved on - nothing to rescue
-            var c = D._crumbKey();
+            var c = D._crumbKey(), waited = Date.now() - t0;
             // The router took it: the new issue is on screen, or another key (a moved issue shows its new one).
             if (c && c !== from) { D._setSpaFails(0); return; }
-            // No breadcrumb: the issue is still loading (Jira's skeleton has none). A slow issue is not an ignored switch:
-            // counted as one, it turned every later click in the tab into a page load, with Jira asking to leave the page.
-            if (!c && Date.now() - t0 < D.NAV_GIVEUP_MS) { D._navTimer = setTimeout(check, 1000); return; }
+            // A slow issue is not an ignored switch: counted as one, it turned every later click in the tab into a page load,
+            // with Jira asking to leave the page. Jira keeps the issue switched from on screen, breadcrumb and all, until the
+            // new one has loaded, so that one is given NAV_FALLBACK_MS; and one with no breadcrumb at all is still loading
+            // (Jira's skeleton has none), given NAV_GIVEUP_MS.
+            if (waited < (c ? D.NAV_FALLBACK_MS : D.NAV_GIVEUP_MS)) { D._navTimer = setTimeout(check, D.NAV_STEP_MS); return; }
             D._setSpaFails(fails + 1);
             location.assign(path);   // the router ignored us: an ordinary page load it is
-        }, D.NAV_FALLBACK_MS);
+        }, D.NAV_STEP_MS);
     },
     // Router fallbacks in a row in this tab, forgotten SPA_FAIL_TTL_MS after the last one. A count from an older build
     // (a bare number) has no time, so it is forgotten too.
@@ -24534,6 +24538,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.51.3', date: '2026-11-09', fixes: [
+            'Detail view: an issue that takes a few seconds to open no longer reloads the page. Jira keeps the issue before on screen until the new one is ready, and JiTA now waits up to 15 s for it, as Convert to Defect does.',
+            'Detail view: two slow issues no longer make every later click in the list reload the page for half an hour.'
+        ] },
         { v: '3.51.1', date: '2026-11-08', fixes: [
             'Attach and Convert to Support Ticket (its Close bug report too) no longer reload the page: Jira shows the new status and links at once.',
             'Convert to Defect opens the new defect without reloading Jira, so it is there sooner.',
