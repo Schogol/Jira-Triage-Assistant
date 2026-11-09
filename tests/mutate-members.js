@@ -435,7 +435,10 @@ const muts = [
     [MB, 'a note written but not read back is lost', '}, function () { return M.setNote(r.acc, note, r.pageNote); })', '}, function () { return null; })', EDITNOTE],
     [MB, 'a failed note write loses the note', "return tabOnly('the ECAID - Team Members page was not changed (' + (e && e.message || e) + ')');", 'throw e;', EDITNOTE],
     [MB, 'an empty note invites a note, not a public one', ": 'Add a public note')", ": 'Add a note')"],
-    [MB, 'an empty note does not say who sees it', ": 'Add a public note on this member: every Lead sees it, and the ECAID Member Productivity page shows it')", ": 'Add a note')"],
+    [MB, 'an empty note does not say who sees it', ": 'Add a public note on this member. Everyone can read it: it is published on the ECAID Member Productivity page')", ": 'Add a note')"],
+    [MB, 'an empty public note says only Leads see it', 'Everyone can read it: it is published on the ECAID Member Productivity page\')', 'Every Lead sees it\')'],
+    [MB, 'the public note dialog says only Leads see it', "hint: 'Everyone can read it: it is published on the ECAID Member Productivity page.'", "hint: 'Shared with every Lead.'"],
+    [MB, 'the public note header says only Leads see them', "attr('title', 'Everyone can read these:", "attr('title', 'Every Lead sees these:"],
     [MB, 'a note from the page does not say so', "var whence = !r.noteSet ? '\\n\\nFrom the ECAID - Team Members page' :", "var whence = !r.noteSet ? '' :"],
     [MB, 'a note set in the tab does not give the page\'s', "(r.pageNote ? ('\\nThe ECAID - Team Members page has: ' + r.pageNote) : '')", "''"],
     // ---- internal notes (v3.49.0): Leads only, kept apart, never on a page ----

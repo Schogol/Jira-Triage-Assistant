@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.49.1
+// @version     3.49.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -21574,7 +21574,7 @@ JiTA.leadduty.ui = {
         $('<span class="ld-mhint"></span>').appendTo($h);
         $('<span class="ld-mname"></span>').text('Name').appendTo($h);
         $('<span class="ld-mrolehd"></span>').text('Role').appendTo($h);
-        $('<span class="ld-mnote"></span>').text('Public note').attr('title', 'Shown on the ECAID Member Productivity page, and on the ECAID - Team Members page when it is changed there too').appendTo($h);
+        $('<span class="ld-mnote"></span>').text('Public note').attr('title', 'Everyone can read these: they are published on the ECAID Member Productivity page, and on the ECAID - Team Members page when changed there too').appendTo($h);
         $('<span class="ld-mnote ld-minote"></span>').text('Internal note').attr('title', 'Only Leads see these: they stay in the Lead Ledger, and no page shows them').appendTo($h);
         M._oldestFirst(wins).forEach(function (i) { $('<span class="ld-mnum"></span>').text(M._mon(wins[i]).slice(0, 3)).attr('title', M._mon(wins[i])).appendTo($h); });
         $('<span class="ld-mnum ld-mcur"></span>').text(M._mon(st.cur).slice(0, 3) + ' so far').appendTo($h);
@@ -21614,7 +21614,7 @@ JiTA.leadduty.ui = {
         var whence = !r.noteSet ? '\n\nFrom the ECAID - Team Members page' : ((r.noteBy ? ('\n\nSet by ' + r.noteBy + (r.noteAt ? (' on ' + r.noteAt) : '')) : '') +
             (r.pageNote ? ('\nThe ECAID - Team Members page has: ' + r.pageNote) : ''));
         $('<span class="ld-mnote"></span>').toggleClass('empty', !r.note).text(r.note ? r.note.split('\n')[0] : 'Add a public note')
-            .attr('title', r.note ? (r.note + whence) : 'Add a public note on this member: every Lead sees it, and the ECAID Member Productivity page shows it')
+            .attr('title', r.note ? (r.note + whence) : 'Add a public note on this member. Everyone can read it: it is published on the ECAID Member Productivity page')
             .on('click', function () { U._editMemberNote(r, wins, cur); }).appendTo($r);
         var inn = U._inote(r.acc);
         $('<span class="ld-mnote ld-minote"></span>').toggleClass('empty', !inn.t).text(inn.t ? inn.t.split('\n')[0] : 'Add an internal note')
@@ -21695,7 +21695,7 @@ JiTA.leadduty.ui = {
     // cell), then in the ledger, then only that row drawn again.
     _editMemberNote: function (r, wins, cur) {
         var L = JiTA.leadduty, U = L.ui, M = L.members, draft = 'member:' + r.acc;
-        U._askNote({ title: 'Note on ' + r.name, hint: 'Shared with every Lead, and shown on the ECAID Member Productivity page.', save: 'Save note', draft: draft, value: r.note }, function (note) {
+        U._askNote({ title: 'Note on ' + r.name, hint: 'Everyone can read it: it is published on the ECAID Member Productivity page.', save: 'Save note', draft: draft, value: r.note }, function (note) {
             var ch = M.noteChange(r, note, U._mem && U._mem.team);
             var drawn = function (w, why) {
                 delete U._drafts[draft];
@@ -24982,6 +24982,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.49.2', date: '2026-11-08', fixes: [
+            'Small improvements behind the scenes.'
+        ] },
         { v: '3.49.1', date: '2026-11-08', fixes: [
             'Small improvements behind the scenes.'
         ] },
