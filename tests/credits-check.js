@@ -7,6 +7,9 @@
 //  - tied members share a rank; a scheduled run's "ready" stays quiet and a failed quiet run clears its pill
 //  - the badge keeps "updating…" through its own refresh; the poll starts once; last month is recomputed once after it
 //    ends
+//  - v3.51.5: the badge and the leaderboard show the same for the viewer: the newer of their own count and the
+//    leaderboard's takes their row in both, rank included, and an open leaderboard is drawn again when the badge reads
+//    newer counts
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cut = (from, to, at) => {
@@ -132,6 +135,8 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     const badge = mkEl();
     global.document = { getElementById: (id) => (id === 'jita-credits-badge' ? badge : null), createElement: mkEl };
     C.getSelf = () => Promise.resolve({ credits: 12, rank: 3, total: 40 });
+    C.getCached = () => Promise.resolve(null);
+    JiTA.link = { currentUser: () => Promise.resolve('a-me') };
     C._updating = true;
     C.badge.refresh();
     await flush();
@@ -140,6 +145,92 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     C.badge.refresh();
     await flush();
     ok('...and stops once the run is over (control)', badge.textContent === '📊 12 credits this month · #3/40', badge.textContent);
+
+    // ---- the badge and the leaderboard show the same (v3.51.5) ----
+    const full = { ym: '2026-11', computedAt: '2026-11-15T16:18:00.000Z', nameToAcc: { Ann: 'a-ann', Bob: 'a-bob', Me: 'a-me' },
+        header: ['Name', 'Defects Created', 'Defects Resolved', 'Reports Attached', 'Reports Trashed', 'Reports Reassigned', 'Total Actioned', 'Extra Credits', 'Credits Earned'],
+        table: [['Ann', 2, 3, 38, 60, 30, 130, 0, 37.4], ['Bob', 1, 1, 104, 48, 0, 153, 0, 37.2], ['Me', 9, 1, 45, 36, 5, 95, 2, 34.8], ['Total', 12, 5, 187, 144, 35, 378, 2, 109.4]] };
+    const mine = { ym: '2026-11', computedAt: '2026-11-15T16:31:00.000Z', me: 'a-me', myName: 'Me', created: 9, resolved: 1, attached: 47, trashed: 36,
+        reassigned: 5, actioned: 97, extra: 2, credits: 35.4, rank: 3, total: 3 };
+    const fullWas = JSON.stringify(full);
+    const sw = C._withSelf(full, mine, 'a-me'), swd = C._derive(sw, 'a-me');
+    ok('your own newer count takes your row on the leaderboard', swd.myRow.join() === 'Me,9,1,47,36,5,97,2,35.4' && sw.selfAt === mine.computedAt, swd.myRow.join());
+    ok('...the other rows and the cached leaderboard stay as they were', sw.table[0] === full.table[0] && sw.table[1] === full.table[1] && sw.table[3] === full.table[3] && JSON.stringify(full) === fullWas);
+    const passed = C._derive(C._withSelf(full, Object.assign({}, mine, { credits: 37.3 }), 'a-me'), 'a-me');
+    ok('...and your rank follows it', passed.myRank === 2 && passed.total === 3, passed.myRank + '/' + passed.total);
+    ok('an older count of your own leaves the leaderboard as it is', C._withSelf(full, Object.assign({}, mine, { computedAt: '2026-11-15T16:10:00.000Z' }), 'a-me') === full);
+    ok('...as does one of another month, or another account\'s', C._withSelf(full, Object.assign({}, mine, { ym: '2026-10' }), 'a-me') === full &&
+        C._withSelf(full, Object.assign({}, mine, { me: 'a-old' }), 'a-me') === full);
+    ok('...or one of someone not on it', C._withSelf(full, Object.assign({}, mine, { me: 'a-new' }), 'a-new') === full);
+
+    C._updating = false;
+    C.getCached = (ym) => Promise.resolve(ym === '2026-11' ? full : null);
+    let selfRec = Object.assign({}, mine, { credits: 37.3 }), synced = [];
+    C.getSelf = () => Promise.resolve(selfRec);
+    C._ymNow = () => ({ y: 2026, m: 11, ym: '2026-11' });
+    C._viewSync = (s) => { synced.push(s); };
+    C.badge.refresh();
+    await flush();
+    ok('the badge shows your newer count with the rank the leaderboard gives it, not the one it was counted with', badge.textContent === '📊 37.3 credits this month · #2/3', badge.textContent);
+    ok('...and tells an open leaderboard which counts it read', synced.length === 1 && synced[0] === C._stamp(full, selfRec), synced.join());
+    selfRec = Object.assign({}, mine, { computedAt: '2026-11-15T16:10:00.000Z', credits: 99, rank: 1 });
+    C.badge.refresh();
+    await flush();
+    ok('a leaderboard newer than your own count gives the badge its number', badge.textContent === '📊 34.8 credits this month · #3/3', badge.textContent);
+    selfRec = { ym: '2026-11', computedAt: '2026-11-15T16:31:00.000Z', me: 'a-new', credits: 4, rank: null, total: null };
+    JiTA.link = { currentUser: () => Promise.resolve('a-new') };
+    C.badge.refresh();
+    await flush();
+    ok('someone not on the leaderboard yet still sees their own count', badge.textContent === '📊 4 credits this month', badge.textContent);
+    JiTA.link = { currentUser: () => Promise.resolve('a-me') };
+
+    // The leaderboard itself, on a jQuery that records what is drawn.
+    let texts = [], reads = 0, attached = true, made = [], tops = [];
+    const node = {};
+    const jq = new Proxy(function () {}, {
+        get(t, k) {
+            if (k === '0') { return node; }
+            if (k === 'then') { return undefined; }
+            if (k === 'scrollTop') { return (v) => { if (v === undefined) { return 120; } tops.push(v); return jq; }; }
+            if (k === 'text') { return (v) => { texts.push(String(v)); return jq; }; }
+            return () => jq;
+        },
+        apply() { return jq; }
+    });
+    global.$ = (h) => { made.push(String(h)); return jq; };
+    JiTA.menu = { _openOverlay: () => ({ $menu: jq }) };
+    C._cssInjected = true;
+    document.documentElement = { contains: (n) => attached && n === node };
+    const realGetCached = C.getCached;
+    C.getCached = (ym) => { reads++; return realGetCached(ym); };
+    selfRec = Object.assign({}, mine);
+    C._viewSync = null;
+    C.openView();
+    await flush();
+    ok('the leaderboard draws your row from your newer count and says when it was counted', reads === 1 && texts.some((x) => /computed 2026-11-15 16:18 UTC, your row 16:31 UTC - 3 members/.test(x)) &&
+        texts.indexOf('35.4') >= 0 && texts.indexOf('34.8') < 0 && made.some((h) => /Loading/.test(h)), reads + ' / ' + texts.filter((x) => /computed/.test(x)).join());
+    C._viewSync(C._stamp(full, selfRec));
+    await flush();
+    ok('the badge reading the same counts draws nothing again', reads === 1, reads);
+    selfRec = Object.assign({}, mine, { computedAt: '2026-11-15T16:33:00.000Z', attached: 48, actioned: 98, credits: 35.7 });
+    texts = []; made = []; tops = [];
+    C.badge.refresh();
+    await flush();
+    ok('newer counts the badge reads are drawn in the open leaderboard too', reads === 3 && texts.indexOf('35.7') >= 0 && badge.textContent === '📊 35.7 credits this month · #3/3', reads + ' / ' + badge.textContent);
+    ok('...without a "Loading…" in between, and scrolled where it was', made.length > 0 && !made.some((h) => /Loading/.test(h)) && tops.join() === '120', made.filter((h) => /Loading/.test(h)).length + ' / ' + tops.join());
+    const opened = C._viewSync;
+    attached = false;
+    C._viewSync('other');
+    await flush();
+    ok('a closed leaderboard draws nothing and lets go', reads === 3 && C._viewSync === null);
+    attached = true;
+    C.openView('2026-10');
+    await flush();
+    reads = 0;
+    C._viewSync('other');
+    await flush();
+    ok('a past month shown is not drawn again', reads === 0 && opened !== C._viewSync);
+    C._viewSync = null;
 
     global.window = { addEventListener() {} };
     timeouts = [];
