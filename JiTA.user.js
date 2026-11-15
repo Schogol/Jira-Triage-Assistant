@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.51.3
+// @version     3.51.4
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -10360,8 +10360,9 @@ JiTA.sched = {
  * refreshed on demand and by a throttled background job (sched). The crawl itself runs in the shared worker
  * (crComputeMonth / crComputeSelf in jitaWorkerBody); this side dispatches it and keeps the cache.
  *
- * PARITY: keep this in lockstep with monthly_report.py. Mirrored here: the credit formula, projects
- * (EO/PLAT/EDR) + resolutions (Fixed/Done/Released), clone dedup via the "Cloners" link (union-find),
+ * PARITY: keep this in lockstep with monthly_report.py. Mirrored here: the credit formula, defects in every
+ * space (EBR holds none) + resolutions (Fixed/Done/Released), a defect its own reporter closed earning nothing (one filed by
+ * mistake and taken back, whatever its resolution), clone dedup via the "Cloners" link (union-find),
  * reopen-aware Attached attribution, automation-account re-credit (a BR converted to a defect sets
  * -> Attached as the automation app account; credit the assignee who triggered it), Trashed vs Reassigned
  * (a close carrying CCP's convert-to-support comment is a reassign), old-account (<handle>@ccpgames.com)
@@ -10369,7 +10370,7 @@ JiTA.sched = {
  */
 JiTA.credits = {
     // ---- config (mirror monthly_report.py) ----
-    PROJECTS: 'EO, PLAT, EDR',
+    // Defects count in every space: an issue of the type Defect is one, wherever it is (EBR holds bug reports only).
     RESOLUTIONS: 'Fixed, Done, Released',
     GROUP: 'Contractors ISD ECAID',
     OLD_DOMAIN: 'ccpgames.com',
@@ -11829,21 +11830,60 @@ function jitaWorkerBody(cfg) {
         c += 0.1 * r.reassigned + r.created + r.resolved;
         return Math.round(c * 10) / 10;
     }
-    function crDefectsCreated(accounts, b, acctToName, rows) {
-        var jql = 'project in (' + crc.PROJECTS + ') AND issuetype = Defect ' +
+    // Who set the resolution an issue has now: the author of the last change to it, oldest first in `hist`; null when it
+    // was taken off again, or never changed (set as it was created).
+    function crResolvedBy(hist) {
+        var by = null;
+        for (var i = 0; i < hist.length; i++) {
+            var items = hist[i].items || [];
+            for (var j = 0; j < items.length; j++) {
+                if (items[j].field !== 'resolution' && items[j].fieldId !== 'resolution') { continue; }
+                by = (items[j].to || items[j].toString) ? ((hist[i].author || {}).accountId || null) : null;
+            }
+        }
+        return by;
+    }
+    // The defects of `issues` that their own reporter closed: the resolution they have now was set by the reporter, as on
+    // one filed by mistake and taken back, whatever the resolution. They earn nothing, neither created nor resolved. A
+    // member's old and new accounts are one reporter. One changelog read per closed defect, kept in `seen` for the run, so
+    // one that is in both counts is read once. Resolves to { key: true }.
+    function crSelfClosed(issues, acctToName, seen) {
+        var closed = issues.filter(function (x) { return !!(x.fields || {}).resolution && !(x.key in seen); });
+        return crParallel(closed, crc.CONCURRENCY, function (x) {
+            return crAllHistories(x.key).then(function (hist) {
+                var by = crResolvedBy(hist), rep = ((x.fields || {}).reporter || {}).accountId;
+                seen[x.key] = !!by && !!rep && (by === rep || (!!acctToName[by] && acctToName[by] === acctToName[rep]));
+            });
+        }).then(function () {
+            var out = {};
+            issues.forEach(function (x) { if (seen[x.key]) { out[x.key] = true; } });
+            return out;
+        });
+    }
+    // Defects in every space: the type says what a defect is (EBR holds bug reports only).
+    function crDefectsCreated(accounts, b, acctToName, rows, seen) {
+        var jql = 'issuetype = Defect ' +
             'AND reporter in (' + crAccList(accounts) + ') ' +
             'AND created >= "' + b.start + '" AND created < "' + b.end + '" ' +
             'AND (resolution is EMPTY OR resolution != Duplicate)';
-        return crFetchIssues(jql, ['reporter', 'project']).then(function (issues) {
-            for (var i = 0; i < issues.length; i++) { var name = acctToName[((issues[i].fields || {}).reporter || {}).accountId]; if (name) { rows[name].created++; } }
+        return crFetchIssues(jql, ['reporter', 'project', 'resolution']).then(function (issues) {
+            return crSelfClosed(issues, acctToName, seen || {}).then(function (self) {
+                for (var i = 0; i < issues.length; i++) {
+                    if (self[issues[i].key]) { continue; }
+                    var name = acctToName[((issues[i].fields || {}).reporter || {}).accountId];
+                    if (name) { rows[name].created++; }
+                }
+            });
         });
     }
-    function crDefectsResolved(accounts, b, acctToName, rows) {
-        var jql = 'project in (' + crc.PROJECTS + ') AND issuetype = Defect ' +
+    function crDefectsResolved(accounts, b, acctToName, rows, seen) {
+        var jql = 'issuetype = Defect ' +
             'AND reporter in (' + crAccList(accounts) + ') ' +
             'AND resolution in (' + crc.RESOLUTIONS + ') ' +
             'AND resolved >= "' + b.start + '" AND resolved < "' + b.end + '"';
-        return crFetchIssues(jql, ['reporter', 'project', 'issuelinks']).then(function (issues) {
+        return crFetchIssues(jql, ['reporter', 'project', 'issuelinks', 'resolution']).then(function (all) {
+            return crSelfClosed(all, acctToName, seen || {}).then(function (self) { return all.filter(function (x) { return !self[x.key]; }); });
+        }).then(function (issues) {
             var present = {}, meta = {};
             for (var i = 0; i < issues.length; i++) { present[issues[i].key] = true; meta[issues[i].key] = issues[i]; }
             var parent = {};
@@ -12000,8 +12040,9 @@ function jitaWorkerBody(cfg) {
                 names.forEach(function (n) { rows[n] = { created: 0, resolved: 0, attached: 0, trashed: 0, reassigned: 0 }; });
                 var allAccounts = Object.keys(acctToName);
                 crProgress(ym + ': ' + names.length + ' members - fetching defects…');
-                return crDefectsCreated(allAccounts, b, acctToName, rows)
-                    .then(function () { return crDefectsResolved(allAccounts, b, acctToName, rows); })
+                var seen = {};   // defect key -> closed by its own reporter, read once for both counts
+                return crDefectsCreated(allAccounts, b, acctToName, rows, seen)
+                    .then(function () { return crDefectsResolved(allAccounts, b, acctToName, rows, seen); })
                     .then(function () { crProgress(ym + ': reports attached…'); return crReportsActioned(memberAccounts, b, rows, acctToName); })
                     .then(function () { crProgress(ym + ': closed (trashed / reassigned)…'); return crReportsClosed(memberAccounts, b, rows); })
                     .then(function () {
@@ -12101,8 +12142,9 @@ function jitaWorkerBody(cfg) {
             if (!id.myName) { return null; }
             var rows = {}; rows[id.myName] = { created: 0, resolved: 0, attached: 0, trashed: 0, reassigned: 0 };
             var acctToName = {}; id.myAccounts.forEach(function (a) { acctToName[a] = id.myName; });
-            return crDefectsCreated(id.myAccounts, b, acctToName, rows)
-                .then(function () { return crDefectsResolved(id.myAccounts, b, acctToName, rows); })
+            var seen = {};   // defect key -> closed by its own reporter, read once for both counts
+            return crDefectsCreated(id.myAccounts, b, acctToName, rows, seen)
+                .then(function () { return crDefectsResolved(id.myAccounts, b, acctToName, rows, seen); })
                 .then(function () { return crReportsActionedSelf(id.myAccounts, b); })
                 .then(function (rep) {
                     var r = rows[id.myName];
@@ -23587,7 +23629,7 @@ JiTA.worker = {
             HOST: JiTA.HOST, MAX_RETRIES: JiTA.MAX_RETRIES, PAGE_DELAY_MS: JiTA.PAGE_DELAY_MS, SCRIPT_VERSION: JiTA.SCRIPT_VERSION,
             // ISD credits config (mirror of JiTA.credits' static fields) so the worker can run the monthly crawl.
             credits: {
-                PROJECTS: C.PROJECTS, RESOLUTIONS: C.RESOLUTIONS, GROUP: C.GROUP, OLD_DOMAIN: C.OLD_DOMAIN,
+                RESOLUTIONS: C.RESOLUTIONS, GROUP: C.GROUP, OLD_DOMAIN: C.OLD_DOMAIN,
                 EBR: C.EBR, ATTACHED_STATUS: C.ATTACHED_STATUS, CLOSED_STATUS: C.CLOSED_STATUS,
                 OPEN_STATUS: C.OPEN_STATUS, CONVERT_COMMENT: C.CONVERT_COMMENT,
                 AUTOMATION_ID: C.AUTOMATION_ID, AUTOMATION_EMAIL: C.AUTOMATION_EMAIL,
@@ -24556,6 +24598,10 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.51.4', date: '2026-11-15', fixes: [
+            'ISD credits: a defect its own reporter closed, as one filed by mistake and taken back, no longer counts as created or resolved, whatever its resolution.',
+            'ISD credits: defects count in every space, not just EO, PLAT and EDR.'
+        ] },
         { v: '3.51.3', date: '2026-11-09', fixes: [
             'Detail view: an issue that takes a few seconds to open no longer reloads the page. Jira keeps the issue before on screen until the new one is ready, and JiTA now waits up to 15 s for it, as Convert to Defect does.',
             'Detail view: two slow issues no longer make every later click in the list reload the page for half an hour.'
