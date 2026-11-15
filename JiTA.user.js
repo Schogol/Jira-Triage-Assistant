@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.51.4
+// @version     3.51.5
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -10586,6 +10586,27 @@ JiTA.credits = {
         }
         return { real: real, ranks: ranks, myName: myName, myRow: myRow, myRank: myRank, total: real.length, withCredits: withCredits };
     },
+    // The viewer's row is counted twice: with everyone about every 15 minutes (the leaderboard) and alone every 2 (the
+    // badge). The newer count wins in both, so the badge and the leaderboard show the same numbers and rank. Resolves
+    // res as it is, or a copy whose viewer row comes from their own newer count (selfAt says when); the cache is untouched.
+    _withSelf: function (res, self, me) {
+        if (!res || !res.table || !self || !me || self.me !== me || self.ym !== res.ym || !((self.computedAt || '') > (res.computedAt || ''))) { return res; }
+        var myName = null;
+        for (var name in res.nameToAcc) { if (res.nameToAcc.hasOwnProperty(name) && res.nameToAcc[name] === me) { myName = name; } }
+        var hit = false;
+        var table = res.table.map(function (row) {
+            if (row[0] !== myName) { return row; }
+            hit = true;
+            return [row[0], self.created, self.resolved, self.attached, self.trashed, self.reassigned, self.actioned, row[7], self.credits];
+        });
+        if (!hit) { return res; }
+        var out = {};
+        for (var k in res) { if (res.hasOwnProperty(k)) { out[k] = res[k]; } }
+        out.table = table; out.selfAt = self.computedAt;
+        return out;
+    },
+    // Which two counts a drawing came from: the open leaderboard draws itself again once the badge reads others.
+    _stamp: function (res, self) { return ((res && res.computedAt) || '') + '|' + ((self && self.computedAt) || ''); },
 
     // ---- overlay CSS (the wide, scrollable overlay chrome; base menu CSS comes from JiTA.menu._injectCss) --
     _injectCss: function () {
@@ -10704,12 +10725,14 @@ JiTA.credits = {
             return $wrap.append($tbl);
         }
 
-        function render() {
-            $scroll.empty();
+        // quiet: drawn again because the badge read newer counts, so no "Loading…" and the scroll position kept.
+        var shown = null;
+        function render(quiet) {
             $msel.val(sel);
-            $scroll.append($('<div class="jita-menu-status">Loading…</div>'));
-            Promise.all([C.getCached(sel), JiTA.link.currentUser()]).then(function (arr) {
-                var fullRes = arr[0], me = arr[1];
+            if (!quiet) { $scroll.empty().append($('<div class="jita-menu-status">Loading…</div>')); }
+            Promise.all([C.getCached(sel), JiTA.link.currentUser(), C.getSelf(sel)]).then(function (arr) {
+                var me = arr[1], fullRes = C._withSelf(arr[0], arr[2], me), top = $scroll.scrollTop();
+                shown = C._stamp(arr[0], arr[2]);
                 $scroll.empty();
                 // Only the current month auto-refreshes (the scheduler computes _ymNow()); past months are on-demand.
                 var isCurrentMonth = (sel === C._ymNow().ym);
@@ -10719,12 +10742,15 @@ JiTA.credits = {
                     return;
                 }
                 var d = C._derive(fullRes, me);
+                var at = function (iso) { return String(iso || '').replace('T', ' ').slice(0, 16); };
                 // Full leaderboard is visible to everyone now (no lead gate).
                 $scroll.append($('<div class="jita-cred-sub">Leaderboard</div>'));
                 $scroll.append(table(fullRes, d));
                 $scroll.append($('<div class="jita-menu-status" style="margin-top:12px;color:#7a8694;"></div>')
-                    .text('Leaderboard computed ' + String(fullRes.computedAt || '').replace('T', ' ').slice(0, 16) + ' UTC - ' + d.total + ' members, ' + d.withCredits + ' with credits.' +
-                        (isCurrentMonth ? ' It refreshes about every 15 minutes; the badge shows your own total every 2.' : '')));
+                    .text('Leaderboard computed ' + at(fullRes.computedAt) + ' UTC' + (fullRes.selfAt ? ', your row ' + at(fullRes.selfAt).slice(11) + ' UTC' : '') +
+                        ' - ' + d.total + ' members, ' + d.withCredits + ' with credits.' +
+                        (isCurrentMonth ? ' It refreshes about every 15 minutes, your row and the badge every 2.' : '')));
+                $scroll.scrollTop(top);
             }).catch(function (e) {   // a failed read used to leave "Loading…" up for good
                 $scroll.empty().append($('<div class="jita-menu-status" style="color:#ff8f8f;margin-top:12px;"></div>')
                     .text('Could not read the leaderboard: ' + (e && e.message || e)));
@@ -10732,6 +10758,13 @@ JiTA.credits = {
         }
 
         render();
+        // The badge calls this each time it reads its numbers: newer counts of this month are drawn here as well, so the
+        // two never disagree while the leaderboard is open. A closed leaderboard lets go of it.
+        var sync = function (stamp) {
+            if (!document.documentElement.contains($scroll[0])) { if (C._viewSync === sync) { C._viewSync = null; } return; }
+            if (shown !== null && stamp !== shown && sel === C._ymNow().ym) { render(true); }
+        };
+        C._viewSync = sync;
     },
 
     // ---- always-on corner badge (your current-month total + rank; reads cache; click opens the view) -----
@@ -10770,23 +10803,24 @@ JiTA.credits = {
             var busy = JiTA.credits._updating ? ' · updating…' : '';
             Promise.all([JiTA.credits.badge._month(ym), JiTA.credits.balance.readSafe()]).then(function (r) {
                 JiTA.credits.badge._paint(el, JiTA.credits.badge._parts(r[0], r[1], busy));
+                if (r[0] && JiTA.credits._viewSync) { JiTA.credits._viewSync(r[0].stamp); }   // the open leaderboard follows
             }).catch(function () { /* ignore */ });
         },
 
-        // This month's numbers for the viewer: their own total (recomputed every 2 minutes) when there is one, else their
-        // row of the cached leaderboard until the first one lands. Resolves { credits, rank, total }, { na: true } when
-        // they are not on the leaderboard, or null when nothing has been computed yet.
+        // This month's numbers for the viewer: their row of the cached leaderboard, taken from their own count (redone
+        // every 2 minutes) when that is newer (_withSelf, as the leaderboard draws it), so both show the same; their own
+        // count alone when they are not on the leaderboard. Resolves { credits, rank, total, stamp }, { na: true, stamp }
+        // when they are not on the leaderboard, or null when nothing has been computed yet.
         _month: function (ym) {
             var C = JiTA.credits;
-            return C.getSelf(ym).then(function (self) {
-                if (self && self.credits != null) { return { credits: self.credits, rank: self.rank, total: self.total }; }
-                return C.getCached(ym).then(function (res) {
-                    if (!res) { return null; }
-                    return JiTA.link.currentUser().then(function (me) {
-                        var d = C._derive(res, me);
-                        return d.myRow ? { credits: d.myRow[8], rank: d.myRank, total: d.total } : { na: true };
-                    });
-                });
+            return Promise.all([C.getSelf(ym), C.getCached(ym), JiTA.link.currentUser()]).then(function (r) {
+                var self = r[0], res = r[1], me = r[2], stamp = C._stamp(res, self);
+                if (res) {
+                    var d = C._derive(C._withSelf(res, self, me), me);
+                    if (d.myRow) { return { credits: d.myRow[8], rank: d.myRank, total: d.total, stamp: stamp }; }
+                }
+                if (self && self.credits != null) { return { credits: self.credits, rank: self.rank, total: self.total, stamp: stamp }; }
+                return res ? { na: true, stamp: stamp } : null;
             });
         },
 
@@ -24598,6 +24632,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.51.5', date: '2026-11-15', fixes: [
+            'ISD credits: the leaderboard and the credits pill show the same number for you. Your own row is counted every 2 minutes, the rest every 15, and the newer count of your row is now used in both, rank included.'
+        ] },
         { v: '3.51.4', date: '2026-11-15', fixes: [
             'ISD credits: a defect its own reporter closed, as one filed by mistake and taken back, no longer counts as created or resolved, whatever its resolution.',
             'ISD credits: defects count in every space, not just EO, PLAT and EDR.'

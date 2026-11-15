@@ -1,6 +1,6 @@
 // mutate-credits.js - breaks each ISD credits fix (v3.38.25), and what the Members tab takes from the credits count (v3.48.0:
-// busy, the leased count, the progress hook, the old-way GM handoffs), and requires credits-check to go red. A crashed
-// harness counts as red.
+// busy, the leased count, the progress hook, the old-way GM handoffs), and the badge and the leaderboard agreeing (v3.51.5),
+// and requires credits-check to go red. A crashed harness counts as red.
 const fs = require('fs');
 const { execSync } = require('child_process');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
@@ -28,6 +28,24 @@ const muts = [
     [H, 'a failed quiet run leaves its pill', '            else { JiTA.credits._clearProgress(); }   // a pill a manual Refresh made it draw would otherwise stay up\n', ''],
     [H, 'the badge drops "updating…"', "            var busy = JiTA.credits._updating ? ' · updating…' : '';", "            var busy = '';"],
     [H, 'the poll can start twice', '            if (S._timer || S._started) { return; }\n            S._started = true;', '            if (S._timer) { return; }'],
+    // ---- the badge and the leaderboard show the same (v3.51.5) ----
+    [H, 'the leaderboard ignores your newer count', 'fullRes = C._withSelf(arr[0], arr[2], me)', 'fullRes = arr[0]'],
+    [H, 'the badge ignores the leaderboard', '                    var d = C._derive(C._withSelf(res, self, me), me);', '                    var d = C._derive(res, me);'],
+    [H, 'the badge takes your own count even when older, with the rank it was counted with', '                if (res) {\n                    var d = C._derive(', '                if (res && !(self && self.credits != null)) {\n                    var d = C._derive('],
+    [H, 'an older count of your own wins', " || !((self.computedAt || '') > (res.computedAt || ''))) { return res; }", ') { return res; }'],
+    [H, 'another month\'s count of your own is used', ' || self.ym !== res.ym', ''],
+    [H, 'another account\'s count is used', ' || self.me !== me', ''],
+    [H, 'the cached leaderboard is changed in place', '        out.table = table; out.selfAt = self.computedAt;\n        return out;', '        res.table = table; res.selfAt = self.computedAt;\n        return res;'],
+    [H, 'only your credits are taken from your own count', 'return [row[0], self.created, self.resolved, self.attached, self.trashed, self.reassigned, self.actioned, row[7], self.credits];', 'return row.slice(0, 8).concat([self.credits]);'],
+    [H, 'the footer leaves out when your row was counted', "(fullRes.selfAt ? ', your row ' + at(fullRes.selfAt).slice(11) + ' UTC' : '')", "''"],
+    [H, 'the open leaderboard is not told what the badge read', '                if (r[0] && JiTA.credits._viewSync) { JiTA.credits._viewSync(r[0].stamp); }   // the open leaderboard follows\n', ''],
+    [H, 'the leaderboard never hooks the badge', '        C._viewSync = sync;\n', ''],
+    [H, 'what the leaderboard was drawn from is never kept', '                shown = C._stamp(arr[0], arr[2]);\n', ''],
+    [H, 'the leaderboard is drawn again for the same counts', '&& stamp !== shown && sel', '&& sel'],
+    [H, 'a past month is drawn again', ' && sel === C._ymNow().ym) { render(true); }', ') { render(true); }'],
+    [H, 'a closed leaderboard keeps being drawn', '            if (!document.documentElement.contains($scroll[0])) { if (C._viewSync === sync) { C._viewSync = null; } return; }\n', ''],
+    [H, 'a redraw says "Loading…" first', '            if (!quiet) { $scroll.empty()', '            if (true) { $scroll.empty()'],
+    [H, 'a redraw jumps to the top', '                $scroll.scrollTop(top);\n', ''],
     [H, 'last month is never finished', "            if (gmGet(S.PREV_DONE_KEY, '') !== prev.ym && ", '            if (false && '],
     [H, 'last month is recomputed every poll', '                }).then(function () { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); end(); },', '                }).then(function () { gmSet(S.FAIL_PREV_KEY, 0); end(); },'],
     [H, 'a month already final is recomputed', "                    if (!res || String(res.computedAt || '') >= now.ym + '-01') { return; }", '                    if (!res) { return; }'],
