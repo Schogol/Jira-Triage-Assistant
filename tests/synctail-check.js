@@ -53,7 +53,7 @@ function fakeDb(rows) {
 
 const rec = (key, over) => Object.assign({
     key: key, project: key.split('-')[0], summary: 's ' + key, description: 'd', status: 'Open', resolution: null,
-    resolutiondate: null, created: '2026-09-01', components: [], updated: '2026-10-01T10:00', team: '',
+    resolutiondate: null, created: '2026-09-01', components: [], labels: [], updated: '2026-10-01T10:00',
     embedding: null, embeddingModelVersion: null, lang: null, enText: null, textHash: 'h-' + key
 }, over || {});
 
@@ -87,10 +87,10 @@ const rec = (key, over) => Object.assign({
     ok('a changed text drops the derived work', r.changed === 1 && F.store.get('EDR-1').embedding === null && F.store.get('EDR-1').enText === null, JSON.stringify(F.store.get('EDR-1')));
     F.log.puts = [];
     const legacy = rec('EDR-2', { status: 'In Progress', updated: '2026-10-02T09:00', embedding: [3], embeddingModelVersion: 'm' });
-    delete legacy.team;
+    delete legacy.labels;
     F.store.set('EDR-2', legacy);
     r = await J.db.syncPut([rec('EDR-2', { status: 'In Progress', updated: '2026-10-02T09:00' })], false);
-    ok('a row from an older build that lacks a field is rewritten (a refetch backfills it)', r.changed === 1 && F.store.get('EDR-2').team === '', String(r.changed));
+    ok('a row from an older build that lacks a field is rewritten (a refetch backfills it)', r.changed === 1 && Array.isArray(F.store.get('EDR-2').labels), String(r.changed));
     r = await J.db.syncPut([rec('EBR-9', { status: 'Attached' }), rec('EBR-10', { status: 'Closed' }), rec('EBR-11')], true);
     ok('pruning deletes a stored report that has closed', F.log.deletes.join() === 'EBR-9' && !F.store.has('EBR-9'), F.log.deletes.join());
     ok('...a closed report never stored is no change, and an open new one is', r.changed === 2 && !F.store.has('EBR-10') && F.store.has('EBR-11'), String(r.changed));
@@ -104,7 +104,7 @@ const rec = (key, over) => Object.assign({
     const full = 'project in (EDR, EO, PLAT) ORDER BY updated ASC';
     let pages = [], meta = {}, status = [], invalidates = 0, putChanged = [];
     const R = {
-        FIELDS: [], PAGE_SIZE: 100, PAGE_DELAY_MS: 0, NEAR_LIMIT_DELAY_MS: 0, DATA_VERSION: 3,
+        FIELDS: [], PAGE_SIZE: 100, PAGE_DELAY_MS: 0, NEAR_LIMIT_DELAY_MS: 0, DATA_VERSION: 3, DATA_VERSION_EBR: 4,
         rank: {}, logsig: {},
         ui: { setStatus: (s) => { status.push(s); } },
         util: { delay: () => Promise.resolve() },
@@ -115,7 +115,7 @@ const rec = (key, over) => Object.assign({
         },
         sync: { _quiet: false }
     };
-    Object.assign(R.sync, new Function('JiTA', 'return ' + obj(['    _resumable: function (rt, jql) {', '    _run: function (jql, opts) {', '    _fullRun: function (prefix, jql) {',
+    Object.assign(R.sync, new Function('JiTA', 'return ' + obj(['    _resumable: function (rt, jql) {', '    _schema: function (jql) {', '    _run: function (jql, opts) {', '    _fullRun: function (prefix, jql) {',
         '    fullSync: function () {', '    incrementalSync: function () {', '    fullSyncEbr: function () {', '    incrementalSyncEbr: function () {']) + ';')(R));
     R.sync.FULL_JQL = full;
     R.sync.FULL_JQL_EBR = 'project = EBR AND statusCategory != Done ORDER BY updated ASC';
@@ -211,11 +211,31 @@ const rec = (key, over) => Object.assign({
     pages = [page(['EDR-5'])];
     await R.sync.incrementalSync();
     ok('...and catches up as before when none is pending', calls[0].jql === 'project in (EDR, EO, PLAT) AND updated >= "-15m" ORDER BY updated ASC', calls[0].jql);
-    meta = { resumeTokenEbr: { jql: R.sync.FULL_JQL_EBR, token: 'e4', v: 3 }, lastSyncHighWaterEbr: '2026-10-01' };
+    meta = { resumeTokenEbr: { jql: R.sync.FULL_JQL_EBR, token: 'e4', v: 4 }, lastSyncHighWaterEbr: '2026-10-01' };
     calls.length = 0;
     pages = [page(['EBR-5'])];
     await R.sync.incrementalSyncEbr();
-    ok('...the bug report sync does the same', calls[0].nextPageToken === 'e4' && meta.dataVersionEbr === 3, JSON.stringify(calls[0]));
+    ok('...the bug report sync does the same, and stamps the bug reports\' own schema', calls[0].nextPageToken === 'e4' && meta.dataVersionEbr === 4, JSON.stringify(calls[0]) + ' / ' + meta.dataVersionEbr);
+
+    // ================= the bug reports' own schema (v3.52.0: labels) =================
+    const ebrFull = R.sync.FULL_JQL_EBR;
+    ok('a bug report crawl is resumed under the bug reports\' schema, not the defects\'', R.sync._resumable({ jql: ebrFull, token: 't', v: 4 }, ebrFull) &&
+        !R.sync._resumable({ jql: ebrFull, token: 't', v: 3 }, ebrFull) && R.sync._resumable({ jql: full, token: 't', v: 3 }, full) && !R.sync._resumable({ jql: full, token: 't', v: 4 }, full));
+    meta = {};
+    calls.length = 0;
+    pages = [page(['EBR-1'], 'p2'), page(['EBR-2'])];
+    let savedTok = null;
+    const setMeta0 = R.db.setMeta;
+    R.db.setMeta = (k, v) => { if (k === 'resumeTokenEbr' && v) { savedTok = v; } return setMeta0(k, v); };
+    await R.sync.fullSyncEbr();
+    R.db.setMeta = setMeta0;
+    ok('...saves its page under that schema, and stamps it when done', savedTok && savedTok.v === 4 && savedTok.jql === ebrFull && meta.dataVersionEbr === 4 && !meta.dataVersionDefects,
+        JSON.stringify(savedTok) + ' / ' + JSON.stringify(meta));
+    meta = { resumeTokenEbr: { jql: ebrFull, token: 'old', v: 3 }, lastSyncHighWaterEbr: '2026-10-01' };
+    calls.length = 0;
+    pages = [page(['EBR-1'])];
+    await R.sync.incrementalSyncEbr();
+    ok('...and a bug report crawl an older build left half done is not carried on', calls.length === 1 && !calls[0].nextPageToken && /updated >= /.test(calls[0].jql), JSON.stringify(calls[0]));
 
     // ================= the upgrade refetch =================
     const tails = [];
@@ -237,7 +257,7 @@ const rec = (key, over) => Object.assign({
     meta = { resumeToken: 'bare-old', lastSyncHighWater: '2026-10-01' };
     await M.sync.refetchDefects();
     ok('with nothing to carry on it resets the cursors', meta.resumeToken === null && meta.lastSyncHighWater === '', JSON.stringify(meta));
-    meta = { resumeTokenEbr: { jql: R.sync.FULL_JQL_EBR, token: 'te', v: 3 } };
+    meta = { resumeTokenEbr: { jql: R.sync.FULL_JQL_EBR, token: 'te', v: 4 } };
     await M.sync.refetchEbr();
     ok('the bug report refetch carries one on too', meta.resumeTokenEbr && meta.resumeTokenEbr.token === 'te' && JSON.stringify(tails[2]) === '[false,false,true]', JSON.stringify(tails));
 

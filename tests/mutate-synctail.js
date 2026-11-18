@@ -12,13 +12,16 @@ const muts = [
     [H, 'the derived fields count as synced ones', "            if (k === 'embedding' || k === 'embeddingModelVersion' || k === 'lang' || k === 'enText') { continue; }\n", ''],
     // ---- a run ----
     [H, 'an incremental run saves a resume token', '                    var saved = opts.resume\n', '                    var saved = true\n'],
-    [H, 'a bare token is saved', '{ jql: jql, token: nextToken, v: JiTA.DATA_VERSION }', 'nextToken'],
+    [H, 'a bare token is saved', '{ jql: jql, token: nextToken, v: JiTA.sync._schema(jql) }', 'nextToken'],
+    [H, 'a bug report crawl saved and resumed under the defects\' schema', 'return jql === JiTA.sync.FULL_JQL_EBR ? JiTA.DATA_VERSION_EBR : JiTA.DATA_VERSION;', 'return JiTA.DATA_VERSION;'],
+    [H, 'a defect crawl saved and resumed under the bug reports\' schema', 'return jql === JiTA.sync.FULL_JQL_EBR ? JiTA.DATA_VERSION_EBR : JiTA.DATA_VERSION;', 'return JiTA.DATA_VERSION_EBR;'],
+    [H, 'the bug reports stamped with the defects\' schema', "setMeta('dataVersionEbr', JiTA.DATA_VERSION_EBR)", "setMeta('dataVersionEbr', JiTA.DATA_VERSION)"],
     [H, 'a background catch-up writes the status line', 'if (opts.resume || !JiTA.sync._quiet) {', 'if (true) {'],
     [H, 'a background full build hides its progress', 'if (opts.resume || !JiTA.sync._quiet) {', 'if (!JiTA.sync._quiet) {'],
     [H, 'a run that only re-fetched tells the worker', 'function settled() { if (changed > 0) {', 'function settled() { if (stored > 0) {'],
     [H, 'a failed run hides what it wrote', "            if (e && typeof e === 'object') { e.syncChanged = changed; }   // what the failed run wrote (see _fullRun)\n", ''],
     // ---- resuming ----
-    [H, 'a token from another schema is resumed', ' && rt.v === JiTA.DATA_VERSION', ''],
+    [H, 'a token from another schema is resumed', ' && rt.v === JiTA.sync._schema(jql)', ''],
     [H, 'a token from another query is resumed', ' && rt.jql === jql', ''],
     [H, 'a refused token is never started over', '                    if (!e || e.status !== 400) { throw e; }   // anything else is a real failure\n', '                    throw e;\n'],
     [H, 'any failure starts the crawl over', '                    if (!e || e.status !== 400) { throw e; }   // anything else is a real failure\n', '                    if (!e) { throw e; }\n'],

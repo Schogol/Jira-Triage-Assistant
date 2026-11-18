@@ -119,8 +119,8 @@ const muts = [
 
     // ---- the background reader ----
     [X, 'the reader off by default', '    on: function () { return gmGet(JiTA.logread.KEY, true) !== false; },', '    on: function () { return !!gmGet(JiTA.logread.KEY, false); },'],
-    [X, 'closed reports read', 'if (JiTA.util.isClosedStatus(f.status && f.status.name) || JiTA.util.isGmTeam(f.customfield_10001)) { return; }', 'if (JiTA.util.isGmTeam(f.customfield_10001)) { return; }'],
-    [X, 'the GM team\'s reports read', 'if (JiTA.util.isClosedStatus(f.status && f.status.name) || JiTA.util.isGmTeam(f.customfield_10001)) { return; }', 'if (JiTA.util.isClosedStatus(f.status && f.status.name)) { return; }'],
+    [X, 'closed reports read', '                        if (JiTA.util.isClosedStatus(f.status && f.status.name)) { return; }\n', ''],
+    [X, 'a Vanguard report not read for the exception search', '                        if (JiTA.util.isClosedStatus(f.status && f.status.name)) { return; }', '                        if (JiTA.util.isClosedStatus(f.status && f.status.name) || JiTA.util.isLeftOut(f)) { return; }'],
     [X, 'every pass lists every report', `(since ? ' AND updated >= "' + since + '"' : '')`, "''"],
     [X, 'the mark moves past a failed read', '                var whole = listOk && !failed && LR.on() && next >= queue.length;', '                var whole = listOk && LR.on() && next >= queue.length;'],
     [X, 'the mark moves past a failed listing', "                listOk = false;\n                console.log('[JiTA] could not list", "                console.log('[JiTA] could not list"],

@@ -30,6 +30,8 @@ const muts = [
     [A, 'the upgrade check runs into a sync', '        JiTA.migrate._done = true;\n        if (JiTA.sync.running) { JiTA.migrate._later(); return; }\n', '        JiTA.migrate._done = true;\n'],
     [A, 'a sync started mid-read is not noticed', '                        if (JiTA.sync.running) { JiTA.migrate._later(); return; }   // one started while we read\n', ''],
     [A, 'a deferred check stays done', '        JiTA.migrate._done = false;\n        setTimeout(', '        setTimeout('],
+    [A, 'the bug reports judged by the defects\' version', '(Number(ev) || 0) < JiTA.DATA_VERSION_EBR;', '(Number(ev) || 0) < JiTA.DATA_VERSION;'],
+    [A, 'the defects judged by the bug reports\' version', 'var defStale = nDef > 0 && (Number(dv) || 0) < JiTA.DATA_VERSION;', 'var defStale = nDef > 0 && (Number(dv) || 0) < JiTA.DATA_VERSION_EBR;'],
     // ---- the worker ----
     [W, 'a tab that gave up still waits for an ACK', "        if (!JiTA.worker.usable()) { return Promise.reject(new Error('the ranking worker is not available in this tab')); }\n", ''],
     [W, 'giving up does not make the worker unusable', 'return JiTA.worker._started && (!JiTA.worker._gaveUp || JiTA.worker._otherLeader);', 'return JiTA.worker._started;'],

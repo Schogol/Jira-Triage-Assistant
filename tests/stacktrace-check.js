@@ -52,7 +52,7 @@ eval(block('JiTA.excfind = {', '\n    _noop: null\n};\n'));
 (0, eval)(block('JiTA.rank._boostRow = function (', '\n};\n'));
 const P = JiTA.profile, X = JiTA.excfind, R = JiTA.repexc;
 // The worker's copies, from jitaWorkerBody itself: the logsig section and the index build.
-const W = new Function('isClosedStatus', 'isGmTeam', 'tokenize', 'effectiveText', 'cfg',
+const W = new Function('isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'cfg',
     'var vecCache = null, kwCache = null, logsigCache = null;\n' + line('    var LG_MIN = 2') + line('    var LG_TRACE = ') +
     src.slice(once('    // ---- logsig: exception-signature mining'), once('\n    // One load at a time')) +
     src.slice(once('    function buildIndexes(recs) {'), once('    // Cosine == dot product')) +

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.51.5
+// @version     3.52.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -3280,10 +3280,16 @@ var JiTA = {
     HOST: 'https://fenriscreations.atlassian.net',
     SCOPE: 'project in (EDR, EO, PLAT)',           // defect dataset (crawled + embedded); shown as similar-defect candidates on EBR pages
     EBR_SCOPE: 'project = EBR AND statusCategory != Done',  // open bug reports, for the EDR "matching reports" view
-    // "EO - GameMasters" team id (Team field = customfield_10001). Bug reports assigned to the GM team are being
-    // handled BY the GMs, so they're excluded from the "matching bug reports" view (see JiTA.rank EBR indexes).
+    // Open bug reports that Matching bug reports (on a defect) and Similar open reports (on a report) leave out, as the
+    // bug hunters' backlog filter does (JiTA.dv.DEFAULT_JQL): labelled Vanguard or Launcher, or in the Launcher
+    // component, whatever the case. They stay in the local copy, so one whose label is taken off comes back with the
+    // next sync, but they are never ranked, embedded or translated (JiTA.util.isLeftOut, and leftOut in the worker).
+    LEFT_OUT: { labels: ['Vanguard', 'Launcher'], components: ['Launcher'] },
+    // "EO - GameMasters" team id (Team field = customfield_10001), for the Lead duties Members tab's count of GM handoffs
+    // made the old way (crSetGm in the worker). Bug reports with the GM team are no longer left out of the matching lists
+    // (v3.52.0): a report converted to a support ticket is closed now, and closed reports are left out anyway.
     GM_TEAM_ID: 'ef4edd53-c099-4431-82af-9b4bd717cb88-38',
-    FIELDS: ['summary', 'description', 'status', 'resolution', 'resolutiondate', 'created', 'components', 'updated', 'project', 'customfield_10001'],  // customfield_10001 = Team
+    FIELDS: ['summary', 'description', 'status', 'resolution', 'resolutiondate', 'created', 'components', 'labels', 'updated', 'project'],
     DB_NAME: 'EJF_SimilarDefects',   // legacy IndexedDB name - renamed identifiers to JiTA but kept this value so existing users keep their synced defect DB
     DB_VERSION: 1,
     PAGE_SIZE: 100,
@@ -3315,7 +3321,7 @@ var JiTA = {
                                                     // would then skip them, leaving foreign vectors permanently.
                                                     // (v1 = NaN fp16; v2 = fp32; v3 = gte-small; v4 = paraphrase-MiniLM;
                                                     //  v5 = e5-small [v4/v5 reverted]; v6-tx = gte-small + foreign-report translation)
-    DATA_VERSION: 3                                 // stored-record SCHEMA version. Bump whenever a sync change
+    DATA_VERSION: 3,                                // stored-record SCHEMA version. Bump whenever a sync change
                                                     // adds/changes a FIELD on stored records - OR widens the crawl
                                                     // SCOPE - that a plain incremental catch-up can't backfill (it
                                                     // only re-fetches CHANGED issues, so old rows / newly-in-scope
@@ -3324,6 +3330,13 @@ var JiTA = {
                                                     // field; v2 = added PLAT to SCOPE -> full refetch backfills
                                                     // existing PLAT defects; v3 = added the `team` field
                                                     // (customfield_10001) so GM-team bug reports can be excluded.)
+                                                    // From v3 on it covers the DEFECTS only: the bug reports have
+                                                    // their own, below.
+    DATA_VERSION_EBR: 4                             // the open bug reports' stored-record schema (DATA_VERSION covered
+                                                    // them up to v3). Bump it for a field only they need: JiTA.migrate
+                                                    // then re-fetches the bug reports alone (a few dozen pages, vectors
+                                                    // kept), never the far larger defect set. (v4 = the `labels` field,
+                                                    // so Vanguard and Launcher reports are left out: JiTA.LEFT_OUT.)
 };
 
 
@@ -4528,23 +4541,17 @@ JiTA.util = {
         return /closed|done|resolved|rejected|cancel|attached/i.test(status || '');
     },
 
-    // Normalize a Team custom-field value (customfield_10001) to a plain id string, or '' when absent. The field
-    // can come back as a bare string / number OR an object ({id}/{value}/{teamId}) depending on the Team-field
-    // variant, so handle every shape.
-    teamId: function (v) {
-        if (v == null) { return ''; }
-        if (typeof v === 'string' || typeof v === 'number') { return String(v); }
-        if (typeof v === 'object') { return String(v.id || v.value || v.teamId || v.name || ''); }
-        return '';
-    },
-
-    // True when a Team value is "EO - GameMasters". Matches the full id, the short numeric id ('38'), or any
-    // "<prefix>-38" form, so it's robust to whichever shape the API / a stored record carries.
-    isGmTeam: function (v) {
-        var id = JiTA.util.teamId(v);
-        if (!id) { return false; }
-        var short = String(JiTA.GM_TEAM_ID).split('-').pop();   // '38' - the short numeric team id
-        return id === JiTA.GM_TEAM_ID || id === short || id.slice(-(short.length + 1)) === ('-' + short);
+    // True for a stored bug report the matching lists leave out (JiTA.LEFT_OUT): labelled Vanguard or Launcher, or in
+    // the Launcher component, whatever the case. A record from before labels were kept goes by its components alone
+    // until JiTA.migrate has fetched the bug reports again. KEEP IN SYNC with leftOut in the worker.
+    isLeftOut: function (rec) {
+        function has(list, names) {
+            for (var i = 0; i < (list || []).length; i++) {
+                for (var j = 0; j < names.length; j++) { if (String(list[i]).toLowerCase() === names[j].toLowerCase()) { return true; } }
+            }
+            return false;
+        }
+        return !!rec && (has(rec.labels, JiTA.LEFT_OUT.labels) || has(rec.components, JiTA.LEFT_OUT.components));
     },
 
     // Stale-match demotion factor. A defect that was FIXED long before this bug report was even filed is
@@ -5853,6 +5860,7 @@ JiTA.sync = {
         var description = JiTA.util.toPlainText(f.description);
         var components = [];
         if (f.components) { for (var i = 0; i < f.components.length; i++) { components.push(f.components[i].name); } }
+        var labels = (f.labels || []).map(String);
         return {
             key: issue.key,
             project: (f.project && f.project.key) || (issue.key.indexOf('-') > 0 ? issue.key.split('-')[0] : ''),
@@ -5863,8 +5871,8 @@ JiTA.sync = {
             resolutiondate: f.resolutiondate || null,   // when the defect was fixed/closed (for stale-match demotion)
             created: f.created || null,                  // when the issue was created (shown in the suggestion row)
             components: components,
+            labels: labels,                              // Vanguard and Launcher reports are left out (JiTA.util.isLeftOut)
             updated: f.updated || '',
-            team: JiTA.util.teamId(f.customfield_10001),   // Team field; used to exclude GM-team bug reports
             embedding: null,
             embeddingModelVersion: null,
             lang: null,          // detected source language ('en','de','ru',...); null = translate pass hasn't seen it yet
@@ -5894,8 +5902,10 @@ JiTA.sync = {
     // current record schema. A bare token from an older build, one saved by another query, or one saved before a
     // schema change (its first pages would lack the new field) is not resumed.
     _resumable: function (rt, jql) {
-        return !!(rt && typeof rt === 'object' && rt.token && rt.jql === jql && rt.v === JiTA.DATA_VERSION);
+        return !!(rt && typeof rt === 'object' && rt.token && rt.jql === jql && rt.v === JiTA.sync._schema(jql));
     },
+    // The record schema a full crawl writes: the bug reports' own (DATA_VERSION_EBR), or the defects'.
+    _schema: function (jql) { return jql === JiTA.sync.FULL_JQL_EBR ? JiTA.DATA_VERSION_EBR : JiTA.DATA_VERSION; },
 
     // Page through /search/jql for a given jql, storing each page. opts: { startToken, startHighWater, resume,
     // metaPrefix, pruneResolved, isEbr }
@@ -5948,7 +5958,7 @@ JiTA.sync = {
                     var nextToken = data.nextPageToken || null, last = !!(data.isLast || !nextToken);
                     // A full crawl saves where it got to, so a reload mid-crawl carries on from there.
                     var saved = opts.resume
-                        ? JiTA.db.setMeta(resumeKey, last ? null : { jql: jql, token: nextToken, v: JiTA.DATA_VERSION })
+                        ? JiTA.db.setMeta(resumeKey, last ? null : { jql: jql, token: nextToken, v: JiTA.sync._schema(jql) })
                         : Promise.resolve();
                     return saved
                         .then(function () { return JiTA.db.setMeta(hwKey, maxUpdated); })
@@ -6179,7 +6189,7 @@ JiTA.sync = {
     fullSyncEbr: function () {
         return JiTA.sync._fullRun('Ebr', JiTA.sync.FULL_JQL_EBR).then(function (res) {
             // Full open-EBR crawl -> stamp the EBR schema version + build time (see fullSync / JiTA.migrate).
-            return JiTA.db.setMeta('dataVersionEbr', JiTA.DATA_VERSION)
+            return JiTA.db.setMeta('dataVersionEbr', JiTA.DATA_VERSION_EBR)
                 .then(function () { return JiTA.db.setMeta('dbBuiltAtEbr', new Date().toISOString()); })
                 .then(function () { return res; });
         });
@@ -6377,10 +6387,10 @@ JiTA.rank = {
 
     // Build (and cache) a BM25 index over the OPEN bug reports (project EBR) stored in the same DB. Same
     // shape and tokenizer as the defect index; closed reports are skipped defensively (the EBR sync prunes
-    // them, but a stale record could linger between syncs).
+    // them, but a stale record could linger between syncs), and so are the Vanguard and Launcher ones (JiTA.LEFT_OUT).
     _ensureEbrIndex: function () {
         return JiTA.rank._ensureCached('_ebrIndex', '_dirtyEbr', '_buildingEbr', function (records) {
-            return JiTA.rank._buildKeywordIndex(records, function (rec) { return rec.project === 'EBR' && !JiTA.util.isClosedStatus(rec.status) && !JiTA.util.isGmTeam(rec.team); });
+            return JiTA.rank._buildKeywordIndex(records, function (rec) { return rec.project === 'EBR' && !JiTA.util.isClosedStatus(rec.status) && !JiTA.util.isLeftOut(rec); });
         });
     },
 
@@ -6503,10 +6513,10 @@ JiTA.embed = {
 
 
 /* ---- foreign bug-report translation: translate non-English EBRs to English at ingest, store enText, index it ---- */
-// Runs TAB-side (GM_xmlhttpRequest is unavailable in the worker). Single-flight background pass over open, non-GM
-// EBRs not yet language-tagged: skip English locally (no call), translate foreign/unknown via round-robin
-// endpoints, store { lang, enText }. Foreign records get their embedding cleared so the embed pass re-embeds off
-// the English text. Resumable: state lives on each record (lang == null = pending), so a reload just continues.
+// Runs TAB-side (GM_xmlhttpRequest is unavailable in the worker). Single-flight background pass over the open EBRs
+// that are ranked (not JiTA.LEFT_OUT) and not yet language-tagged: skip English locally (no call), translate
+// foreign/unknown via round-robin endpoints, store { lang, enText }. Foreign records get their embedding cleared so the
+// embed pass re-embeds off the English text. Resumable: state lives on each record (lang == null = pending), so a reload just continues.
 JiTA.translate = {
     _running: null,
     BATCH_DELAY: 1000,          // ms between a lane's successful calls (2 concurrent lanes, one pinned per endpoint); 1s was steadier than 500ms against the rate limit
@@ -6536,7 +6546,7 @@ JiTA.translate = {
             for (var k = 0; k < recs.length; k++) {
                 var r = recs[k];
                 if (r.project !== 'EBR') { continue; }                                              // never translate defects
-                if (JiTA.util.isClosedStatus(r.status) || JiTA.util.isGmTeam(r.team)) { continue; }  // not ranked -> skip
+                if (JiTA.util.isClosedStatus(r.status) || JiTA.util.isLeftOut(r)) { continue; }  // not ranked -> skip
                 if (r.lang) { continue; }                                                            // already language-tagged
                 candidates.push(r);
             }
@@ -6684,14 +6694,15 @@ JiTA.rank._workerSemantic = function (text, scope, excludeKey, filterTerms) {
 };
 
 // Apply the tab-side gates the worker doesn't know about to the worker's pre-scored candidates: user-hidden
-// suggestions, the structural open+non-GM filter for matching-reports (ebr scope), and the session status/recency
-// filter. Candidates arrive score-sorted, so order is preserved. Returns the semantic list for fusion.
+// suggestions, the structural open filter for matching-reports (ebr scope), and the session status/recency
+// filter. Candidates arrive score-sorted, so order is preserved. Returns the semantic list for fusion. (The Vanguard
+// and Launcher reports never reach here: the worker leaves them out of its indexes.)
 JiTA.rank._gateScored = function (cands, scope) {
     var out = [];
     for (var i = 0; i < cands.length; i++) {
         var d = cands[i];
         if (JiTA.hidden.isHidden(d.key)) { continue; }
-        if (scope === 'ebr' && (JiTA.util.isClosedStatus(d.status) || JiTA.util.isGmTeam(d.team))) { continue; }
+        if (scope === 'ebr' && JiTA.util.isClosedStatus(d.status)) { continue; }
         if (!JiTA.ui.passesFilter(d)) { continue; }
         out.push({ key: d.key, project: d.project, summary: d.summary, status: d.status, resolution: d.resolution, resolutiondate: d.resolutiondate, score: d.score });
     }
@@ -9217,8 +9228,8 @@ JiTA.ui = {
 
     // EBR view, "reporter's other reports" mode (funnel toggle): list EVERY other bug report from the same
     // Original Reporter as this one, newest first. This is a LIVE Jira search (not the local cache) on purpose:
-    // we deliberately want ALL of the reporter's reports - open AND closed, GM-team included - and the cache
-    // holds only open, non-GM reports. Closed reports are greyed so the open ones stand out.
+    // we deliberately want ALL of the reporter's reports - open AND closed, Vanguard and Launcher included - and the
+    // cache holds only open reports. Closed reports are greyed so the open ones stand out.
     renderReporterReports: function (key) {
         JiTA.ui._ensurePanel();
         JiTA.ui._syncFilterBtn();
@@ -10220,8 +10231,9 @@ if (!gmGet('sdGpuDefault_v1', false)) {
 // The stored records evolve over time. Most changes are picked up by the normal incremental catch-up, but a
 // few (a brand-new FIELD, like `created`) cannot be: incremental only re-fetches issues whose `updated` moved,
 // so every pre-existing row keeps the old shape forever. To handle that, each dataset is stamped with
-// JiTA.DATA_VERSION whenever it is built from scratch (fullSync / fullSyncEbr - which a manual rebuild also
-// routes through). On load, if a POPULATED dataset is stamped BELOW the current DATA_VERSION - or carries no
+// its schema version (JiTA.DATA_VERSION for the defects, JiTA.DATA_VERSION_EBR for the bug reports) whenever it is built
+// from scratch (fullSync / fullSyncEbr - which a manual rebuild also routes through). On load, if a POPULATED dataset is
+// stamped BELOW its current version - or carries no
 // stamp at all, i.e. it was built before this mechanism shipped - we transparently re-fetch just that dataset
 // once (refetchDefects / refetchEbr), which backfills the new field without dropping embeddings. Brand-new /
 // empty DBs need nothing: their first full build stamps the current version.
@@ -10244,11 +10256,11 @@ JiTA.migrate = {
                 var defStale = nDef > 0 && (Number(dv) || 0) < JiTA.DATA_VERSION;
                 return JiTA.db.countEbr().then(function (nEbr) {
                     return JiTA.db.getMeta('dataVersionEbr').then(function (ev) {
-                        var ebrStale = nEbr > 0 && (Number(ev) || 0) < JiTA.DATA_VERSION;
+                        var ebrStale = nEbr > 0 && (Number(ev) || 0) < JiTA.DATA_VERSION_EBR;   // the bug reports' own schema
                         if (!defStale && !ebrStale) { return; }
                         if (JiTA.sync.running) { JiTA.migrate._later(); return; }   // one started while we read
-                        console.log('[JiTA] local DB schema out of date (defects v' + (Number(dv) || 0) +
-                            ', reports v' + (Number(ev) || 0) + ' < v' + JiTA.DATA_VERSION +
+                        console.log('[JiTA] local DB schema out of date (defects v' + (Number(dv) || 0) + ' of v' + JiTA.DATA_VERSION +
+                            ', reports v' + (Number(ev) || 0) + ' of v' + JiTA.DATA_VERSION_EBR +
                             ') - auto re-fetching to backfill new fields');
                         // Sequential: each refetch is single-flight (the `running` guard), so chain them.
                         var chain = Promise.resolve();
@@ -11100,7 +11112,7 @@ function jitaWorkerBody(cfg) {
             if (!passesGate(doc, gate)) { continue; }
             var score = 0;
             for (var t = 0; t < terms.length; t++) { var tf = doc.tf[terms[t]]; if (!tf) { continue; } var denom = tf + K1 * (1 - B + B * (doc.len / avgdl)); score += idf[terms[t]] * (tf * (K1 + 1)) / denom; }
-            if (score > 0 || hasTerms) { scored.push({ key: doc.key, project: doc.project, summary: doc.summary, status: doc.status, resolution: doc.resolution, resolutiondate: doc.resolutiondate, created: doc.created, team: doc.team, score: score }); }
+            if (score > 0 || hasTerms) { scored.push({ key: doc.key, project: doc.project, summary: doc.summary, status: doc.status, resolution: doc.resolution, resolutiondate: doc.resolutiondate, created: doc.created, score: score }); }
         }
         scored.sort(function (a, b) { return b.score - a.score; });
         return scored.slice(0, limit || 50);
@@ -11360,6 +11372,18 @@ function jitaWorkerBody(cfg) {
     // cleaned original. The worker only READS the stored enText field; it never translates (no GM_xmlhttpRequest).
     function effectiveText(rec) { return (rec && rec.enText) ? rec.enText : cleanForCompare(rec.summary, rec.description); }
     function isClosedStatus(status) { return /closed|done|resolved|rejected|cancel|attached/i.test(status || ''); }
+    // Mirror of JiTA.util.isLeftOut: a bug report the matching lists leave out (cfg.LEFT_OUT = JiTA.LEFT_OUT), so it is
+    // neither indexed nor embedded. KEEP IN SYNC.
+    function leftOut(rec) {
+        function has(list, names) {
+            for (var i = 0; i < (list || []).length; i++) {
+                for (var j = 0; j < names.length; j++) { if (String(list[i]).toLowerCase() === names[j].toLowerCase()) { return true; } }
+            }
+            return false;
+        }
+        return !!rec && (has(rec.labels, cfg.LEFT_OUT.labels) || has(rec.components, cfg.LEFT_OUT.components));
+    }
+    // The Team field's id, and whether it is the GM team: for the Members tab's count of GM handoffs made the old way (crSetGm).
     function teamId(v) { if (v == null) { return ''; } if (typeof v === 'string' || typeof v === 'number') { return String(v); } if (typeof v === 'object') { return String(v.id || v.value || v.teamId || v.name || ''); } return ''; }
     function isGmTeam(v) { var id = teamId(v); if (!id) { return false; } var short = String(cfg.GM_TEAM_ID).split('-').pop(); return id === cfg.GM_TEAM_ID || id === short || id.split('-').pop() === short; }
     // Write embeddings back by MERGING onto the current row (get-then-put in one tx) instead of putting the stale
@@ -11388,7 +11412,7 @@ function jitaWorkerBody(cfg) {
             });
         });
     }
-    // Embed every stored record lacking a current-version embedding (defects + open non-GM EBRs), in batches,
+    // Embed every stored record lacking a current-version embedding (defects + the open EBRs ranked), in batches,
     // writing as we go. Single-flight; resumable. On a bad/NaN batch, reset the model and retry a few times.
     // Asked again while it runs (an auto-sync stored new defects, translate finished a report), it goes round once
     // more when done: that request used to be answered "busy" and dropped, leaving those records without vectors
@@ -11418,7 +11442,7 @@ function jitaWorkerBody(cfg) {
         var todo = [];
         for (var i = 0; i < recs.length; i++) {
             var r = recs[i];
-            if (r.project === 'EBR' && (isClosedStatus(r.status) || isGmTeam(r.team))) { continue; }   // not ranked -> don't embed
+            if (r.project === 'EBR' && (isClosedStatus(r.status) || leftOut(r))) { continue; }   // not ranked -> don't embed
             if (r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION) { continue; }
             todo.push(r);
         }
@@ -11512,7 +11536,8 @@ function jitaWorkerBody(cfg) {
         });
     }
     // Build BOTH in-worker indexes in a single DB read (held ONCE for all tabs): the vector index (records
-    // embedded at the current model version) and the BM25 keyword index, each split defects vs open non-GM EBRs.
+    // embedded at the current model version) and the BM25 keyword index, each split defects vs the open EBRs ranked
+    // (not left out: leftOut).
     //
     // One build at a time, and never a stale one. Queries arriving together after a drop share one read and one
     // build (self.onmessage is async, so a hybrid render's keyword and semantic calls used to build twice), and a
@@ -11537,16 +11562,16 @@ function jitaWorkerBody(cfg) {
         function lgFile(map, k, member) { var list = map[k] || (map[k] = []); if (list.indexOf(member) === -1) { list.push(member); } }
         for (var i = 0; i < recs.length; i++) {
             var r = recs[i], isEbr = r.project === 'EBR';
-            if (isEbr && (isClosedStatus(r.status) || isGmTeam(r.team))) { continue; }   // not ranked in the reports view
+            if (isEbr && (isClosedStatus(r.status) || leftOut(r))) { continue; }   // not ranked in the reports view
             var hay = ((r.key || '') + ' ' + (r.summary || '') + ' ' + (r.description || '') + ' ' + (r.enText || '')).toLowerCase();
-            var meta = { key: r.key, project: r.project, summary: r.summary, status: r.status, resolution: r.resolution, resolutiondate: r.resolutiondate, created: r.created, team: r.team };
+            var meta = { key: r.key, project: r.project, summary: r.summary, status: r.status, resolution: r.resolution, resolutiondate: r.resolutiondate, created: r.created };
             if (r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION) {
-                var ve = { key: meta.key, project: meta.project, summary: meta.summary, status: meta.status, resolution: meta.resolution, resolutiondate: meta.resolutiondate, created: meta.created, team: meta.team, vec: r.embedding, hay: hay };
+                var ve = { key: meta.key, project: meta.project, summary: meta.summary, status: meta.status, resolution: meta.resolution, resolutiondate: meta.resolutiondate, created: meta.created, vec: r.embedding, hay: hay };
                 (isEbr ? vE : vD).push(ve);
             }
             var toks = tokenize(effectiveText(r)), tf = {}, seen = {}, df = isEbr ? dfE : dfD;
             for (var j = 0; j < toks.length; j++) { var tk = toks[j]; tf[tk] = (tf[tk] || 0) + 1; if (!seen[tk]) { df[tk] = (df[tk] || 0) + 1; seen[tk] = true; } }
-            var kd = { key: meta.key, project: meta.project, summary: meta.summary, status: meta.status, resolution: meta.resolution, resolutiondate: meta.resolutiondate, created: meta.created, team: meta.team, tf: tf, len: toks.length, hay: hay };
+            var kd = { key: meta.key, project: meta.project, summary: meta.summary, status: meta.status, resolution: meta.resolution, resolutiondate: meta.resolutiondate, created: meta.created, tf: tf, len: toks.length, hay: hay };
             if (isEbr) { kE.push(kd); lenE += toks.length; } else { kD.push(kd); lenD += toks.length; }
             // logsig: mine exception and stacktrace signatures from DEFECT descriptions only
             if (!isEbr && r.description && (r.description.indexOf('EXCEPTION #') !== -1 || r.description.indexOf('STACKTRACE #') !== -1)) {
@@ -11599,7 +11624,7 @@ function jitaWorkerBody(cfg) {
             if (!passesGate(e, gate)) { continue; }                          // session filters; hidden keys and the UI gates stay in the tab
             var v = e.vec, s = 0, n = q.length;
             for (var j = 0; j < n; j++) { s += q[j] * v[j]; }
-            scored.push({ key: e.key, project: e.project, summary: e.summary, status: e.status, resolution: e.resolution, resolutiondate: e.resolutiondate, created: e.created, team: e.team, score: s });
+            scored.push({ key: e.key, project: e.project, summary: e.summary, status: e.status, resolution: e.resolution, resolutiondate: e.resolutiondate, created: e.created, score: s });
         }
         scored.sort(function (a, b) { return b.score - a.score; });
         return scored.slice(0, topN || 10);
@@ -16284,7 +16309,7 @@ JiTA.logread = {
     CONCURRENCY: 2,
     GAP_MS: 300,                 // between one lane's downloads
     START_MS: 45 * 1000,         // after a page load, before the first pass
-    FIELDS: ['status', 'labels', 'attachment', 'customfield_10001'],
+    FIELDS: ['status', 'labels', 'attachment'],
     _running: null,
 
     on: function () { return gmGet(JiTA.logread.KEY, true) !== false; },
@@ -16329,8 +16354,9 @@ JiTA.logread = {
                     var d = (r && r.data) || {};
                     (d.issues || []).forEach(function (iss) {
                         var f = iss.fields || {};
-                        // Never ranked, so never read: a status the search lets through that says closed, and the GM team's.
-                        if (JiTA.util.isClosedStatus(f.status && f.status.name) || JiTA.util.isGmTeam(f.customfield_10001)) { return; }
+                        // Never ranked, so never read: a status the search lets through that says closed. (A Vanguard report is
+                        // still read: Matching bug reports leaves it out, but the exception search looks in it.)
+                        if (JiTA.util.isClosedStatus(f.status && f.status.name)) { return; }
                         queue.push({ key: iss.key, fields: { labels: f.labels || [], attachment: (f.attachment || []).map(function (a) {
                             return { filename: a.filename, size: a.size, content: a.content };
                         }) } });
@@ -23658,7 +23684,7 @@ JiTA.worker = {
         var C = JiTA.credits;
         var cfg = {
             LIB: JiTA.embed.LIB_URL, MODEL: JiTA.embed.MODEL, MODEL_VERSION: JiTA.MODEL_VERSION,
-            DB_NAME: JiTA.DB_NAME, DB_VERSION: JiTA.DB_VERSION, MAX_CHARS: JiTA.embed.MAX_CHARS, GM_TEAM_ID: JiTA.GM_TEAM_ID,
+            DB_NAME: JiTA.DB_NAME, DB_VERSION: JiTA.DB_VERSION, MAX_CHARS: JiTA.embed.MAX_CHARS, GM_TEAM_ID: JiTA.GM_TEAM_ID, LEFT_OUT: JiTA.LEFT_OUT,
             tryGpu: gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false),
             HOST: JiTA.HOST, MAX_RETRIES: JiTA.MAX_RETRIES, PAGE_DELAY_MS: JiTA.PAGE_DELAY_MS, SCRIPT_VERSION: JiTA.SCRIPT_VERSION,
             // ISD credits config (mirror of JiTA.credits' static fields) so the worker can run the monthly crawl.
@@ -24632,6 +24658,12 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.52.0', date: '2026-11-18', features: [
+            'Matching bug reports on a defect, and Similar open reports on a bug report, leave out reports labelled Vanguard or Launcher and those in the Launcher component, as the backlog filter does.',
+            'Once after updating, JiTA fetches the open bug reports again in the background, to learn their labels. Until it is done, Vanguard and Launcher-labelled reports can still show up.'
+        ], fixes: [
+            'Matching bug reports no longer leaves out reports with the EO - GameMasters team. A report converted to a support ticket is closed now, and closed ones were never listed.'
+        ] },
         { v: '3.51.5', date: '2026-11-15', fixes: [
             'ISD credits: the leaderboard and the credits pill show the same number for you. Your own row is counted every 2 minutes, the rest every 15, and the newer count of your row is now used in both, rank included.'
         ] },

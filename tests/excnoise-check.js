@@ -36,7 +36,7 @@ global.JiTA = { HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCatego
 JiTA.db.getMeta = (k) => { metaReads++; return Promise.resolve(Object.prototype.hasOwnProperty.call(meta, k) ? meta[k] : null); };
 JiTA.db.setMeta = (k, v) => { meta[k] = v; metaSets.push(k); return Promise.resolve(); };
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isResolved: function (status, resolution) {') + member('    isClosedStatus: function (status) {') + member('    hash: function (str) {') +
-    member('    isGmTeam: function (v) {') + member('    teamId: function (v) {') + member('    jqlSince: function (iso, now) {') + '})'));
+    member('    isLeftOut: function (rec) {') + member('    jqlSince: function (iso, now) {') + '})'));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 JiTA.util.delay = () => Promise.resolve();
 JiTA.ocr._langFromLabels = () => null;
@@ -57,7 +57,7 @@ Object.assign(JiTA.ui, eval('({' + uiMember('    _counting: function (found) {')
 const reread = () => { JiTA.excnoise._freqRead = Date.now() - JiTA.excnoise.LOAD_MS - 1; return JiTA.excnoise.load(); };
 const N = JiTA.excnoise, P = JiTA.profile, X = JiTA.excfind, R = JiTA.repexc, LR = JiTA.logread;
 // The worker's copies, from jitaWorkerBody itself.
-const W = new Function('isClosedStatus', 'isGmTeam', 'tokenize', 'effectiveText', 'cfg',
+const W = new Function('isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'cfg',
     'var vecCache = null, kwCache = null, logsigCache = null;\n' + line('    var LG_MIN = 2') + line('    var LG_TRACE = ') +
     src.slice(once('    // ---- logsig: exception-signature mining'), once('\n    // One load at a time')) +
     src.slice(once('    function buildIndexes(recs) {'), once('    // Cosine == dot product')) +
