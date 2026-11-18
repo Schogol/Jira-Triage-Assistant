@@ -117,21 +117,39 @@ if (want('version') && BASE) {
 }
 
 // ---- the changelog keeps every release ----
-// changelog-check pins the newest entry to @version, so no version ships without one. These guard the rest of the
+// changelog-check pins CHANGELOG.md's newest entry to @version, so no version ships without one. These guard the rest of the
 // list. Every version main has ever carried must still be listed: @updateURL points at main, so each one reached
 // someone. And an entry that is already out must not be dropped or re-dated by a later change (its wording may
 // be corrected); that also covers the versions before the 2.35.0 rename, which predate this file's history.
+// Since v3.52.2 the changelog is CHANGELOG.md, read here with the script's own parser (JiTA.changelog.parse), so what
+// these rules see is what JiTA shows. Before that it was JiTA.changelog.ENTRIES inside the script, which is how a base
+// from before the move still carries it.
 const CL_END = '\n    _noop: null\n};';
-function changelog(text) {
+function changelogModule(text) {
     const s = String(text || '').replace(/\r\n/g, '\n'), cs = s.indexOf('\nJiTA.changelog = {'), ce = s.indexOf(CL_END, cs);
     if (cs < 0 || ce < 0) { return null; }
     const J = {};
     try { new Function('JiTA', s.slice(cs, ce + CL_END.length))(J); } catch (e) { return null; }
-    return (J.changelog && Array.isArray(J.changelog.ENTRIES)) ? J.changelog.ENTRIES : null;
+    return J.changelog || null;
 }
-// JITA_SRC names another copy whose changelog to check instead, as the harnesses take it (mutate-releases.js).
-const entries = want('changelog') ? changelog(fs.readFileSync(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'), 'utf8')) : null;
-if (want('changelog')) { ok('JiTA.user.js carries its changelog', !!entries); }
+const quiet = (args) => { try { return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }); } catch (e) { return null; } };
+// JITA_SRC and JITA_CHANGELOG name other copies to check instead, as the harnesses take them (mutate-releases.js).
+const CL = want('changelog') ? changelogModule(fs.readFileSync(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'), 'utf8')) : null;
+const fromFile = (md) => {
+    if (!CL || typeof CL.parse !== 'function' || md == null) { return null; }
+    const got = CL.parse(md).entries;
+    return got.length ? got : null;
+};
+// A ref's changelog: its CHANGELOG.md, or, from before the move, the list inside its script.
+function changelogAt(ref) {
+    const md = quiet(['show', ref + ':CHANGELOG.md']);
+    if (md != null) { return fromFile(md); }
+    const m = changelogModule(quiet(['show', ref + ':JiTA.user.js']));
+    return (m && Array.isArray(m.ENTRIES)) ? m.ENTRIES : null;
+}
+const clPath = process.env.JITA_CHANGELOG || path.join(ROOT, 'CHANGELOG.md');
+const entries = want('changelog') ? fromFile(fs.existsSync(clPath) ? fs.readFileSync(clPath, 'utf8') : null) : null;
+if (want('changelog')) { ok('CHANGELOG.md carries the changelog, as JiTA.user.js reads it', !!entries); }
 if (entries) {
     const listed = {};
     entries.forEach((e) => { listed[e.v] = e; });
@@ -149,8 +167,7 @@ if (entries) {
         released.length > 0 && unlisted.length === 0,
         'no entry for: ' + unlisted.join(', ') + ' - each of these was on main, so its users got it: put its entry back');
     if (BASE) {
-        let baseEntries = null;
-        try { baseEntries = changelog(git(['show', REL + ':JiTA.user.js'])); } catch (e) { /* no script on the base */ }
+        const baseEntries = changelogAt(REL);
         if (baseEntries) {
             const lost = baseEntries.filter((e) => !listed[e.v]).map((e) => e.v);
             const redated = baseEntries.filter((e) => listed[e.v] && listed[e.v].date !== e.date)
