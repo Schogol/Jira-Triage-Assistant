@@ -150,7 +150,7 @@ const live = () => intervals.filter((h) => h.on);
     const reads = [];
     let refetched = [];
     const M = {
-        DATA_VERSION: 5,
+        DATA_VERSION: 5, DATA_VERSION_EBR: 4,
         sync: { running: true, refetchDefects: () => { refetched.push('defects'); return Promise.resolve(); }, refetchEbr: () => { refetched.push('ebr'); return Promise.resolve(); } },
         db: {
             countDefectsOnly: () => { const d = deferred(); reads.push(d); return d.promise; },
@@ -173,6 +173,27 @@ const live = () => intervals.filter((h) => h.on);
     await flush(); await flush(); await flush();
     ok('a sync that starts while it reads sends it round again rather than to a refetch that would do nothing', refetched.length === 0 && mig._done === false && timeouts.length === 1,
         refetched.join() + ' / ' + timeouts.length);
+
+    // Each dataset has its own schema version (v3.52.0): the bug reports' labels re-fetch the bug reports only.
+    const stamps = { dataVersionDefects: 3, dataVersionEbr: 3 };
+    M.DATA_VERSION = 3; M.DATA_VERSION_EBR = 4; M.sync.running = false;
+    M.db.getMeta = (k) => Promise.resolve(stamps[k]);
+    M.db.countDefectsOnly = () => Promise.resolve(100);
+    M.db.countEbr = () => Promise.resolve(50);
+    mig._done = false; refetched = [];
+    mig.run();
+    await flush(); await flush(); await flush(); await flush();
+    ok('bug reports behind their own version are fetched again, the defects left alone', refetched.join() === 'ebr', refetched.join());
+    stamps.dataVersionEbr = 4;
+    mig._done = false; refetched = [];
+    mig.run();
+    await flush(); await flush(); await flush(); await flush();
+    ok('...and once they carry it, nothing is', refetched.length === 0, refetched.join());
+    stamps.dataVersionDefects = 2;
+    mig._done = false; refetched = [];
+    mig.run();
+    await flush(); await flush(); await flush(); await flush();
+    ok('...while defects behind theirs are, alone', refetched.join() === 'defects', refetched.join());
 
     Date.now = realNow;
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'auto-sync checks passed.'));

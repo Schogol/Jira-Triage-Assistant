@@ -44,7 +44,7 @@ global.gmGet = (k, d) => (Object.prototype.hasOwnProperty.call(gm, k) ? gm[k] : 
 
 let renders = 0;
 global.JiTA = {
-    TOP_N: 3, HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, GM_TEAM_ID: 'abc-38',
+    TOP_N: 3, HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, LEFT_OUT: { labels: ['Vanguard', 'Launcher'], components: ['Launcher'] },
     worker: { _started: true, usable: () => true },
     embed: { WARM_WAIT_MS: 5000 },
     rank: { CAND: 50, RRF_K: 60 },
@@ -54,8 +54,8 @@ global.JiTA = {
     excfind: { WAIT_MS: 0, SCOPE: 'project = EBR AND statusCategory != Done AND <not the launcher\'s>' }   // the real one: excfind-check
 };
 Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    staleFactor: function (brCreatedIso, resolutionDateIso) {') +
-    member('    humanizeAge: function (days) {') + member('    isClosedStatus: function (status) {') + member('    teamId: function (v) {') +
-    member('    isGmTeam: function (v) {') + member('    jqlSince: function (iso, now) {') + '})'));
+    member('    humanizeAge: function (days) {') + member('    isClosedStatus: function (status) {') +
+    member('    isLeftOut: function (rec) {') + member('    jqlSince: function (iso, now) {') + '})'));
 JiTA.util.fmtDate = (s) => (s ? String(s).slice(0, 10) : '');
 let delays = [];
 JiTA.util.delay = (ms) => { delays.push(ms); return Promise.resolve(); };
@@ -459,13 +459,13 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     console.log = () => {};
 
     setup();
-    pages = [{ issues: [iss('EBR-1'), iss('EBR-2', { status: { name: 'Attached' } }), iss('EBR-3', { customfield_10001: 'abc-38' })], nextPageToken: 't1' }, { issues: [iss('EBR-4')], isLast: true }];
-    readScript = { 'EBR-4': 'cached' };
+    pages = [{ issues: [iss('EBR-1'), iss('EBR-2', { status: { name: 'Attached' } }), iss('EBR-3', { labels: ['Vanguard'] })], nextPageToken: 't1' }, { issues: [iss('EBR-4')], isLast: true }];
+    readScript = { 'EBR-3': 'cached', 'EBR-4': 'cached' };
     JiTA.ui.currentKey = 'EDR-5';
     let n = await LR.prepare();
     ok('the first pass lists every report the exception search looks in (not the launcher\'s), newest first', posted.length === 2 && posted[0].jql === JiTA.excfind.SCOPE + ' ORDER BY created DESC' && posted[1].nextPageToken === 't1', JSON.stringify(posted.map((p) => p.jql)));
-    ok('...asks for what the reader needs', JSON.stringify(posted[0].fields) === JSON.stringify(['status', 'labels', 'attachment', 'customfield_10001']));
-    ok('...reads the open ones, not a closed status nor the GM team\'s', readsDone.join() === 'EBR-1,EBR-4', readsDone.join());
+    ok('...asks for what the reader needs', JSON.stringify(posted[0].fields) === JSON.stringify(['status', 'labels', 'attachment']));
+    ok('...reads the open ones, not a closed status; a Vanguard one too, for the exception search', readsDone.slice().sort().join() === 'EBR-1,EBR-3,EBR-4', readsDone.join());
     ok('...hands the reader each one\'s labels and attachments', JSON.stringify(items['EBR-1'].fields) === JSON.stringify({ labels: ['Russian'], attachment: [{ filename: 'logs.txt', size: 9, content: 'u' }] }),
         JSON.stringify(items['EBR-1']));
     ok('...counts what it downloaded, not what was cached', n === 1, String(n));

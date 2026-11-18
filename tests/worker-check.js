@@ -20,7 +20,7 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
 
 // ---- the worker's index builds ----
 const reads = [];
-const idx = new Function('allRecords', 'isClosedStatus', 'isGmTeam', 'tokenize', 'effectiveText', 'lgSplit', 'lgFp', 'cfg',
+const idx = new Function('allRecords', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'lgSplit', 'lgFp', 'cfg',
     'var vecCache = null, kwCache = null, logsigCache = null;\n' +
     cut('    var idxGen = 0, idxP = null;', '    // Cosine == dot product') +
     '\nreturn { ensureIndexes: ensureIndexes, dropIndexes: dropIndexes, kw: function () { return kwCache; } };')(
@@ -35,7 +35,7 @@ const ONE_ATTACHED = [{ key: 'EBR-1', project: 'EBR', status: 'Attached', summar
 
 // ---- the worker's embedPass ----
 let dropped = 0, loadFails = false;
-const ep = new Function('loadModel', 'allRecords', 'isClosedStatus', 'isGmTeam', 'cfg', 'effectiveText', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'self',
+const ep = new Function('loadModel', 'allRecords', 'isClosedStatus', 'leftOut', 'cfg', 'effectiveText', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'self',
     'var embedding = false, pipe = null, BATCH = 8;\n' + cut('    async function embedPass() {', '\n    function openDb() {') + '\nreturn embedPass;')(
     () => (loadFails ? Promise.reject(new Error('no model')) : Promise.resolve()),
     () => Promise.resolve([{ key: 'EDR-1', project: 'EDR', status: 'Open', embedding: [1], embeddingModelVersion: 'm1' }]),

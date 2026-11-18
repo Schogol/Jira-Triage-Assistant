@@ -62,7 +62,7 @@ const quiet = { log() {}, warn() {} };
     // ================= the embed pass =================
     let recsList = [], batches = [], stored = [], dropped = 0, pipeDrops = 0, failText = null, reads = 0, gate = null;
     const later = [];
-    const mkPass = () => new Function('loadModel', 'allRecords', 'isClosedStatus', 'isGmTeam', 'cfg', 'effectiveText', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'dropPipe', 'self', 'setTimeout', 'clearTimeout', 'console',
+    const mkPass = () => new Function('loadModel', 'allRecords', 'isClosedStatus', 'leftOut', 'cfg', 'effectiveText', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'dropPipe', 'self', 'setTimeout', 'clearTimeout', 'console',
         'var embedding = false, embedAgain = false, BATCH = 1;\n' + cut('    async function embedPass() {', '\n    function openDb() {') +
         '\nreturn { embedPass: embedPass, again: function () { return embedAgain; } };')(
         () => Promise.resolve(), () => { reads++; return Promise.resolve(recsList.slice()); }, () => false, () => false, { MODEL_VERSION: 'm2' },

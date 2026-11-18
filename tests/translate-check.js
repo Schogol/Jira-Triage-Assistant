@@ -23,7 +23,7 @@ global.JiTA = {
         updateRecord: (key, apply) => { if (refuse[key]) { return Promise.reject(new Error('QuotaExceededError')); } const c = {}; apply(c); stored.push(key + ':' + c.lang); return Promise.resolve(true); }
     },
     util: {
-        isClosedStatus: () => false, isGmTeam: () => false,
+        isClosedStatus: () => false, isLeftOut: () => false,
         cleanForCompare: (s) => s, detectLang: (t) => (/^en /.test(t) ? 'english' : 'foreign'),
         // A pass that never gives up would spin here for good: fail it instead of hanging the harness.
         delay: (ms) => { waits.push(ms); return waits.length > 1000 ? Promise.reject(new Error('runaway retries')) : new Promise((r) => setImmediate(r)); }
