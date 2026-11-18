@@ -107,6 +107,7 @@ Object.assign(JiTA.ui, {
     JiTA.ui.getIssueText = () => (D.text = deferred()).promise;
     JiTA.db.countDefectsOnly = JiTA.db.countEbr = () => { calls.count++; return (D.count = deferred()).promise; };
     JiTA.rank.suggestBest = JiTA.rank.suggestEbrBest = () => { calls.rank++; return (D.rank = deferred()).promise; };
+    JiTA.rank.ebrPool = () => Promise.resolve(40);   // the reports ranked, fewer than the 42 stored (v3.52.1)
     JiTA.db.getDefect = () => { calls.enrich++; return (D.enrich = deferred()).promise; };
     async function run(fn, key, match, at, how, failAt) {
         Object.keys(D).forEach((k) => { delete D[k]; });
@@ -147,6 +148,7 @@ Object.assign(JiTA.ui, {
 
     await run('renderReports', 'EDR-1', 'EBR-9', null);
     ok('renderReports: the reports for the defect on screen are painted, attaching to it', list.kids.length === 1 && list.kids[0].key === 'EBR-9' && list.kids[0].defect === 'EDR-1', JSON.stringify(list.kids));
+    ok('...counting the reports ranked, not every one stored', statuses.indexOf('1 matches · Keyword · 40 open reports') >= 0, statuses.join('|'));
     await run('renderReports', 'EDR-1', 'EBR-9', 'text', away);
     ok('renderReports: moving on while the text is read stops it there', calls.count === 0 && nothingPainted(), JSON.stringify(calls));
     await run('renderReports', 'EDR-1', 'EBR-9', 'count', away);

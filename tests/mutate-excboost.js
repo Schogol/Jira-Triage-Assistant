@@ -106,8 +106,8 @@ const muts = [
     // ---- where it is used ----
     [X, 'Similar defects get no boost', 'JiTA.rank.suggestBest(text, key, brCreated, JiTA.ui.modeOverride, terms, undefined, got[1])', 'JiTA.rank.suggestBest(text, key, brCreated, JiTA.ui.modeOverride, terms)'],
     [X, 'a late boost does not redraw the panel', '                var late = function () { if (!stale()) { JiTA.ui.scheduleRender(); } };', '                var late = function () {};'],
-    [X, 'Matching bug reports get no boost', 'return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(key)).then(function (out) {',
-        'return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms).then(function (out) {'],
+    [X, 'Matching bug reports get no boost', 'JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(key)), JiTA.rank.ebrPool()',
+        'JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms), JiTA.rank.ebrPool()'],
     [X, 'the slid-in report gets no boost', 'JiTA.rank.suggestEbrBest(text, defectKey, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(defectKey))', 'JiTA.rank.suggestEbrBest(text, defectKey, JiTA.ui.modeOverride, terms)'],
     [X, 'the card has no mark', "        if (r.excHit) { JiTA.repexc.badge(r.excHit, '<span class=\"jita-mark\"></span>', r.excHits).appendTo($f); }   // why it ranks higher\n", ''],
     [X, 'the card\'s mark names nothing', "JiTA.repexc.badge(r.excHit, '<span class=\"jita-mark\"></span>', r.excHits)", "JiTA.repexc.badge(r.excHit, '<span class=\"jita-mark\"></span>')"],

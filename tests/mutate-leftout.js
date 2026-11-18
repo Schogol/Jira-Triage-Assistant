@@ -34,7 +34,18 @@ const muts = [
     [H, 'the translate pass translates them', 'if (JiTA.util.isClosedStatus(r.status) || JiTA.util.isLeftOut(r)) { continue; }  // not ranked -> skip', 'if (JiTA.util.isClosedStatus(r.status)) { continue; }  // not ranked -> skip'],
     [H, 'the worker\'s indexes keep them', '            if (isEbr && (isClosedStatus(r.status) || leftOut(r))) { continue; }', '            if (isEbr && isClosedStatus(r.status)) { continue; }'],
     [H, 'the worker\'s indexes leave out a defect in the Launcher component', '            if (isEbr && (isClosedStatus(r.status) || leftOut(r))) { continue; }', '            if ((isEbr && isClosedStatus(r.status)) || leftOut(r)) { continue; }'],
-    [H, 'the embed pass embeds them', "            if (r.project === 'EBR' && (isClosedStatus(r.status) || leftOut(r))) { continue; }", "            if (r.project === 'EBR' && isClosedStatus(r.status)) { continue; }"]
+    [H, 'the embed pass embeds them', "            if (r.project === 'EBR' && (isClosedStatus(r.status) || leftOut(r))) { continue; }", "            if (r.project === 'EBR' && isClosedStatus(r.status)) { continue; }"],
+    // ---- the count on the status line (v3.52.1) ----
+    [H, 'the worker\'s query tells no index size', '        return { indexed: idx.N, results: bm25Score(', '        return { results: bm25Score('],
+    [H, 'the count is of every report stored', "            ? JiTA.worker.call('rankKeyword', { text: '', scope: 'ebr', topN: 1 }).then(function (r) {", "            ? JiTA.db.countEbr().then(function (n) { return { indexed: n }; }).then(function (r) {"],
+    [H, 'a worker giving no size is believed', "                if (!r || typeof r.indexed !== 'number') { throw new Error('no index size'); }\n", ''],
+    [H, 'a failing worker leaves no count', '            }).catch(local)\n            : local();', '            })\n            : local();'],
+    [H, 'the worker asked when there is none', '        var p = (JiTA.worker && JiTA.worker.usable())\n', '        var p = (JiTA.worker)\n'],
+    [H, 'no count when both fail', "        return p.catch(function () { return JiTA.db.countEbr(); });", '        return p;'],
+    [H, 'Matching bug reports counts every report stored', "JiTA.ui.setStatus(results.length + ' matches · ' + out.mode + ' · ' + open + ' open reports');", "JiTA.ui.setStatus(results.length + ' matches · ' + out.mode + ' · ' + n + ' open reports');"],
+    [H, '...when it finds none, too', "JiTA.ui.setStatus('No matching bug reports found (' + open + ' open).');", "JiTA.ui.setStatus('No matching bug reports found (' + n + ' open).');"],
+    [H, 'Similar open reports counts every report stored', "JiTA.ui.setStatus(results.length + ' similar · ' + out.mode + ' · ' + open + ' open reports');", "JiTA.ui.setStatus(results.length + ' similar · ' + out.mode + ' · ' + n + ' open reports');"],
+    [H, 'the line after Attach counts every report stored', '                function refreshCount() {\n                    JiTA.rank.ebrPool().then(', '                function refreshCount() {\n                    JiTA.db.countEbr().then(']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
