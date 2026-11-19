@@ -565,7 +565,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     console.log = log0;
 
     const boot = src.slice(once('// ---- Jira boot:'));
-    ok('a page load starts a pass, after the page has settled', /setTimeout\(function \(\) \{ try \{ JiTA\.logread\.prepare\(\); \} catch \(e\) \{ \/\* swallow \*\/ \} \}, JiTA\.logread\.START_MS\);/.test(boot) && LR.START_MS >= 30000);
+    ok('a page load starts a pass, after the page has settled', /setTimeout\(function \(\) \{ try \{ JiTA\.logread\.prepare\(\); \} catch \(e\) \{ JiTA\.caught\('logread\.prepare', e\); \} \}, JiTA\.logread\.START_MS\);/.test(boot) && LR.START_MS >= 30000);
     const menu = member('    render: function () {', once('\nJiTA.menu = {'));
     ok('Settings switches it, under the Triage Assistant', /Read open reports\\' logs/.test(menu) && /gmSet\(JiTA\.logread\.KEY, !JiTA\.logread\.on\(\)\);/.test(menu) &&
         menu.indexOf("Read open reports\\' logs") > menu.indexOf("var $ta = $('<div class=\"jita-menu-sect\"></div>');") && menu.indexOf("Read open reports\\' logs") < menu.indexOf("pane('triage').append($ta);"));

@@ -136,7 +136,7 @@ const muts = [
     [X, 'a pass with the Triage Assistant off', "        if (JITA_NO_JIRA_UI || !flagOn('similarDefects') || !LR.on()) { return Promise.resolve(); }", '        if (JITA_NO_JIRA_UI || !LR.on()) { return Promise.resolve(); }'],
     [X, 'a pass while switched off', "        if (JITA_NO_JIRA_UI || !flagOn('similarDefects') || !LR.on()) { return Promise.resolve(); }", "        if (JITA_NO_JIRA_UI || !flagOn('similarDefects')) { return Promise.resolve(); }"],
     [X, 'a stuck page token loops', "                    if (!d.nextPageToken || d.isLast || d.nextPageToken === token) { return null; }   // a token that does not move on would loop", '                    if (!d.nextPageToken || d.isLast) { return null; }'],
-    [X, 'no pass after a page load', "    setTimeout(function () { try { JiTA.logread.prepare(); } catch (e) { /* swallow */ } }, JiTA.logread.START_MS);   // read the open reports' logs, for the exception boost\n", ''],
+    [X, 'no pass after a page load', "    setTimeout(function () { try { JiTA.logread.prepare(); } catch (e) { JiTA.caught('logread.prepare', e); } }, JiTA.logread.START_MS);   // read the open reports' logs, for the exception boost\n", ''],
     [X, 'the Settings switch switches nothing', '                gmSet(JiTA.logread.KEY, !JiTA.logread.on());\n', ''],
     [S, 'a bug report sync reads no new logs', '        if (ebr) { JiTA.logread.prepare(); }                // read the logs of new or changed reports, for the exception boost\n', ''],
     [S, 'a defect sync keeps the old boosts (the sync tail)', '        if (defects) { JiTA.repexc.reset(); }               // which defects hold an exception may have changed\n', '']

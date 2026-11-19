@@ -103,7 +103,7 @@ const flush = async () => { for (let i = 0; i < 8; i++) { await new Promise((r) 
     ok('a status line on the page is live, its detached copy after a redraw is not', JiTA.menu._live([{ attached: true }]) === true && JiTA.menu._live([{ attached: false }]) === false && JiTA.menu._live([]) === false);
     const s0 = src.indexOf('    render: function () {\n        var $p = $(\'#jita-menu\');'), s1 = src.indexOf('\n    },\n', s0);
     const body = src.slice(s0, s1);
-    ok('no completion in Settings checks only that the menu exists', s0 > 0 && body.indexOf("if (!document.getElementById('jita-menu')") === -1 && (body.match(/JiTA\.menu\._live\(/g) || []).length === 13,
+    ok('no completion in Settings checks only that the menu exists', s0 > 0 && body.indexOf("if (!document.getElementById('jita-menu')") === -1 && (body.match(/JiTA\.menu\._live\(/g) || []).length === 16,
         String((body.match(/JiTA\.menu\._live\(/g) || []).length));
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'Settings checks passed.'));

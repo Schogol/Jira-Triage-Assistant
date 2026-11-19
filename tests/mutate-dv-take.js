@@ -18,7 +18,7 @@ const muts = [
     ['user yanked off their issue', "if (seq !== D._linkSeq || D._mounted || D._locKey()) { return; }", "if (seq !== D._linkSeq || D._mounted) { return; }"],
     ['toast after a fast load', "            clearTimeout(slow);\n", ""],
     ['toast never shown', "}, D.TAKE_TOAST_MS);", "}, 1e9);"],
-    ['hook only bound on mount', "    try { JiTA.dv._bindGlobal(); } catch (eDv) { /* swallow */ }", "    /* mutated */"]
+    ['hook only bound on mount', "    try { JiTA.dv._bindGlobal(); } catch (eDv) { JiTA.caught('dv._bindGlobal', eDv); }", "    /* mutated */"]
 ];
 let allRed = true;
 muts.forEach(([name, a, b]) => {

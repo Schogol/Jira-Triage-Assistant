@@ -72,7 +72,7 @@ const muts = [
     [H, 'ensure never puts the pill back', '        if (C.shouldShow()) { C.mount(); }\n    },', '    },'],
     [H, 'start looks only once', 'START_MS: [2500, 10000, 30000],', 'START_MS: [2500],'],
     [H, 'start never listens to the other tabs', '        C.watch();\n        C.START_MS.forEach', '        C.START_MS.forEach'],
-    [H, 'start never arms ensure', 'setTimeout(function () { try { C._armed = true; C.ensure(); } catch (e) { /* swallow */ } }, ms);', 'setTimeout(function () { try { C.ensure(); } catch (e) { /* swallow */ } }, ms);'],
+    [H, 'start never arms ensure', "setTimeout(function () { try { C._armed = true; C.ensure(); } catch (e) { JiTA.caught('changelog.ensure', e); } }, ms);", "setTimeout(function () { try { C.ensure(); } catch (e) { JiTA.caught('changelog.ensure', e); } }, ms);"],
     // ---- CHANGELOG.md itself (v3.52.2) ----
     [H, 'the newest entry is not this version', '\n## ' + ver + ' (', '\n## ' + nextVer + ' (', MD],
     [H, 'an item with an unescaped Markdown character', firstItem, firstItem + ' <b>', MD],

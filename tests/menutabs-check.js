@@ -115,7 +115,8 @@ const editor = () => menu.n.querySelectorAll('.jita-resp-editor')[0];
     ok('the Triage Assistant tab has its actions and settings', /Sync now/.test(text('triage')) && /Panel style/.test(text('triage')) && /Results shown/.test(text('triage')) &&
         /Embedding backend/.test(text('triage')) && /Hidden suggestions/.test(text('triage')) && !/Log Parser/.test(text('triage')));
     ok('Lead duties has the Lead duties', /Open lead duties/.test(text('lead')) && /Test Confluence access/.test(text('lead')));
-    ok('About has the version, What\'s new and the debug settings', /v3\.42\.0/.test(text('about')) && /What's new/.test(text('about')) && /Debug logging/.test(text('about')));
+    ok('About has the version, What\'s new and the debug settings, Copy diagnostics among them', /v3\.42\.0/.test(text('about')) && /What's new/.test(text('about')) && /Debug logging/.test(text('about')) &&
+        /Copy diagnostics/.test(text('about')));
     ok('only the open tab shows, the first one at first, and it is marked', shown() === 'features' && marked() === 'features', shown() + ' / ' + marked());
 
     // ================= switching =================

@@ -58,7 +58,7 @@ const muts = [
     [SR, 'an old note said', 'if (!v || !(Date.now() - (v.at || 0) < 2 * 60 * 1000)) { return; }', 'if (!v) { return; }'],
     [SR, 'the note never said', "    console.log('[JiTA] ' + v.key + ' was loaded the ordinary way: '", "    void ('[JiTA] ' + v.key + ' was loaded the ordinary way: '"],
     [SR, 'the note does not say what was on screen', "(v.on ? 'the page still showed ' + v.on + '.' : 'it had still not loaded.')", "'it had still not loaded.'"],
-    [SR, 'the boot never says the note', "    try { jitaNavSaid(); } catch (eNs) { /* swallow */ }   // a page load an in-app switch fell back to says why\n", '', BOOT]
+    [SR, 'the boot never says the note', "    try { jitaNavSaid(); } catch (eNs) { JiTA.caught('jitaNavSaid', eNs); }   // a page load an in-app switch fell back to says why\n", '', BOOT]
 ];
 // Where an anchor is looked for: the helpers' block (or the part named), between its first line and its end.
 function within(fn) {

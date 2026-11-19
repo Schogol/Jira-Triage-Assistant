@@ -6,8 +6,12 @@
 const fs = require('fs'), path = require('path'), os = require('os');
 const { spawnSync } = require('child_process');
 const TOOL = path.resolve(process.env.JITA_RELEASE || path.join(__dirname, 'release.js'));
-const SRC0 = fs.readFileSync(process.env.JITA_SRC || path.join(__dirname, '..', 'JiTA.user.js'), 'utf8');
-const MD0 = fs.readFileSync(process.env.JITA_CHANGELOG || path.join(__dirname, '..', 'CHANGELOG.md'), 'utf8');
+const SRC1 = fs.readFileSync(process.env.JITA_SRC || path.join(__dirname, '..', 'JiTA.user.js'), 'utf8');
+const MD1 = fs.readFileSync(process.env.JITA_CHANGELOG || path.join(__dirname, '..', 'CHANGELOG.md'), 'utf8');
+// The copies start at 7.8.9, whatever the real version: no digit 0, so a bump that forgets to start one at 0 shows.
+const REAL = (/^\/\/ @version\s+(\S+)/m.exec(SRC1) || [])[1] || '';
+const SRC0 = SRC1.replace(/^(\/\/ @version\s+)\S+/m, '$17.8.9').replace(/^(\/\/ @resource\s+changelog\s+\S+\?v=)\S+/m, '$17.8.9');
+const MD0 = MD1.replace('\n## ' + REAL + ' (', '\n## 7.8.9 (');
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
