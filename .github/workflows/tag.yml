@@ -1,0 +1,48 @@
+# Tags every release: a push to main that raises @version in JiTA.user.js gets the tag v<version> on its commit, so a
+# release can be found, linked and compared by its version (git diff v3.52.0 v3.52.2). A push that leaves the version
+# as it was (tests, CI) tags nothing, and a version that already has a tag keeps it.
+name: tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write   # to push the tag
+
+concurrency:
+  group: tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # the tags, and the commit before the push
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Tag a new version
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          v="$(node tests/release.js --current)"
+          was=""
+          if git show "$BEFORE:JiTA.user.js" > "$RUNNER_TEMP/before.user.js" 2>/dev/null; then
+            was="$(JITA_SRC="$RUNNER_TEMP/before.user.js" node tests/release.js --current || true)"
+          fi
+          if [ "$v" = "$was" ]; then
+            echo "The version stays $v: nothing to tag."
+          elif git rev-parse -q --verify "refs/tags/v$v" > /dev/null; then
+            echo "v$v is tagged already, at $(git rev-list -n 1 "v$v")."
+          else
+            git tag "v$v" "$GITHUB_SHA"
+            git push origin "refs/tags/v$v"
+            echo "Tagged v$v at $GITHUB_SHA."
+          fi
