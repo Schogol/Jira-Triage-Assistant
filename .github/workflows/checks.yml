@@ -28,6 +28,8 @@ jobs:
       # layout-check.js measures the views in a real headless Chrome, which ubuntu-latest has preinstalled. Without a
       # browser it would skip; here it fails instead, and so does mutate-layout.js.
       JITA_LAYOUT_REQUIRED: '1'
+      # ci-static.js lints the script with ESLint through npx. Without it, it would skip; here that fails.
+      JITA_LINT_REQUIRED: '1'
     steps:
       - uses: actions/checkout@v5
         with:
@@ -37,7 +39,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Static checks (syntax, LF endings, em dashes, version bump, changelog history)
+      - name: Static checks (syntax, LF endings, em dashes, lint, version bump, changelog history)
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
@@ -61,6 +63,7 @@ jobs:
         part: ['0/3', '1/3', '2/3']
     env:
       JITA_LAYOUT_REQUIRED: '1'
+      JITA_LINT_REQUIRED: '1'   # mutate-lint.js
       JITA_BREAK_PART: ${{ matrix.part }}
     steps:
       - uses: actions/checkout@v5

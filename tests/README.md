@@ -9,10 +9,23 @@ three that each make a third of the breakages. The `checks` job only waits for t
 Run them locally from the repo root with Node 24:
 
 ```
-node tests/ci-static.js --base origin/main   # syntax, LF endings, no em dashes, @version went up, changelog history
+node tests/ci-static.js --base origin/main   # syntax, LF endings, no em dashes, lint, @version went up, changelog history
 node tests/run-checks.js                     # every *-check.js harness, side by side
 node tests/run-breakages.js                  # every mutate-*.js suite, side by side (pull requests only in CI)
 ```
+
+## Lint
+
+`ci-static.js` runs ESLint over `JiTA.user.js` with `tests/eslint.config.js`. It holds only rules that find bugs: a
+name defined nowhere, a variable never used, one declared twice, an object key or `case` written twice, code that can
+never run, a `typeof` compared with a misspelt type. No style rules.
+
+- ESLint comes through `npx` at the exact version `ci-static.js` names, so nothing has to be installed. The first run
+  downloads it.
+- Without `npx` or the network the check says `SKIP`. CI sets `JITA_LINT_REQUIRED=1`, so there it fails instead.
+- A browser or Tampermonkey name the script starts using goes into the globals list in `tests/eslint.config.js`.
+  Anything not in that list counts as a misspelling.
+- `mutate-lint.js` writes each kind of mistake into a copy of the script and requires the check to go red.
 
 ## The changelog
 
