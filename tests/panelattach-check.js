@@ -7,14 +7,9 @@
 //  - a failed on-demand translation is not cached; one log scan per report, a failed one tried again; an attachment
 //    fetch that 403s, hangs or fails is no text; an unreadable Original Reporter ID is an error, not "none"; the
 //    closed-report rule matches
-const fs = require('fs');
-const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
-const member = (head, from) => {
-    const s = src.indexOf(head, from || 0);
-    if (s < 0 || (from == null && src.indexOf(head, s + 1) >= 0)) { throw new Error('could not slice ' + head.trim().slice(0, 50)); }
-    return src.slice(s, src.indexOf('\n    },', s) + 7);
-};
-const uiStart = src.indexOf('\nJiTA.ui = {');
+const S = require('./source');
+const src = S.load();
+const ui = (names) => eval(S.members(src, 'JiTA.ui', names));
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
@@ -58,8 +53,7 @@ const log0 = console.log;
 
 (async () => {
     // ================= Jira's reason =================
-    Object.assign(JiTA.link, eval('({' + member('    _why: function (what, xhr) {') + member('    dupInfo: function () {') + member('    markDuplicate: function (ebrKey, otherKey) {') + member('    _dupAddOp: function (info, otherKey) {') +
-        (() => { const s = src.indexOf('    attachDuplicate: function (ebrKey, otherKey, statusName, preferredResolution, assigneeAccountId) {'); return src.slice(s, src.indexOf('\n    }\n};', s) + 6); })() + '})'));
+    Object.assign(JiTA.link, eval(S.members(src, 'JiTA.link', ['_why', 'dupInfo', 'markDuplicate', '_dupAddOp', 'attachDuplicate'])));
     JiTA.link._info = null;
     ajaxScript = [{ ok: true, data: { issueLinkTypes: [{ name: 'Dupe', outward: 'duplicates', inward: 'is duplicated by' }] } },
         { ok: true, data: { transitions: [{ id: '5', name: 'Attached', to: { name: 'Attached' }, fields: { issuelinks: {} } }] } },
@@ -81,7 +75,7 @@ const log0 = console.log;
 
     // ================= the defect-side Attach =================
     let attaches = [], drops = [], fades = 0, dropFails = false;
-    Object.assign(JiTA.ui, eval('({' + member('    _assigneeCache: {},', uiStart).replace(/,\n$/, ',') + '\n' + member('    _getAssignee: function (key) {', uiStart) + member('    _attachReportButton: function (reportKey, opts) {', uiStart) + member('    _markDupButton: function (defectKey) {', uiStart) + '})'));
+    Object.assign(JiTA.ui, ui(['_assigneeCache', '_getAssignee', '_attachReportButton', '_markDupButton']));
     // Jira's issue view, told to read the issue on screen again (softrefresh-check.js covers the real helpers).
     let onScreen = 'EDR-1', viewRefreshes = 0, shows = [], statusNow = 'Open', patched = [];
     global.jitaCurrentKey = () => onScreen;
@@ -143,7 +137,7 @@ const log0 = console.log;
     dropFails = false;
 
     // ================= the on-demand translation =================
-    Object.assign(JiTA.ui, eval('({' + member('    getIssueText: function (key) {', uiStart) + '})'));
+    Object.assign(JiTA.ui, ui(['getIssueText']));
     JiTA.ui._qtx = null;
     JiTA.db.getDefect = () => Promise.resolve(null);
     JiTA.util = { cleanForCompare: (t, d) => t + ' ' + d, detectLang: () => 'foreign', toPlainText: (x) => x };
@@ -156,7 +150,7 @@ const log0 = console.log;
     ok('...so the next look translates it (control)', txt === 'Crash on undock' && JiTA.ui._qtx && JiTA.ui._qtx.text === 'Crash on undock', txt);
 
     // ================= attachments and the log scan =================
-    Object.assign(JiTA.ui, eval('({' + member('    _fetchText: function (url) {', uiStart) + member('    _logScanCache: {},', uiStart).replace(/,\n$/, ',') + '\n' + member('    scanIssueLog: function (key) {', uiStart) + member('    _scanIssueLog: function (key) {', uiStart) + '})'));
+    Object.assign(JiTA.ui, ui(['_fetchText', '_logScanCache', '_logExc', 'scanIssueLog', '_scanIssueLog']));
     global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onload({ status: 403, responseText: '<html>Forbidden</html>' }));
     ok('an attachment fetch that 403s is no text, not the error page', (await JiTA.ui._fetchText('https://media/x')) === '');
     let asked = null;
@@ -188,7 +182,7 @@ const log0 = console.log;
     ok('a scan whose attachment list failed is no hits, and the next look tries again', Object.keys(f1).length === 0 && ajaxCalls.length === 2, ajaxCalls.length + ' reads');
 
     // ================= the Original Reporter ID =================
-    Object.assign(JiTA.ui, eval('({' + member('    _getReporterId: function (key) {', uiStart) + '})'));
+    Object.assign(JiTA.ui, ui(['_getReporterId']));
     global.setTimeout = (f) => { setImmediate(f); return 1; };
     ajaxScript = [{ ok: false, xhr: { status: 401, getResponseHeader: () => null } }];
     err = null;

@@ -3,15 +3,8 @@
 // next one, and its Attach then acted on the issue on screen; and JiTA.link.attachDuplicate accepted any pair.
 // Evals the real attachDuplicate and JiTA.ui (render, renderReports, _markDupButton, _attachReportButton) against
 // stubs, holding each asynchronous step open to move on mid-way.
-const fs = require('fs');
-const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
-const END = '\n    },';
-const slice = (head) => {
-    const s = src.indexOf(head);
-    if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + head.trim()); }
-    const a = src.indexOf(END, s), b = src.indexOf('\n    }\n};', s);   // a member, or the last one in its object
-    return (b >= 0 && b < a) ? src.slice(s, b + '\n    }'.length) + ',' : src.slice(s, a + END.length);
-};
+const S = require('./source');
+const src = S.load();
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
@@ -62,14 +55,9 @@ global.JiTA = {
     profile: { renderSection() {}, clear() {} },   // profile-check.js covers the defect profile
     repexc: { soon: () => Promise.resolve(null), forReport: () => Promise.resolve({}), forDefect: () => null }   // excboost-check.js covers the boost
 };
-JiTA.link.attachDuplicate = eval('({' + slice('    attachDuplicate: function (ebrKey, otherKey, statusName, preferredResolution, assigneeAccountId) {') + '})').attachDuplicate;
+JiTA.link.attachDuplicate = eval(S.members(src, 'JiTA.link', ['attachDuplicate'])).attachDuplicate;
 const realAttach = JiTA.link.attachDuplicate;
-Object.assign(JiTA.ui, eval('({' + [
-    slice('    render: function (key, background) {'),
-    slice('    renderReports: function (key, background) {'),
-    slice('    _markDupButton: function (defectKey) {'),
-    slice('    _attachReportButton: function (reportKey, opts) {')
-].join('') + '})'));
+Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['render', 'renderReports', '_markDupButton', '_attachReportButton'])));
 Object.assign(JiTA.ui, {
     currentKey: null, reporterMode: false, simReportsMode: false, trendMode: false, modeOverride: null,
     _ensurePanel() {}, _syncFilterBtn() {}, _filterTerms: () => [], renderLogLink() {}, renderExceptionCluster() {},

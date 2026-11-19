@@ -71,6 +71,22 @@ one against another copy of the script:
 JITA_SRC=some/other/JiTA.user.js node tests/trend-check.js
 ```
 
+To cut a piece out, use `source.js`, which finds it by name rather than by text copied from the script, so an edit
+inside the piece (a parameter added, a line reworded) leaves the harness alone:
+
+```js
+const S = require('./source');
+const src = S.load();                                             // the script, as JITA_SRC names it, with LF line ends
+Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['render', '_attachReportButton'])));
+eval(S.top(src, 'JiTA.profile'));                                 // a whole top-level object
+const body = S.fn(src, 'jitaWorkerBody');                         // a function, or one inside it: S.fn(src, 'lgFp', body)
+```
+
+It goes by the script's layout: 4 spaces a level, and a closing bracket on a line of its own at the indent its
+opening line had. `source-check.js` checks that every object member and function in the script cuts out that way, so
+a change the rule would cut wrong fails there first. Older harnesses still cut by text; move one over when you touch it
+(`attach`, `panelattach`, `profile` and `excfind` have).
+
 ## Breakage suites (`mutate-*.js`)
 
 Each one breaks a specific guard in a copy of the script on purpose and requires the harness that owns it to

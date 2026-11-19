@@ -2,16 +2,13 @@
 // defect's exceptions. Evals the real JiTA.excfind, JiTA.logsig's fingerprints, JiTA.profile's cache helpers, the Attach
 // control's options (JiTA.ui._attachReportButton) and the launcher against stubs and a small DOM.
 require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
-const fs = require('fs');
-const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const S = require('./source');   // finds the pieces by name
+const src = S.load();
 const once = (head) => {
     const s = src.indexOf(head);
     if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + head.trim().slice(0, 60)); }
     return s;
 };
-const member = (head) => { const s = once(head); return src.slice(s, src.indexOf('\n    },', s) + 7); };
-const line = (head) => { const s = once(head); return src.slice(s, src.indexOf('\n', s) + 1); };
-const block = (head, end) => { const s = once(head); return src.slice(s, src.indexOf(end, s) + end.length); };
 const cut = (a, b) => { const s = once(a); return src.slice(s, src.indexOf(b, s)); };
 
 let fail = 0;
@@ -105,16 +102,14 @@ let viewRefreshes = 0;   // Jira's issue view told to read the issue on screen a
 global.jitaRefreshIssueView = () => { viewRefreshes++; };
 global.jitaLinkedKeys = (links) => (links || []).map((l) => (l.outwardIssue || l.inwardIssue).key);
 global.JiTA = { HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, link: {} };
-Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isClosedStatus: function (status) {') + '})'));
+Object.assign(JiTA.util, eval(S.members(src, 'JiTA.util', ['toPlainText', 'isClosedStatus'])));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 JiTA.util.delay = (ms) => new Promise((r) => setTimeout(r, ms));
 let crashCalls = 0;
-Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    OPEN_CUT: ') + line('    isTrace: function (sig) {') +
-    line('    isCut: function (sig) {') + line('    _traceKey: function (sig) {') + member('    _splitBlocks: function (text) {') + member('    _fingerprint: function (text) {') +
-    member('    _crashOf: function (sig) {') + '})'));
+Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['MIN_FRAMES', 'CRASH_FRAMES', 'TRACE', 'OPEN_CUT', 'isTrace', 'isCut', '_traceKey', '_splitBlocks', '_fingerprint', '_crashOf'])));
 // What counts (JiTA.excnoise), the real one over the stubs above (excnoise-check.js covers it).
-Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
-eval(block('JiTA.excnoise = {', '\n};\n'));
+Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['isUserError', '_msgKey'])));
+eval(S.top(src, 'JiTA.excnoise'));
 const realCrash = JiTA.logsig._crashOf;
 JiTA.logsig._crashOf = function (s) { crashCalls++; return realCrash.call(this, s); };
 JiTA.ocr._langFromLabels = () => null;
@@ -122,8 +117,8 @@ JiTA.db.getMeta = (k) => Promise.resolve(k in meta ? meta[k] : null);
 JiTA.db.setMeta = (k, v) => { meta[k] = v; return Promise.resolve(); };
 let dbRec = null;
 JiTA.db.getDefect = () => Promise.resolve(dbRec);
-eval(block('JiTA.profile = {', '\n    _noop: null\n};\n'));
-eval(block('JiTA.excfind = {', '\n    _noop: null\n};\n'));
+eval(S.top(src, 'JiTA.profile'));
+eval(S.top(src, 'JiTA.excfind'));
 const P = JiTA.profile, X = JiTA.excfind;
 X.WAIT_MS = 1;
 
@@ -915,7 +910,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     X._sweep = realSweep;
 
     // ================= the Attach control's options (the real one) =================
-    eval('Object.assign(JiTA.ui, {' + line('    _assigneeCache: {},') + member('    _getAssignee: function (key) {') + member('    _attachReportButton: function (reportKey, opts) {') + '});');
+    Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['_assigneeCache', '_getAssignee', '_attachReportButton'])));
     let attaches = [], assigned = [], dones = [], fades = 0, offList = [], live = {};
     Object.assign(JiTA.ui, { currentKey: null, _fadeOutAndReplace() { fades++; }, _takeOffList(keys, still) { offList.push(keys.join() + ':' + still()); return Promise.resolve(); },
         _liveStatus: (keys) => Promise.resolve(live), _isOpenStatus: (s) => !!s && !JiTA.util.isClosedStatus(s) });
