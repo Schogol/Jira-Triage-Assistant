@@ -173,6 +173,7 @@ global.JiTA = {
             if (m && /fields=reporter$/.test(path) && issueOf[m[1]]) { return Promise.resolve({ key: m[1], fields: { reporter: JSON.parse(J(issueOf[m[1]].fields.reporter)) } }); }
             if (m && /fields=updated$/.test(path) && issueOf[m[1]]) { return Promise.resolve({ key: m[1], fields: { updated: issueOf[m[1]].fields.updated || null } }); }
             if (m && /fields=\*all/.test(path)) { return issueOf[m[1]] ? Promise.resolve(JSON.parse(J(issueOf[m[1]]))) : Promise.reject(Object.assign(new Error('404'), { status: 404 })); }
+            if (m && sourceOf[m[1]] instanceof Error) { return Promise.reject(sourceOf[m[1]]); }   // a bug report read that fails
             if (m) { return sourceOf[m[1]] ? Promise.resolve(JSON.parse(J(sourceOf[m[1]]))) : Promise.reject(Object.assign(new Error('404'), { status: 404 })); }
             return Promise.reject(new Error('unexpected GET ' + path));
         },
@@ -605,6 +606,20 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     try { await C.load('EDR-1', () => {}); } catch (e) { lerr = e; }
     ok('a load that fails once it knows who is looking says who it was', !!lerr && lerr.message === 'HTTP 500 from Jira' && lerr.sees === 'reporter' && lerr.me === 'acc-rep', lerr && J({ m: lerr.message, s: lerr.sees, me: lerr.me }));
     delete histOf['EDR-1'];
+    // a bug report that cannot be read is not a defect with no report (review 2026-11-20, checklist-logic-3, v3.53.8)
+    const goodSrc = sourceOf['EBR-10'];
+    for (const status of [503, 429, 0]) {
+        sourceOf['EBR-10'] = Object.assign(new Error('Jira GET failed: HTTP ' + status), { status: status });
+        const drawn = [];
+        lerr = null;
+        try { await C.load('EDR-1', (s) => { drawn.push(s); }); } catch (e) { lerr = e; }
+        ok('a bug report read that fails (HTTP ' + status + ') fails the load, saying who is looking, rather than judging the defect without its report',
+            !!lerr && lerr.status === status && lerr.sees === 'reporter' && lerr.me === 'acc-rep' && drawn.length === 0, lerr ? J({ m: lerr.message, s: lerr.sees }) : J(drawn.map((d) => d.complete)));
+    }
+    delete sourceOf['EBR-10'];
+    last2 = await C.load('EDR-1', () => {});
+    ok('...while a bug report Jira says is not there (404) is still judged as no report', last2 && last2.items && !last2.src && !byId(last2.items, 'desc'), last2 && J(last2.items && last2.items.map((it) => it.id)));
+    sourceOf['EBR-10'] = goodSrc;
     readOf = { 'EBR-10': { rec: { logs: true, exc: [EXC], build: null } } };
     me = 'acc-other';
     gets = [];
