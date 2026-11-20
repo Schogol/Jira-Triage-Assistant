@@ -23673,6 +23673,9 @@ JiTA.worker = {
     // leader, step down so a fresher tab rebuilds the worker.
     _applyReelect: function (want) {
         if (want && JiTA.worker._verCmp(want, JiTA.worker._maxSeenVersion) > 0) { JiTA.worker._maxSeenVersion = want; }
+        // A newer tab just spoke, so it is still open: this tab stands aside for it again, up to MAX_STANDASIDE times. Counted
+        // over the tab's life, the stand-asides ran out after two hand-overs, and the tab then led with older code.
+        if (want && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, want) < 0) { JiTA.worker._standAsides = 0; }
         if (JiTA.worker._isLeader && want && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, want) < 0) {
             JiTA.log('[JiTA worker] stale leader (v' + JiTA.SCRIPT_VERSION + ' < v' + want + '); stepping down for re-election');
             JiTA.worker._stepDown(true);
@@ -23803,7 +23806,19 @@ JiTA.worker = {
         } else if (m.kind === 'leader') {
             JiTA.worker._otherLeader = true;   // somebody leads again, even if this tab gave up
             JiTA.worker._failTabPending('the ranking leader changed - try again', true);   // a call the old leader took will never be answered
+            JiTA.worker._olderLeader(m.version);
         }
+    },
+
+    // Another tab took the lead. One running older code (a tab left open from before an update) is asked to hand over at
+    // once. A tab that has stood aside for newer ones MAX_STANDASIDE times leads anyway the next time it is handed the
+    // lock, so with several old tabs open, each re-election only moved the lead to the next old tab, one per version
+    // check or announcement. Not from a tab that leads, or gave up leading and could not take over (_announce).
+    _olderLeader: function (version) {
+        var w = JiTA.worker;
+        if (w._isLeader || w._gaveUp || !version || !JiTA.SCRIPT_VERSION || w._verCmp(version, JiTA.SCRIPT_VERSION) >= 0) { return; }
+        JiTA.log('[JiTA worker] a tab on v' + version + ' took the lead; asking it to hand over to this tab, v' + JiTA.SCRIPT_VERSION);
+        w._announce();
     },
 
     // The worker's source (a module): the real jitaWorkerBody function, serialized and immediately invoked with

@@ -17,7 +17,16 @@ const muts = [
     [H, 'an older worker found by the ping asks for nothing', "                try { if (JiTA.worker._bc) { JiTA.worker._bc.postMessage({ kind: 'reelect', want: JiTA.SCRIPT_VERSION }); } } catch (e) { /* ignore */ }\n", ''],
     [H, 'the tabs waiting never stand aside', '            && JiTA.worker._standAsides < JiTA.worker.MAX_STANDASIDE) {', '            && false) {'],
     [H, 'a tab stands aside for ever', '            && JiTA.worker._standAsides < JiTA.worker.MAX_STANDASIDE) {', '            ) {'],
-    [H, 'it says it every few seconds', '    ANNOUNCE_MS: 5 * 60 * 1000,', '    ANNOUNCE_MS: 5 * 1000,']
+    [H, 'it says it every few seconds', '    ANNOUNCE_MS: 5 * 60 * 1000,', '    ANNOUNCE_MS: 5 * 1000,'],
+    [H, 'an older tab taking the lead is not asked to hand over', '            JiTA.worker._olderLeader(m.version);\n', ''],
+    [H, 'a newer tab taking the lead is asked, an older one not', 'w._verCmp(version, JiTA.SCRIPT_VERSION) >= 0) { return; }', 'w._verCmp(version, JiTA.SCRIPT_VERSION) < 0) { return; }'],
+    [H, 'a tab at the same version taking the lead is asked to hand over', 'w._verCmp(version, JiTA.SCRIPT_VERSION) >= 0) { return; }', 'w._verCmp(version, JiTA.SCRIPT_VERSION) > 0) { return; }'],
+    [H, 'a leader that does not say its version is taken for an older one', 'if (w._isLeader || w._gaveUp || !version || ', 'if (w._isLeader || w._gaveUp || '],
+    [H, 'a tab that leads asks another leader to hand over', 'if (w._isLeader || w._gaveUp || !version || ', 'if (w._gaveUp || !version || '],
+    [H, 'a tab that gave up asks an older leader to hand over', 'if (w._isLeader || w._gaveUp || !version || ', 'if (w._isLeader || !version || '],
+    [H, 'a newer tab speaking gives no stand-asides back', '        if (want && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, want) < 0) { JiTA.worker._standAsides = 0; }\n', ''],
+    [H, 'any tab speaking gives the stand-asides back', 'if (want && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, want) < 0) { JiTA.worker._standAsides = 0; }',
+        'if (want) { JiTA.worker._standAsides = 0; }']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

@@ -18,7 +18,7 @@ node tests/release.js patch --fix "..." (or minor --feature "...") does the firs
 
 ### Fixed issues
 
-- After an update, a tab still open from before no longer keeps JiTA's background work (matching, credits) on the old version until it is reloaded: an updated tab takes it over within seconds.
+- After an update, tabs still open from before no longer keep JiTA's background work (matching, credits) on the old version until they are reloaded: an updated tab takes it over within seconds, however many there are.
 
 ## 3.53.1 (2026-11-20)
 

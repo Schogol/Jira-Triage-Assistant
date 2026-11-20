@@ -6,18 +6,24 @@
 //  - a leader at that version or a newer one carries on; an older tab starting changes nothing
 //  - one that missed it hears it again within ANNOUNCE_MS; a tab that gave up leading, or a frame, says nothing
 //  - old tabs waiting for the lock stand aside for the newer one
+//  - an old tab that has stood aside twice already leads when handed the lock; the updated tab asks it to hand over at once,
+//    and the next one, so it leads within a second however many there are (v3.53.2); a same-version, newer or no-lock
+//    leader is not asked, nor by a tab that gave up
+//  - a newer tab speaking gives an older one's stand-asides back, an older tab speaking does not
 //  - the version check's ping still finds an older worker, and a ping that gets no answer is logged
+// A tab reads what was said on the channel before the lock it waits for reaches it, as in the browser: a lock handed over at
+// once let an old tab take it before it had heard of the newer one.
 const vm = require('vm');
 const S = require('./source');
 const src = S.load();
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
-const flush = async () => { for (let i = 0; i < 20; i++) { await new Promise((r) => setImmediate(r)); } };
+const flush = async () => { for (let i = 0; i < 60; i++) { await new Promise((r) => setImmediate(r)); } };
 
 const WORKER = S.members(src, 'JiTA.worker', ['CHANNEL', 'LOCK', 'REELECT_DELAY_MS', 'ANNOUNCE_MS', 'MAX_STANDASIDE', '_bc', '_worker', '_isLeader', '_started',
     '_tabPending', '_releaseLock', '_respawns', '_gaveUp', '_otherLeader', '_maxSeenVersion', '_standAsides', 'start', '_requestLock', '_becomeLeader', '_stepDown',
-    '_verCmp', '_checkWorkerVersion', '_announce', '_applyReelect', '_onBc']);
+    '_verCmp', '_checkWorkerVersion', '_announce', '_applyReelect', '_onBc', '_olderLeader']);
 const W = eval(WORKER.replace('JiTA.SCRIPT_VERSION', "''"));   // for the constants
 
 // ---- the browser the tabs share ----
@@ -62,8 +68,8 @@ const locks = {
         this.queue = this.queue.filter((q) => q.tab.alive);
         const q = this.queue.shift();
         if (!q) { return; }
-        this.held = q;
-        Promise.resolve().then(() => q.cb()).then(() => { if (this.held === q) { this.held = null; this.pump(); } });
+        this.held = q;   // the grant reaches the tab after the messages already on their way to it
+        setImmediate(() => Promise.resolve().then(() => q.cb()).then(() => { if (this.held === q) { this.held = null; this.pump(); } }));
     },
     drop(tab) {
         this.queue = this.queue.filter((q) => q.tab !== tab);
@@ -75,7 +81,7 @@ function open(name, version, opts) {
     const tab = { name: name, version: version, alive: true, deaf: false, busy: false, spawns: 0, logs: [] };
     const ctx = {
         JITA_IS_SUBFRAME: !!opts.frame,
-        navigator: { locks: { request: (n, cb) => locks.request(tab, cb) } },
+        navigator: opts.nolocks ? {} : { locks: { request: (n, cb) => locks.request(tab, cb) } },   // without Web Locks every tab leads its own
         BroadcastChannel: function () { this.postMessage = (data) => bus.send(tab, data); bus.add(tab, this); },
         setTimeout: (fn, ms) => clock.add(tab, fn, ms, false),
         setInterval: (fn, ms) => clock.add(tab, fn, ms, true),
@@ -99,7 +105,12 @@ function open(name, version, opts) {
         if (!L) { return Promise.reject(new Error('no leader')); }
         return L.busy ? Promise.reject(new Error('timeout')) : Promise.resolve({ version: L.w._worker.built });
     };
-    if (/^3\.5[01]\./.test(version)) { w._announce = function () {}; }   // a tab from before v3.53.2 does not say its version
+    if (/^3\.5[01]\./.test(version)) {   // a tab from before v3.53.2 does not say its version, ask an older leader to hand over,
+        w._announce = function () {};      // or get its stand-asides back when a newer tab speaks
+        w._olderLeader = function () {};
+        const reelect = w._applyReelect;
+        w._applyReelect = function (want) { const n = w._standAsides; reelect(want); w._standAsides = n; };
+    }
     tab.w = w;
     tabs.push(tab);
     w.start();
@@ -189,6 +200,86 @@ const reset = () => { tabs.slice().forEach(close); tabs.length = 0; bus.chans = 
     ok('an old tab handed the lock while it knows of a newer one stands aside for it, without building a worker', leaders() === 'new2' && O.spawns === 0 && N2.spawns === 1,
         leaders() + ' / ' + O.spawns);
 
+    // ================= several old tabs that have stood aside twice already =================
+    // As in Schogol's Firefox (2026-11-20): v3.51.5 led, and v3.51.4 and v3.51.3 waited, each having stood aside twice for
+    // newer tabs, so each led when handed the lock, the lead moving on one old tab per version check.
+    reset();
+    O = open('old1', '3.51.5');
+    await clock.advance(100);
+    const chain = [open('old2', '3.51.4'), open('old3', '3.51.3'), open('old4', '3.51.2')];
+    await clock.advance(100);
+    chain.forEach((t) => { t.w._standAsides = W.MAX_STANDASIDE; });
+    N = open('new', '3.53.2');
+    await clock.advance(1000);
+    const olds = [O].concat(chain);
+    ok('old tabs that have stood aside twice already take the lead in turn, each asked to hand over at once: the updated tab leads within a second',
+        leaders() === 'new' && N.spawns === 1 && olds.every((t) => t.w._worker === null),
+        leaders() + ' / ' + olds.concat([N]).map((t) => t.name + ':' + t.spawns + (t.w._worker ? '+' : '')).join(','));
+    ok('...each one it asked is in its log', chain.every((t) => N.logs.some((l) => l.indexOf('a tab on v' + t.version + ' took the lead; asking it to hand over') >= 0)),
+        N.logs.join(' | '));
+    ok('...and each did lead for a moment, as old code does once its stand-asides are spent', chain.every((t) => t.spawns === 1), chain.map((t) => t.spawns).join(','));
+    await clock.advance(30000);
+    ok('...and the updated tab keeps the lead', leaders() === 'new' && N.spawns === 1, leaders());
+
+    // ================= a leader that is not asked =================
+    reset();
+    N = open('new', '3.53.2');
+    await clock.advance(100);
+    const S2 = open('same2', '3.53.2'), S3 = open('same3', '3.53.2'), OL = open('older', '3.53.1');
+    await clock.advance(100);
+    bus.said = [];
+    close(N);
+    await clock.advance(1000);
+    ok('a tab at the same version taking the lead is not asked to hand over, nor a newer one by an older tab',
+        leaders() === 'same2' && !bus.said.some((s) => s.data.kind === 'reelect') && ![S3, OL].some((t) => t.logs.some((l) => /took the lead/.test(l))),
+        leaders() + ' / ' + JSON.stringify(bus.said));
+    bus.said = [];
+    S3.w._onBc({ data: { kind: 'leader' } });
+    await clock.advance(10);
+    ok('...nor a leader that does not say its version', !bus.said.some((s) => s.from === 'same3') && S2.spawns === 1, JSON.stringify(bus.said));
+
+    // Without Web Locks every tab leads its own worker: an older one asked to hand over would only lead again 3 s later.
+    reset();
+    N = open('new', '3.53.2', { nolocks: true });
+    await clock.advance(100);
+    bus.said = [];
+    O = open('old', '3.51.4', { nolocks: true });
+    await clock.advance(10000);
+    ok('without Web Locks, where every tab leads its own worker, an older tab leading is not asked to hand over',
+        !bus.said.some((s) => s.from === 'new') && O.w._isLeader && N.w._isLeader, JSON.stringify(bus.said));
+
+    // ================= stand-asides given back =================
+    // A newer tab speaking gives an older tab on this code its stand-asides back, so after the next update it does not lead
+    // with older code once two hand-overs have used them up.
+    reset();
+    const U = open('u', '3.53.2');
+    await clock.advance(100);
+    const T = open('t', '3.53.1');
+    await clock.advance(100);
+    T.w._standAsides = W.MAX_STANDASIDE;   // stood aside twice since it last led
+    open('u2', '3.53.2');
+    await clock.advance(100);
+    close(U);
+    await clock.advance(1000);
+    ok('a newer tab speaking gives an older tab its stand-asides back: handed the lock, it stands aside, without building a worker',
+        leaders() === 'u2' && T.spawns === 0, leaders() + ' / t built ' + T.spawns);
+
+    reset();
+    const X = open('x', '3.53.1');
+    await clock.advance(100);
+    const T2 = open('t', '3.53.1');
+    await clock.advance(100);
+    T2.w._maxSeenVersion = '3.53.2'; T2.w._standAsides = W.MAX_STANDASIDE;   // a newer tab, closed since, used them up
+    const Y = open('y', '3.53.0');
+    await clock.advance(100);
+    close(X);
+    await clock.advance(1000);
+    ok('...an older tab speaking does not: with the newer tab gone, it leads', leaders() === 't' && T2.spawns === 1, leaders());
+    open('z', '3.53.2');
+    await clock.advance(1000);
+    ok('...and a leader on this code steps down for a newer tab, the one waiting behind it standing aside',
+        leaders() === 'z' && T2.w._worker === null && Y.spawns === 0, leaders() + ' / y built ' + Y.spawns);
+
     // ================= who says nothing =================
     reset();
     N = open('new', '3.53.2');
@@ -197,6 +288,12 @@ const reset = () => { tabs.slice().forEach(close); tabs.length = 0; bus.chans = 
     bus.said = [];
     await clock.advance(W.ANNOUNCE_MS * 2);
     ok('a tab that gave up leading says nothing more', !bus.said.some((s) => s.from === 'new'), JSON.stringify(bus.said));
+    N.w._stepDown(false);   // as a tab that gives up does: it lets go of the lock for good
+    bus.said = [];
+    O = open('old', '3.51.4');
+    await clock.advance(1000);
+    ok('...not even to an old tab taking the lead, which it could not take over', leaders() === 'old' && !bus.said.some((s) => s.from === 'new') &&
+        !N.logs.some((l) => /took the lead/.test(l)), leaders() + ' / ' + JSON.stringify(bus.said));
     bus.said = [];
     const F = open('frame', '3.53.2', { frame: true });
     await clock.advance(W.ANNOUNCE_MS + 1000);
