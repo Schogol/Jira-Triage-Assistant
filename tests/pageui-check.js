@@ -213,7 +213,7 @@ const translate = async (r) => { results = r.slice(); alerts = []; logs = []; co
     let observed = null, yields = 0, cb = null;
     global.window = { indexedDB: {} };
     global.setTimeout = () => {};
-    global.JiTA = { changelog: { start() {} } };
+    global.JiTA = { changelog: { start() {} }, census: { start() {} } };
     global.jitaArmLeadDuties = () => {};
     global.jitaPillsYieldSoon = () => { yields++; };
     global.MutationObserver = function (fn) { cb = fn; this.observe = (target, opts) => { observed = { target: target, opts: opts }; }; };

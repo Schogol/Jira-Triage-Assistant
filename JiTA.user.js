@@ -10263,6 +10263,14 @@ JiTA.menu = {
             });
         $diagAct.append($diag);
         $diagStatus.appendTo($dbg);
+        // Who runs what (JiTA.census): each user's JiTA version, browser and Features switches, as their own JiTA wrote them
+        // to the JiTA wiki page. For the owner only.
+        if (JiTA.leadduty.OWNER === ((JiTA.leadduty.me() && JiTA.leadduty.me().handle) || '')) {
+            $('<button class="jita-btn">Who runs what</button>')
+                .attr('title', 'Each user\'s JiTA version, browser and Settings > Features switches, as their JiTA last wrote them to the JiTA wiki page')
+                .on('click', function () { JiTA.census.openView(); })
+                .appendTo($diagAct);
+        }
 
         // Self-heal test (shown only when debug is on, to keep it out of casual reach). Calls _onWorkerDead, which
         // only acts on the leader tab's own worker, so it is disabled on followers with a hint about where to click.
@@ -18127,15 +18135,16 @@ JiTA.conf = {
         return { id: String(p.id), key: p.key, value: p.value, version: (p.version && p.version.number) || 1 };
     },
 
-    // Create (POST, no prop) or update (PUT at version+1 - the CAS token). Resolves the stored property.
-    saveProperty: function (pageId, key, value, prop) {
+    // Create (POST, no prop) or update (PUT at version+1 - the CAS token). Resolves the stored property. `message` names
+    // the writer in the property's version history (Lead duties when left out).
+    saveProperty: function (pageId, key, value, prop, message) {
         var base = '/wiki/api/v2/pages/' + encodeURIComponent(pageId) + '/properties';
         if (!prop) {
             return JiTA.conf._ajax('POST', base, { key: key, value: value })
                 .then(function (r) { return JiTA.conf._mapProp(r.data || {}); });
         }
         return JiTA.conf._ajax('PUT', base + '/' + encodeURIComponent(prop.id), {
-            key: key, value: value, version: { number: prop.version + 1, message: 'JiTA lead duties' }
+            key: key, value: value, version: { number: prop.version + 1, message: message || 'JiTA lead duties' }
         }).then(function (r) { return JiTA.conf._mapProp(r.data || {}); });
     },
 
@@ -24738,24 +24747,6 @@ JiTA.ocr = {
 };
 
 
-/* ---- Changelog: every version's changes, and a "What's new" pill after an update -------------------------
- * The whole history of the script, newest first, from its first version as "Enhanced Jira Features" (2023) to now,
- * is CHANGELOG.md in the repo. Tampermonkey fetches it together with the script (@resource changelog, whose URL
- * carries the version, so no older copy is kept) and stores it with it: reading it costs no request, and it always
- * belongs to the version installed. parse() turns it into entries, each listing what it added under `features` and
- * what it fixed under `fixes`; either may be left out. The list shows them in two tabs, New features and Fixed issues.
- *
- * After an update that brings a feature, a pill joins the others in the bottom-left corner until the update has
- * been looked at: opening the list (click the pill) and closing the pill with its x both count, and it then stays
- * away until the next feature. An update that only fixes things gets no pill; its fixes are marked New in the list.
- * The list itself is always in Settings, under About. A script manager that gave the script no changelog puts up
- * no pill, and the list then points to the file on GitHub.
- *
- * Every version bump adds an entry at the top of CHANGELOG.md. tests/changelog-check.js reads the file with parse()
- * and fails the build when its newest entry is not the version in the @version header, when the @resource line asks
- * for another version, or when parse() would pass over a line of it. Before v3.39.0 an entry had one `items` list;
- * those were sorted by version: an x.y.0 release brought features, an x.y.z release fixes.
- */
 // ---- Copy diagnostics (Settings > About > Debug) ----
 // A short plain-text report with what a message about a JiTA problem needs: the version and script manager, the browser,
 // the kind of page, the worker, what is stored and how far it is synced, the errors JiTA caught and went on from
@@ -24863,6 +24854,248 @@ JiTA.diag = {
     _noop: null
 };
 
+// ---- Who runs what (Settings > About, for the owner only) ----
+// Every user's JiTA keeps one content property of its own on the JiTA wiki page: their name and, for each browser they use
+// it in, the JiTA version, Tampermonkey's version, the browser and each switch in Settings > Features, with when it was
+// last written. It writes when any of that changed, and otherwise once a day so "last seen" stays true, from one tab at a
+// time. The owner reads them all into one table (openView). Writing a property takes edit rights on the page, so a user
+// without them is missing from the table. Anyone who can view the page can read the properties through Confluence's REST
+// API; JiTA shows the table to the owner only.
+JiTA.census = {
+    PAGE: '281119715',           // "JiTA - Jira Triage Assistant - Tampermonkey Script" (ESQA)
+    PREFIX: 'jita_census_',      // + the account id, anything but [a-z0-9] made '_' (all a property key may hold)
+    DAY_MS: 24 * 3600 * 1000,
+    FIRST_MS: 60 * 1000,         // a tab's first look, once its page has settled
+    CHECK_MS: 3600 * 1000,       // then this often, to see whether a write is due
+    RETRY_MS: 6 * 3600 * 1000,   // after a failed write (no edit rights, say), the next try
+    KEEP_DAYS: 90,               // a browser that has not written for this long is dropped from the user's entry
+    OLD_DAYS: 30,                // the table greys a browser not seen for this long
+    SENT_KEY: 'jitaCensusSent',  // GM: { sig, at } of the last write from this browser, or { retry } after a failed one
+    // The switches in Settings > Features, in its order; a sub-option is read by its own call, the rest by flagOn.
+    FEATURES: [
+        { id: 'parser', label: 'Log Parser', short: 'Parser' },
+        { id: 'scrollbar', label: 'Custom Scrollbar', short: 'Scrollbar' },
+        { id: 'buttons', label: 'Extra Buttons', short: 'Buttons' },
+        { id: 'similarDefects', label: 'Triage Assistant', short: 'Triage' },
+        { id: 'defectProfile', label: 'Defect profile', short: 'Profile' },
+        { id: 'igbrZip', label: 'Read igbr.zip', short: 'igbr.zip', sub: function () { return JiTA.profile.zipOn(); } },
+        { id: 'defectChecklist', label: 'Defect checklist', short: 'Checklist' },
+        { id: 'credits', label: 'ISD Credits', short: 'Credits' },
+        { id: 'detailView', label: 'Detail view', short: 'Detail' },
+        { id: 'dvTake', label: 'Open filters in the detail view', short: 'Filters', sub: function () { return JiTA.dv._takeOn(); } },
+        { id: 'screenOcr', label: 'Screenshot translation', short: 'OCR' }
+    ],
+
+    // Boot, in the top frame of a Jira or Confluence tab.
+    start: function () {
+        var C = JiTA.census;
+        if (C._started || JITA_IS_SUBFRAME || JITA_IS_FORGE_FRAME) { return; }
+        C._started = true;
+        setTimeout(C.tick, C.FIRST_MS);
+        setInterval(C.tick, C.CHECK_MS);
+    },
+    _started: false,
+
+    // Writes this browser's entry when it is due. Resolves true when it wrote. A look that overlaps another (a slow write,
+    // two tabs) finds the other's claim in SENT_KEY and leaves it be.
+    tick: function () {
+        var C = JiTA.census, L = JiTA.leadduty;
+        if (JITA_IS_SUBFRAME || JITA_IS_FORGE_FRAME) { return Promise.resolve(false); }
+        var me = L.me();
+        return ((me && me.accountId && me.displayName) ? Promise.resolve(me) : L.resolveMe()).then(function (m) {
+            if (!m || !m.accountId) { return false; }
+            var entry = C.entry(), sig = JSON.stringify([m.displayName || '', entry.jita, entry.tm, entry.browser, entry.f]), now = Date.now();
+            if (!C._due(sig, now)) { return false; }
+            gmSet(C.SENT_KEY, { sig: sig, at: now });   // claimed first, so this browser's other tabs leave it be
+            return C._write(m, entry, now).then(function () { return true; }, function (e) {
+                gmSet(C.SENT_KEY, { retry: now + C.RETRY_MS });
+                JiTA.log('[JiTA] census: could not write this browser\'s entry to the JiTA page:', (e && e.message) || e);
+                return false;
+            });
+        }, function (e) {
+            JiTA.log('[JiTA] census: could not tell who is signed in:', (e && e.message) || e);
+            return false;
+        });
+    },
+    // Due when something changed since the last write, or a day has passed; never before a failed write's retry time.
+    _due: function (sig, now) {
+        var s = gmGet(JiTA.census.SENT_KEY, null) || {};
+        if (s.retry) { return now >= s.retry; }
+        return s.sig !== sig || !s.at || now - s.at >= JiTA.census.DAY_MS;
+    },
+
+    // This browser's entry: the versions, the browser and each Features switch (null where one cannot be read).
+    entry: function () {
+        var C = JiTA.census, f = {};
+        C.FEATURES.forEach(function (x) {
+            try { f[x.id] = x.sub ? !!x.sub() : flagOn(x.id); } catch (e) { f[x.id] = null; }
+        });
+        var ua = '';
+        try { ua = navigator.userAgent || ''; } catch (e) { ua = ''; }
+        return { jita: JiTA.SCRIPT_VERSION || '?', tm: C._manager(), browser: C._browser(ua), f: f };
+    },
+    _manager: function () {
+        try { return GM_info.scriptHandler ? (GM_info.scriptHandler + ' ' + (GM_info.version || '')).trim() : '?'; } catch (e) { return '?'; }
+    },
+    // "Firefox 158", "Edge 131", "Chrome 131", "Opera 115", "Safari 18"; "other" for anything else. Edge and Opera say
+    // Chrome as well, so they are asked first.
+    _browser: function (ua) {
+        var tests = [['Edge', /\bEdg\/(\d+)/], ['Opera', /\bOPR\/(\d+)/], ['Firefox', /\bFirefox\/(\d+)/], ['Chrome', /\bChrome\/(\d+)/], ['Safari', /\bVersion\/(\d+)[\d.]* (?:Mobile\/\S+ )?Safari\//]];
+        for (var i = 0; i < tests.length; i++) {
+            var m = tests[i][1].exec(ua || '');
+            if (m) { return tests[i][0] + ' ' + m[1]; }
+        }
+        return 'other';
+    },
+    key: function (accountId) { return JiTA.census.PREFIX + String(accountId).toLowerCase().replace(/[^a-z0-9]/g, '_'); },
+
+    // Puts this browser's entry into the user's property, keeping their other browsers' while those still write, and reads
+    // it again once when another tab or browser wrote in between.
+    _write: function (m, entry, now) {
+        var C = JiTA.census, key = C.key(m.accountId), name = entry.browser.split(' ')[0];
+        var put = function (again) {
+            return JiTA.conf.getProperty(C.PAGE, key).then(function (prop) {
+                var v = prop && prop.value, old = (v && typeof v === 'object' && v.b && typeof v.b === 'object') ? v.b : {}, b = {};
+                Object.keys(old).forEach(function (k) {
+                    var t = Date.parse((old[k] && old[k].at) || '');
+                    if (k !== name && t && now - t < C.KEEP_DAYS * C.DAY_MS) { b[k] = old[k]; }
+                });
+                b[name] = { at: new Date(now).toISOString(), jita: entry.jita, tm: entry.tm, browser: entry.browser, f: entry.f };
+                return JiTA.conf.saveProperty(C.PAGE, key, { v: 1, name: m.displayName || '', id: m.accountId, b: b }, prop, 'JiTA census');
+            }).catch(function (e) {
+                if (again && JiTA.conf.isConflict(e)) { return put(false); }
+                throw e;
+            });
+        };
+        return put(true);
+    },
+
+    // Every user's entry on the page, read a page of properties at a time.
+    all: function () {
+        var C = JiTA.census, out = [], guard = 0;
+        function page(path) {
+            if (++guard > 50) { return Promise.resolve(); }
+            return JiTA.conf._ajax('GET', path).then(function (r) {
+                var d = r.data || {};
+                (d.results || []).forEach(function (p) {
+                    if (p && typeof p.key === 'string' && p.key.indexOf(C.PREFIX) === 0 && p.value && typeof p.value === 'object') { out.push(p.value); }
+                });
+                var next = (d._links && d._links.next) || JiTA.conf._nextLink(r.xhr);
+                return next ? page(JiTA.conf._relPath(next)) : null;
+            });
+        }
+        return page('/wiki/api/v2/pages/' + encodeURIComponent(C.PAGE) + '/properties?limit=' + JiTA.conf.PAGE_LIMIT).then(function () { return out; });
+    },
+    // One row per user and browser, by name (an "ISD " in front left out of the order), then browser.
+    rows: function (values) {
+        var rows = [];
+        (values || []).forEach(function (v) {
+            var b = (v && v.b && typeof v.b === 'object') ? v.b : {};
+            Object.keys(b).forEach(function (k) {
+                var e = b[k] || {};
+                rows.push({ name: String(v.name || v.id || '?'), id: String(v.id || ''), at: e.at || '', jita: e.jita || '?', tm: e.tm || '?',
+                    browser: e.browser || k, f: (e.f && typeof e.f === 'object') ? e.f : {} });
+            });
+        });
+        var bare = function (r) { return r.name.replace(/^ISD\s+/i, '').toLowerCase(); };
+        var cmp = function (x, y) { return x < y ? -1 : x > y ? 1 : 0; };
+        return rows.sort(function (a, b) { return cmp(bare(a), bare(b)) || cmp(a.browser, b.browser); });
+    },
+
+    // ---- the table ----
+    openView: function () {
+        var C = JiTA.census;
+        C._injectCss();
+        var ov = JiTA.menu._openOverlay({ title: 'Who runs what' });
+        ov.$menu.addClass('jita-census-view');
+        var $s = $('<div class="jcs-scroll"></div>').appendTo(ov.$menu);
+        $('<div class="jcs-note"></div>').text('Reading the JiTA page…').appendTo($s);
+        return C.all().then(function (values) {
+            if (JiTA.menu._live($s)) { C._paint($s, C.rows(values), Date.now()); }
+        }, function (e) {
+            if (JiTA.menu._live($s)) { $s.empty(); $('<div class="jcs-note"></div>').text('Could not read the JiTA page: ' + String((e && e.message) || e)).appendTo($s); }
+        });
+    },
+    _paint: function ($s, rows, now) {
+        var C = JiTA.census, cur = JiTA.SCRIPT_VERSION;
+        $s.empty();
+        if (!rows.length) { $('<div class="jcs-note"></div>').text('Nobody\'s JiTA has written an entry yet.').appendTo($s); return; }
+        var users = {};
+        rows.forEach(function (r) { users[r.id || r.name] = true; });
+        var n = Object.keys(users).length, onCur = rows.filter(function (r) { return r.jita === cur; }).length;
+        $('<div class="jcs-note"></div>').text(n + (n === 1 ? ' user' : ' users') + ' in ' + rows.length + (rows.length === 1 ? ' browser' : ' browsers') +
+            '; ' + onCur + ' of them on v' + cur + ', this version. Older versions are amber, browsers not seen for ' + C.OLD_DAYS + ' days grey.').appendTo($s);
+        var $t = $('<table class="jcs-table"></table>').appendTo($s);
+        var $h = $('<tr></tr>').appendTo($('<thead></thead>').appendTo($t));
+        ['Name', 'Version', 'Seen', 'Browser', 'Tampermonkey'].forEach(function (x) { $('<th></th>').text(x).appendTo($h); });
+        C.FEATURES.forEach(function (f) { $('<th class="jcs-f"></th>').attr('title', f.label).text(f.short).appendTo($h); });
+        var $b = $('<tbody></tbody>').appendTo($t);
+        rows.forEach(function (r) {
+            var t = Date.parse(r.at), days = t ? Math.floor((now - t) / C.DAY_MS) : null;
+            var $r = $('<tr></tr>').toggleClass('jcs-old', days === null || days >= C.OLD_DAYS).appendTo($b);
+            $('<td></td>').text(r.name).appendTo($r);
+            $('<td></td>').text(r.jita).toggleClass('jcs-behind', !!cur && JiTA.worker._verCmp(r.jita, cur) < 0).appendTo($r);
+            $('<td></td>').text(C._ago(days)).attr('title', r.at).appendTo($r);
+            $('<td></td>').text(r.browser).appendTo($r);
+            $('<td></td>').text(r.tm).appendTo($r);
+            C.FEATURES.forEach(function (f) {
+                var v = r.f[f.id];
+                $('<td class="jcs-f"></td>').addClass(v === true ? 'on' : 'off').text(v === true ? '✓' : v === false ? '·' : '?')
+                    .attr('title', f.label + ': ' + (v === true ? 'on' : v === false ? 'off' : 'not known')).appendTo($r);
+            });
+        });
+        var $foot = $('<tr></tr>').appendTo($('<tfoot></tfoot>').appendTo($t));
+        $('<td colspan="5"></td>').text('Switched on').appendTo($foot);
+        C.FEATURES.forEach(function (f) {
+            var k = rows.filter(function (r) { return r.f[f.id] === true; }).length;
+            $('<td class="jcs-f"></td>').text(String(k)).attr('title', f.label + ': on in ' + k + ' of ' + rows.length).appendTo($foot);
+        });
+    },
+    _ago: function (days) { return days === null ? '?' : days <= 0 ? 'today' : days === 1 ? 'yesterday' : days + ' days ago'; },
+
+    _cssInjected: false,
+    _injectCss: function () {
+        if (JiTA.census._cssInjected) { return; }
+        JiTA.census._cssInjected = true;
+        try {
+            GM_addStyle(
+                '#jita-menu.jita-census-view { width: 1100px; max-width: 96vw; display: flex; flex-direction: column; overflow: hidden; }' +
+                '.jita-census-view .jcs-scroll { flex: 1 1 auto; min-height: 0; max-height: 78vh; overflow: auto; padding: 4px 18px 14px; }' +
+                '.jita-census-view .jcs-note { color: #9aa6b2; font-size: 12px; margin: 8px 0 10px; }' +
+                '.jita-census-view .jcs-table { border-collapse: collapse; font-size: 12px; color: #cfd6dd; white-space: nowrap; }' +
+                '.jita-census-view .jcs-table th { text-align: left; color: #9aa6b2; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #3a434d; position: sticky; top: 0; background: #1D2125; }' +
+                '.jita-census-view .jcs-table td { padding: 4px 8px; border-bottom: 1px solid #2c333a; }' +
+                '.jita-census-view .jcs-table .jcs-f { text-align: center; }' +
+                '.jita-census-view td.jcs-f.on { color: #7fdca4; }' +
+                '.jita-census-view td.jcs-f.off { color: #626f86; }' +
+                '.jita-census-view td.jcs-behind { color: #ffb547; }' +
+                '.jita-census-view tr.jcs-old td { opacity: .5; }' +
+                '.jita-census-view tfoot td { color: #9aa6b2; border-bottom: none; border-top: 1px solid #3a434d; }'
+            );
+        } catch (e) { /* ignore */ }
+    },
+
+    _noop: null
+};
+
+/* ---- Changelog: every version's changes, and a "What's new" pill after an update -------------------------
+ * The whole history of the script, newest first, from its first version as "Enhanced Jira Features" (2023) to now,
+ * is CHANGELOG.md in the repo. Tampermonkey fetches it together with the script (@resource changelog, whose URL
+ * carries the version, so no older copy is kept) and stores it with it: reading it costs no request, and it always
+ * belongs to the version installed. parse() turns it into entries, each listing what it added under `features` and
+ * what it fixed under `fixes`; either may be left out. The list shows them in two tabs, New features and Fixed issues.
+ *
+ * After an update that brings a feature, a pill joins the others in the bottom-left corner until the update has
+ * been looked at: opening the list (click the pill) and closing the pill with its x both count, and it then stays
+ * away until the next feature. An update that only fixes things gets no pill; its fixes are marked New in the list.
+ * The list itself is always in Settings, under About. A script manager that gave the script no changelog puts up
+ * no pill, and the list then points to the file on GitHub.
+ *
+ * Every version bump adds an entry at the top of CHANGELOG.md. tests/changelog-check.js reads the file with parse()
+ * and fails the build when its newest entry is not the version in the @version header, when the @resource line asks
+ * for another version, or when parse() would pass over a line of it. Before v3.39.0 an entry had one `items` list;
+ * those were sorted by version: an x.y.0 release brought features, an x.y.z release fixes.
+ */
 JiTA.changelog = {
     SEEN_KEY: 'jitaChangelogSeen',   // the newest version whose changes this browser has been shown
     PILL_ID: 'jita-changelog-pill',
@@ -25170,6 +25403,7 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
         if (!window.indexedDB) { return; }
         setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { JiTA.caught('jitaArmLeadDuties', e); } }, 1200);
         try { JiTA.changelog.start(); } catch (e) { JiTA.caught('changelog.start', e); }   // the "What's new" pill after an update
+        try { JiTA.census.start(); } catch (e) { JiTA.caught('census.start', e); }   // this browser's entry for Who runs what
         // The Lead chip and the What's new pill sit over the same Atlaskit sidebar here as on Jira, but Jira's shared
         // observer (which steps them aside for a menu) never runs on the wiki. Watch for menus here as well.
         try { new MutationObserver(function () { try { jitaPillsYieldSoon(); } catch (e) { /* ignore */ } }).observe(document.body, { childList: true, subtree: true }); } catch (e) { /* ignore */ }
@@ -25183,6 +25417,7 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
     // "What's new" after an update. Scheduled first, so nothing that boots after it can keep it from showing; start()
     // still waits for the page to settle, and the observer below puts the pill back if anything takes it away.
     try { JiTA.changelog.start(); } catch (eCl) { JiTA.caught('changelog.start', eCl); }
+    try { JiTA.census.start(); } catch (eCs) { JiTA.caught('census.start', eCs); }   // this browser's entry for Who runs what
     try { jitaNavSaid(); } catch (eNs) { JiTA.caught('jitaNavSaid', eNs); }   // a page load an in-app switch fell back to says why
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
     try { JiTA.dv._bindGlobal(); } catch (eDv) { JiTA.caught('dv._bindGlobal', eDv); }   // the detail view's click hook works off /browse/ too (see _takeAll)
