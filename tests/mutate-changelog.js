@@ -9,7 +9,10 @@ const md = fs.readFileSync(process.env.JITA_CHANGELOG || path.join(__dirname, '.
 const H = 'changelog-check.js', MD = 'md';
 const ver = (/^\/\/ @version\s+(\S+)/m.exec(src) || [])[1] || '';
 const nextVer = ver.replace(/(\d+)$/, (d) => String(+d + 1));
-const firstItem = (/\n- [^\n]*/.exec(md.slice(md.indexOf('\n## ')) ) || [''])[0];
+// The newest entry's first item, with its heading in front, so the anchor is unique even when an older entry says the
+// same (Internal cleanup, no visible change.).
+const firstAt = /(\n## [^\n]*\n(?:[^\n]*\n)*?)(- [^\n]*)/.exec(md.slice(md.indexOf('\n## '))) || ['', '', ''];
+const firstItem = firstAt[0], itemHead = firstAt[1], itemText = firstAt[2];
 const muts = [
     // ---- the data has to match the release ----
     [H, 'a release without an entry', '// @version     ' + ver + '\n', '// @version     ' + nextVer + '\n'],
@@ -73,7 +76,7 @@ const muts = [
     // ---- CHANGELOG.md itself (v3.52.2) ----
     [H, 'the newest entry is not this version', '\n## ' + ver + ' (', '\n## ' + nextVer + ' (', MD],
     [H, 'an item with an unescaped Markdown character', firstItem, firstItem + ' <b>', MD],
-    [H, 'an item that starts a list of its own', firstItem, '\n- + ' + firstItem.slice(3), MD],
+    [H, 'an item that starts a list of its own', firstItem, itemHead + '- + ' + itemText.slice(2), MD],
     [H, 'a line the script would pass over', firstItem, firstItem + '\nA loose line', MD],
     [H, 'an item too long to read at a glance', firstItem, firstItem + ' ' + 'x'.repeat(240), MD],
     [H, 'an en dash in an item', firstItem, firstItem + ' a ' + String.fromCharCode(0x2013) + ' b', MD]

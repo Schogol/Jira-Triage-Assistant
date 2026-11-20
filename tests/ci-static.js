@@ -1,11 +1,11 @@
 // ci-static.js - the checks that need no harness: every script parses, git stores every text file with LF
-// endings, nothing contains an em dash, the page code declares nothing with let / const, a pull request that
-// changes JiTA.user.js raises its @version, and the changelog keeps every release: each version main has carried
-// has an entry, and no entry already out is dropped or re-dated.
+// endings, nothing contains an em dash, the page code declares nothing with let / const, JiTA.user.js passes the lint
+// rules, a pull request that changes JiTA.user.js raises its @version, and the changelog keeps every release: each
+// version main has carried has an entry, and no entry already out is dropped or re-dated.
 //
 //   node tests/ci-static.js                      everything except the checks against a base
 //   node tests/ci-static.js --base origin/main   plus the version check and the changelog against that ref
-//   node tests/ci-static.js --only es5,changelog only those checks (parse, eol, dash, es5, version, changelog)
+//   node tests/ci-static.js --only es5,changelog only those checks (parse, eol, dash, es5, lint, version, changelog)
 //
 // Run it from anywhere inside the repo. It reads the committed state through git, so stage new files first.
 // --only is for the breakage suites, which test one rule each: the parse check alone starts node once per script.
@@ -18,7 +18,7 @@ const argBase = process.argv.indexOf('--base');
 const BASE = argBase > 0 ? process.argv[argBase + 1] : null;
 const argOnly = process.argv.indexOf('--only');
 const ONLY = argOnly > 0 ? String(process.argv[argOnly + 1] || '').split(',') : null;
-const CHECKS = ['parse', 'eol', 'dash', 'es5', 'version', 'changelog'];
+const CHECKS = ['parse', 'eol', 'dash', 'es5', 'lint', 'version', 'changelog'];
 if (ONLY && (!ONLY.length || ONLY.some((k) => CHECKS.indexOf(k) < 0))) {
     console.log('--only takes a comma-separated list of: ' + CHECKS.join(', '));
     process.exit(2);
@@ -90,6 +90,34 @@ if (want('es5')) {
     const es5 = es5Breaks(fs.readFileSync(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'), 'utf8'));
     ok('the page code declares with var, not let / const (jitaWorkerBody excepted)', es5.length === 0,
         es5.slice(0, 20).join('\n          '));
+}
+
+// ---- the lint rules ----
+// ESLint with tests/eslint.config.js: rules that find bugs only (a name defined nowhere or never used, a key or case
+// written twice, code that can never run). It comes through npx, at this exact version, so the test files still need
+// nothing installed. Without npx or the network it skips, unless JITA_LINT_REQUIRED=1, which CI sets. JITA_SRC names
+// another copy to lint (mutate-lint.js).
+const ESLINT = 'eslint@10.14.0';
+function lint(file) {
+    const args = ['--yes', ESLINT, '--config', path.join(ROOT, 'tests', 'eslint.config.js'), '--format', 'json', '--no-warn-ignored', file];
+    const win = process.platform === 'win32';   // npx is npx.cmd there, which only a shell runs
+    const r = require('child_process').spawnSync(win ? 'npx.cmd' : 'npx', win ? args.map((a) => '"' + a + '"') : args,
+        { cwd: ROOT, encoding: 'utf8', shell: win, maxBuffer: 64 * 1024 * 1024 });
+    let res = null;
+    try { res = JSON.parse(r.stdout)[0]; } catch (e) { /* no report: npx or ESLint could not run */ }
+    return res ? { messages: res.messages } : { error: String(r.error || r.stderr || 'no output').trim().split('\n').slice(-3).join(' / ') };
+}
+if (want('lint')) {
+    const file = path.resolve(process.env.JITA_SRC || path.join(ROOT, 'JiTA.user.js'));
+    const r = lint(file);
+    if (r.error) {
+        if (process.env.JITA_LINT_REQUIRED === '1') { ok('JiTA.user.js passes the lint rules (' + ESLINT + ')', false, 'ESLint did not run: ' + r.error); }
+        else { console.log('  SKIP  the lint rules: ESLint did not run (' + r.error.slice(0, 120) + ')'); }
+    } else {
+        ok('JiTA.user.js passes the lint rules (' + ESLINT + ', tests/eslint.config.js)', r.messages.length === 0,
+            r.messages.slice(0, 20).map((m) => 'JiTA.user.js:' + m.line + ':' + m.column + '  ' + (m.ruleId || 'parse') + '  ' + m.message).join('\n          ') +
+            (r.messages.length > 20 ? '\n          ...and ' + (r.messages.length - 20) + ' more' : ''));
+    }
 }
 
 // ---- the version moves forward ----

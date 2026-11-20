@@ -27,7 +27,9 @@ jobs:
         with:
           node-version: 24
 
-      - name: Static checks (syntax, LF endings, em dashes, version bump, changelog history)
+      - name: Static checks (syntax, LF endings, em dashes, lint, version bump, changelog history)
+        env:
+          JITA_LINT_REQUIRED: '1'
         run: node tests/ci-static.js --base origin/main
 
       - name: Test files

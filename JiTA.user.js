@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.52.2
+// @version     3.52.3
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.52.2
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.52.3
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -5925,7 +5925,7 @@ JiTA.sync = {
     _run: function (jql, opts) {
         opts = opts || {};
         var token = opts.startToken || null;
-        var pages = 0, stored = 0, changed = 0;
+        var stored = 0, changed = 0;
         var maxUpdated = opts.startHighWater || '';
         var resumeKey = 'resumeToken' + (opts.metaPrefix || '');
         var hwKey = 'lastSyncHighWater' + (opts.metaPrefix || '');
@@ -5947,7 +5947,6 @@ JiTA.sync = {
                 // only (isClosedStatus), so a REOPENED report that kept a stale resolution is kept.
                 return JiTA.db.syncPut(recs, !!opts.pruneResolved).then(function (put) {
                     stored += recs.length;
-                    pages++;
                     if (put.changed) {
                         changed += put.changed;
                         if (opts.isEbr) {
@@ -19216,7 +19215,7 @@ JiTA.leadduty = {
         // Turn a frozen record into rows for MY list: resolve each key's summary, from the pool when we just
         // fetched it, otherwise via a single targeted search.
         _hydrate: function (ym, record, ledgerValue, shared, pool) {
-            var L = JiTA.leadduty, Q = L.qc;
+            var L = JiTA.leadduty;
             var me = (L.me() && L.me().handle) || null;
             var keys = (me && record.assign && record.assign[me]) || [];
             var have = (pool && pool.byKey) || null;
