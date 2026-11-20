@@ -116,6 +116,7 @@ const rec = (key, over) => Object.assign({
         sync: { _quiet: false }
     };
     Object.assign(R.sync, new Function('JiTA', 'return ' + obj(['    _resumable: function (rt, jql) {', '    _schema: function (jql) {', '    _run: function (jql, opts) {', '    _fullRun: function (prefix, jql) {',
+        '    _sweepFrom: function (prefix, hw) {', '    _ebrSince: function (hw) {', '    _sweepEbr: function (res) {',
         '    fullSync: function () {', '    incrementalSync: function () {', '    fullSyncEbr: function () {', '    incrementalSyncEbr: function () {']) + ';')(R));
     R.sync.FULL_JQL = full;
     R.sync.FULL_JQL_EBR = 'project = EBR AND statusCategory != Done ORDER BY updated ASC';
@@ -237,6 +238,71 @@ const rec = (key, over) => Object.assign({
     await R.sync.incrementalSyncEbr();
     ok('...and a bug report crawl an older build left half done is not carried on', calls.length === 1 && !calls[0].nextPageToken && /updated >= /.test(calls[0].jql), JSON.stringify(calls[0]));
 
+    // ================= the catch-up after a full bug report crawl (v3.53.4) =================
+    // The crawl reads open reports alone and moves the mark on with every page: a report closed since the last sync was
+    // never seen, and the next incremental sync started after it, so it stayed stored as open for good.
+    const sweepJql = /^project = EBR AND updated >= "-15m" ORDER BY updated ASC$/;
+    const syncPut0 = R.db.syncPut, prunes = [], hwSets = [];
+    R.db.syncPut = (recs, prune) => { prunes.push(!!prune); return syncPut0(recs, prune); };
+    R.db.setMeta = (k, v) => { if (k === 'lastSyncHighWaterEbr') { hwSets.push(v); } return setMeta0(k, v); };
+    R.db.countEbr = () => Promise.resolve(5);
+    meta = { lastSyncHighWaterEbr: '2026-10-01T09:00' };
+    calls.length = 0;
+    let crawlTok = null;
+    const setMetaHw = R.db.setMeta;
+    R.db.setMeta = (k, v) => { if (k === 'resumeTokenEbr' && v) { crawlTok = v; } return setMetaHw(k, v); };
+    pages = [page(['EBR-1'], 'p2'), page(['EBR-2']), page(['EBR-3'])];
+    putChanged = [0, 0, 1];
+    res = await R.sync.fullSyncEbr();
+    ok('a full bug report crawl over a filled store ends in a catch-up from the mark it started at', calls.length === 3 && sweepJql.test(calls[2].jql) && !calls[2].nextPageToken,
+        calls.map((c) => c.jql).join(' | '));
+    ok('...which deletes what closed, as an incremental sync does', JSON.stringify(prunes) === '[false,false,true]', JSON.stringify(prunes));
+    ok('...after putting the mark back there, so a catch-up that fails is carried on', JSON.stringify(hwSets.slice(-2)) === '["2026-10-01T09:00","2026-10-03T10:00"]',
+        JSON.stringify(hwSets));
+    ok('...its saved crawl position carries the mark too', crawlTok && crawlTok.from === '2026-10-01T09:00', JSON.stringify(crawlTok));
+    ok('...and what it deleted counts as a change', res.changed === 1 && meta.dataVersionEbr === 4, JSON.stringify(res));
+
+    meta = { lastSyncHighWaterEbr: '2026-10-01T09:00' };
+    R.db.countEbr = () => Promise.resolve(0);
+    calls.length = 0;
+    pages = [page(['EBR-1'])];
+    res = await R.sync.fullSyncEbr();
+    ok('a crawl into an empty store needs no catch-up', calls.length === 1 && !res.from, calls.length + ' ' + JSON.stringify(res));
+    R.db.countEbr = () => Promise.resolve(5);
+    meta = {};
+    calls.length = 0;
+    pages = [page(['EBR-1'])];
+    await R.sync.fullSyncEbr();
+    ok('...nor a crawl with no mark to start from', calls.length === 1, String(calls.length));
+
+    meta = { resumeTokenEbr: { jql: ebrFull, token: 'r1', v: 4, from: '2026-10-01T08:00' }, lastSyncHighWaterEbr: '2026-10-02T12:00' };
+    calls.length = 0; hwSets.length = 0;
+    pages = [page(['EBR-7']), page(['EBR-8'])];
+    await R.sync.fullSyncEbr();
+    ok('a crawl carried on after a reload catches up from the mark it first started at', calls.length === 2 && calls[0].nextPageToken === 'r1' && sweepJql.test(calls[1].jql) &&
+        hwSets.indexOf('2026-10-01T08:00') >= 0, calls.map((c) => c.jql).join(' | ') + ' / ' + JSON.stringify(hwSets));
+    meta = { resumeTokenEbr: { jql: ebrFull, token: 'r2', v: 4 }, lastSyncHighWaterEbr: '2026-10-02T12:00' };
+    calls.length = 0;
+    pages = [page(['EBR-7'])];
+    await R.sync.fullSyncEbr();
+    ok('...one saved by an older build, with no mark in it, has none to catch up from', calls.length === 1, String(calls.length));
+
+    meta = { lastSyncHighWaterEbr: '2026-10-01T09:00' };
+    calls.length = 0;
+    pages = [page(['EBR-1']), new Error('HTTP 502')];
+    err = null;
+    try { res = await R.sync.fullSyncEbr(); } catch (e) { err = e; }
+    ok('a catch-up that fails does not fail the crawl', !err && meta.dataVersionEbr === 4, err && err.message);
+    ok('...and leaves the mark where the next sync carries it on', meta.lastSyncHighWaterEbr === '2026-10-01T09:00', meta.lastSyncHighWaterEbr);
+
+    meta = { lastSyncHighWater: '2026-10-01T09:00' };
+    calls.length = 0;
+    pages = [page(['EDR-1'])];
+    res = await R.sync.fullSync();
+    ok('a full defect crawl needs no catch-up: it reads closed defects too', calls.length === 1 && !res.from, calls.length + ' ' + JSON.stringify(res));
+    R.db.syncPut = syncPut0;
+    R.db.setMeta = setMeta0;
+
     // ================= the upgrade refetch =================
     const tails = [];
     const M = {
@@ -260,6 +326,10 @@ const rec = (key, over) => Object.assign({
     meta = { resumeTokenEbr: { jql: R.sync.FULL_JQL_EBR, token: 'te', v: 4 } };
     await M.sync.refetchEbr();
     ok('the bug report refetch carries one on too', meta.resumeTokenEbr && meta.resumeTokenEbr.token === 'te' && JSON.stringify(tails[2]) === '[false,false,true]', JSON.stringify(tails));
+    meta = { resumeTokenEbr: 'bare-old', lastSyncHighWaterEbr: '2026-10-01T09:00' };
+    await M.sync.refetchEbr();
+    ok('...and with nothing to carry on it keeps the bug reports\' mark, for the catch-up after the crawl', meta.resumeTokenEbr === null && meta.lastSyncHighWaterEbr === '2026-10-01T09:00',
+        JSON.stringify(meta));
 
     // ================= the tail =================
     let marks = 0, embeds = 0, translates = 0, renders = 0, logreads = 0, resets = 0;

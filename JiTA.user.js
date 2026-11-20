@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.3
+// @version     3.53.4
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.3
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.4
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -6013,10 +6013,14 @@ JiTA.sync = {
                         }
                     }
                     var nextToken = data.nextPageToken || null, last = !!(data.isLast || !nextToken);
-                    // A full crawl saves where it got to, so a reload mid-crawl carries on from there.
-                    var saved = opts.resume
-                        ? JiTA.db.setMeta(resumeKey, last ? null : { jql: jql, token: nextToken, v: JiTA.sync._schema(jql) })
-                        : Promise.resolve();
+                    // A full crawl saves where it got to, so a reload mid-crawl carries on from there, and the mark its catch-up
+                    // starts from (opts.from, see _sweepFrom).
+                    var saved = Promise.resolve();
+                    if (opts.resume) {
+                        var tok = last ? null : { jql: jql, token: nextToken, v: JiTA.sync._schema(jql) };
+                        if (tok && opts.from) { tok.from = opts.from; }
+                        saved = JiTA.db.setMeta(resumeKey, tok);
+                    }
                     return saved
                         .then(function () { return JiTA.db.setMeta(hwKey, maxUpdated); })
                         .then(function () {
@@ -6049,24 +6053,60 @@ JiTA.sync = {
     // carries on from the page token it saved (_resumable). Jira refuses a token that has gone stale with a 400, and
     // the crawl then starts over from the first page. It used to start over on every load: the resume token was only
     // ever used by the next full crawl, and the upgrade check (JiTA.migrate) restarted an unfinished first build from
-    // scratch, because only a finished build carries the schema stamp.
+    // scratch, because only a finished build carries the schema stamp. Resolves _run's answer, with `from` when the
+    // bug reports need a catch-up once it is done (_sweepFrom).
     _fullRun: function (prefix, jql) {
         var resumeKey = 'resumeToken' + prefix;
         return JiTA.db.getMeta(resumeKey).then(function (rt) {
             return JiTA.db.getMeta('lastSyncHighWater' + prefix).then(function (hw) {
-                function run(token) {
-                    return JiTA.sync._run(jql, { startToken: token, startHighWater: hw || '', resume: true, metaPrefix: prefix, isEbr: prefix === 'Ebr' });
-                }
-                if (!JiTA.sync._resumable(rt, jql)) { return run(null); }
-                return run(rt.token).catch(function (e) {
-                    if (!e || e.status !== 400) { throw e; }   // anything else is a real failure
-                    var before = e.syncChanged || 0;
-                    JiTA.log('[JiTA] Jira refused the saved sync position (HTTP 400) - crawling ' + (prefix ? 'the bug reports' : 'the defects') + ' from the start');
-                    return JiTA.db.setMeta(resumeKey, null)
-                        .then(function () { return run(null); })
-                        .then(function (res) { res.changed += before; return res; });
+                var resuming = JiTA.sync._resumable(rt, jql);
+                return Promise.resolve(resuming ? (rt.from || '') : JiTA.sync._sweepFrom(prefix, hw)).then(function (from) {
+                    function run(token) {
+                        return JiTA.sync._run(jql, { startToken: token, startHighWater: hw || '', resume: true, metaPrefix: prefix, isEbr: prefix === 'Ebr', from: from });
+                    }
+                    var done = function (res) { if (from) { res.from = from; } return res; };
+                    if (!resuming) { return run(null).then(done); }
+                    return run(rt.token).catch(function (e) {
+                        if (!e || e.status !== 400) { throw e; }   // anything else is a real failure
+                        var before = e.syncChanged || 0;
+                        JiTA.log('[JiTA] Jira refused the saved sync position (HTTP 400) - crawling ' + (prefix ? 'the bug reports' : 'the defects') + ' from the start');
+                        return JiTA.db.setMeta(resumeKey, null)
+                            .then(function () { return run(null); })
+                            .then(function (res) { res.changed += before; return res; });
+                    }).then(done);
                 });
             });
+        });
+    },
+
+    // The mark a full crawl of the open bug reports has to catch up from once it is done: the high-water mark it started
+    // at, when bug reports were stored then. That crawl reads open reports alone, and each of its pages moves the mark on,
+    // past every report that closed since the last sync: it never sees them, the next incremental sync starts after them,
+    // and they stayed stored as open for good. '' for the defects, whose crawl reads closed ones as well, and for a bug
+    // report store that was empty. Resolves the mark, or '' at once.
+    _sweepFrom: function (prefix, hw) {
+        if (prefix !== 'Ebr' || !hw) { return ''; }
+        return JiTA.db.countEbr().then(function (n) { return n ? hw : ''; }, function () { return hw; });
+    },
+
+    // The bug reports updated since `hw`, those closed since deleted: an incremental sync. No open-filter on purpose, so
+    // the updated-but-now-closed reports come back for pruneResolved to delete. Null, starting nothing, when `hw` is no date.
+    _ebrSince: function (hw) {
+        var since = JiTA.util.jqlSince(hw);
+        if (!since) { return null; }
+        return JiTA.sync._run('project = EBR AND updated >= "' + since + '" ORDER BY updated ASC', { startHighWater: hw, metaPrefix: 'Ebr', pruneResolved: true, isEbr: true });
+    },
+
+    // After a full bug report crawl over a filled store (res.from, see _sweepFrom): the reports updated since the mark it
+    // started at, so those closed meanwhile leave the store. The mark goes back there first: a catch-up that fails part
+    // way is carried on by the next sync. Adds what it changed to res.changed; never rejects.
+    _sweepEbr: function (res) {
+        var from = res && res.from;
+        if (!from || !JiTA.util.jqlSince(from)) { return Promise.resolve(); }
+        return JiTA.db.setMeta('lastSyncHighWaterEbr', from).then(function () {
+            return JiTA.sync._ebrSince(from);
+        }).then(function (r) { res.changed += (r && r.changed) || 0; }, function (e) {
+            JiTA.log('[JiTA] could not catch up on the bug reports closed during the full crawl (the next sync does):', e && e.message || e);
         });
     },
 
@@ -6223,7 +6263,8 @@ JiTA.sync = {
         return JiTA.db.getMeta('resumeTokenEbr')
             .then(function (rt) {
                 if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL_EBR)) { return null; }
-                return JiTA.db.setMeta('resumeTokenEbr', null).then(function () { return JiTA.db.setMeta('lastSyncHighWaterEbr', ''); });
+                // The high-water mark stays: the full crawl catches up from it once it is done (_sweepEbr).
+                return JiTA.db.setMeta('resumeTokenEbr', null);
             })
             .then(function () { JiTA.rank._dirtyEbr = true; return JiTA.sync.fullSyncEbr(); })
             .then(function (res) {
@@ -6242,9 +6283,12 @@ JiTA.sync = {
     // ---- open bug reports (EBR) sync, for the EDR "matching reports" view ----
     // Same paging engine as the defects, but its own meta cursors (resumeTokenEbr / lastSyncHighWaterEbr)
     // and the EBR keyword index as the dirty target. The FULL build uses the open-only scope; the
-    // INCREMENTAL pass drops the open-filter and prunes (deletes) reports that have since closed.
+    // INCREMENTAL pass drops the open-filter and prunes (deletes) reports that have since closed. A full crawl over a
+    // filled store ends in one such pass (_sweepEbr), for the reports that closed while it read only open ones.
     fullSyncEbr: function () {
         return JiTA.sync._fullRun('Ebr', JiTA.sync.FULL_JQL_EBR).then(function (res) {
+            return JiTA.sync._sweepEbr(res).then(function () { return res; });
+        }).then(function (res) {
             // Full open-EBR crawl -> stamp the EBR schema version + build time (see fullSync / JiTA.migrate).
             return JiTA.db.setMeta('dataVersionEbr', JiTA.DATA_VERSION_EBR)
                 .then(function () { return JiTA.db.setMeta('dbBuiltAtEbr', new Date().toISOString()); })
@@ -6257,12 +6301,7 @@ JiTA.sync = {
             if (JiTA.sync._resumable(rt, JiTA.sync.FULL_JQL_EBR)) { return JiTA.sync.fullSyncEbr(); }   // finish an interrupted build first
             return JiTA.db.getMeta('lastSyncHighWaterEbr').then(function (hw) {
                 if (!hw) { return JiTA.sync.fullSyncEbr(); }
-                var since = JiTA.util.jqlSince(hw);
-                if (!since) { return JiTA.sync.fullSyncEbr(); }
-                // No open-filter here on purpose: we want updated-but-now-closed reports back so pruneResolved
-                // can delete them from the open-report set.
-                var jql = 'project = EBR AND updated >= "' + since + '" ORDER BY updated ASC';
-                return JiTA.sync._run(jql, { startHighWater: hw, metaPrefix: 'Ebr', pruneResolved: true, isEbr: true });
+                return JiTA.sync._ebrSince(hw) || JiTA.sync.fullSyncEbr();   // a mark that is no date: a full sync
             });
         });
     },

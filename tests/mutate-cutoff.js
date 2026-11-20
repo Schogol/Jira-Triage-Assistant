@@ -14,7 +14,7 @@ const muts = [
     [H, 'the defect sync ignores the time since the mark', 'if (!hw) { return JiTA.sync.fullSync(); }\n                var since = JiTA.util.jqlSince(hw);',
         'if (!hw) { return JiTA.sync.fullSync(); }\n                var since = JiTA.util.jqlSince(hw, 0);'],
     [H, 'a defect mark that is not a date runs a broken query', 'if (!since) { return JiTA.sync.fullSync(); }', ''],
-    [H, 'a bug report mark that is not a date runs a broken query', 'if (!since) { return JiTA.sync.fullSyncEbr(); }', '']
+    [H, 'a bug report mark that is not a date runs a broken query', '        if (!since) { return null; }\n        return JiTA.sync._run(\'project = EBR', '        return JiTA.sync._run(\'project = EBR']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
