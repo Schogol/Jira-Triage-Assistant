@@ -8,6 +8,8 @@
 //  - the sync keeps each report's labels and no longer asks for the Team field
 //  - left out of the tab's index, the worker's keyword and vector indexes, the embed pass and the translate pass; a
 //    report with the GM team is in all of them now
+//  - v3.52.1: the "N open reports" on the status line counts the reports ranked (the index's size: JiTA.rank.ebrPool),
+//    not every bug report stored, which still holds the left-out ones
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cut = (from, to, at) => {
@@ -89,9 +91,10 @@ const keys = (list) => list.map((r) => r.key).join(',');
 
     // ================= the worker =================
     const idx = new Function('allRecords', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'lgSplit', 'lgFp', 'cfg',
-        'var vecCache = null, kwCache = null, logsigCache = null;\n' +
-        cut('    var idxGen = 0, idxP = null;', '    // Cosine == dot product') +
-        '\nreturn { ensureIndexes: ensureIndexes, kw: function () { return kwCache; }, vec: function () { return vecCache; } };')(
+        'var vecCache = null, kwCache = null, logsigCache = null, K1 = 1.5, B = 0.75;\n' +
+        cut('    var idxGen = 0, idxP = null;', '    // Cosine == dot product') + cut('    function bm25Score(idx, text, excludeKey, limit, filterTerms, gate) {', '\n    }\n') + '\n    }\n' +
+        cut('    async function rankKeyword(payload) {', '\n    }\n') + '\n    }\n' +
+        '\nreturn { ensureIndexes: ensureIndexes, rankKeyword: rankKeyword, kw: function () { return kwCache; }, vec: function () { return vecCache; } };')(
         () => Promise.resolve(RECS.slice()), JiTA.util.isClosedStatus, workerLeftOut,
         (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
         (r) => (r.summary || '') + ' ' + (r.description || ''),
@@ -100,6 +103,30 @@ const keys = (list) => list.map((r) => r.key).join(',');
     ok('the worker\'s keyword index of bug reports leaves them out, keeps the GM team\'s', keys(idx.kw().ebr.docs) === 'EBR-1,EBR-4', keys(idx.kw().ebr.docs));
     ok('...and so does its vector index, though the Vanguard one was embedded before', keys(idx.vec().ebr) === 'EBR-4', keys(idx.vec().ebr));
     ok('...while a defect in the Launcher component stays among the defects', keys(idx.kw().defects.docs) === 'EDR-6' && keys(idx.vec().defects) === 'EDR-6');
+    const sized = await idx.rankKeyword({ text: '', scope: 'ebr', topN: 1 });
+    ok('an empty query tells the size of the bug report index: the reports ranked, not the five stored', sized.indexed === 2 && sized.results.length === 0, JSON.stringify(sized));
+
+    // ================= the count on the status line (v3.52.1) =================
+    let asked = [], answer = null, usable = true, localN = 2, localFails = false;
+    JiTA.worker = { usable: () => usable, call: (op, payload) => { asked.push(op + ':' + JSON.stringify(payload)); return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer); } };
+    JiTA.rank._ensureEbrIndex = () => (localFails ? Promise.reject(new Error('no db')) : Promise.resolve({ N: localN }));
+    JiTA.db = { countEbr: () => Promise.resolve(5) };
+    const pool = eval('({' + cut('    ebrPool: function () {', '\n    }\n') + '\n    }})').ebrPool;   // the last member: no comma after it
+    answer = await idx.rankKeyword({ text: '', scope: 'ebr', topN: 1 });
+    ok('the status line counts the reports the worker ranks', (await pool()) === 2 && asked.length === 1 && asked[0] === 'rankKeyword:{"text":"","scope":"ebr","topN":1}', asked.join());
+    answer = { results: [] }; localN = 3;
+    ok('...the tab\'s own index when the worker gives no size', (await pool()) === 3);
+    answer = new Error('worker gone');
+    ok('...or fails', (await pool()) === 3);
+    usable = false; asked = [];
+    ok('...and without the worker, asks it nothing', (await pool()) === 3 && asked.length === 0);
+    localFails = true;
+    ok('...failing both, every report stored', (await pool()) === 5);
+    const ui = src.slice(src.indexOf('\nJiTA.ui = {'));
+    const shown = (ui.match(/\+ ' open reports'\)/g) || []).length;
+    const fromPool = (ui.match(/\(' \+ open \+ ' open\)\.'\)|' · ' \+ open \+ ' open reports'\)/g) || []).length;
+    ok('both lists show that count, found and not found', shown === 3 && fromPool === 4 && (ui.match(/JiTA\.rank\.ebrPool\(\)/g) || []).length === 3 && !/' \+ n \+ ' open\)/.test(ui), shown + ' / ' + fromPool);
+    ok('...and so does the line after Attach slides the next report in', /function refreshCount\(\) \{\s*JiTA\.rank\.ebrPool\(\)\.then\(function \(n\) \{/.test(ui));
 
     const embedded = [];
     const ep = new Function('loadModel', 'allRecords', 'isClosedStatus', 'leftOut', 'cfg', 'effectiveText', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'dropPipe', 'self', 'setTimeout', 'clearTimeout', 'console',

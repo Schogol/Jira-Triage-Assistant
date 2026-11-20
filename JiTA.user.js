@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.52.0
+// @version     3.52.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -6416,6 +6416,20 @@ JiTA.rank = {
             for (var p = 0; p < scored.length; p++) { scored[p].pct = top > 0 ? Math.round(scored[p].score / top * 100) : 0; }
             return scored;
         });
+    },
+    // How many open bug reports the matching lists rank, for their status line: the size of the bug report index (the
+    // open reports, less the ones left out: JiTA.LEFT_OUT), not every bug report in the local copy, which keeps the left
+    // out ones. Asked as suggestEbr asks: the worker's index (an empty query answers its size alone), else the tab's own;
+    // failing both, the local copy's count.
+    ebrPool: function () {
+        function local() { return JiTA.rank._ensureEbrIndex().then(function (idx) { return idx.N; }); }
+        var p = (JiTA.worker && JiTA.worker.usable())
+            ? JiTA.worker.call('rankKeyword', { text: '', scope: 'ebr', topN: 1 }).then(function (r) {
+                if (!r || typeof r.indexed !== 'number') { throw new Error('no index size'); }
+                return r.indexed;
+            }).catch(local)
+            : local();
+        return p.catch(function () { return JiTA.db.countEbr(); });
     }
 };
 
@@ -8641,7 +8655,7 @@ JiTA.ui = {
                     if (!shown[results[i].key]) { pick = results[i]; break; }   // first ranked result not already listed
                 }
                 function refreshCount() {
-                    JiTA.db.countEbr().then(function (n) {
+                    JiTA.rank.ebrPool().then(function (n) {
                         if (JiTA.ui.currentKey !== defectKey) { return; }
                         var c = $('#jita-sd-list').children('li').length;
                         JiTA.ui.setStatus(c + ' matches · ' + out.mode + ' · ' + n + ' open reports');
@@ -9200,12 +9214,14 @@ JiTA.ui = {
                 }
                 if (!text) { JiTA.ui.setStatus('Could not read this defect’s text.'); return; }
                 // Reports whose logs hold this defect's exceptions rank higher (JiTA.repexc; their logs are read ahead by JiTA.logread).
-                return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(key)).then(function (out) {
+                // The count shown is of the reports ranked (ebrPool), not of every one stored (n).
+                return Promise.all([JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(key)), JiTA.rank.ebrPool()]).then(function (got) {
+                    var out = got[0], open = got[1];
                     if (stale()) { return; }
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
-                    if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No matching bug reports found (' + n + ' open).'); return; }   // clear a stale list if a refresh now finds nothing
-                    JiTA.ui.setStatus(results.length + ' matches · ' + out.mode + ' · ' + n + ' open reports');
+                    if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No matching bug reports found (' + open + ' open).'); return; }   // clear a stale list if a refresh now finds nothing
+                    JiTA.ui.setStatus(results.length + ' matches · ' + out.mode + ' · ' + open + ' open reports');
                     // Enrich with each report's full description for the hover preview (a handful of reads).
                     return Promise.all(results.map(function (r) {
                         return JiTA.db.getDefect(r.key).then(function (rec) {
@@ -9297,12 +9313,13 @@ JiTA.ui = {
                     return;
                 }
                 if (!text) { JiTA.ui.setStatus('Could not read this report’s text.'); return; }
-                return JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms).then(function (out) {
+                return Promise.all([JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms), JiTA.rank.ebrPool()]).then(function (got) {
+                    var out = got[0], open = got[1];   // open: the reports ranked (ebrPool), not every one stored (n)
                     if (JiTA.ui.currentKey !== key || !JiTA.ui.simReportsMode) { return; }
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
-                    if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar open reports found (' + n + ' open).'); return; }
-                    JiTA.ui.setStatus(results.length + ' similar · ' + out.mode + ' · ' + n + ' open reports');
+                    if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar open reports found (' + open + ' open).'); return; }
+                    JiTA.ui.setStatus(results.length + ' similar · ' + out.mode + ' · ' + open + ' open reports');
                     // Enrich with each report's full description for the hover preview (a handful of reads).
                     return Promise.all(results.map(function (r) {
                         return JiTA.db.getDefect(r.key).then(function (rec) {
@@ -24658,6 +24675,9 @@ JiTA.changelog = {
     RENAME_V: '2.35.0',              // the first version under the JiTA name; the list marks where the older ones start
     MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
     ENTRIES: [
+        { v: '3.52.1', date: '2026-11-18', fixes: [
+            'Matching bug reports and Similar open reports: the number of open reports on their status line counts only the reports they can list, so no longer the Vanguard and Launcher ones they leave out.'
+        ] },
         { v: '3.52.0', date: '2026-11-18', features: [
             'Matching bug reports on a defect, and Similar open reports on a bug report, leave out reports labelled Vanguard or Launcher and those in the Launcher component, as the backlog filter does.',
             'Once after updating, JiTA fetches the open bug reports again in the background, to learn their labels. Until it is done, Vanguard and Launcher-labelled reports can still show up.'
