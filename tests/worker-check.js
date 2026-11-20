@@ -48,7 +48,7 @@ global.navigator = {};
 global.gmGet = (k, d) => d;
 global.gmSet = () => {};
 global.JITA_IS_FORGE_FRAME = false; global.JITA_IS_SUBFRAME = false;
-let invalidates = 0, pages = [];
+let invalidates = 0, pages = [], tells = [];
 global.JiTA = {
     SCRIPT_VERSION: '3.38.6', FIELDS: [], PAGE_SIZE: 100, PAGE_DELAY_MS: 0, NEAR_LIMIT_DELAY_MS: 0,
     dlog() {}, sched: { tabId: 'tabF' },
@@ -61,6 +61,7 @@ require('./logstub')(JiTA);
 JiTA.sync._run = eval('({' + cut("    _run: function (jql, opts) {\n        opts = opts || {};\n        var token = opts.startToken || null;", '\n    },') + '\n    }})')._run;
 JiTA.sync._mapIssue = (i) => ({ key: i.key, updated: i.updated, status: i.status || 'Open', textHash: 'h' });
 JiTA.sync._invalidateWorker = () => { invalidates++; };
+JiTA.sync._tellChanged = (defects, ebr) => { tells.push((defects ? 'defects' : '') + (ebr ? 'ebr' : '')); };
 JiTA.sync._apiPost = () => {
     const p = pages.shift();
     if (p instanceof Error) { return Promise.reject(p); }
@@ -116,18 +117,23 @@ const realSpawn = W._spawnWorker;
     // ================= a sync run =================
     pages = [{ issues: [{ key: 'EDR-1', updated: '2026-10-03T10:00:00.000+0000' }], nextPageToken: 'p2' },
         { issues: [{ key: 'EDR-2', updated: '2026-10-03T10:05:00.000+0000' }], isLast: true }];
-    invalidates = 0;
+    invalidates = 0; tells = [];
     const res = await JiTA.sync._run('project = EDR', {});
     ok('a run that stored two pages drops the worker indexes once, at the end', res.stored === 2 && invalidates === 1, res.stored + ' stored, ' + invalidates + ' invalidates');
+    ok('...and tells the other tabs once that the defects changed', tells.join() === 'defects', tells.join());
+    pages = [{ issues: [{ key: 'EBR-1', updated: '2026-10-03T10:00:00.000+0000' }], isLast: true }];
+    tells = [];
+    await JiTA.sync._run('project = EBR', { isEbr: true });
+    ok('...a bug report run that the bug reports did', tells.join() === 'ebr', tells.join());
     pages = [{ issues: [], isLast: true }];
-    invalidates = 0;
+    invalidates = 0; tells = [];
     await JiTA.sync._run('project = EDR', {});
-    ok('a run that stored nothing leaves them alone', invalidates === 0, String(invalidates));
+    ok('a run that stored nothing leaves them alone, and tells nobody', invalidates === 0 && !tells.length, invalidates + ' ' + tells.join());
     pages = [{ issues: [{ key: 'EDR-3', updated: '2026-10-03T11:00:00.000+0000' }], nextPageToken: 'p2' }, new Error('HTTP 502')];
-    invalidates = 0;
+    invalidates = 0; tells = [];
     let runErr = null;
     try { await JiTA.sync._run('project = EDR', {}); } catch (e) { runErr = e; }
-    ok('a run that fails part way still drops them, and still fails', !!runErr && /502/.test(runErr.message) && invalidates === 1, String(invalidates));
+    ok('a run that fails part way still drops them, tells the other tabs, and still fails', !!runErr && /502/.test(runErr.message) && invalidates === 1 && tells.join() === 'defects', invalidates + ' ' + tells.join());
 
     // ================= the leader changes =================
     W._started = true;

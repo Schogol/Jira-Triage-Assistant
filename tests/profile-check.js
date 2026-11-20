@@ -26,7 +26,7 @@ global.flagOn = (n) => flags[n] !== false;
     S.top(src, 'var DX_BUGCHECK'), S.top(src, 'var DX_EXCEPTION'), S.fn(src, 'dxBugcheckName'), S.fn(src, 'dxExceptionName'), S.fn(src, 'parseWER'), S.top(src, 'var DX_APP_CRASH'),
     ['dxWerKind', 'dxCrashCode', 'dxFirst', 'dxParseDate', 'dxDateOrder', 'dxNvidiaDriver', 'dxGpus'].map((n) => S.fn(src, n))
 ).join('\n') + '\nObject.assign(global, { pdmBestGpu, pdmGpuName, convertTextToObject, parseWER, dxWerKind, dxCrashCode, dxExceptionName, dxFirst, dxDateOrder, dxGpus });');
-global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, repexc: { forget() {}, profileReady() {} } };
+global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, repexc: { forget() {}, readStored() {}, profileReady() {} } };
 Object.assign(JiTA.util, eval(S.members(src, 'JiTA.util', ['toPlainText', 'isResolved'])));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['MIN_FRAMES', 'CRASH_FRAMES', 'TRACE', 'OPEN_CUT', 'isTrace', 'isCut', '_traceKey', '_fingerprint', '_logBlocks',

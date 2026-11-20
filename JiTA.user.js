@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.9
+// @version     3.53.10
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.9
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.10
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -6041,7 +6041,8 @@ JiTA.sync = {
         // way - drop them if it changed anything. Once per run, not per page: a query in between rebuilds them, and a
         // full crawl is hundreds of pages. (embedPass drops them as well, but a sync that only changed statuses, or
         // pruned closed reports, gave it nothing to embed, and it used to return before dropping anything.)
-        function settled() { if (changed > 0) { JiTA.sync._invalidateWorker(); } }
+        // The other tabs hear it too (_tellChanged): their own indexes were built from what this run replaced.
+        function settled() { if (changed > 0) { JiTA.sync._invalidateWorker(); JiTA.sync._tellChanged(!opts.isEbr, !!opts.isEbr); } }
         return nextPage().then(function (res) { settled(); return res; }, function (e) {
             settled();
             if (e && typeof e === 'object') { e.syncChanged = changed; }   // what the failed run wrote (see _fullRun)
@@ -6332,6 +6333,26 @@ JiTA.sync = {
     _invalidateWorker: function () {
         if (!(JiTA.worker && JiTA.worker.usable())) { return Promise.resolve(); }
         return JiTA.worker.call('invalidate').then(function () {}, function () { /* ignore */ });
+    },
+
+    // The stored defects or bug reports changed in this tab: tell the other tabs (heardChanged). The shared worker is
+    // told already (_invalidateWorker), but a tab keeps indexes of its own as long as it is open: the exception signatures
+    // a parsed log is matched by, the exception boost's answers, and its keyword fallbacks. A sync runs in one tab, so
+    // these went stale in every other tab until it was reloaded, or until it ran a sync of its own that changed something.
+    CHANGED_KEY: 'jitaStoreChanged',   // GM: { at, tab, defects, ebr }
+    _tellChanged: function (defects, ebr) {
+        gmSet(JiTA.sync.CHANGED_KEY, { at: Date.now(), tab: JiTA.sched.tabId, defects: !!defects, ebr: !!ebr });
+    },
+    // Another tab changed the stored data (v from CHANGED_KEY): what this tab built from it is built again when next used,
+    // and a parsed log on screen is matched again at once.
+    heardChanged: function (v) {
+        if (!v || v.tab === JiTA.sched.tabId) { return; }
+        if (v.ebr) { JiTA.rank._dirtyEbr = true; }
+        if (!v.defects) { return; }
+        JiTA.rank._dirty = true;
+        JiTA.logsig._dirty = true;
+        JiTA.repexc.reset();
+        JiTA.logsig.rematch();
     },
 
     // An EBR just left the OPEN set locally (attached / closed) and was deleted from the DB. Make every open
@@ -12781,7 +12802,9 @@ JiTA.dupfind = {
                 if (ghostKeys.length) {
                     JiTA.db.deleteDefects(ghostKeys).then(function () {
                         JiTA.rank._dirty = true;   // the tab's defect keyword index (the worker's are dropped below)
+                        JiTA.logsig._dirty = true;   // and its exception signatures, which the ghosts were mined into too
                         if (JiTA.worker && JiTA.worker.usable()) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
+                        JiTA.sync._tellChanged(true, false);   // the other tabs' own copies
                         JiTA.log('[JiTA] dupfind: deleted ' + ghostKeys.length + ' moved-key ghost record(s): ' + ghostKeys.join(', '));
                     }).catch(function () { /* best effort - the next full rebuild drops them anyway */ });
                 }
@@ -13697,8 +13720,8 @@ JiTA.profile = {
         }
         return jobs.then(function () {
             rec.at = Date.now();
-            // The ranking's copy of this report's exceptions is out of date once this is stored (JiTA.repexc).
-            var stored = function () { JiTA.repexc.forget(issue.key); return rec; };
+            // The ranking's copy of this report's exceptions is out of date once this is stored, here and in the other tabs (JiTA.repexc).
+            var stored = function () { JiTA.repexc.readStored(issue.key); return rec; };
             return JiTA.db.setMeta(P.CACHE_PREFIX + issue.key, rec).then(stored, stored);
         });
     },
@@ -16243,33 +16266,71 @@ JiTA.repexc = {
     WAIT_MS: 1500,     // how long a list waits for a report's exceptions before it is drawn without them
     SAID_MAX: 300,     // characters of an exception's message a badge names
     MORE_SHOWN: 3,     // further matches a badge's hover names
+    EMPTY_MS: 5 * 60 * 1000,   // a cached reading with nothing to go by is looked up again after this
+    READ_KEY: 'jitaReadingsStored',   // GM: { at, tab, keys (null: too many to list), done }, the readings another tab stored
+    TELL_MS: 3000,     // the readings stored here are told to the other tabs at most this often...
+    TELL_MAX: 300,     // ...by report key, up to this many at once (more: the other tabs drop every reading they cached)
     _report: {},       // report key -> Promise of { defect key: { kind (FACTOR), hits } }, for the session (reset after a defect sync)
-    _reads: {},        // report key -> Promise of its cached reading's exception signatures ([] none, null logs not read)
+    _reads: {},        // report key -> { at, empty, p }: p a Promise of its cached reading's exception signatures ([] none, null nothing to go by)
     _msgs: {},         // report key -> { sig: its message as that report's log writes it }, so a badge can name what it is for
     _usedProf: {},     // defect key -> the profile exceptions its last ranking used, so a finished profile ranks it again
+    _untold: [],       // report keys whose readings were stored here and are not told to the other tabs yet
+    _tellT: 0,
 
     reset: function () { JiTA.repexc._report = {}; },
     // A report's reading was just written: what was cached from it is out of date.
     forget: function (key) { delete JiTA.repexc._reads[key]; delete JiTA.repexc._report[key]; delete JiTA.repexc._msgs[key]; },
+    // A report's reading was just stored in this tab: forgotten here, and told to the other tabs. Every tab caches readings
+    // for as long as it is open, and a reading pass runs in one tab (JiTA.logread), so a tab that ranked a defect's reports
+    // before the pass read them would otherwise go on raising none of them until it was reloaded.
+    readStored: function (key) {
+        var R = JiTA.repexc;
+        R.forget(key);
+        if (R._untold.indexOf(key) < 0) { R._untold.push(key); }
+        if (!R._tellT) { R._tellT = setTimeout(function () { R._tellReads(false); }, R.TELL_MS); }
+    },
+    // Tell the other tabs which readings were stored since the last time, and with `done` that a reading pass has ended.
+    _tellReads: function (done) {
+        var R = JiTA.repexc, keys = R._untold;
+        clearTimeout(R._tellT);
+        R._tellT = 0;
+        R._untold = [];
+        if (!keys.length && !done) { return; }
+        gmSet(R.READ_KEY, { at: Date.now(), tab: JiTA.sched.tabId, keys: keys.length > R.TELL_MAX ? null : keys, done: !!done });
+    },
+    // Another tab stored readings (v from READ_KEY): this tab's copies of them go, every copy when they were too many to
+    // list. A reading pass that ended redraws the defect on screen, as it does in the tab that ran it.
+    readsHeard: function (v) {
+        var R = JiTA.repexc;
+        if (!v || v.tab === JiTA.sched.tabId) { return; }
+        if (v.keys) { v.keys.forEach(R.forget); } else { R._reads = {}; R._report = {}; R._msgs = {}; }
+        if (v.done && JiTA.ui._isReportsKey(JiTA.ui.currentKey || '')) { JiTA.ui.scheduleRender(); }
+    },
     // Keep a report's messages as its log writes them, by signature (exc: [{ sig, msg }], each signature once).
     _keep: function (key, exc) {
         var m = JiTA.repexc._msgs[key] = {};
         (exc || []).forEach(function (e) { if (e && e.sig && e.msg) { m[e.sig] = e.msg; } });
     },
 
-    // A report's cached reading: the signatures of its logs' exceptions, [] when they hold none, null when its logs
-    // have not been read (no reading, or one made without them).
+    // A report's cached reading: the signatures of its logs' exceptions, [] when they hold none, null when there is
+    // nothing to go by: its logs have not been read (no reading, or one made without them), or it had no log file then (a
+    // log attached since is read by the panel's scan). Kept for the session, though one with nothing to go by, or holding
+    // no exceptions, is looked up again EMPTY_MS later: a tab on an older build does not tell this one when it reads it.
     _reading: function (key) {
-        var R = JiTA.repexc, P = JiTA.profile;
-        if (!R._reads[key]) {
-            R._reads[key] = Promise.resolve().then(function () { return JiTA.db.getMeta(P.CACHE_PREFIX + key); }).then(function (rec) {
+        var R = JiTA.repexc, P = JiTA.profile, c = R._reads[key];
+        if (c && c.empty && !(Date.now() - c.at < R.EMPTY_MS)) { c = null; }
+        if (!c) {
+            c = R._reads[key] = { at: Date.now(), empty: false, p: null };
+            c.p = Promise.resolve().then(function () { return JiTA.db.getMeta(P.CACHE_PREFIX + key); }).then(function (rec) {
                 rec = P._usable(rec);
-                if (!(rec && rec.logs)) { return null; }
+                if (!(rec && rec.logs && (rec.hasLog || (rec.exc && rec.exc.length)))) { c.empty = true; return null; }   // exceptions come from a log
                 R._keep(key, rec.exc);
-                return (rec.exc || []).map(function (e) { return e.sig; });
-            }, function () { return null; });
+                var sigs = (rec.exc || []).map(function (e) { return e.sig; });
+                if (!sigs.length) { c.empty = true; }
+                return sigs;
+            }, function () { c.empty = true; return null; });
         }
-        return R._reads[key];
+        return c.p;
     },
 
     // A bug report's own exceptions: its cached reading, else what the panel's log scan read in its logs. The scan is
@@ -16572,6 +16633,7 @@ JiTA.logread = {
                 return (whole ? JiTA.db.setMeta(LR.AT_KEY, { at: began, lv: JiTA.profile.LOG_V }).then(null, function () { /* listed again next time */ }) : Promise.resolve()).then(function () {
                     if (read) {
                         JiTA.log('[JiTA] read the logs of ' + read + ' open bug report(s)');
+                        JiTA.repexc._tellReads(true);   // and the other tabs, which redraw an open defect too
                         if (JiTA.ui._isReportsKey(JiTA.ui.currentKey || '')) { JiTA.ui.scheduleRender(); }   // Matching bug reports can rank them now
                     }
                     return read;
@@ -25853,6 +25915,18 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
                 if (!remote) { return; }
                 JiTA.sync._ebrRemoved((newV && newV.keys) || [], true);
                 try { JiTA.ui._rerenderCurrent(); } catch (e) { /* ignore */ }
+            });
+        } catch (e) { /* ignore */ }
+    }
+    // Another tab's sync changed the stored data (JiTA.sync._tellChanged), or stored log readings (JiTA.repexc.readStored):
+    // what this tab built from them is built again.
+    if (typeof GM_addValueChangeListener === 'function') {
+        try {
+            GM_addValueChangeListener(JiTA.sync.CHANGED_KEY, function (name, oldV, newV, remote) {
+                if (remote) { try { JiTA.sync.heardChanged(newV); } catch (e) { JiTA.caught('sync.heardChanged', e); } }
+            });
+            GM_addValueChangeListener(JiTA.repexc.READ_KEY, function (name, oldV, newV, remote) {
+                if (remote) { try { JiTA.repexc.readsHeard(newV); } catch (e) { JiTA.caught('repexc.readsHeard', e); } }
             });
         } catch (e) { /* ignore */ }
     }
