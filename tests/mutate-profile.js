@@ -36,9 +36,9 @@ const muts = [
     // reading a report's files
     [H, 'logs.txt is not read first', "        logs.sort(function (a, b) { return ((/^logs\\.txt$/i.test(b.filename) ? 1 : 0) - (/^logs\\.txt$/i.test(a.filename) ? 1 : 0)) || ((a.size || 0) - (b.size || 0)); });\n", ''],
     [H, 'logs over the size cap are read', 'return logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); }).slice(0, P.MAX_LOGS);', 'return logs.slice(0, P.MAX_LOGS);'],
-    [H, 'a log too big counts as read, not skipped', 'var logs = P._logFiles(att), small = P._pickLogs(att), got = {}, li = 0;', 'var logs = P._pickLogs(att), small = logs, got = {}, li = 0;'],
+    [H, 'a log too big counts as read, not skipped', 'var logs = P._logFiles(att), small = P._pickLogs(att), got = {}, li = 0, gone = 0;', 'var logs = P._pickLogs(att), small = logs, got = {}, li = 0, gone = 0;'],
     [H, 'a zip a player added is read as the igbr.zip', "return /^igbr\\.zip$/i.test(a.filename || '') && a.content;", "return /\\.zip$/i.test(a.filename || '') && a.content;"],
-    [H, 'a failed log download is never read again', 'function () { /* a log failed: all of them are read again next time */ }', 'function () { return nextLog(); }'],
+    [H, 'a failed log download is never read again', 'function (e) { if (P._gone(e)) { gone++; return nextLog(); } /* any other failure: all of them are read again next time */ }', 'function () { return nextLog(); }'],
     [H, 'a report\'s logs are downloaded side by side', '            jobs = (function nextLog() {', '            small.forEach(function (a) { P._fetchLog(a.content, hint); });\n            jobs = (function nextLog() {'],
     // logs in Windows' own code page
     [H, 'every line is read as UTF-8', '        try { legacy = new TextDecoder(P._codepage(b, bad, hint)); } catch (e3) { legacy = lax; }', '        legacy = lax;'],
@@ -74,7 +74,7 @@ const muts = [
     [H, 'a zip entry over the cap is unpacked', '            if (maxBytes && usize > maxBytes) { continue; }\n', ''],
     [H, 'every defect looked at stays in memory', '        if (keys.length > P.KEEP) { delete P._last[keys[0]]; }\n', ''],
     [H, 'a defect looked at again is the first dropped', '        delete P._last[key];\n        P._last[key] = s;', '        P._last[key] = s;'],
-    [H, 'a failed zip download is never read again', '}, function () { /* the download failed: read it again next time */ });', '}, function () { rec.zip = true; });'],
+    [H, 'a failed zip download is never read again', '                    /* any other failure: read it again next time */\n', '                    rec.zip = true;\n'],
     [H, 'a huge zip is downloaded', 'if (z.size > P.MAX_ZIP_BYTES) {', 'if (false) {'],
     [H, 'the zip is read with the switch off', '        if (zip && !rec.zip) {', '        if (!rec.zip) {'],
     [H, 'the log inside the zip is never used', "                    if (!rec.hasLog && files['logs.txt'] && rec.logs) { useLog(rec, files['logs.txt']); }\n", ''],
@@ -152,12 +152,12 @@ const muts = [
     [H, 'the defects are never looked up', 'var look = P._lookup(views, def), late = false, timer = null;', 'var look = null, late = false, timer = null;'],
     [H, 'the profile is drawn before the lookup', 'var wait = look ? Promise.race(', 'var wait = look ? Promise.resolve() || Promise.race('],
     [H, 'a slow lookup holds the profile back', 'var wait = look ? Promise.race(', 'var wait = look ? look.then(function () {}) || Promise.race('],
-    [H, 'a slow lookup is never drawn', "                    if (late) { look.then(function () { publish(!left && finished); }); }\n", ''],
+    [H, 'a slow lookup is never drawn', "                    if (late) { look.then(function () { if (P._buildN[key] === nth) { publish(!left && finished); } }); }\n", ''],
     [H, 'a report read later has its exceptions looked up nowhere', '                            .then(function () { return P._lookup([views[i]], def); })\n', ''],
     [H, 'every signature is asked about again', "if (!Object.prototype.hasOwnProperty.call(def, e.sig) && !seen[e.sig]) {", 'if (!seen[e.sig]) {'],
     [H, 'a failed lookup counts as no defect', '}, function () { /* asked again with the next lookup */ });', "}, function () { want.forEach(function (s) { def[s] = ''; }); });"],
     [H, 'a lookup that throws breaks the build', 'return Promise.resolve().then(function () { return JiTA.logsig.defectsForSigs(want); }).then(', 'return JiTA.logsig.defectsForSigs(want).then('],
-    [H, 'a defect unhidden since still hides its exception', "function hiddenOf(sig) { var d = def[sig]; return (d && JiTA.hidden.isHidden(d)) ? d : ''; }", "function hiddenOf(sig) { return def[sig] || ''; }"],
+    [H, 'a defect unhidden since still hides its exception', "function hiddenOf(sig) { var d = def[sig]; return (d && d !== key && JiTA.hidden.isHidden(d)) ? d : ''; }", "function hiddenOf(sig) { return def[sig] || ''; }"],
     // ...the card and the full profile
     [H, 'the card shows the hidden exceptions unfolded', "var $hx = $('<div class=\"jp-hidden\"></div>').toggleClass('open', !!P._hidOpen)", "var $hx = $('<div class=\"jp-hidden\"></div>').toggleClass('open', true)"],
     [H, 'the card folds them again on every redraw', "var $hx = $('<div class=\"jp-hidden\"></div>').toggleClass('open', !!P._hidOpen)", "var $hx = $('<div class=\"jp-hidden\"></div>').toggleClass('open', false)"],
@@ -175,6 +175,33 @@ const muts = [
     [H, 'a zip wanted counts as read', '&& (!zip || s.zip)) { return s; }', ') { return s; }'],
     [H, 'a read that threw stops the next', "            p = before.then(null, function () { /* it failed: this one reads for itself */ }).then(function () {", '            p = before.then(function () {'],
     [H, 'a finished read stays noted', 'var done = function () { if (P._readQ[key] === p) { delete P._readQ[key]; } };', 'var done = function () {};'],
+    // ---- the profile's lows (review 2026-11-20) ----
+    // profile-logic-2: the defect profiled is not hidden under itself
+    [H, 'the defect profiled hides its own exceptions', '(d && d !== key && JiTA.hidden.isHidden(d))', '(d && JiTA.hidden.isHidden(d))'],
+    // profile-logic-3: a late lookup of an older build
+    [H, 'a late lookup of an older build draws over a newer one', 'look.then(function () { if (P._buildN[key] === nth) { publish(!left && finished); } });', 'look.then(function () { publish(!left && finished); });'],
+    [H, 'every build counts as the first', 'var nth = P._buildN[key] = (P._buildN[key] || 0) + 1;', 'var nth = P._buildN[key] = 1;'],
+    // profile-logic-4: a reading of other logs than the report has now
+    [H, 'the profile never reads a reading of other logs again', ' || JiTA.profile._otherLogs(rec, att); },', '; },'],
+    [H, 'a reading of other logs is kept as it is', '        if (rec.logs && (!P._logsCurrent(rec, att, zip) || P._otherLogs(rec, att))) {', '        if (rec.logs && !P._logsCurrent(rec, att, zip)) {'],
+    [H, 'a reading that names no logs counts as of other logs', 'return !!rec && !!rec.logs && rec.logSig != null && rec.logSig !== JiTA.profile._logSig(att);', 'return !!rec && !!rec.logs && rec.logSig !== JiTA.profile._logSig(att);'],
+    // profile-robust-1: a reading cut short
+    [H, 'a reading cut short by the cap is not marked', '} else { into.excCut = true; }', '}'],
+    [H, 'the cut mark is not kept', ' rec.excCut = !!got.excCut; }', ' }'],
+    [H, 'the cut mark stays once the logs are taken out', '        delete r.excCut;\n', ''],
+    [H, 'a skipped log does not cut a reading short', '(rec.excCut || rec.skippedLogs)', '(rec.excCut)'],
+    [H, 'a reading cut short is an outlier', 'v.logRead === true && !v.cut && !v.exc.some(', 'v.logRead === true && !v.exc.some('],
+    // profile-robust-4: a file that is not there
+    [H, 'a log that is not there fails them all', 'if (P._gone(e)) { gone++; return nextLog(); } ', ''],
+    [H, 'a log that is not there is not said to be skipped', 'rec.skippedLogs = logs.length > small.length || gone > 0;', 'rec.skippedLogs = logs.length > small.length;'],
+    [H, 'any failure counts as not there', 'return !!e && JiTA.profile.GONE.indexOf(e.status) >= 0;', 'return !!e;'],
+    [H, 'a file gone (410) is tried again', 'GONE: [404, 410],', 'GONE: [404],'],
+    [H, 'a zip that is not there is downloaded again', '                    if (P._gone(e)) { rec.zip = true; rec.hasZip = false; rec.skippedZip = true; }   // not there: skipped for good, as one too big\n', ''],
+    [H, 'a download failure says no status', '                    err.status = r.status;\n', ''],
+    // profile-robust-5: an entry that unpacks to more than it says
+    [H, 'an entry is unpacked without the cap', 'P._inflate(data, maxBytes)', 'P._inflate(data)'],
+    [H, 'the cap is never checked while unpacking', '                if (maxBytes && size > maxBytes) {', '                if (false) {'],
+    [H, 'an entry unpacked loses its pieces', '                parts.push(r.value);\n', ''],
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

@@ -49,11 +49,11 @@ function zip(entries) {
         const nb = Buffer.from(e.name, 'utf8'), comp = e.method === 8 ? zlib.deflateRawSync(e.data) : e.data;
         const lh = Buffer.alloc(30);
         lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(e.flags || 0, 6); lh.writeUInt16LE(e.method, 8);
-        lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(e.data.length, 22); lh.writeUInt16LE(nb.length, 26);
+        lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(e.usize != null ? e.usize : e.data.length, 22); lh.writeUInt16LE(nb.length, 26);
         parts.push(lh, nb, comp);
         const ch = Buffer.alloc(46);
         ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(e.flags || 0, 8); ch.writeUInt16LE(e.method, 10);
-        ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(e.data.length, 24); ch.writeUInt16LE(nb.length, 28); ch.writeUInt32LE(off, 42);
+        ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(e.usize != null ? e.usize : e.data.length, 24); ch.writeUInt16LE(nb.length, 28); ch.writeUInt32LE(off, 42);
         central.push(ch, nb);
         off += 30 + nb.length + comp.length;
     });
@@ -180,6 +180,13 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     dec = await P._fetchLog('https://jira/att/logs.txt');
     ok('a log is fetched as bytes and read so', dec.indexOf(RU) >= 0, dec);
     files = await P.unzip(zip([{ name: 'logs.txt', data: zh, method: 8 }]), ['logs.txt'], 0, 'chi_sim');
+    // an entry that says it is small and unpacks to far more is stopped at the cap (review 2026-11-20 profile-robust-5)
+    const bomb = zip([{ name: 'dxdiag.txt', data: Buffer.alloc(3 * 1024 * 1024, 65), method: 8, usize: 1000 }, { name: 'pdmdata.txt', data: Buffer.from(PDM), method: 8 }]);
+    const unbombed = await P.unzip(bomb, ['dxdiag.txt', 'pdmdata.txt'], 1024 * 1024);
+    ok('a zip entry that unpacks to more than the cap, whatever the zip says, is stopped and left out, the others read', !('dxdiag.txt' in unbombed) && /GenuineIntel/.test(unbombed['pdmdata.txt'] || ''),
+        Object.keys(unbombed).join() + ' ' + String((unbombed['dxdiag.txt'] || '').length));
+    const fits = await P._inflate(zlib.deflateRawSync(Buffer.alloc(5000, 66)), 5000), whole = await P._inflate(zlib.deflateRawSync(Buffer.alloc(300000, 67)));
+    ok('...one that fits the cap is unpacked whole, and with no cap given any is', fits.length === 5000 && fits[4999] === 66 && whole.length === 300000 && whole[299999] === 67, fits.length + ' ' + whole.length);
     ok('...so is the log inside the zip, by the same language label', files['logs.txt'].indexOf('连接') >= 0, files['logs.txt']);
 
     let texts = [], bytes = [], hints = [];
@@ -313,6 +320,71 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     await Promise.all([rdA, rdB]);
     textAnswer = () => Promise.resolve(LOG_A);
 
+    // ================= a reading cut short, a log that is not there, a log added since (review 2026-11-20) =================
+    // More exceptions than MAX_EXC: the reading says it is cut short, and so does one with a log it did not read.
+    const lettersOf = (i) => String.fromCharCode(97 + (i % 26)) + String.fromCharCode(97 + Math.floor(i / 26));
+    const LOG_MANY = Array.from({ length: P.MAX_EXC + 2 }, (x, i) => exBlock('ValueError: case ' + lettersOf(i), ['sys/f' + lettersOf(i) + '.py(1) Run', 'sys/g.py(2) Go'])).join('\n');
+    textAnswer = (u) => Promise.resolve(/many/.test(u) ? LOG_MANY : LOG_A);
+    texts = [];
+    rec = await P._readFiles({ key: 'EBR-44', fields: { attachment: [att('logs_many.txt')] } }, null, false);
+    ok('a log with more exceptions than are kept marks its reading cut short', rec.exc.length === P.MAX_EXC && rec.excCut === true && P.view({ key: 'EBR-44', fields: {} }, rec).cut === true,
+        rec.exc.length + ' ' + rec.excCut);
+    rec = await P._readFiles({ key: 'EBR-45', fields: { attachment: [att('logs.txt')] } }, null, false);
+    ok('...one with room for them all does not', rec.exc.length === 2 && !rec.excCut && P.view({ key: 'EBR-45', fields: {} }, rec).cut === false, JSON.stringify(rec.exc.length));
+    ok('...and one that skipped a log is cut short too', P.view({ key: 'EBR-2', fields: {} }, { v: P.V, logs: true, hasLog: true, exc: [], skippedLogs: true }).cut === true);
+    ok('...while taking the logs out takes the mark with them', P._dropLogs({ logs: true, excCut: true }).excCut === undefined);
+    // a log Jira says is not there (404, 410) is skipped for good; any other failure leaves all of them for next time
+    const httpErr = (s) => Object.assign(new Error('HTTP ' + s), { status: s });
+    textAnswer = (u) => (/other_log/.test(u) ? Promise.reject(httpErr(404)) : Promise.resolve(LOG_A));
+    texts = []; bytes = [];
+    const goneOne = { key: 'EBR-46', fields: { attachment: [att('logs.txt', 2000), att('other_log.txt', 3000)] } };
+    rec = await P._readFiles(goneOne, null, false);
+    ok('a log Jira says is not there is skipped for good, and what the others say is kept', rec.logs === true && rec.hasLog === true && rec.exc.length === 2 && rec.skippedLogs === true &&
+        texts.length === 2 && P._needs(rec, false, goneOne.fields.attachment) === false, JSON.stringify({ logs: rec.logs, skipped: rec.skippedLogs, n: texts.length }));
+    textAnswer = (u) => (/other_log/.test(u) ? Promise.reject(httpErr(410)) : Promise.resolve(LOG_A));
+    rec = await P._readFiles(goneOne, null, false);
+    ok('...so is one that is gone (410)', rec.logs === true && rec.skippedLogs === true);
+    for (const s of [503, 403]) {
+        textAnswer = (u) => (/other_log/.test(u) ? Promise.reject(httpErr(s)) : Promise.resolve(LOG_A));
+        rec = await P._readFiles(goneOne, null, false);
+        ok('...while a ' + s + ' leaves all of them to be read again', rec.logs === false && !rec.hasLog, JSON.stringify({ logs: rec.logs }));
+    }
+    textAnswer = (u) => (/other_log/.test(u) ? Promise.reject(new Error('timeout')) : Promise.resolve(LOG_A));
+    rec = await P._readFiles(goneOne, null, false);
+    ok('...and so does a timeout', rec.logs === false);
+    textAnswer = () => Promise.resolve(LOG_A);
+    byteAnswer = () => Promise.reject(httpErr(404));
+    rec = await P._readFiles({ key: 'EBR-47', fields: { attachment: [att('logs.txt'), att('igbr.zip')] } }, null, true);
+    ok('an igbr.zip that is not there is skipped for good', rec.zip === true && rec.hasZip === false && rec.skippedZip === true && rec.logs === true, JSON.stringify({ zip: rec.zip, skipped: rec.skippedZip }));
+    byteAnswer = () => Promise.reject(httpErr(502));
+    rec = await P._readFiles({ key: 'EBR-48', fields: { attachment: [att('logs.txt'), att('igbr.zip')] } }, null, true);
+    ok('...one that failed otherwise is read again next time', rec.zip === false && !rec.skippedZip);
+    byteAnswer = () => Promise.resolve(zbuf);
+    // the real download says what Jira answered, so a file not there can be told from a failure that may pass
+    const realFetch = eval(S.members(src, 'JiTA.profile', ['_fetchBytes']))._fetchBytes;
+    let gmAnswer = { status: 404, response: null };
+    global.GM_xmlhttpRequest = (o) => { setImmediate(() => o.onload(gmAnswer)); };
+    const got404 = await realFetch('https://jira/att/gone.txt').then(() => null, (e) => e);
+    gmAnswer = { status: 200, response: new ArrayBuffer(3) };
+    const got200 = await realFetch('https://jira/att/here.txt');
+    delete global.GM_xmlhttpRequest;
+    ok('a download Jira refuses rejects with its status; one it answers resolves with the bytes', !!got404 && got404.status === 404 && P._gone(got404) && got200.byteLength === 3,
+        got404 && (got404.message + ' ' + got404.status));
+    // a reading made before a log was added (or replaced) is read again, the zip part kept (profile-logic-4)
+    const preLog = { v: P.V, key: 'EBR-49', logs: true, hasLog: false, exc: [], lv: P.LOG_V, logSig: '', zip: true, hasZip: true, wer: true, crashes: [] };
+    const nowAtt = [att('logs.txt'), att('igbr.zip')];
+    ok('the profile reads again a reading made before a log was added', P._needs(preLog, true, nowAtt) === true && P._needs(preLog, true, [att('igbr.zip')]) === false &&
+        P._needs(Object.assign({}, preLog, { logSig: undefined }), true, nowAtt) === false);
+    texts = []; bytes = [];
+    rec = await P._readFiles({ key: 'EBR-49', fields: { attachment: nowAtt } }, preLog, true);
+    ok('...its new log is read, the zip part kept, not downloaded again', texts.length === 1 && bytes.length === 0 && rec.hasLog === true && rec.exc.length === 2 &&
+        rec.logSig === P._logSig(nowAtt) && rec.wer === true && rec.zip === true, texts.join() + ' / ' + bytes.join());
+    const fromZip = { v: P.V, key: 'EBR-50', logs: true, hasLog: true, exc: [{ sig: 'z', msg: 'Z' }], lv: P.LOG_V, logSig: 'logs.txt:1000', zip: true, hasZip: true, wer: true, crashes: [] };
+    texts = []; bytes = []; byteAnswer = () => Promise.resolve(zLog);
+    rec = await P._readFiles({ key: 'EBR-50', fields: { attachment: [att('igbr.zip')] } }, fromZip, true);
+    ok('...and one whose log was taken off since reads the zip\'s log instead', texts.length === 0 && bytes.length === 1 && rec.logSig === '' && rec.hasLog === true, texts.join() + ' / ' + bytes.join());
+    byteAnswer = () => Promise.resolve(zbuf);
+
     // ================= one report as the profile sees it =================
     let v = P.view({ key: 'EBR-9', fields: { description: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: CI }] }] }, labels: ['Russian'], created: '2026-10-01T10:00:00.000+0000' } },
         { v: 1, logs: true, hasLog: true, exc: [{ sig: 's1', msg: 'm' }], zip: true, wer: true, crashes: [], dxHw: { gpu: 'X', gpuVendor: 'AMD' } });
@@ -369,6 +441,9 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         [stacks[0].sig, stacks[1].sig].indexOf(sm.domExc.sig) >= 0, JSON.stringify(sm.domExc));
     ok('...and the report without the message is an outlier', sm.outliers.length === 1 && sm.outliers[0].key === 'EBR-7' &&
         /its log lacks the exception 6 of 7 logs share/.test(sm.outliers[0].why.join()), JSON.stringify(sm.outliers));
+    // a reading cut short may hold the message all the same (review 2026-11-20 profile-robust-1)
+    sm = P.summarise(split.slice(0, 6).concat([Object.assign(mk('EBR-7', { exc: [Y] }), { cut: true }), mk('EBR-8', { exc: [Y] })]), null);
+    ok('a report whose reading was cut short is no outlier for lacking the message, one read whole is', sm.domExc && sm.outliers.length === 1 && sm.outliers[0].key === 'EBR-8', JSON.stringify(sm.outliers));
     views = [1, 2, 3, 4, 5].map((i) => mk('EBR-' + i, { crashRead: true, crashes: i === 5 ? [{ module: 'd3d11.dll', code: 'X' }] : [{ module: 'nvwgf2umx.dll', code: 'ACCESS_VIOLATION' }, { module: 'nvwgf2umx.dll', code: 'ACCESS_VIOLATION' }] }))
         .concat([mk('EBR-6', { crashRead: true, crashes: [] }), mk('EBR-7', { crashRead: null }), mk('EBR-8', { crashRead: false })]);
     sm = P.summarise(views, null);
@@ -805,6 +880,11 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('unhidden in the Triage Assistant, it is part of the profile again', lastOf().summary.hiddenExc.length === 0 && lastOf().summary.excGroups.some((g) => g.paths.some((p) => p.sig === H1.sig && p.count === 3)),
         JSON.stringify(lastOf().summary.excGroups));
     JiTA.hidden.keys = { 'EDR-2': true };
+    // the defect profiled is never one its own exceptions are hidden under (review 2026-11-20 profile-logic-2)
+    asked = []; hstates = [];
+    await P.build('EDR-2', (s) => { hstates.push(s); }, () => true);
+    ok('on a defect hidden itself, the exception that points at it stays in its profile', lastOf().done && lastOf().summary.hiddenExc.length === 0 && shared(lastOf().summary).indexOf(H1.sig) >= 0,
+        JSON.stringify(lastOf().summary.hiddenExc));
     asked = []; hstates = [];
     let release = null;
     answer = (sigs) => (asked.length === 1 ? new Promise((r) => { release = () => r({ [H1.sig]: 'EDR-2' }); }) : Promise.resolve({}));
@@ -818,6 +898,20 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     await flush();
     ok('...and drawn again once the lookup lands, with the hidden exception set apart', hstates.length === before + 1 && lastOf().summary.hiddenExc.length === 1 && lastOf().done,
         hstates.length + ' ' + JSON.stringify(lastOf().summary.hiddenExc));
+    // a late lookup of an earlier build lands after a newer build of the defect (review 2026-11-20 profile-logic-3)
+    asked = []; hstates = [];
+    let releaseOld = null;
+    answer = (sigs) => (asked.length === 1 ? new Promise((r) => { releaseOld = () => r({ [H1.sig]: 'EDR-2' }); }) : Promise.resolve({}));
+    const oldBuild = P.build('EDR-25', (s) => { hstates.push(s); }, () => true);
+    await new Promise((r) => setTimeout(r, 80));
+    await Promise.race([oldBuild, new Promise((r) => setTimeout(r, 1000))]);
+    const newStates = [];
+    await P.build('EDR-25', (s) => { newStates.push(s); }, () => true);
+    const newest = P._last['EDR-25'], oldDrawn = hstates.length;
+    releaseOld();
+    await flush();
+    ok('a late lookup of an earlier build draws nothing over a newer build\'s profile', newStates.length >= 1 && P._last['EDR-25'] === newest && hstates.length === oldDrawn,
+        oldDrawn + ' -> ' + hstates.length + ', newest kept: ' + (P._last['EDR-25'] === newest));
     asked = []; hstates = [];
     answer = (sigs) => (asked.length === 1 ? Promise.reject(new Error('worker down')) : Promise.resolve({ [H1.sig]: 'EDR-2' }));
     await P.build('EDR-22', (s) => { hstates.push(s); }, () => true);

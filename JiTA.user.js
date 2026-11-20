@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.14
+// @version     3.53.15
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.14
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.15
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -13328,6 +13328,7 @@ JiTA.profile = {
     MIN_N: 5,
     MARK: /Trinity platform:|Video Card:/i,
     _builds: {},                   // defect key -> the build in flight
+    _buildN: {},                   // defect key -> how many builds it has had, so a late lookup knows whether a newer one began
     _last: {},                     // defect key -> the latest state, painted at once on a redraw
     KEEP: 20,                      // defects whose latest state stays in memory; a tab stays open for days
 
@@ -13538,7 +13539,8 @@ JiTA.profile = {
     // The named entries of a zip (an ArrayBuffer), found by file name without folder, case-insensitive: resolves
     // { name: text }. A small reader on the browser's own DecompressionStream, so no library is loaded: stored and
     // deflated entries only (what zip tools write); zip64 and encrypted entries are skipped, and so is an entry that
-    // unpacks to more than `maxBytes` (when given), as the zip says before anything is unpacked. `hint` is the report's
+    // unpacks to more than `maxBytes` (when given): as the zip says before anything is unpacked, and again while it is
+    // unpacked, since a zip can say anything (_inflate). `hint` is the report's
     // client language (an OCR code), for text in Windows' own code page (see _decodeLog).
     unzip: function (buf, wanted, maxBytes, hint) {
         var P = JiTA.profile, u8 = new Uint8Array(buf), dv = new DataView(buf), want = {}, taken = {}, jobs = [], eocd = -1, i;
@@ -13547,7 +13549,7 @@ JiTA.profile = {
         if (eocd < 0) { return Promise.resolve({}); }
         var count = dv.getUint16(eocd + 10, true), p = dv.getUint32(eocd + 16, true);
         function take(base, method, data) {
-            var bytes = (method === 0) ? Promise.resolve(data) : P._inflate(data);
+            var bytes = (method === 0) ? Promise.resolve(data) : P._inflate(data, maxBytes);
             jobs.push(bytes.then(function (b) { return [base, P._decode(b, hint)]; }, function () { return null; }));
         }
         for (var n = 0; n < count && p + 46 <= u8.length; n++) {
@@ -13570,10 +13572,27 @@ JiTA.profile = {
             return out;
         });
     },
-    _inflate: function (data) {
+    // A deflated entry unpacked, read a piece at a time: past `maxBytes` (when given) it stops and rejects, so an entry
+    // that says it is small and unpacks to gigabytes (a zip a player crafted) cannot fill the tab's memory.
+    _inflate: function (data, maxBytes) {
         if (typeof DecompressionStream !== 'function') { return Promise.reject(new Error('no DecompressionStream')); }
-        var stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-        return new Response(stream).arrayBuffer().then(function (b) { return new Uint8Array(b); });
+        var reader = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader(), parts = [], size = 0;
+        return (function more() {
+            return reader.read().then(function (r) {
+                if (r.done) {
+                    var out = new Uint8Array(size), at = 0;
+                    parts.forEach(function (p) { out.set(p, at); at += p.length; });
+                    return out;
+                }
+                size += r.value.length;
+                if (maxBytes && size > maxBytes) {
+                    reader.cancel().then(null, function () { /* stopped all the same */ });
+                    throw new Error('the entry unpacks to more than ' + maxBytes + ' bytes');
+                }
+                parts.push(r.value);
+                return more();
+            });
+        })();
     },
     // Text in UTF-16 when it says so (a byte-order mark, or every other byte zero, which is how dxdiag can write it),
     // else UTF-8 with lines in Windows' own code page read as such (_decodeLog).
@@ -13632,12 +13651,21 @@ JiTA.profile = {
             if (typeof GM_xmlhttpRequest !== 'function') { reject(new Error('no GM_xmlhttpRequest')); return; }
             GM_xmlhttpRequest({
                 method: 'GET', url: url, responseType: 'arraybuffer', timeout: 120000,
-                onload: function (r) { if (r.status >= 200 && r.status < 300 && r.response) { resolve(r.response); } else { reject(new Error('HTTP ' + r.status)); } },
+                onload: function (r) {
+                    if (r.status >= 200 && r.status < 300 && r.response) { resolve(r.response); return; }
+                    var err = new Error('HTTP ' + r.status);
+                    err.status = r.status;
+                    reject(err);
+                },
                 onerror: function () { reject(new Error('network error')); },
                 ontimeout: function () { reject(new Error('timeout')); }
             });
         });
     },
+    // A download Jira answered with "not there" (GONE: the file was deleted, or never stored), which trying again will
+    // not change. Any other failure (the network, a timeout, a 5xx, a 403 from a session that ran out) may pass.
+    GONE: [404, 410],
+    _gone: function (e) { return !!e && JiTA.profile.GONE.indexOf(e.status) >= 0; },
     // A log, fetched as bytes so _decodeLog can read lines in Windows' own code page.
     _fetchLog: function (url, hint) {
         return JiTA.profile._fetchBytes(url).then(function (buf) { return JiTA.profile._decodeLog(new Uint8Array(buf), hint); });
@@ -13668,6 +13696,7 @@ JiTA.profile = {
         r.logs = false; r.hasLog = false; r.exc = []; r.build = null; r.version = null; r.skippedLogs = false;
         delete r.logSig;
         delete r.lv;
+        delete r.excCut;
         return r;
     },
 
@@ -13700,13 +13729,15 @@ JiTA.profile = {
         var P = JiTA.profile, L = JiTA.logsig, f = issue.fields || {}, att = f.attachment || [], jobs = Promise.resolve();
         var hint = (JiTA.ocr._langFromLabels(f.labels || []) || {}).code;   // the client language, for Windows' own code page
         rec = rec ? JSON.parse(JSON.stringify(rec)) : { v: P.V, key: issue.key, logs: false, zip: false };
-        // Logs read before the reader read them as it does now are read again, and a log out of the zip with the zip.
-        if (rec.logs && !P._logsCurrent(rec, att, zip)) {
+        // Logs read before the reader read them as it does now, or other logs than the report has now, are read again, and
+        // a log out of the zip with the zip.
+        if (rec.logs && (!P._logsCurrent(rec, att, zip) || P._otherLogs(rec, att))) {
             if (P._zipLog(rec, att)) { rec.zip = false; }
             P._dropLogs(rec);
         }
         // What one log says, added to `into`: the build, if none is known yet, and the exceptions and stacktraces it does
-        // not have yet, up to MAX_EXC of each, so a log full of stacktraces leaves room for its exceptions.
+        // not have yet, up to MAX_EXC of each, so a log full of stacktraces leaves room for its exceptions. One left out
+        // over the cap marks the reading cut short (excCut): it may hold more than it lists.
         function useLog(into, t) {
             var seen = {}, n = { exc: 0, st: 0 }, b = P.parseBuild(t);
             into.exc = into.exc || [];
@@ -13714,25 +13745,28 @@ JiTA.profile = {
             if (b && !into.build) { into.build = b.build; into.version = b.version; }
             P.logExceptions(t).forEach(function (e) {
                 var k = L.isTrace(e.sig) ? 'st' : 'exc';
-                if (!seen[e.sig] && n[k] < P.MAX_EXC) { seen[e.sig] = true; n[k]++; into.exc.push(e); }
+                if (seen[e.sig]) { return; }
+                if (n[k] < P.MAX_EXC) { seen[e.sig] = true; n[k]++; into.exc.push(e); } else { into.excCut = true; }
             });
             into.hasLog = true;
         }
         if (!rec.logs) {
-            var logs = P._logFiles(att), small = P._pickLogs(att), got = {}, li = 0;
+            var logs = P._logFiles(att), small = P._pickLogs(att), got = {}, li = 0, gone = 0;
             // One log at a time, each read as it arrives and then let go: a report can carry three logs of 15 MB, and
-            // three reports are read at once. What they say is kept only once every one of them was read.
+            // three reports are read at once. What they say is kept only once every one of them was read. A log Jira says
+            // is not there (_gone) is skipped for good, as one over the size cap is, so the others are not downloaded
+            // again on every visit for it.
             jobs = (function nextLog() {
                 if (li >= small.length) {
                     rec.logs = true;
                     rec.logSig = P._logSig(att);
                     rec.lv = P.LOG_V;
-                    rec.skippedLogs = logs.length > small.length;
-                    if (got.hasLog) { rec.exc = got.exc; rec.build = got.build; rec.version = got.version; rec.hasLog = true; }
+                    rec.skippedLogs = logs.length > small.length || gone > 0;
+                    if (got.hasLog) { rec.exc = got.exc; rec.build = got.build; rec.version = got.version; rec.hasLog = true; rec.excCut = !!got.excCut; }
                     return Promise.resolve();
                 }
                 return P._fetchLog(small[li++].content, hint).then(function (t) { useLog(got, String(t || '')); return nextLog(); },
-                    function () { /* a log failed: all of them are read again next time */ });
+                    function (e) { if (P._gone(e)) { gone++; return nextLog(); } /* any other failure: all of them are read again next time */ });
             })();
         }
         if (zip && !rec.zip) {
@@ -13754,7 +13788,10 @@ JiTA.profile = {
                     }
                     if (files['pdmdata.txt']) { rec.pdmHw = P.readPdm(files['pdmdata.txt']); }
                     if (!rec.hasLog && files['logs.txt'] && rec.logs) { useLog(rec, files['logs.txt']); }
-                }, function () { /* the download failed: read it again next time */ });
+                }, function (e) {
+                    if (P._gone(e)) { rec.zip = true; rec.hasZip = false; rec.skippedZip = true; }   // not there: skipped for good, as one too big
+                    /* any other failure: read it again next time */
+                });
             });
         }
         return jobs.then(function () {
@@ -13774,6 +13811,7 @@ JiTA.profile = {
             hw: hw, hwFrom: ci ? 'Computer Info' : (hw ? (rec.dxHw ? 'dxdiag.txt' : 'PDMData.txt') : null),
             build: (rec && rec.build) || null, version: (rec && rec.version) || null,
             logRead: (rec && rec.logs) ? !!rec.hasLog : null, exc: (rec && rec.exc) || [],
+            cut: !!(rec && rec.logs && (rec.excCut || rec.skippedLogs)),   // its exceptions may be more than it lists: some left out over a cap, or a log not read
             crashRead: (rec && rec.zip) ? !!rec.wer : null, crashes: (rec && rec.crashes) || []
         };
     },
@@ -13843,8 +13881,9 @@ JiTA.profile = {
                 why.push(d.label + ' ' + x + ', while ' + d.domCount + ' of ' + d.known + ' have ' + d.dominant);
             });
             // The same message through another call stack is the same error here, not an outlier, even when that stack's
-            // defect is hidden.
-            if (out.domExc && v.logRead === true && !v.exc.some(function (e) { return P._sigParts(e.sig).msg === out.domExc.key; })) {
+            // defect is hidden. A reading cut short (v.cut) that does not list it may hold it all the same, so it is no
+            // outlier either.
+            if (out.domExc && v.logRead === true && !v.cut && !v.exc.some(function (e) { return P._sigParts(e.sig).msg === out.domExc.key; })) {
                 why.push('its log lacks the ' + (JiTA.logsig.isTrace(out.domExc.sig) ? 'stacktrace ' : 'exception ') + out.domExc.count + ' of ' + out.withLog + ' logs share');
             }
             if (out.domCrash && v.crashRead === true && !v.crashes.some(function (c) { return c.module === out.domCrash.module; })) {
@@ -13911,7 +13950,10 @@ JiTA.profile = {
         } };
     },
     _usable: function (rec) { return (rec && rec.v === JiTA.profile.V) ? rec : null; },
-    _needs: function (rec, zip, att) { return !rec || !rec.logs || (zip && !rec.zip) || !JiTA.profile._logsCurrent(rec, att, zip); },
+    // A reading of logs other than the report has now (a log added or replaced since: logSig) is read again too, as the
+    // exception search reads it again (excfind._read).
+    _needs: function (rec, zip, att) { return !rec || !rec.logs || (zip && !rec.zip) || !JiTA.profile._logsCurrent(rec, att, zip) || JiTA.profile._otherLogs(rec, att); },
+    _otherLogs: function (rec, att) { return !!rec && !!rec.logs && rec.logSig != null && rec.logSig !== JiTA.profile._logSig(att); },
     // Remember a defect's latest state, dropping the defect looked at longest ago once KEEP are remembered. Defect keys
     // are not array indices, so the object keeps them in the order they were (re)inserted.
     _keep: function (key, s) {
@@ -13950,6 +13992,7 @@ JiTA.profile = {
         var P = JiTA.profile, job = P._builds[key];
         if (job) { if (onState) { job.listeners.push(onState); } return job.promise; }
         job = P._builds[key] = { listeners: onState ? [onState] : [] };
+        var nth = P._buildN[key] = (P._buildN[key] || 0) + 1;   // this defect's newest build, which a late lookup must still be
         function emit(s) { job.listeners.forEach(function (f) { try { f(s); } catch (e) { /* ignore */ } }); }
         // What counts (JiTA.excnoise) is read first, so the first state already sets apart what does not.
         job.promise = Promise.all([P._reports(key), JiTA.db.getDefect(key).then(null, function () { return null; }), JiTA.excnoise.load()]).then(function (r) {
@@ -13959,7 +14002,9 @@ JiTA.profile = {
                 var todo = [];
                 issues.forEach(function (iss, i) { if (P._needs(recs[i], zip, (iss.fields || {}).attachment)) { todo.push(i); } });
                 var next = 0, left = todo.length, finished = !todo.length, def = {};
-                function hiddenOf(sig) { var d = def[sig]; return (d && JiTA.hidden.isHidden(d)) ? d : ''; }
+                // The defect profiled is never one its own exceptions are hidden under: hidden in the Triage Assistant, it is
+                // still the defect those exceptions belong to.
+                function hiddenOf(sig) { var d = def[sig]; return (d && d !== key && JiTA.hidden.isHidden(d)) ? d : ''; }
                 function publish(done) {
                     var s = { key: key, total: got.total, views: views.slice(), summary: P.summarise(views, defect, hiddenOf, JiTA.excnoise.why), pending: left, done: done, zip: zip,
                         defect: defect, hiddenOf: hiddenOf, gen: JiTA.excnoise.gen };   // what _fresh summarises it again with
@@ -13972,7 +14017,9 @@ JiTA.profile = {
                 return wait.then(function () {
                     clearTimeout(timer);
                     publish(!left);
-                    if (late) { look.then(function () { publish(!left && finished); }); }
+                    // A lookup that lands after a newer build of this defect began draws nothing: its views are older than
+                    // what that build has drawn.
+                    if (late) { look.then(function () { if (P._buildN[key] === nth) { publish(!left && finished); } }); }
                     function lane() {
                         if (next >= todo.length || (still && !still())) { return Promise.resolve(); }
                         var i = todo[next++];

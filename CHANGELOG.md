@@ -14,6 +14,17 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.15 (2026-11-21)
+
+### Fixed issues
+
+- Defect Profile: on a defect you hid in the Triage Assistant, its own exception is no longer set apart as hidden.
+- Defect Profile: a slow lookup from an earlier visit no longer draws an older profile over the newest one when you come back to the defect.
+- Defect Profile: a bug report that got a log after it was first read is read again, so its exceptions count.
+- Defect Profile: a report whose log holds more exceptions than are kept, or that has a log that was not read, is no longer listed as an outlier for lacking the shared exception.
+- A log or igbr.zip that Jira says is not there any more is skipped, instead of every log of the report being downloaded again on each visit.
+- A file inside an igbr.zip stops unpacking at 15 MB, whatever the zip says its size is, so a crafted zip cannot fill the tab's memory.
+
 ## 3.53.14 (2026-11-21)
 
 ### Fixed issues

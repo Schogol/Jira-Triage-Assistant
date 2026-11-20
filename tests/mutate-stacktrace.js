@@ -100,14 +100,14 @@ const muts = [
     [T, 'a re-match keeps a stacktrace\'s old hover', '/^(Known (exception|stacktrace)|Possibly related \\(same [^)]*\\)) · /', '/^(Known exception|Possibly related \\(same crash site\\)) · /'],
     // ---- the profile's readings ----
     [T, 'a reading made now does not say how', '                    rec.lv = P.LOG_V;\n', ''],
-    [T, 'a reading from before stacktraces never read again', '        if (rec.logs && !P._logsCurrent(rec, att, zip)) {', '        if (false) {'],
+    [T, 'a reading from before stacktraces never read again', '        if (rec.logs && (!P._logsCurrent(rec, att, zip) || P._otherLogs(rec, att))) {', '        if (false) {'],
     [T, 'a log out of the zip read again without the zip', '            if (P._zipLog(rec, att)) { rec.zip = false; }\n', ''],
     [T, 'a log out of the zip lost where the zip is not read', '(rec.lv === JiTA.profile.LOG_V || (!zip && JiTA.profile._zipLog(rec, att)))', '(rec.lv === JiTA.profile.LOG_V)'],
     [T, 'a log out of the zip never read again', '(rec.lv === JiTA.profile.LOG_V || (!zip && JiTA.profile._zipLog(rec, att)))', '(rec.lv === JiTA.profile.LOG_V || JiTA.profile._zipLog(rec, att))'],
     [T, 'every log taken for one out of the zip', 'return !!(rec && rec.hasLog) && !JiTA.profile._logFiles(att).length; },', 'return !!(rec && rec.hasLog); },'],
-    [T, 'the profile never reads a reading from before stacktraces again', ' || !JiTA.profile._logsCurrent(rec, att, zip); },', '; },'],
+    [T, 'the profile never reads a reading from before stacktraces again', ' || !JiTA.profile._logsCurrent(rec, att, zip) || JiTA.profile._otherLogs(rec, att); },', ' || JiTA.profile._otherLogs(rec, att); },'],
     [T, 'the profile\'s build blind to a report\'s own logs', 'if (P._needs(recs[i], zip, (iss.fields || {}).attachment)) {', 'if (P._needs(recs[i], zip)) {'],
-    [T, 'stacktraces crowd out exceptions', 'if (!seen[e.sig] && n[k] < P.MAX_EXC) {', 'if (!seen[e.sig] && into.exc.length < P.MAX_EXC) {'],
+    [T, 'stacktraces crowd out exceptions', 'if (n[k] < P.MAX_EXC) { seen[e.sig] = true; n[k]++; into.exc.push(e); }', 'if (into.exc.length < P.MAX_EXC) { seen[e.sig] = true; n[k]++; into.exc.push(e); }'],
     [T, 'a first log\'s stacktraces counted as exceptions', "into.exc.forEach(function (e) { seen[e.sig] = true; n[L.isTrace(e.sig) ? 'st' : 'exc']++; });", 'into.exc.forEach(function (e) { seen[e.sig] = true; n.exc++; });'],
     // ---- the profile's words ----
     [T, 'a stacktrace\'s hover says nothing of its kind', "out.push((st ? 'Stacktrace: ' : '') + (msg ||", "out.push(('') + (msg ||"],
