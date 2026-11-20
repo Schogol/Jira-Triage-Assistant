@@ -36,6 +36,7 @@ let timers = [];
 global.setTimeout = (fn) => { timers.push(fn); return timers.length; };
 global.clearTimeout = () => {};
 const runTimers = () => { while (timers.length) { timers.shift()(); } };
+global.JiTA = require('./logstub')({});   // these functions log through JiTA.log and JiTA.warn
 console.log = ((log) => (...a) => { if (a[0] !== '[JiTA] log parser failed:') { log(...a); } })(console.log);
 console.warn = () => {};
 

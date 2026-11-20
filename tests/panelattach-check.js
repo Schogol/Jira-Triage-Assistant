@@ -49,6 +49,7 @@ global.gmSet = (k, v) => { store[k] = v; };
 global.confirm = () => true;
 global.SELECTORS = { SUMMARY_HEADING: 'h1', DESC_CONTAINER: 'desc' };
 global.JiTA = { HOST: 'https://jira', MAX_RETRIES: 2, link: {}, ui: {}, db: {}, sync: {}, util: {} };
+require('./logstub')(JiTA);
 const log0 = console.log;
 
 (async () => {

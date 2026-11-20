@@ -25,7 +25,7 @@ const muts = [
     [H, 'a partial translation is not said', '                if (missed.length) {', '                if (false) {'],
     [H, 'the wrong parts are named', "var missed = ['title', 'description', 'steps to reproduce'].filter(function (n, i) { return tr[i] === null; });",
         "var missed = ['title', 'description', 'steps to reproduce'].filter(function (n, i) { return tr[i] !== null; });"],
-    [H, 'a failing translation is not caught', "            .catch(function (e) { console.log('[JiTA] translate failed:', e); });", '            .catch(function () {});'],
+    [H, 'a failing translation is not caught', "            .catch(function (e) { JiTA.log('[JiTA] translate failed:', e); });", '            .catch(function () {});'],
     // ---- launcher, wiki pills, scrollbar ----
     [H, 'a held key is a double tap', ' || e.repeat || e.isComposing) { return; }', ') { return; }'],
     [H, 'an input method\'s keys are a double tap', ' || e.repeat || e.isComposing) { return; }', ' || e.repeat) { return; }'],

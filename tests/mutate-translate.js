@@ -5,7 +5,7 @@ const { execSync } = require('child_process');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const H = 'translate-check.js';
 const muts = [
-    [H, 'a failed write ends the lane', "                            return JiTA.db.updateRecord(item.key, apply).then(null, function (e) {\n                                console.log('[JiTA] translate: could not store ' + item.key + ':', e && e.message || e);\n                            }).then(function () {",
+    [H, 'a failed write ends the lane', "                            return JiTA.db.updateRecord(item.key, apply).then(null, function (e) {\n                                JiTA.log('[JiTA] translate: could not store ' + item.key + ':', e && e.message || e);\n                            }).then(function () {",
         '                            return JiTA.db.updateRecord(item.key, apply).then(function () {'],
     [H, 'a refusing endpoint is retried forever', '                                if (backoff >= JiTA.translate.BACKOFF_MAX && ++capped >= JiTA.translate.MAX_CAPPED) {', '                                if (false) {'],
     [H, 'the lane gives up before the cap', '                                if (backoff >= JiTA.translate.BACKOFF_MAX && ++capped >= JiTA.translate.MAX_CAPPED) {', '                                if (++capped >= JiTA.translate.MAX_CAPPED) {'],

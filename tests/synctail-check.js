@@ -105,7 +105,7 @@ const rec = (key, over) => Object.assign({
     let pages = [], meta = {}, status = [], invalidates = 0, putChanged = [];
     const R = {
         FIELDS: [], PAGE_SIZE: 100, PAGE_DELAY_MS: 0, NEAR_LIMIT_DELAY_MS: 0, DATA_VERSION: 3, DATA_VERSION_EBR: 4,
-        rank: {}, logsig: {},
+        rank: {}, logsig: {}, log() {},
         ui: { setStatus: (s) => { status.push(s); } },
         util: { delay: () => Promise.resolve() },
         db: {
@@ -240,7 +240,7 @@ const rec = (key, over) => Object.assign({
     // ================= the upgrade refetch =================
     const tails = [];
     const M = {
-        DATA_VERSION: 3, rank: {},
+        DATA_VERSION: 3, rank: {}, log() {},
         ui: { toast() {} },
         db: R.db,
         sync: { running: false, FULL_JQL: full, FULL_JQL_EBR: R.sync.FULL_JQL_EBR, _resumable: R.sync._resumable,
@@ -285,7 +285,7 @@ const rec = (key, over) => Object.assign({
 
     // ================= the paths into it =================
     const P = {
-        rank: {}, ui: { toast() {}, setStatus() {}, currentKey: null },
+        rank: {}, log() {}, ui: { toast() {}, setStatus() {}, currentKey: null },
         db: { clearEbr: () => Promise.resolve(), clearDefects: () => Promise.resolve(), setMeta: () => Promise.resolve(), countEbr: () => Promise.resolve(3), countDefectsOnly: () => Promise.resolve(5) },
         sync: { running: false, fullSyncEbr: () => Promise.resolve({ changed: 0 }), fullSync: () => Promise.resolve({ changed: 0 }),
             incrementalSync: () => Promise.resolve({ changed: 0 }), incrementalSyncEbr: () => Promise.resolve({ changed: 5 }) }

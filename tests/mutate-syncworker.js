@@ -17,7 +17,7 @@ const muts = [
     [A, 'closing the tab keeps the lease', "        try { window.addEventListener('pagehide', function () { JiTA.sched._releaseLease(); }); } catch (e) { /* ignore */ }\n", ''],
     [A, 'any tab\'s lease is freed', 'if (l && l.tabId === JiTA.sched.tabId) { gmSet(JiTA.sched.LEASE_KEY, null); }', 'if (l) { gmSet(JiTA.sched.LEASE_KEY, null); }'],
     [A, 'a completed auto-sync says nothing', '            return true;\n        }).catch(function (e) {', '        }).catch(function (e) {'],
-    [A, 'a failed auto-sync says nothing', "            console.log('[JiTA] auto-sync error:', e && e.message || e);\n            return false;\n", "            console.log('[JiTA] auto-sync error:', e && e.message || e);\n"],
+    [A, 'a failed auto-sync says nothing', "            JiTA.log('[JiTA] auto-sync error:', e && e.message || e);\n            return false;\n", "            JiTA.log('[JiTA] auto-sync error:', e && e.message || e);\n"],
     [A, 'an auto-sync that did not run is not told apart', 'if (JiTA.sync.running) { return Promise.resolve(null); }', 'if (JiTA.sync.running) { return Promise.resolve(); }'],
     // ---- a removed report ----
     [A, 'the other tabs hear before the worker has dropped its indexes', "JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });", "JiTA.sync._invalidateWorker(); gmSet('sdEbrRemoved', note);"],
@@ -37,7 +37,7 @@ const muts = [
     [W, 'giving up does not make the worker unusable', 'return JiTA.worker._started && (!JiTA.worker._gaveUp || JiTA.worker._otherLeader);', 'return JiTA.worker._started;'],
     [W, 'a new leader is not noticed', '            JiTA.worker._otherLeader = true;   // somebody leads again, even if this tab gave up\n', ''],
     [W, 'a spawn does not record its backend', "            JiTA.worker._spawnedGpu = !!(gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false));   // what _src() builds it for\n", ''],
-    [W, 'a backend switch never rebuilds the worker', "' in another tab - rebuilding the worker'); }\n        JiTA.worker._spawnWorker();", "' in another tab - rebuilding the worker'); }"],
+    [W, 'a backend switch never rebuilds the worker', "' in another tab - rebuilding the worker');\n        JiTA.worker._spawnWorker();", "' in another tab - rebuilding the worker');"],
     [W, 'a follower rebuilds a worker it does not have', 'if (!JiTA.worker._isLeader || !JiTA.worker._worker || JiTA.worker._spawnedGpu === gpu) { return; }', 'if (!JiTA.worker._worker || JiTA.worker._spawnedGpu === gpu) { return; }'],
     [W, 'the same backend rebuilds the worker', 'if (!JiTA.worker._isLeader || !JiTA.worker._worker || JiTA.worker._spawnedGpu === gpu) { return; }', 'if (!JiTA.worker._isLeader || !JiTA.worker._worker) { return; }'],
     [W, 'this tab\'s own switch rebuilds it too', 'if (remote) { JiTA.worker._backendChanged(); }', 'JiTA.worker._backendChanged();'],

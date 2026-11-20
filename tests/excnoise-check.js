@@ -33,6 +33,7 @@ global.JITA_NO_JIRA_UI = false;
 let meta = {}, metaReads = 0, metaSets = [];
 global.JiTA = { HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {},
     hidden: { isHidden: () => false }, worker: { usable: () => false }, rank: {} };
+require('./logstub')(JiTA);
 JiTA.db.getMeta = (k) => { metaReads++; return Promise.resolve(Object.prototype.hasOwnProperty.call(meta, k) ? meta[k] : null); };
 JiTA.db.setMeta = (k, v) => { meta[k] = v; metaSets.push(k); return Promise.resolve(); };
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isResolved: function (status, resolution) {') + member('    isClosedStatus: function (status) {') + member('    hash: function (str) {') +

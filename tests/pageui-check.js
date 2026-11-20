@@ -169,6 +169,7 @@ global.jitaConvertButtonState = () => {};
 global.jitaConvertClick = () => {};
 global.jitaCloseClick = () => {};   // the Close button's handler once v3.38.16 is in
 global.flagOn = () => false;
+require('./logstub')(JiTA);   // the translate handler logs its failure through JiTA.log
 (0, eval)(cut('\nfunction addButtons(', '\n};\n') + '\n};');
 addButtons();
 const log0 = console.log;
@@ -212,7 +213,7 @@ const translate = async (r) => { results = r.slice(); alerts = []; logs = []; co
     let observed = null, yields = 0, cb = null;
     global.window = { indexedDB: {} };
     global.setTimeout = () => {};
-    global.JiTA = { changelog: { start() {} } };
+    global.JiTA = { changelog: { start() {} }, census: { start() {} } };
     global.jitaArmLeadDuties = () => {};
     global.jitaPillsYieldSoon = () => { yields++; };
     global.MutationObserver = function (fn) { cb = fn; this.observe = (target, opts) => { observed = { target: target, opts: opts }; }; };
