@@ -271,11 +271,12 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const X = { sig: 'sx', msg: 'KeyError: 2' }, Y = { sig: 'sy', msg: 'ValueError' };
     let views = [mk('EBR-1', { exc: [X], build: 3561000, created: '2026-09-01T00:00:00.000+0000' }), mk('EBR-2', { exc: [X, Y] }), mk('EBR-3', { exc: [X] }), mk('EBR-4', { exc: [X], build: 3569502 }),
         mk('EBR-5', { exc: [Y], vendor: 'NVIDIA', created: '2026-10-02T00:00:00.000+0000' }), mk('EBR-6', { logRead: null, hw: null, lang: 'Russian' })];
+    const shared = (s) => s.excGroups.reduce((a, g) => a.concat(g.paths.map((p) => p.sig)), []);   // every stack of the shared messages
     let sm = P.summarise(views, { status: 'Closed', resolution: 'Fixed', resolutiondate: '2026-09-15T00:00:00.000+0000' });
     let gv = sm.dims.filter((d) => d.id === 'gpuVendor')[0];
     ok('a value 4 of 5 reports share is the pattern; a report with no hardware counts for neither side', gv.dominant === 'AMD' && gv.domCount === 4 && gv.known === 5, JSON.stringify(gv));
     ok('the exception 4 of 5 read logs share is the pattern; one in only 2 is still listed', sm.domExc && sm.domExc.sig === 'sx' && sm.domExc.count === 4 && sm.withLog === 5 &&
-        sm.exc.length === 2 && sm.exc[1].sig === 'sy', JSON.stringify(sm.exc));
+        sm.excGroups.length === 2 && sm.excGroups[1].paths[0].sig === 'sy', JSON.stringify(sm.excGroups));
     const o5 = sm.outliers.filter((o) => o.key === 'EBR-5')[0];
     ok('the report that differs is an outlier, with why: its GPU and its log', sm.outliers.length === 1 && o5 && o5.why.length === 2 && o5.why[0] === 'GPU vendor NVIDIA, while 4 of 5 have AMD' &&
         /lacks the exception 4 of 5 logs share/.test(o5.why[1]), JSON.stringify(sm.outliers));
@@ -298,6 +299,18 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         sm.excGroups[0].msg === 'RuntimeError: failed' && sm.excGroups[0].paths.map((p) => p.count).join() === '4,1', JSON.stringify(sm.excGroups));
     ok('...and the report that reaches it the other way is no outlier', sm.domExc && sm.domExc.sig === A1.sig && sm.outliers.length === 0, JSON.stringify(sm.outliers));
     const groupedState = { key: 'EDR-8', total: 5, views: grouped, summary: sm, pending: 0, done: true, zip: true };
+    // A message reached through many call stacks is one pattern, however its reports split between them (review 2026-11-20).
+    const stacks = [1, 2, 3, 4, 5, 6].map((i) => ({ sig: "keyerror: 'shipid'|caller" + i + '.py:go>helper.py:get', msg: "KeyError: 'shipID'" }));
+    const spread = stacks.map((e, i) => mk('EBR-' + (i + 1), { exc: [e] }));
+    sm = P.summarise(spread, null);
+    ok('one message reached through six stacks, one log each, is the pattern, 6 of 6', sm.domExc && sm.domExc.count === 6 && sm.domExc.msg === "KeyError: 'shipID'" &&
+        sm.excGroups.length === 1 && sm.excGroups[0].paths.length === 6, JSON.stringify(sm.domExc));
+    const split = [1, 2, 3, 4, 5, 6].map((i) => mk('EBR-' + i, { exc: [i <= 3 ? stacks[0] : stacks[1]] })).concat([mk('EBR-7', { exc: [Y] })]);
+    sm = P.summarise(split, null);
+    ok('...split 3 and 3 between two stacks, the pattern all the same, 6 of 7, with one of its stacks for the hover', sm.domExc && sm.domExc.count === 6 && sm.withLog === 7 &&
+        [stacks[0].sig, stacks[1].sig].indexOf(sm.domExc.sig) >= 0, JSON.stringify(sm.domExc));
+    ok('...and the report without the message is an outlier', sm.outliers.length === 1 && sm.outliers[0].key === 'EBR-7' &&
+        /its log lacks the exception 6 of 7 logs share/.test(sm.outliers[0].why.join()), JSON.stringify(sm.outliers));
     views = [1, 2, 3, 4, 5].map((i) => mk('EBR-' + i, { crashRead: true, crashes: i === 5 ? [{ module: 'd3d11.dll', code: 'X' }] : [{ module: 'nvwgf2umx.dll', code: 'ACCESS_VIOLATION' }, { module: 'nvwgf2umx.dll', code: 'ACCESS_VIOLATION' }] }))
         .concat([mk('EBR-6', { crashRead: true, crashes: [] }), mk('EBR-7', { crashRead: null }), mk('EBR-8', { crashRead: false })]);
     sm = P.summarise(views, null);
@@ -439,6 +452,12 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const traced = [1, 2].map((i) => mk('EBR-' + i, { exc: [TS] }));
     P._paint('EDR-7', { key: 'EDR-7', total: 2, views: traced, summary: P.summarise(traced, null), pending: 0, done: true, zip: true });
     ok('a shared stacktrace is shown as one', /Stacktrace in 2\/2 logs: Possible service deadlock detected!/.test(box.text()) && !/Exception in/.test(box.text()), box.text());
+    made = [];
+    P._paint('EDR-7', { key: 'EDR-7', total: 6, views: spread, summary: P.summarise(spread, null), pending: 0, done: true, zip: true });
+    ok('the card shows a message reached through six stacks as one highlighted chip, 6 of 6', made.some((m) => m.hasClass('strong') && /^Exception in 6\/6 logs: KeyError: 'shipID'$/.test(m.e.txt)) &&
+        !/No shared pattern/.test(box.text()), box.text());
+    const chipTip = made.filter((m) => m.hasClass('jp-chip') && /^Exception in 6\/6/.test(m.e.txt)).map((m) => m.e.attrs.title).join();
+    ok('...its hover gives every stack', (chipTip.match(/helper\.py: get/g) || []).length === 6, chipTip);
     P._paint('EDR-7', { key: 'EDR-7', total: 0, views: [], summary: P.summarise([], null), pending: 0, done: true });
     ok('a defect without reports shows no section', !box.hasClass('has-hits') && box.text() === '');
     JiTA.ui.currentKey = 'EDR-1';
@@ -519,6 +538,8 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const gtxt = overlay.text();
     ok('...a message reached two ways is one row, with its call stacks below it', (gtxt.match(/RuntimeError: failed/g) || []).length === 1 && /5\/5RuntimeError: failed/.test(gtxt) &&
         /4\/5via a\.py:run > b\.py:<module> > …/.test(gtxt) && /1\/5via z\.py:other > …/.test(gtxt), gtxt.slice(0, 400));
+    ok('...the pattern\'s row is marked, not one of its stacks', made.filter((m) => m.hasClass('jpv-count') && m.hasClass('dom') && /\/5$/.test(m.e.txt)).map((m) => m.e.txt).join() === '5/5',
+        made.filter((m) => m.hasClass('jpv-count') && m.hasClass('dom')).map((m) => m.e.txt).join());
     const hover = (txt) => made.filter((m) => m.hasClass('jpv-count') && m.e.txt === txt).map((m) => m.e.attrs.title).join(' | ');
     ok('hovering a count lists the reports behind it: the message, and each call stack', hover('5/5') === '5 reports: EBR-1, EBR-2, EBR-3, EBR-4, EBR-5' &&
         hover('4/5') === '4 reports: EBR-1, EBR-2, EBR-3, EBR-4' && hover('1/5') === '1 report: EBR-5', hover('5/5') + ' || ' + hover('4/5') + ' || ' + hover('1/5'));
@@ -579,7 +600,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         sm.outliers[0].key === 'EBR-6', JSON.stringify(sm.outliers));
     sm = P.summarise(hv, null, hidOf);
     ok('an exception whose defect is hidden in the Triage Assistant is no pattern and makes no outlier', !sm.domExc && sm.outliers.length === 0 &&
-        sm.exc.map((e) => e.sig).join() === V1.sig, JSON.stringify(sm.exc) + ' ' + JSON.stringify(sm.outliers));
+        shared(sm).join() === V1.sig, JSON.stringify(sm.excGroups) + ' ' + JSON.stringify(sm.outliers));
     ok('...it is not among the shared exceptions either', sm.excGroups.length === 1 && sm.excGroups[0].msg === 'ValueError: bad' && sm.excGroups[0].count === 2, JSON.stringify(sm.excGroups));
     ok('...it is listed apart, with the reports that have it and the defect it is hidden under', sm.hiddenExc.length === 1 && sm.hiddenExc[0].msg === 'KeyError: 2' &&
         sm.hiddenExc[0].count === 5 && sm.hiddenExc[0].keys.join() === 'EBR-1,EBR-2,EBR-3,EBR-4,EBR-5' && sm.hiddenExc[0].defects.join() === 'EDR-2' &&
@@ -637,7 +658,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const U1 = { sig: "usererror: user error, msg=throttlegeneric, dict={'remainingtime': #}|uilib.py:checkaccelerators>evecommands.py:cmdstopship", msg: 'UserError: User error, msg=ThrottleGeneric' };
     const nv = [1, 2, 3, 4, 5, 6].map((i) => mk('EBR-' + i, { exc: i <= 2 ? [U1, V1] : [U1] }));
     const ns = { key: 'EDR-7', total: 6, views: nv, summary: P.summarise(nv, null, () => '', N.why), defect: null, hiddenOf: () => '', gen: N.gen, pending: 0, done: true, zip: true };
-    ok('(the UserError all 6 logs share is no pattern; the ValueError 2 share is all that counts)', !ns.summary.domExc && ns.summary.exc.length === 1 && ns.summary.exc[0].sig === V1.sig &&
+    ok('(the UserError all 6 logs share is no pattern; the ValueError 2 share is all that counts)', !ns.summary.domExc && shared(ns.summary).join() === V1.sig &&
         ns.summary.leftExc.length === 1 && ns.summary.leftExc[0].why === 'user', JSON.stringify(ns.summary.leftExc));
     made = [];
     P._leftOpen = false;
@@ -718,13 +739,13 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         asked[0].join() === [H1.sig, V1.sig].join() && hstates[0].summary.hiddenExc.length === 1 && hstates[0].summary.hiddenExc[0].count === 2,
         JSON.stringify(asked) + ' ' + JSON.stringify(hstates[0] && hstates[0].summary.hiddenExc));
     ok('...a report read later has only its new exceptions looked up', asked[1].join() === K9.sig, JSON.stringify(asked[1]));
-    ok('...and the finished profile sets the hidden one apart', lastOf().done && lastOf().summary.hiddenExc[0].count === 3 && lastOf().summary.exc.every((e) => e.sig !== H1.sig),
-        JSON.stringify(lastOf().summary.exc));
+    ok('...and the finished profile sets the hidden one apart', lastOf().done && lastOf().summary.hiddenExc[0].count === 3 && shared(lastOf().summary).indexOf(H1.sig) < 0,
+        JSON.stringify(lastOf().summary.excGroups));
     JiTA.hidden.keys = {};
     hstates = [];
     await P.build('EDR-20', (s) => { hstates.push(s); }, () => true);
-    ok('unhidden in the Triage Assistant, it is part of the profile again', lastOf().summary.hiddenExc.length === 0 && lastOf().summary.exc.some((e) => e.sig === H1.sig && e.count === 3),
-        JSON.stringify(lastOf().summary.exc));
+    ok('unhidden in the Triage Assistant, it is part of the profile again', lastOf().summary.hiddenExc.length === 0 && lastOf().summary.excGroups.some((g) => g.paths.some((p) => p.sig === H1.sig && p.count === 3)),
+        JSON.stringify(lastOf().summary.excGroups));
     JiTA.hidden.keys = { 'EDR-2': true };
     asked = []; hstates = [];
     let release = null;
@@ -733,7 +754,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     await new Promise((r) => setTimeout(r, 80));
     await Promise.race([lateBuild, new Promise((r) => setTimeout(r, 1000))]);   // a build that waits for the lookup would hold here
     ok('a slow lookup does not hold the profile back: it is drawn without it at first', hstates.length >= 1 && hstates[0].summary.hiddenExc.length === 0 &&
-        hstates[0].summary.exc.some((e) => e.sig === H1.sig), JSON.stringify(hstates.map((s) => s.summary.hiddenExc.length)));
+        shared(hstates[0].summary).indexOf(H1.sig) >= 0, JSON.stringify(hstates.map((s) => s.summary.hiddenExc.length)));
     const before = hstates.length;
     release();
     await flush();
@@ -757,7 +778,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     hstates = [];
     await P.build('EDR-24', (s) => { hstates.push(s); }, () => true);
     ok('a profile built sets apart a UserError its reports share', lastOf().done && lastOf().summary.leftExc.length === 1 && lastOf().summary.leftExc[0].why === 'user' &&
-        lastOf().summary.leftExc[0].count === 3 && lastOf().summary.exc.every((e) => e.sig !== U1.sig) && lastOf().summary.excGroups[0].msg === 'ValueError: bad',
+        lastOf().summary.leftExc[0].count === 3 && shared(lastOf().summary).indexOf(U1.sig) < 0 && lastOf().summary.excGroups[0].msg === 'ValueError: bad',
         JSON.stringify(lastOf().summary.leftExc));
     ok('...and keeps what summarising it again takes', lastOf().gen === N.gen && typeof lastOf().hiddenOf === 'function' && Array.isArray(lastOf().views) && 'defect' in lastOf());
 

@@ -360,15 +360,16 @@ const fO2 = fpOf(TIMEOUT([B + 'packages/other/place.py(1) Elsewhere', B + 'packa
     // ================= the defect profile =================
     const view = (key, exc) => ({ key, created: '2026-10-01T00:00:00.000+0000', lang: 'English', hw: null, logRead: true, exc, crashRead: null, crashes: [] });
     const vs = [1, 2, 3, 4, 5, 6].map((i) => view('EBR-' + i, [{ sig: fT.sig, msg: 'UserError: ThrottleGeneric' }, { sig: fO.sig, msg: 'TimeoutException' }].concat(i <= 2 ? [{ sig: fK.sig, msg: 'KeyError: 7' }] : [])));
+    const shared = (s) => s.excGroups.reduce((a, g) => a.concat(g.paths.map((p) => p.sig)), []);   // every stack of the shared messages
     let sm = P.summarise(vs, null, null, N.why);
-    ok('the profile leaves what does not count out of the pattern: the KeyError 2 logs share is all it counts', sm.exc.length === 1 && sm.exc[0].sig === fK.sig && !sm.domExc &&
-        sm.excGroups.length === 1 && sm.excGroups[0].paths[0].sig === fK.sig, J(sm.exc.map((e) => e.sig.slice(0, 30))));
+    ok('the profile leaves what does not count out of the pattern: the KeyError 2 logs share is all it counts', !sm.domExc &&
+        sm.excGroups.length === 1 && sm.excGroups[0].paths[0].sig === fK.sig, J(sm.excGroups.map((g) => g.key.slice(0, 30))));
     ok('...and lists the rest apart, each group with why', sm.leftExc.length === 2 && J(sm.leftExc.map((g) => g.why).sort()) === J(['ignored', 'user']) && sm.leftExc.every((g) => g.count === 6),
         J(sm.leftExc.map((g) => [g.key.slice(0, 20), g.why])));
     sm = P.summarise(vs, null, (sig) => (sig === fT.sig ? 'EDR-9' : ''), N.why);
     ok('...one whose defect is hidden as hidden, not twice', sm.hiddenExc.length === 1 && sm.hiddenExc[0].defects[0] === 'EDR-9' && sm.leftExc.length === 1 && sm.leftExc[0].why === 'ignored');
     sm = P.summarise(vs, null);
-    ok('...and without the rules, as before: everything counts', sm.exc.length === 3 && sm.leftExc.length === 0 && !!sm.domExc);
+    ok('...and without the rules, as before: everything counts', sm.excGroups.length === 3 && sm.leftExc.length === 0 && !!sm.domExc);
     // A state kept from a build is summarised again once what counts changes; one made by hand is not.
     const kept = { key: 'EDR-5', total: 6, views: vs, summary: P.summarise(vs, null, null, N.why), defect: null, hiddenOf: () => '', gen: N.gen };
     const before = kept.summary;
@@ -376,7 +377,7 @@ const fO2 = fpOf(TIMEOUT([B + 'packages/other/place.py(1) Elsewhere', B + 'packa
     ok('a kept state summarised by the rules as they stand is drawn as it is', kept.summary === before);
     N.unignore(N.keyOf(fO.sig));
     P._fresh(kept);
-    ok('...and summarised again once what counts changed: the TimeoutException counts again', kept.summary !== before && kept.gen === N.gen && kept.summary.exc.some((e) => e.sig === fO.sig) &&
+    ok('...and summarised again once what counts changed: the TimeoutException counts again', kept.summary !== before && kept.gen === N.gen && shared(kept.summary).indexOf(fO.sig) >= 0 &&
         J(kept.summary.leftExc.map((g) => g.why)) === J(['user']));
     const byHand = { key: 'EDR-6', total: 1, views: vs, summary: { mark: 1 } };
     P._fresh(byHand);

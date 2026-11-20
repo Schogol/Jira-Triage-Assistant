@@ -90,7 +90,7 @@ const muts = [
     [N, 'a defect does not wait for the count', '        return JiTA.excnoise.load().then(function () {\n            prof.forEach(add);', '        return Promise.resolve().then(function () {\n            prof.forEach(add);', REPEXC],
     [N, 'a candidate raises by any exception', 'var sigs = (reads[i] || []).filter(JiTA.excnoise.counts), kind = R._kind(sigs, ds);', 'var sigs = reads[i] || [], kind = R._kind(sigs, ds);', REPEXC],
     // ---- the defect profile ----
-    [N, 'the profile\'s pattern takes what does not count', '                if (left(e.sig)) { return; }\n', ''],
+    // (the profile's pattern taking what does not count: the pattern is the shared groups' first, so the next breakage covers it)
     [PC, 'the shared list holds what does not count', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig) && !left(e.sig); });', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig); });'],
     [N, 'a hidden one also listed as not counted', 'out.leftExc = P._groups(withLog, function (e) { return !hid(e.sig) && !!left(e.sig); });', 'out.leftExc = P._groups(withLog, function (e) { return !!left(e.sig); });'],
     [PC, 'what does not count listed nowhere', 'out.leftExc = P._groups(withLog, function (e) { return !hid(e.sig) && !!left(e.sig); });', 'out.leftExc = [];'],
