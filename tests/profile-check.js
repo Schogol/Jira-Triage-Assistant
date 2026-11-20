@@ -255,6 +255,64 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         macView.logRead === true && macView.build === 3569502 && macView.crashRead === false, JSON.stringify(macView));
     byteAnswer = () => Promise.resolve(zbuf);
 
+    // ================= one read of a report at a time (review 2026-11-20 checklist-robust-3) =================
+    // The Defect checklist reads a report again on every change of its defect, while the profile or the background reader
+    // may be reading it: a read that starts while another is under way waits for it, and starts from what that one stored.
+    let held = [];
+    const slowLogs = () => new Promise((r) => { held.push(() => r(LOG_A)); });
+    const letGo = async () => { await flush(); while (held.length) { held.shift()(); await flush(); } };
+    const twin = { key: 'EBR-40', fields: { attachment: [att('logs.txt'), att('igbr.zip')] } };
+    textAnswer = slowLogs; texts = []; bytes = []; metaSets = []; delete meta['rp:EBR-40'];
+    let rdA = P._readFiles(twin, null, true), rdB = P._readFiles(twin, null, false);
+    await flush();
+    ok('a second read of a report while one is under way waits for it', texts.length === 1 && held.length === 1, texts.join());
+    await letGo();
+    let both = await Promise.all([rdA, rdB]);
+    ok('...and finds what it wants in what the first stored: the log is downloaded once, nothing is stored twice', texts.length === 1 && bytes.length === 1 &&
+        metaSets.filter((k) => k === 'rp:EBR-40').length === 1 && both[1].logs && both[1].hasLog && both[1].exc.length === 2, texts.join() + ' / ' + metaSets.join());
+    ok('...so a read that skips the zip leaves the zip part the other stored', both[1].zip === true && meta['rp:EBR-40'].zip === true && meta['rp:EBR-40'].wer === true, JSON.stringify(meta['rp:EBR-40']).slice(0, 160));
+    ok('...and once both are done, none is under way', !P._readQ['EBR-40']);
+    // the other way round: the read without the zip first, the profile's after it
+    texts = []; bytes = []; metaSets = []; delete meta['rp:EBR-40'];
+    rdA = P._readFiles(twin, null, false); rdB = P._readFiles(twin, null, true);
+    await letGo();
+    both = await Promise.all([rdA, rdB]);
+    ok('a read that wants the zip too, after one that skips it, downloads only the zip', texts.length === 1 && bytes.length === 1 && both[1].zip === true && both[1].hasLog &&
+        meta['rp:EBR-40'].zip === true && meta['rp:EBR-40'].logs === true, texts.join() + ' / ' + bytes.join());
+    // the first one's log download fails: the second reads for itself
+    let failOnce = true;
+    textAnswer = () => (failOnce ? (failOnce = false, Promise.reject(new Error('timeout'))) : Promise.resolve(LOG_A));
+    texts = []; bytes = []; delete meta['rp:EBR-40'];
+    rdA = P._readFiles(twin, null, false); rdB = P._readFiles(twin, null, false);
+    both = await Promise.all([rdA, rdB]);
+    ok('...one after a read whose log failed reads the log itself', texts.length === 2 && both[0].logs === false && both[1].logs === true && meta['rp:EBR-40'].logs === true, texts.join());
+    // the first one throws (a log the reader chokes on): the second reads for itself all the same
+    const realLogExc = P.logExceptions;
+    let chokeOnce = true;
+    P.logExceptions = function () { if (chokeOnce) { chokeOnce = false; throw new Error('bad block'); } return realLogExc.apply(P, arguments); };
+    texts = []; delete meta['rp:EBR-40'];
+    rdA = P._readFiles(twin, null, false); rdB = P._readFiles(twin, null, false);
+    const firstEnd = await rdA.then(() => 'read', () => 'threw'), afterIt = await rdB;
+    P.logExceptions = realLogExc;
+    ok('...and one after a read that threw reads for itself all the same', firstEnd === 'threw' && afterIt.logs === true && afterIt.hasLog === true && texts.length === 2, firstEnd + ' ' + texts.join());
+    // a log added since the first one began: the second reads the logs again
+    textAnswer = slowLogs; texts = []; bytes = []; delete meta['rp:EBR-40'];
+    const grown = { key: 'EBR-40', fields: { attachment: twin.fields.attachment.concat([att('late_log.txt', 10)]) } };
+    rdA = P._readFiles(twin, null, false); rdB = P._readFiles(grown, null, false);
+    await letGo();
+    both = await Promise.all([rdA, rdB]);
+    ok('...and one for a log added meanwhile reads the logs again, the new one with them', texts.length === 3 && texts.slice(1).sort().join() === 'https://jira/att/late_log.txt,https://jira/att/logs.txt' &&
+        both[1].logSig === P._logSig(grown.fields.attachment), texts.join());
+    // two reports are read side by side as before
+    texts = []; held = []; delete meta['rp:EBR-41']; delete meta['rp:EBR-42'];
+    rdA = P._readFiles({ key: 'EBR-41', fields: { attachment: [att('logs.txt')] } }, null, false);
+    rdB = P._readFiles({ key: 'EBR-42', fields: { attachment: [att('logs.txt')] } }, null, false);
+    await flush();
+    ok('two reports are still read side by side', texts.length === 2, texts.join());
+    await letGo();
+    await Promise.all([rdA, rdB]);
+    textAnswer = () => Promise.resolve(LOG_A);
+
     // ================= one report as the profile sees it =================
     let v = P.view({ key: 'EBR-9', fields: { description: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: CI }] }] }, labels: ['Russian'], created: '2026-10-01T10:00:00.000+0000' } },
         { v: 1, logs: true, hasLog: true, exc: [{ sig: 's1', msg: 'm' }], zip: true, wer: true, crashes: [], dxHw: { gpu: 'X', gpuVendor: 'AMD' } });

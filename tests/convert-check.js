@@ -199,6 +199,36 @@ ok('...with one, the automation is called', invoked === 1);
     await convertOf('EBR-21', null);
     gets[1].d.reject({ status: 403 });
     ok('...a take Jira refuses converts all the same', rules.length === 1 && rules[0].id === '921');
+    // a conversion that does not start gives a report it took back (review 2026-11-20 checklist-logic-5)
+    await convertOf('EBR-26', null);
+    gets[1].d.resolve();   // taken
+    let errs = errors;
+    rules[0].d.resolve({ invocations: [{ status: 'FAILURE' }] });
+    const back = gets[2];
+    ok('a report taken to convert it is given back to nobody when the automation does not start', !!back && back.type === 'PUT' && /\/rest\/api\/3\/issue\/EBR-26\/assignee$/.test(back.url) &&
+        back.data === JSON.stringify({ accountId: null }) && !!back.headers && back.headers['X-Atlassian-Token'] === 'no-check' && errors === errs, back && JSON.stringify({ url: back.url, data: back.data }));
+    back.d.resolve();
+    ok('...and then the failure is said, and the report freed', errors === errs + 1 && /did not start \(FAILURE\)/.test(lastErr || '') && !jitaConvertBusy['EBR-26'], String(lastErr));
+    await convertOf('EBR-27', null);
+    gets[1].d.resolve();
+    errs = errors;
+    rules[0].d.reject({ status: 500 });
+    ok('...so is one whose automation call fails', gets.length === 3 && gets[2].type === 'PUT' && gets[2].data === JSON.stringify({ accountId: null }) && errors === errs, gets.length + ' requests');
+    gets[2].d.reject({ status: 403 });
+    ok('...and a give-back Jira refuses still says the failure and frees the report', errors === errs + 1 && !jitaConvertBusy['EBR-27']);
+    await convertOf('EBR-28', null);
+    gets[1].d.reject({ status: 403 });   // not taken
+    errs = errors;
+    rules[0].d.resolve({ invocations: [{ status: 'FAILURE' }] });
+    ok('a report the take did not get is given back nothing', gets.length === 2 && errors === errs + 1, gets.length + ' requests');
+    await convertOf('EBR-29', { accountId: 'acc-x' });
+    errs = errors;
+    rules[0].d.resolve({ invocations: [{ status: 'FAILURE' }] });
+    ok('...nor one someone had already', gets.length === 1 && errors === errs + 1, gets.length + ' requests');
+    await convertOf('EBR-30', null);
+    gets[1].d.resolve();
+    rules[0].d.resolve({ invocations: [{ status: 'SUCCESS' }] });
+    ok('...and one that converts keeps the one who converts it', gets.length === 2, gets.length + ' requests');
     await convertOf('EBR-22', { accountId: 'acc-x' });
     ok('a report someone has is converted as it is', gets.length === 1 && rules.length === 1);
     checklistOn = false;

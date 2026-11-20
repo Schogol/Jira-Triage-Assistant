@@ -170,7 +170,7 @@ const defect = (key, msg, frames) => ({ key: key, project: 'EDR', status: 'Open'
     ok('a sync run that changed something tells the other tabs once it ends, which dataset it was', run.indexOf('function settled() { if (changed > 0) { JiTA.sync._invalidateWorker(); JiTA.sync._tellChanged(!opts.isEbr, !!opts.isEbr); } }') >= 0);
     const dup = S.top(src, 'JiTA.dupfind');
     ok('the duplicate finder\'s ghost delete marks this tab\'s signatures and tells the other tabs', /JiTA\.logsig\._dirty = true;[^\n]*\n[^\n]*\n\s*JiTA\.sync\._tellChanged\(true, false\);/.test(dup));
-    const rf = S.member(src, 'JiTA.profile', '_readFiles');
+    const rf = S.member(src, 'JiTA.profile', '_readNow');
     ok('a stored reading is told', /var stored = function \(\) \{ JiTA\.repexc\.readStored\(issue\.key\); return rec; \};/.test(rf));
     const pass = S.member(src, 'JiTA.logread', 'pass');
     ok('a pass that read something tells the other tabs it ended', /if \(read\) \{\n\s*JiTA\.log\([^\n]*\n\s*JiTA\.repexc\._tellReads\(true\);/.test(pass));

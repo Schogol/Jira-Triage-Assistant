@@ -14,6 +14,19 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.14 (2026-11-21)
+
+### Fixed issues
+
+- Defect checklist: a card that could not tell who is looking at the defect tries again on your next click, or when you come back to the tab, instead of staying away until you reload.
+- Defect checklist: moving on to another defect while a change to the last one was still saving no longer leaves the new one without its card.
+- Defect checklist: Unassigned is refused only in the defect's own Assignee field, no longer in the Create dialog, a filter or another issue's picker.
+- Defect checklist: two marks clicked one right after the other are both kept.
+- Defect checklist: Hand to FC is no longer undone when the next read of the bug report's logs, which could not be read before, finds an item open again.
+- Defect checklist: Add looks for the exception only in the logs the reader reads (logs.txt first, none over 15 MB), so a huge log attached first no longer stalls it.
+- A bug report read by the Defect checklist and the Defect Profile at the same time downloads its logs once, and the profile's DxDiag reading is no longer lost.
+- Convert to Defect: a report taken to convert it goes back to unassigned when the conversion does not start.
+
 ## 3.53.13 (2026-11-20)
 
 ### Fixed issues
