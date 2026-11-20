@@ -9,7 +9,7 @@ const TARGET = "                [R._txt('Target'), R._txt('every page read by ' 
 const muts = [
     // ---- a failed read ----
     [P, 'an unreadable QC ledger is published', "                if (r[1] === QC_UNREAD) { return { skipped: 'the quality control ledger could not be read, so the page was left as it was' }; }\n", ''],
-    [P, 'a failed QC read looks like an empty one', 'L.ledger.read(L.QC_LEDGER_KEY).catch(function () { return QC_UNREAD; }),', 'L.ledger.read(L.QC_LEDGER_KEY).catch(function () { return { value: null }; }),'],
+    [P, 'a failed QC read looks like an empty one', 'L.qcl.read([L._prevYm()]).catch(function () { return QC_UNREAD; }),', 'L.qcl.read([L._prevYm()]).catch(function () { return { value: null }; }),'],
     [P, 'an unreadable page tree is published', "                if (!pool) { return { skipped: 'the page tree could not be read, so the page was left as it was' }; }\n", ''],
     // ---- the scan time ----
     [P, 'the scan time is hashed again', TARGET,

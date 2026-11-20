@@ -10,9 +10,9 @@ const muts = [
         "L.qc.markChecked(it.key, 'ok', ym, null, it), L.qc.localKey(ym), it.key, function () { U._qc = null; U._loadQc(false); });"],
     [H, 'Mark reviewed reloads the wiki list', 'U._act(this, L.wiki.markReviewed(id, ym), L.wiki.localKey(ym), id, settle);',
         'U._act(this, L.wiki.markReviewed(id, ym), L.wiki.localKey(ym), id, function () { U._loadWiki(false); });'],
-    [H, 'Resolve reloads the follow-ups', 'var v = U._adopt(U._qc, r);', 'var v = null;'],
+    [H, 'Resolve reloads the follow-ups', 'var v = U._qcAdopt(U._qc, r);', 'var v = null;'],
     // ---- folding the write into the tab's state ----
-    [H, 'a QC write is not folded into the state', 'if (v) { res.ledgerValue = v; }', 'if (false) { res.ledgerValue = v; }'],
+    [H, 'a QC write is not folded into the state', 'lv.done[ym] = (r.value.done && r.value.done[ym]) || {};', ''],
     [H, 'a wiki write is not folded into the state', 'if (res && v) { res.ledgerValue = v; }', 'if (false) { res.ledgerValue = v; }'],
     [H, 'a QC verdict the ledger dropped stays', 'if (d && d.by === me) { res.done[key] = d; } else { delete res.done[key]; }', 'if (d && d.by === me) { res.done[key] = d; }'],
     [H, 'a QC mark is not kept locally', 'if (marked === true) { local[key] = new Date().toISOString(); } else if (marked === false) { delete local[key]; }',
@@ -79,7 +79,8 @@ const muts = [
     [H, 'a failed Follow-ups load paints into another tab', "if (!U.isOpen() || U._tab !== 'flags') { return; }", 'if (!U.isOpen()) { return; }'],
     // ---- the follow-ups redraw ----
     [H, 'Resolve loses the scroll position', 'U._renderFlags(v);\n        U._body().scrollTop(top);', 'U._renderFlags(v);'],
-    [H, 'Resolve leaves the QC tab offering Undo on a resolved flag', 'if (v && U._qc) { U._qc.ledgerValue = v; }', ''],
+    [H, 'Resolve leaves the QC tab offering Undo on a resolved flag', 'var v = U._qcAdopt(U._qc, r);', 'var v = U._qcAdopt(null, r);'],
+    [H, 'a resolve is not folded into the QC tab', 'lv.flags = r.value.flags || {}; took = true; }', 'took = true; }'],
     [H, 'a Resolve on another tab leaves the count stale', 'if (v) { U._tabCount(v); }', ''],
     [H, 'a dry-run Resolve reloads into another tab', "if (U._tab !== 'flags') { return; }\n        if (!v) { U._loadFlags(false); return; }",
         "if (!v) { U._loadFlags(false); return; }\n        if (U._tab !== 'flags') { return; }"],

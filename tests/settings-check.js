@@ -18,11 +18,12 @@ const flush = async () => { for (let i = 0; i < 8; i++) { await new Promise((r) 
 
 (async () => {
     // ================= Clear ledger =================
-    let store = {}, metas = [], deletes = [], refuse = null, schedGone = false;
+    let store = {}, metas = [], deletes = [], refuse = null, schedGone = false, listFails = false;
     global.gmSet = (k, v) => { store[k] = v; };
     global.confirm = () => true;
     const L = {
-        LEDGER_KEY: 'wiki', QC_LEDGER_KEY: 'qc', SNOOZE_KEY: 'snooze', ledgerPage: () => '123',
+        LEDGER_KEY: 'wiki', QC_LEDGER_KEY: 'qc', QC_FLAGS_KEY: 'qcf', SNOOZE_KEY: 'snooze', ledgerPage: () => '123',
+        qcl: { keys: () => (listFails ? Promise.reject(new Error('HTTP 500')) : Promise.resolve(['qc', 'qc_2026_08', 'qc_2026_09', 'qcf'])) },   // the QC ledger's parts (v3.53.5)
         _ym: () => '2026-10', _prevYm: () => '2026-09',
         wiki: { localKey: (m) => 'wikiMirror:' + m }, qc: { localKey: (m) => 'qcMirror:' + m, _actorCache: { x: 1 } },
         pool: { CACHE_KEY: 'pool' }, ui: { _wiki: 1, _qc: 1, _qcWarm: 1 }
@@ -45,10 +46,16 @@ const flush = async () => { for (let i = 0; i < 8; i++) { await new Promise((r) 
     wipe();
     ok('Clear ledger disables its button while it works (control)', disabled === true && /Clearing the ledgers/.test(status));
     await flush();
-    ok('a refused delete of one ledger is said for that ledger, and the other is still deleted', /qc: HTTP 403/.test(status) && /wiki: deleted/.test(status) && deletes.join() === 'wiki-id,qc-id', status);
+    ok('a refused delete of one ledger is said for that ledger, and the others are still deleted', /qc: HTTP 403/.test(status) && /wiki: deleted/.test(status) &&
+        deletes.join() === 'wiki-id,qc-id,qc_2026_08-id,qc_2026_09-id,qcf-id', status + ' / ' + deletes.join());
     ok('...the button comes back', disabled === false);
     ok('...and the mirror and the scheduler are reset all the same', metas.length === 3 && store.last === 0 && store.failTs === 0 && L.qc._actorCache && Object.keys(L.qc._actorCache).length === 0,
         metas.join() + ' / ' + JSON.stringify(store));
+    status = ''; disabled = null; deletes = []; refuse = null; listFails = true;
+    wipe();
+    await flush();
+    ok('the QC ledger parts: a listing that fails still deletes the two whose keys are known', deletes.join() === 'wiki-id,qc-id,qcf-id' && disabled === false, deletes.join());
+    listFails = false;
     status = ''; disabled = null; store = {}; metas = []; deletes = []; refuse = null; schedGone = true;
     wipe();
     await flush();

@@ -11,7 +11,7 @@ let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
 
 const store = {};
-let puts = 0, reads = 0, readImpl;
+let puts = 0, reads = 0, readImpl, qclAsked = null;
 const L = {
     LEDGER_KEY: 'wikiLedger', QC_LEDGER_KEY: 'qcLedger', _syncing: null,
     _ym: () => '2026-09', _prevYm: () => '2026-08',
@@ -20,7 +20,8 @@ const L = {
         get: (k) => Promise.resolve(store[k] ? JSON.parse(JSON.stringify(store[k])) : null),
         put: (k, v) => { puts++; store[k] = JSON.parse(JSON.stringify(v)); return Promise.resolve(); }
     },
-    ledger: { read: (k) => { reads++; return readImpl(k); } }
+    ledger: { read: (k) => { reads++; return readImpl(k); } },
+    qcl: { read: (yms) => { reads++; qclAsked = yms; return readImpl(L.QC_LEDGER_KEY); } }   // the QC ledger in parts (v3.53.5)
 };
 global.JiTA = { leadduty: L };
 Object.assign(L, eval('({' + src.slice(s0, e0) + '})'));
@@ -48,6 +49,7 @@ function reset(wiki, qc) {
     ok('...only for what the ledger actually has', !store[Q].done['EDR-2']);
     ok('it reports that something changed', changed === true);
     ok('it reads each ledger once', reads === 2, String(reads));
+    ok('the QC half is read for its month only', JSON.stringify(qclAsked) === '["2026-08"]', JSON.stringify(qclAsked));
 
     // Only items this mirror lists: another Lead's pages must not leak into my count.
     reset({ ym: '2026-09', pageIds: ['101'], done: {}, pending: [] }, null);

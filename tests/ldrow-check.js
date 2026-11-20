@@ -155,6 +155,11 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     // ================= Quality control =================
     const qym = L._prevYm(), QK = L.QC_LEDGER_KEY, QL = L.qc.localKey(qym);
     props[QK] = { id: QK, key: QK, version: 1, value: { v: 1, months: {}, done: {}, flags: {} } };
+    // The QC ledger as one value (v3.53.5: it is kept in parts, qcl), its done and flags the very objects stored in the
+    // month's verdicts property and the follow-ups property.
+    const QM = L.qcl.monthKey(qym), QFK = L.QC_FLAGS_KEY;
+    const qpart = (key, blank) => { if (!props[key]) { props[key] = { id: key, key: key, version: 1, value: blank }; } return props[key].value; };
+    const qv = () => ({ v: 1, months: props[QK].value.months, done: { [qym]: qpart(QM, { v: 1, ym: qym, verdicts: {} }).verdicts }, flags: qpart(QFK, { v: 1, flags: {} }).flags });
     U._qc = {
         ym: qym, shared: true, done: {},
         record: { quota: 10, poolSize: 40, roster: L.ROSTER(), minDefects: 0, poolDefects: 5 },
@@ -183,7 +188,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     let n2 = rowOf('EDR-2');
     ok('...the clicked row alone is redrawn', n2 !== r2);
     ok('...as checked, with Undo in place of Checked and Flag', isDone(n2) && tick(n2) === '✓' && !!button(n2, 'Undo') && !button(n2, 'Checked') && !button(n2, 'Flag'));
-    ok('...the verdict reached the ledger and the mirror', props[QK].value.done[qym]['EDR-2'].verdict === 'ok' && props[QK].value.done[qym]['EDR-2'].by === 'schogol' && !!mirror(QL).done['EDR-2']);
+    ok('...the verdict reached the ledger and the mirror', qv().done[qym]['EDR-2'].verdict === 'ok' && qv().done[qym]['EDR-2'].by === 'schogol' && !!mirror(QL).done['EDR-2']);
     ok('...the status line counts it', status.textContent === '1 of 4 checked' + tail, status.textContent);
     ok('...the hover card of the replaced row is closed', hides === 1, String(hides));
     ok('...and the chip is repainted from the mirror just updated', mounts === 1, String(mounts));
@@ -195,7 +200,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('Flag asks for its reason in the note dialog, kept under the issue key', asked && asked.title === 'Flag EBR-1' && asked.save === 'Flag' && asked.draft === 'EBR-1', JSON.stringify(asked));
     ok('Flag: the row shows the flag', isDone(n1) && has(n1, 'flagged') && tick(n1) === '!' && !!button(n1, 'Undo'));
     ok('...taken from the ledger the write left behind, reason and all', U._qc.done['EBR-1'] && U._qc.done['EBR-1'].verdict === 'flag' &&
-        props[QK].value.flags['EBR-1'].note === 'wrong component');
+        qv().flags['EBR-1'].note === 'wrong component');
     ok('...the card open over another row stays up', hides === 1, String(hides));
     ok('...the Follow-ups count follows the flag', counts[counts.length - 1] === 1, String(counts));
     ok('...still no reload, and the other rows untouched', body.emptied === base && loads.qc === 0 && rows()[2] === r3 && rows()[3] === r4);
@@ -204,7 +209,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     await click(n2, 'Undo');
     const u2 = rowOf('EDR-2');
     ok('Undo: the row is back to undone, with Checked and Flag', !isDone(u2) && tick(u2) === '' && !!button(u2, 'Checked') && !!button(u2, 'Flag'));
-    ok('...the verdict left the ledger, the mirror and this tab\'s copy', !props[QK].value.done[qym]['EDR-2'] && !mirror(QL).done['EDR-2'] && !U._qcLocalDone['EDR-2'] && !U._qc.done['EDR-2']);
+    ok('...the verdict left the ledger, the mirror and this tab\'s copy', !qv().done[qym]['EDR-2'] && !mirror(QL).done['EDR-2'] && !U._qcLocalDone['EDR-2'] && !U._qc.done['EDR-2']);
     ok('...the status line says so first', status.textContent === 'EDR-2 is back on your list · 1 of 4 checked' + tail, status.textContent);
     ok('...the chip is repainted after the Undo too', mounts === 3, String(mounts));
     ok('...and the other rows stay put', rows()[0] === n1 && rows()[2] === r3 && body.emptied === base);
@@ -222,14 +227,14 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     await click(rowOf('EDR-2'), 'Undo');
     n2 = rowOf('EDR-2');
     ok('an Undo that cannot reach Confluence leaves the row checked, and says so', isDone(n2) && !!button(n2, 'Undo') && status.textContent.indexOf('Could not undo on Confluence - HTTP 503') === 0, status.textContent);
-    ok('...keeping the mark in the mirror and in this tab', !!mirror(QL).done['EDR-2'] && !!U._qcLocalDone['EDR-2'] && !!props[QK].value.done[qym]['EDR-2']);
+    ok('...keeping the mark in the mirror and in this tab', !!mirror(QL).done['EDR-2'] && !!U._qcLocalDone['EDR-2'] && !!qv().done[qym]['EDR-2']);
 
     failNext = true;
     await click(r3, 'Checked');
     let n3 = rowOf('EBR-3');
     ok('a write that fails: the row still shows the mark, from the local mirror', isDone(n3) && tick(n3) === '✓' && !!button(n3, 'Undo'));
     ok('...the status line says it was saved locally, and counts it', status.textContent === 'Saved locally only - HTTP 500 It will be retried automatically. · 3 of 4 checked' + tail, status.textContent);
-    ok('...nothing reached the ledger, and the mirror holds it for the retry', !props[QK].value.done[qym]['EBR-3'] && mirror(QL).pending.indexOf('EBR-3') >= 0);
+    ok('...nothing reached the ledger, and the mirror holds it for the retry', !qv().done[qym]['EBR-3'] && mirror(QL).pending.indexOf('EBR-3') >= 0);
     failGetNext = true;
     await click(n3, 'Undo');
     n3 = rowOf('EBR-3');
@@ -249,22 +254,22 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     n4 = rowOf('EBR-4');
     ok('...the next Flag offers the reason typed before', promptDefault === 'bad title', String(promptDefault));
     ok('...and once it is saved the draft is gone', isDone(n4) && tick(n4) === '!' && !U._drafts['EBR-4'] && asked.draft === 'EBR-4');
-    ok('...a reason over several lines keeps its lines, tidied', props[QK].value.flags['EBR-4'].note === 'bad title\n\nand no repro steps' &&
-        props[QK].value.done[qym]['EBR-4'].note === 'bad title\n\nand no repro steps', JSON.stringify(props[QK].value.flags['EBR-4'].note));
+    ok('...a reason over several lines keeps its lines, tidied', qv().flags['EBR-4'].note === 'bad title\n\nand no repro steps' &&
+        qv().done[qym]['EBR-4'].note === 'bad title\n\nand no repro steps', JSON.stringify(qv().flags['EBR-4'].note));
 
     gm.leadDutyDryRun = true;
     await click(n3, 'Checked');
     n3 = rowOf('EBR-3');
     ok('a dry run: the row shows the mark for this session only', isDone(n3));
     ok('...the mirror is not touched, so nothing is replayed for real later', !mirror(QL).done['EBR-3'] && mirror(QL).pending.indexOf('EBR-3') < 0);
-    ok('...the value nobody wrote is not taken as the ledger', !U._qc.done['EBR-3'] && !props[QK].value.done[qym]['EBR-3']);
+    ok('...the value nobody wrote is not taken as the ledger', !U._qc.done['EBR-3'] && !qv().done[qym]['EBR-3']);
     ok('...and the status line says DRY RUN once', status.textContent.split('DRY RUN').length === 2, status.textContent);
     await click(n3, 'Undo');
     ok('...an Undo of the dry mark takes it back', !isDone(rowOf('EBR-3')));
     await click(rowOf('EDR-2'), 'Undo');
     n2 = rowOf('EDR-2');
     ok('...a dry-run Undo of a mark the ledger holds leaves it standing, and says DRY RUN once', isDone(n2) && !!mirror(QL).done['EDR-2'] &&
-        !!U._qcLocalDone['EDR-2'] && !!props[QK].value.done[qym]['EDR-2'] && status.textContent.split('DRY RUN').length === 2, status.textContent);
+        !!U._qcLocalDone['EDR-2'] && !!qv().done[qym]['EDR-2'] && status.textContent.split('DRY RUN').length === 2, status.textContent);
     delete gm.leadDutyDryRun;
 
     // Two writes whose answers come back in the other order: the second must not be overwritten by the first.
@@ -274,10 +279,10 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     await settle();
     answer = 'two of them';
     await click(rowOf('EDR-2'), 'Flag');           // reads EBR-3's write, saves on top, answers first
-    const newer = U._qc.ledgerVersion;
+    const newer = JSON.stringify(U._qc.qcParts);
     release();
     await settle();
-    ok('an older answer landing last is not taken over the newer ledger', U._qc.ledgerVersion === newer && !!U._qc.ledgerValue.flags['EDR-2'], U._qc.ledgerVersion + ' vs ' + newer);
+    ok('an older answer landing last is not taken over the newer ledger', JSON.stringify(U._qc.qcParts) === newer && !!U._qc.ledgerValue.flags['EDR-2'], JSON.stringify(U._qc.qcParts) + ' vs ' + newer);
     ok('...the late row is still drawn from the ledger, which carries it', !!U._qc.done['EBR-3'] && U._qc.done['EBR-3'].verdict === 'ok' && isDone(rowOf('EBR-3')));
     ok('...and the Follow-ups count is right', counts[counts.length - 1] === 2, String(counts));
 
@@ -396,9 +401,22 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('a wiki settle with no row to swap paints nothing over the rebuild', rows().length === 0 && status.textContent === 'Loading the wiki queue…', status.textContent);
     U._renderWiki();
 
+    // Two wiki writes whose answers come back in the other order (ui._adopt, by the property's version; v3.53.5 moved
+    // the QC case to _qcAdopt, so this is the one that keeps it honest for the wiki ledger and the Members tab).
+    parkNext = true;
+    press(rowOf('p2'), 'Mark reviewed');           // its PUT lands, its answer is held
+    await settle();
+    await click(rowOf('p3'), 'Undo');              // reads p2's write, saves on top, answers first
+    const wnewer = U._wiki.ledgerVersion;
+    release();
+    await settle();
+    const wdone = (U._wiki.ledgerValue.done && U._wiki.ledgerValue.done[ym]) || {};
+    ok('two wiki answers landing in the other order: the older one is not taken over the newer ledger', !!wnewer && U._wiki.ledgerVersion === wnewer && !wdone.p3 && !!wdone.p2,
+        U._wiki.ledgerVersion + ' vs ' + wnewer + ' / ' + JSON.stringify(wdone));
+
     // ================= Follow-ups =================
     U._tab = 'flags';
-    U._renderFlags(clone(props[QK].value));
+    U._renderFlags(clone(qv()));
     body._scroll = 120;
     const resolveButtons = () => descendants(body).filter((n) => n.html.indexOf('>Resolve</button>') >= 0);
     let fbase = body.emptied;
@@ -414,7 +432,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('...the status line says why', status.textContent.indexOf('Could not resolve: HTTP 500') === 0, status.textContent);
     ok('...and its note is kept for the next try', U._drafts[rdraft] === 'talked it through', JSON.stringify(U._drafts));
 
-    const openBefore = L.qc.openFlags(props[QK].value).length;
+    const openBefore = L.qc.openFlags(qv()).length;
     rb = resolveButtons()[0];
     rb.handlers.click.forEach((f) => f.call(rb));
     ok('...which offers it again', promptDefault === 'talked it through' && asked.draft === rdraft, String(promptDefault));
@@ -424,7 +442,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('...it is redrawn once, from the value just written', body.emptied === fbase + 1 && resolveButtons().length === openBefore - 1);
     ok('...at the same scroll position', body._scroll === 120, String(body._scroll));
     ok('...the count follows it', counts[counts.length - 1] === openBefore - 1, String(counts));
-    const resolvedKey = Object.keys(props[QK].value.flags).filter((k) => props[QK].value.flags[k].resolvedAt && props[QK].value.flags[k].outcome === 'talked it through')[0];
+    const resolvedKey = Object.keys(qv().flags).filter((k) => qv().flags[k].resolvedAt && qv().flags[k].outcome === 'talked it through')[0];
     ok('...and the QC tab learns the flag is resolved, so it stops offering Undo on it', !!(U._qc.ledgerValue.flags[resolvedKey] && U._qc.ledgerValue.flags[resolvedKey].resolvedAt));
 
     fbase = body.emptied;
@@ -433,19 +451,19 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     U._tab = 'qc';                                 // the Lead moved on before the write landed
     await settle();
     ok('a Resolve landing on another tab leaves that tab alone', body.emptied === fbase && loads.flags === 0);
-    ok('...but the count and the QC state follow it', counts[counts.length - 1] === L.qc.openFlags(props[QK].value).length && L.qc.openFlags(U._qc.ledgerValue).length === L.qc.openFlags(props[QK].value).length, String(counts));
+    ok('...but the count and the QC state follow it', counts[counts.length - 1] === L.qc.openFlags(qv()).length && L.qc.openFlags(U._qc.ledgerValue).length === L.qc.openFlags(qv()).length, String(counts));
 
     await L.qc.markChecked('EBR-3', 'flag', qym, 'late', { kind: 'report', summary: 'three', actor: 'Cara' });
     gm.leadDutyDryRun = true;
     U._tab = 'flags';
-    U._renderFlags(clone(props[QK].value));
+    U._renderFlags(clone(qv()));
     rb = resolveButtons()[0];
     rb.handlers.click.forEach((f) => f.call(rb));
     U._tab = 'qc';
     await settle();
     ok('a dry-run Resolve landing on another tab does not reload Follow-ups into it', loads.flags === 0);
     U._tab = 'flags';
-    U._renderFlags(clone(props[QK].value));
+    U._renderFlags(clone(qv()));
     rb = resolveButtons()[0];
     rb.handlers.click.forEach((f) => f.call(rb));
     await settle();
@@ -453,7 +471,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     delete gm.leadDutyDryRun;
 
     // ================= Resolve all (v3.43.0) =================
-    const QF = props[QK].value.flags;
+    const QF = qv().flags;
     QF['EBR-71'] = { by: 'schogol', at: '2026-10-01T00:00:00.000Z', ym: qym, note: 'wrong component\nand the wrong version', actor: 'ISD Dana', kind: 'report', summary: 'one' };
     QF['EBR-72'] = { by: 'solnichka', at: '2026-10-02T00:00:00.000Z', ym: qym, note: 'no repro steps', actor: 'ISD Dana', kind: 'report', summary: 'two' };
     QF['EBR-73'] = { by: 'schogol', at: '2026-10-03T00:00:00.000Z', ym: qym, note: 'closed too early', actor: 'ISD Erin', kind: 'report', summary: 'three' };
@@ -462,7 +480,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     JiTA.conf.saveProperty = function () { saves++; return save0.apply(this, arguments); };
     const groupOf = (name) => body.kids.find((k) => has(k, 'ld-group') && find(k, (n) => has(n, 'ld-gname') && n._text === name));
     U._tab = 'flags';
-    U._renderFlags(clone(props[QK].value));
+    U._renderFlags(clone(qv()));
     let ra = button(groupOf('ISD Dana'), 'Resolve all');
     ok('a person with several open follow-ups gets Resolve all', !!ra);
     ok('...one with a single follow-up does not', !!groupOf('ISD Erin') && !button(groupOf('ISD Erin'), 'Resolve all'));
@@ -475,7 +493,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     await settle();
     ok('Resolve all asks once, for the whole group', asked.title === 'Resolve 2 follow-ups for ISD Dana' && asked.save === 'Resolve all' &&
         asked.draft === 'resolve:EBR-72,EBR-71', JSON.stringify(asked));
-    ok('a cancelled Resolve all writes nothing', saves === s0 && body.emptied === rbase && !props[QK].value.flags['EBR-71'].resolvedAt);
+    ok('a cancelled Resolve all writes nothing', saves === s0 && body.emptied === rbase && !qv().flags['EBR-71'].resolvedAt);
     answer = 'went through both with Dana\nshe fixes the components next week';
     failNext = true;
     ra.handlers.click.forEach((f) => f.call(ra));
@@ -483,22 +501,22 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('...while it is written, every button of the group waits', groupBtns().length >= 4 && groupBtns().every((b) => b.props.disabled === true), String(groupBtns().length));
     await settle();
     ok('a Resolve all that fails: the buttons come back, nothing changed, and it says why', groupBtns().every((b) => b.props.disabled === false) &&
-        !props[QK].value.flags['EBR-71'].resolvedAt && body.emptied === rbase && status.textContent.indexOf('Could not resolve: HTTP 500') === 0, status.textContent);
+        !qv().flags['EBR-71'].resolvedAt && body.emptied === rbase && status.textContent.indexOf('Could not resolve: HTTP 500') === 0, status.textContent);
     ok('...keeping its note for the next try', U._drafts['resolve:EBR-72,EBR-71'] === answer, JSON.stringify(U._drafts));
     s0 = saves;
     ra.handlers.click.forEach((f) => f.call(ra));
     ok('...which offers it again', promptDefault === answer, JSON.stringify(promptDefault));
     await settle();
-    const R71 = props[QK].value.flags['EBR-71'], R72 = props[QK].value.flags['EBR-72'];
+    const R71 = qv().flags['EBR-71'], R72 = qv().flags['EBR-72'];
     ok('Resolve all closes out all of the person\'s follow-ups in one write', saves === s0 + 1 && !!R71.resolvedAt && R71.resolvedAt === R72.resolvedAt, (saves - s0) + ' writes');
     ok('...each with the note, its lines kept', R71.outcome === answer && R72.outcome === answer, JSON.stringify(R71.outcome));
     ok('...and the note is no longer kept', !('resolve:EBR-72,EBR-71' in U._drafts), JSON.stringify(U._drafts));
     const out71 = find(body, (n) => has(n, 'ld-outcome') && n._text.indexOf('Resolved: went through') === 0);
     ok('...shown under Recently resolved with its lines, in a note row', !!out71 && out71._text === 'Resolved: ' + answer && has(out71.parent, 'ld-lines') &&
         has(out71.parent.parent, 'ld-noterow'), out71 && JSON.stringify(out71._text));
-    ok('...and leaves the other people\'s alone', !props[QK].value.flags['EBR-73'].resolvedAt);
+    ok('...and leaves the other people\'s alone', !qv().flags['EBR-73'].resolvedAt);
     ok('...the tab is redrawn once, without the group', body.emptied === rbase + 1 && !groupOf('ISD Dana') && !!groupOf('ISD Erin') && loads.flags === 1);
-    ok('...and the count follows it', counts[counts.length - 1] === L.qc.openFlags(props[QK].value).length, String(counts.slice(-2)));
+    ok('...and the count follows it', counts[counts.length - 1] === L.qc.openFlags(qv()).length, String(counts.slice(-2)));
     JiTA.conf.saveProperty = save0;
 
     // ================= Late loads paint only into their own tab =================
@@ -511,7 +529,7 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     U._tab = 'wiki';                               // clicked away before the ledger read came back
     await settle();
     ok('a Follow-ups load landing on another tab leaves its body alone', !find(body, (n) => n._text === 'Open follow-ups, by the person who handled them'));
-    ok('...but still updates the count', counts[counts.length - 1] === L.qc.openFlags(props[QK].value).length, String(counts.slice(-2)));
+    ok('...but still updates the count', counts[counts.length - 1] === L.qc.openFlags(qv()).length, String(counts.slice(-2)));
     failGetNext = true;
     U._tab = 'flags';
     real.flags.call(U, false);

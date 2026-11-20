@@ -38,8 +38,9 @@ let taps = 0;
 R.schedule = () => { taps++; };   // a written ledger change republishes the page; count it instead of waiting
 
 const pym = L._prevYm();
-const KEY = L.QC_LEDGER_KEY;
+const KEY = L.QC_LEDGER_KEY, MK = L.qcl.monthKey(pym), FK = L.QC_FLAGS_KEY;
 function seed() {
+    Object.keys(props).forEach((k) => { if (k !== KEY && k.indexOf('jita_leadduty_qc') === 0) { delete props[k]; } });
     props[KEY] = { id: KEY, key: KEY, version: 1, value: {
         v: 1,
         months: { [pym]: { roster: ['lookuptable', 'schogol', 'solnichka'], quota: 3, poolSize: 12,
@@ -47,7 +48,14 @@ function seed() {
         done: {}, flags: {}
     } };
 }
-const value = () => props[KEY].value;
+// The QC ledger as one value (v3.53.5: it is kept in parts, qcl), its done and flags the very objects stored in the
+// month's verdicts property and the follow-ups property, so a check can write into them as into the old single one.
+const part = (key, blank) => { if (!props[key]) { props[key] = { id: key, key: key, version: 1, value: blank }; } return props[key].value; };
+const value = () => ({
+    v: 1, months: props[KEY].value.months,
+    done: { [pym]: part(MK, { v: 1, ym: pym, verdicts: {} }).verdicts },
+    flags: part(FK, { v: 1, flags: {} }).flags
+});
 const item = (key) => ({ key: key, kind: 'report', summary: 'Summary of ' + key, actor: 'ISD Bob' });
 
 // The Items table as rows of cells, so a column can be read by name.
