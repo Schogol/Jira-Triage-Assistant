@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.5 (2026-11-20)
+
+### Fixed issues
+
+- Lead duties: quality control keeps the last three months instead of six, so its ledger no longer fills up and refuses verdicts, flags and follow-ups. A ledger that fills up anyway drops its oldest month instead of refusing the write.
+
 ## 3.53.4 (2026-11-20)
 
 ### Fixed issues
