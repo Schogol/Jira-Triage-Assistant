@@ -67,9 +67,9 @@ if (process.env.JITA_BREAK_LIST === '1') {
 }
 const W = Math.max(1, Math.min(pool.length, +process.env.JITA_BREAK_WORKERS || Math.min(8, os.cpus().length)));
 
-// The runners write their broken copies (mut.js, mutt.js, ...) next to themselves; they are gitignored and
+// The runners write their broken copies (mut.js, mutt.js, mutt.md, ...) next to themselves; they are gitignored and
 // removed again here so a crashed runner leaves nothing behind.
-const scratch = (f) => /^mut[a-z]*\.js$/.test(f);
+const scratch = (f) => /^mut[a-z]*\.(js|md)$/.test(f);
 const cleanup = (dir) => fs.readdirSync(dir).filter(scratch).forEach((f) => { try { fs.unlinkSync(path.join(dir, f)); } catch (e) { /* ignore */ } });
 
 // The runners must break THIS file, not whatever JITA_SRC points at: they set JITA_SRC for their harnesses. And each
@@ -91,6 +91,7 @@ for (let k = 0; k < W; k++) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jita-breakages-'));
     roots.push(root);
     fs.copyFileSync(path.join(REPO, 'JiTA.user.js'), path.join(root, 'JiTA.user.js'));
+    fs.copyFileSync(path.join(REPO, 'CHANGELOG.md'), path.join(root, 'CHANGELOG.md'));   // the changelog the script reads (v3.52.2)
     fs.cpSync(DIR, path.join(root, 'tests'), { recursive: true, filter: (s) => !scratch(path.basename(s)) });
     copies.push(path.join(root, 'tests'));
 }

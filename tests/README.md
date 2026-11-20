@@ -16,21 +16,33 @@ node tests/run-breakages.js                  # every mutate-*.js suite, side by 
 
 ## The changelog
 
-Every release needs its own entry at the top of `JiTA.changelog.ENTRIES`: `changelog-check.js` fails unless the
-newest entry is the `@version` being released. An entry lists what it added under `features` and what it fixed
-under `fixes` (either may be left out); only an entry with `features` brings up the What's new pill:
+The changelog is `CHANGELOG.md` at the top of the repo (since v3.52.2). Tampermonkey fetches it together with the
+script (`@resource changelog`), and the script reads it with `JiTA.changelog.parse`. Every release needs its own
+entry at the top. An entry lists what it added under New features and what it fixed under Fixed issues (either may be
+left out); only an entry with New features brings up the What's new pill:
 
-```js
-{ v: '3.40.0', date: '2026-10-10', features: [
-    'What a user can now do, in one sentence.'
-], fixes: [
-    'What no longer goes wrong.'
-] },
+```md
+## 3.40.0 (2026-10-10)
+
+### New features
+
+- What a user can now do, in one sentence.
+
+### Fixed issues
+
+- What no longer goes wrong.
 ```
 
-`ci-static.js` guards the rest of the history: every version main
-has carried keeps its entry, and no entry that is already out is dropped or re-dated (fixing its wording is fine).
-`mutate-releases.js` breaks that history four ways and requires `ci-static.js` to notice each one.
+- One item per line, at most 240 characters.
+- A backslash goes before any of `` \ ` * _ [ ] < > # ~ | & `` in an item (and before a `-` or `+` that starts one),
+  so GitHub shows the item as JiTA does.
+- The `@resource` line in `JiTA.user.js` ends in `?v=` and the same version, so Tampermonkey fetches the file again.
+
+`changelog-check.js` fails unless the newest entry is the `@version` being released, the `@resource` line asks for
+that version, every line of the file is one the parser reads, and every item is escaped. Set `JITA_CHANGELOG` to
+check another copy of the file. `ci-static.js` guards the rest of the history: every version main has carried keeps
+its entry, and no entry that is already out is dropped or re-dated (fixing its wording is fine). `mutate-releases.js`
+breaks that history five ways and requires `ci-static.js` to notice each one.
 
 ## Test files (`*-check.js`)
 

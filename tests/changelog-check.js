@@ -4,9 +4,15 @@
 // `features`, what it fixed under `fixes`. The "What's new" pill follows what this browser has been shown, and only
 // an update that brings a feature puts it up: it names those updates, is gone once they are seen or dismissed, and a
 // browser that never saw the changelog is shown just the newest entry. The list opens on the tab with something new.
-// Evals the real JiTA.changelog against small stubs, with the real version comparator.
-const fs = require('fs');
-const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+// Since v3.52.2 the list is CHANGELOG.md, which Tampermonkey fetches with the script (@resource changelog, its URL
+// carrying the version) and the script reads with JiTA.changelog.parse: every line of the file is one the parser takes,
+// each item's Markdown characters are escaped so GitHub shows it as JiTA does, the file is read once a page, and a
+// script manager that gave no changelog leaves no pill and a list that points to GitHub.
+// Evals the real JiTA.changelog against small stubs, with the real version comparator. JITA_CHANGELOG names another
+// copy of the file to read, as mutate-changelog.js takes it.
+const fs = require('fs'), path = require('path');
+const src = fs.readFileSync(process.env.JITA_SRC || path.join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const md = fs.readFileSync(process.env.JITA_CHANGELOG || path.join(__dirname, '..', 'CHANGELOG.md'), 'utf8');
 const hv = /^\/\/ @version\s+(\S+)/m.exec(src);
 const em = '\n    _noop: null\n};';
 const cs = src.indexOf('\nJiTA.changelog = {'), ce = src.indexOf(em, cs);
@@ -39,8 +45,37 @@ function node(tag) {
 const body = node('body');
 global.document = { body: body, documentElement: body, getElementById: (id) => byId[id] || null, createElement: node };
 global.JiTA = { worker: eval('({' + src.slice(vs, ve) + '})') };
+const resourceReads = [];
+global.GM_getResourceText = (name) => { resourceReads.push(name); return name === 'changelog' ? md : null; };   // as Tampermonkey hands it over
 eval(src.slice(cs + 1, ce + em.length));
-const C = JiTA.changelog, E = C.ENTRIES, cmp = JiTA.worker._verCmp;
+const C = JiTA.changelog, E = C.entries(), cmp = JiTA.worker._verCmp;
+
+// ---- the file comes with the script, and is read as it is ----
+const res = /^\/\/ @resource\s+(\S+)\s+(\S+)\s*$/m.exec(src);
+ok('Tampermonkey fetches CHANGELOG.md from main with the script', !!res && res[1] === C.RESOURCE && /^https:\/\/raw\.githubusercontent\.com\/Schogol\/Jira-Triage-Assistant\/main\/CHANGELOG\.md\?v=/.test(res[2]), res && res.join(' '));
+ok('...asking for this very version, so it never keeps an older copy', !!res && res[2].split('?v=')[1] === hv[1], (res && res[2]) + ' vs @version ' + hv[1]);
+ok('...and the script may read it', /^\/\/ @grant\s+GM_getResourceText\s*$/m.test(src));
+C.entries(); C.latest();
+ok('the file is read once a page, under its @resource name', resourceReads.join() === 'changelog', resourceReads.join());
+const parsed = C.parse(md);
+ok('every line of CHANGELOG.md is one the script reads', parsed.errors.length === 0, parsed.errors.slice(0, 5).join(' | '));
+// GitHub has to show an item as JiTA shows it, so a character Markdown would act on is escaped with a backslash: the
+// parser takes the backslash off, GitHub does not render it.
+const ACTIVE = '\\`*_[]<>#~|&';
+const unescaped = [];
+let inEntries = false;   // the notes above the first version are the file's own, not items
+md.replace(/\r\n/g, '\n').split('\n').forEach((l, i) => {
+    if (/^## \d/.test(l)) { inEntries = true; }
+    if (!inEntries || !/^- /.test(l)) { return; }
+    const t = l.slice(2);
+    let bad = /^[-+]/.test(t) || /^\d+[.)]/.test(t);   // a list marker of its own
+    for (let k = 0; k < t.length && !bad; k++) {
+        if (t[k] === '\\') { k++; continue; }   // an escape and what it escapes
+        if (ACTIVE.indexOf(t[k]) >= 0) { bad = true; }
+    }
+    if (bad) { unescaped.push((i + 1) + ': ' + l.slice(0, 80)); }
+});
+ok('GitHub shows every item as JiTA does: its Markdown characters are escaped', unescaped.length === 0, unescaped.slice(0, 5).join(' | '));
 
 // ---- the data ----
 ok('the changelog has the whole history', E.length > 100, String(E.length));
@@ -68,8 +103,37 @@ const long = E.filter((e) => allItems(e).some((t) => t.length > 240));
 ok('items stay short enough to read at a glance', !long.length, long.map((e) => e.v).join(', '));
 ok('both tabs have a history', E.some((e) => e.features) && E.some((e) => e.fixes));
 
+// ---- the parser (v3.52.2) ----
+const J = JSON.stringify;
+let p = C.parse('# JiTA changelog\n\nSome words, and a list:\n- above the first version\n\n## 2.1.0 (2030-02-01)\n\n### New features\n\n- One \\> two \\# three, \\*not bold\\*\n- \\- starts with a dash\n\n### Fixed issues\n- a fix\r\n## 2.0 (2030-01-01)\r\n### Fixed issues\r\n- an old one\r\n');
+ok('the parser reads versions, their lists and their items, newest first', J(p.entries) === J([{ v: '2.1.0', date: '2030-02-01', features: ['One > two # three, *not bold*', '- starts with a dash'], fixes: ['a fix'] }, { v: '2.0', date: '2030-01-01', fixes: ['an old one'] }]), J(p.entries));
+ok('...taking the Markdown escapes off, passing over the title and notes, whatever the line endings', p.errors.length === 0, p.errors.join(' | '));
+p = C.parse([
+    '## 1.0 (2030-01-01)',                  //  1
+    '- an item under no list',              //  2 passed over
+    '### Fixed issues',                     //  3
+    '- kept',                               //  4
+    '## Unreleased',                        //  5 passed over, and the list above it ends
+    '- after a heading of another kind',    //  6 passed over
+    '### Fixed issues',                     //  7 passed over: named twice
+    '- under a list named twice',           //  8 passed over
+    '### New features',                     //  9
+    '- a feature',                          // 10
+    '#### A deeper heading',                // 11 passed over
+    '- after a deeper heading',             // 12 passed over
+    'loose text',                           // 13 passed over
+    '## 1.1 (soon)',                        // 14 passed over: no date
+    '## 0.9 (2029-12-01)',                  // 15
+    '### Known issues',                     // 16 passed over: not a tab
+    '- a known issue'                       // 17 passed over
+].join('\n'));
+ok('...and lists every line it passes over: an item under no list, a list named twice or by another name, other headings, loose text',
+    J(p.errors.map((e) => +e.split(':')[0])) === J([2, 5, 6, 7, 8, 11, 12, 13, 14, 16, 17]), p.errors.join(' | '));
+ok('...keeping what it could read, and never an item into a list a heading ended', J(p.entries) === J([{ v: '1.0', date: '2030-01-01', fixes: ['kept'], features: ['a feature'] }, { v: '0.9', date: '2029-12-01' }]), J(p.entries));
+ok('nothing to read is no entries', C.parse('').entries.length === 0 && C.parse(null).entries.length === 0 && C.parse('# Only a title\n').errors.length === 0);
+
 // ---- what counts as new, and what warrants the pill (on a history of our own, so the real one can grow) ----
-C.ENTRIES = [
+C._entries = [
     { v: '9.2.1', date: '2030-01-05', fixes: ['fix three'] },
     { v: '9.2.0', date: '2030-01-04', features: ['feature two'], fixes: ['fix two'] },
     { v: '9.1.1', date: '2030-01-03', fixes: ['fix one'] },
@@ -211,6 +275,24 @@ ok('a pill that is up is left alone: no second one, nothing redrawn', body.child
 C.markSeen();
 C.ensure();
 ok('once the update is seen, ensure() leaves it down', !byId[C.PILL_ID]);
+
+// ---- a script manager that gave the script no changelog (v3.52.2) ----
+for (const [how, give] of [['no GM_getResourceText', null], ['one that throws', () => { throw new Error('no resource'); }], ['no file', () => null]]) {
+    if (give) { global.GM_getResourceText = give; } else { delete global.GM_getResourceText; }
+    C._entries = null;
+    gm[C.SEEN_KEY] = '9.0.0';
+    let threw = null;
+    try {
+        C.remove(); C.ensure(); C.mount(); C.markSeen();
+    } catch (e) { threw = e; }
+    ok('with ' + how + ': no entries, no pill, nothing marked seen, nothing thrown', !threw && C.entries().length === 0 && C.latest() === null && !C.shouldShow() && !byId[C.PILL_ID] && gm[C.SEEN_KEY] === '9.0.0',
+        (threw && threw.message) + ' / ' + C.entries().length + ' / ' + gm[C.SEEN_KEY]);
+}
+made.length = 0;
+C.openView();
+const none = made.filter((e) => e.cls['jcl-none'])[0], link = made.filter((e) => e.attrs.href)[0];
+ok('...and the list says so, and links to the file on GitHub', !!none && /came without its list of changes/.test(none.txt) && !!link && link.attrs.href === C.URL && none.kids.indexOf(link) >= 0 &&
+    C.URL === 'https://github.com/Schogol/Jira-Triage-Assistant/blob/main/CHANGELOG.md', JSON.stringify(none && none.txt) + ' / ' + (link && link.attrs.href));
 
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'changelog checks passed.'));
 process.exit(fail ? 1 : 0);

@@ -14,7 +14,7 @@ const muts = [
     [H, 'a non-Lead keeps the chip', '            try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }   // removes the chip for a non-Lead\n', ''],
     [H, 'an open Settings keeps the Lead section', "            try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { /* swallow */ }\n            return;\n        }",
         '            return;\n        }'],
-    [H, 'the seen mark moves back', 'if (!seen || JiTA.worker._verCmp(C.latest().v, seen) > 0) { gmSet(C.SEEN_KEY, C.latest().v); }', 'gmSet(C.SEEN_KEY, C.latest().v);'],
+    [H, 'the seen mark moves back', 'if (top && (!seen || JiTA.worker._verCmp(top.v, seen) > 0)) { gmSet(C.SEEN_KEY, top.v); }', 'if (top) { gmSet(C.SEEN_KEY, top.v); }'],
     [H, 'a detached status line counts as live', '_live: function ($el) { return !!($el && $el[0] && document.body && document.body.contains($el[0])); },', '_live: function ($el) { return true; },'],
     [H, 'a completion checks only for the menu again', 'if (!JiTA.menu._live($wbk)) { return; }', "if (!document.getElementById('jita-menu')) { return; }"]
 ];
