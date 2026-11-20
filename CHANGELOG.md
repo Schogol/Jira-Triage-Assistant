@@ -14,6 +14,16 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.0 (2026-11-19)
+
+### New features
+
+- Copy diagnostics, in Settings \> About: puts a short report on your clipboard (JiTA's version, your browser, what is stored and the errors JiTA ran into) to paste when you report a problem. Nothing is sent anywhere.
+
+### Fixed issues
+
+- Errors JiTA used to drop without a trace are now kept for that report, and shown in the console with Debug logging on.
+
 ## 3.52.3 (2026-11-19)
 
 ### Fixed issues

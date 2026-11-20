@@ -315,8 +315,8 @@ const muts = [
     [CK, 'the old way leaves its box on the page', '                document.body.removeChild(box);\n', '', UTIL],
     [CK, 'the old way says it copied when refused', "                document.body.removeChild(box);\n                if (ok) { resolve(); } else { reject(new Error('copy refused')); }", '                document.body.removeChild(box);\n                resolve();', UTIL],
     // ---- the page observer ----
-    [CK, 'a wiped card waits for the observer\'s pause', "        try { JiTA.checklist.reensure(); } catch (eCl0) { /* swallow */ }   // the Defect checklist card, if Jira wiped it\n", '', BOOT],
-    [CK, 'the card never follows the defect on screen', "            try { JiTA.checklist.ensure(); } catch (e7) { /* swallow */ }   // the Defect checklist: follow the defect on screen, judge it again after an edit\n", '', BOOT]
+    [CK, 'a wiped card waits for the observer\'s pause', "        try { JiTA.checklist.reensure(); } catch (eCl0) { JiTA.caught('checklist.reensure', eCl0); }   // the Defect checklist card, if Jira wiped it\n", '', BOOT],
+    [CK, 'the card never follows the defect on screen', "            try { JiTA.checklist.ensure(); } catch (e7) { JiTA.caught('checklist.ensure', e7); }   // the Defect checklist: follow the defect on screen, judge it again after an edit\n", '', BOOT]
 ];
 // Where an anchor is looked for: the part named (the checklist's block by default), between its first line and its end.
 function within(fn) {

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.52.3
+// @version     3.53.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.52.3
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.0
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -3303,9 +3303,51 @@ var JiTA = {
     // leader tab that wasn't reloaded after an update) and trigger a re-election. '' if GM_info is unavailable.
     SCRIPT_VERSION: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '',
     // Gated debug logger: emits to the console only when "Debug logging" is enabled in Settings (the 'sdDebug' flag).
+    // It also keeps the last DLOG_MAX lines, for Settings > Debug > Copy diagnostics (JiTA.diag).
     dlog: function () {
-        try { if (window.console && gmGet('sdDebug', false)) { console.log.apply(console, arguments); } } catch (e) { /* ignore */ }
+        try {
+            if (!gmGet('sdDebug', false)) { return; }
+            if (window.console) { console.log.apply(console, arguments); }
+            JiTA._dlogLines.push(new Date().toISOString().slice(11, 19) + ' ' + JiTA._fmtArgs(arguments));
+            if (JiTA._dlogLines.length > JiTA.DLOG_MAX) { JiTA._dlogLines.shift(); }
+        } catch (e) { /* ignore */ }
     },
+    DLOG_MAX: 200,
+    _dlogLines: [],
+    // A log call's arguments as one line of text: an error by its name and message, anything else as JSON, each cut short.
+    _fmtArgs: function (args) {
+        var out = [];
+        for (var i = 0; i < args.length; i++) {
+            var a = args[i], s;
+            try {
+                s = typeof a === 'string' ? a
+                    : (a instanceof Error) ? (a.name + ': ' + a.message)
+                    : (a === undefined || typeof a === 'function') ? String(a) : JSON.stringify(a);
+            } catch (e) { s = Object.prototype.toString.call(a); }
+            s = String(s);
+            out.push(s.length > 300 ? s.slice(0, 300) + '...' : s);
+        }
+        return out.join(' ');
+    },
+    // An error JiTA caught and went on from: a background step that failed, a page observer pass that threw. Each used to
+    // vanish without a trace. Kept for Copy diagnostics, one entry per place and message with how often it came (an
+    // observer can throw on every page change), the CAUGHT_MAX latest; logged the first time when Debug logging is on.
+    // Never throws.
+    caught: function (where, e) {
+        try {
+            var msg = String((e && (e.message || e.name)) || e || 'unknown error').slice(0, 300);
+            var key = where + ': ' + msg, now = Date.now(), list = JiTA._caughtList;
+            for (var i = 0; i < list.length; i++) {
+                if (list[i].key === key) { list[i].n++; list[i].last = now; return; }
+            }
+            var stack = (e && typeof e.stack === 'string') ? e.stack.split('\n').slice(0, 4).join('\n') : '';
+            list.push({ key: key, where: where, msg: msg, stack: stack, n: 1, first: now, last: now });
+            if (list.length > JiTA.CAUGHT_MAX) { list.shift(); }
+            JiTA.dlog('[JiTA] caught in ' + where + ':', e);
+        } catch (x) { /* the recorder never throws */ }
+    },
+    CAUGHT_MAX: 50,
+    _caughtList: [],
     // How many related issues the panel lists (similar defects / matching bug reports). User-configurable
     // from the settings menu, persisted in the GM flag 'sdTopN'; default 8, clamped 1..30 (kept below
     // JiTA.rank.CAND so the fusion candidate pool is never the limiting factor). Read live at query time,
@@ -9574,6 +9616,7 @@ JiTA.menu = {
 #jita-menu .jita-num { width: 56px; flex: 0 0 auto; background: #2c333a; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 5px; padding: 5px 8px; font-size: 12px; text-align: center; }\
 #jita-menu .jita-num:focus { outline: none; border-color: #4c9aff; }\
 #jita-menu .jita-menu-status { color: #9aa6b2; font-size: 11px; padding: 8px 0 0; }\
+#jita-menu .jita-diag-text { display: block; box-sizing: border-box; width: 100%; height: 140px; margin-top: 6px; font: 11px/1.35 monospace; white-space: pre; }\
 #jita-menu .jita-resp-item { display: flex; flex-direction: column; gap: 4px; border: 1px solid #2c333a; border-radius: 6px; padding: 8px; position: relative; }\
 #jita-menu .jita-resp-title { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 4px; padding: 5px 26px 5px 8px; font-size: 12px; font-weight: 600; }\
 #jita-menu .jita-resp-body { background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 4px; padding: 5px 8px; font-size: 12px; resize: vertical; font-family: inherit; line-height: 1.4; }\
@@ -9662,7 +9705,7 @@ JiTA.menu = {
         if (savedVariables[index][1]) { $sw.addClass('on'); }
         $sw.on('click', function () {
             toggleFeature(index);
-            if (onAfter) { try { onAfter(); } catch (e) { /* swallow */ } }
+            if (onAfter) { try { onAfter(); } catch (e) { JiTA.caught('menu onAfter', e); } }
         });
         $row.append($sw);
         return $row;
@@ -10182,6 +10225,31 @@ JiTA.menu = {
         $dRow.append($dSw);
         $dbg.append($dRow);
 
+        // Copy diagnostics: a short plain-text report (JiTA.diag.report) to paste into a message about a problem. It goes
+        // to the clipboard only; where the browser refuses that, the text is shown here to copy by hand.
+        var $diagAct = $('<div class="jita-menu-actions"></div>').appendTo($dbg);
+        var $diagStatus = $('<div class="jita-menu-status"></div>');
+        var $diag = $('<button class="jita-btn">Copy diagnostics</button>')
+            .attr('title', 'Copies a short report of the JiTA version, browser, worker, stored data and the errors JiTA ran into, to paste when you report a problem. Nothing is sent anywhere.')
+            .on('click', function () {
+                $diag.prop('disabled', true);
+                $diagStatus.text('Gathering…');
+                JiTA.diag.report().then(function (text) {
+                    return JiTA.diag.copy(text).then(function () {
+                        if (JiTA.menu._live($diagStatus)) { $diagStatus.text('Copied. Paste it into your message.'); }
+                    }, function () {
+                        if (!JiTA.menu._live($diagStatus)) { return; }
+                        $diagStatus.text('The browser would not copy it: select the text below and copy it yourself.');
+                        $diagStatus.siblings('.jita-diag-text').remove();
+                        $('<textarea class="jita-diag-text" readonly></textarea>').val(text).insertAfter($diagStatus).each(function () { this.select(); });
+                    });
+                }).catch(function (e) {   // report() reads what it can, but a fault in it must not leave the button off
+                    if (JiTA.menu._live($diagStatus)) { $diagStatus.text('Could not gather it: ' + String(e && e.message || e)); }
+                }).then(function () { $diag.prop('disabled', false); });
+            });
+        $diagAct.append($diag);
+        $diagStatus.appendTo($dbg);
+
         // Self-heal test (shown only when debug is on, to keep it out of casual reach). Calls _onWorkerDead, which
         // only acts on the leader tab's own worker, so it is disabled on followers with a hint about where to click.
         if (dbgOn) {
@@ -10262,7 +10330,7 @@ JiTA.migrate = {
     // session. Look again once it is over.
     _later: function () {
         JiTA.migrate._done = false;
-        setTimeout(function () { try { JiTA.migrate.run(); } catch (e) { /* swallow */ } }, JiTA.migrate.RETRY_MS);
+        setTimeout(function () { try { JiTA.migrate.run(); } catch (e) { JiTA.caught('migrate.run', e); } }, JiTA.migrate.RETRY_MS);
     },
     run: function () {
         if (JiTA.migrate._done) { return; }            // once per session
@@ -10371,11 +10439,11 @@ JiTA.sched = {
         // Free the lease when the tab goes away, so another tab can take the sync up at once (the TTL is the backstop).
         try { window.addEventListener('pagehide', function () { JiTA.sched._releaseLease(); }); } catch (e) { /* ignore */ }
         setTimeout(function () {
-            try { JiTA.sched.tick(); } catch (e) { /* swallow */ }
+            try { JiTA.sched.tick(); } catch (e) { JiTA.caught('sched.tick', e); }
             // Poll every POLL_MS (≪ INTERVAL_MS). tick() itself only acts once recentlySynced() reports that
             // INTERVAL_MS has elapsed, so this reliably fires ~every 30 min instead of skipping windows.
             JiTA.sched._timer = setInterval(function () {
-                try { JiTA.sched.tick(); } catch (e) { /* swallow */ }
+                try { JiTA.sched.tick(); } catch (e) { JiTA.caught('sched.tick', e); }
             }, JiTA.sched.POLL_MS);
         }, JiTA.sched.STARTUP_DELAY_MS);
     }
@@ -11086,8 +11154,8 @@ JiTA.credits = {
             // Release our leases when the tab goes away so a reload can pick the work up at once (TTL is the backstop).
             try { window.addEventListener('pagehide', function () { S._release(S.FULL_LEASE_KEY); S._release(S.SELF_LEASE_KEY); }); } catch (e) { /* ignore */ }
             setTimeout(function () {
-                try { S.tick(); } catch (e) { /* swallow */ }
-                S._timer = setInterval(function () { try { S.tick(); } catch (e) { /* swallow */ } }, S.POLL_MS);
+                try { S.tick(); } catch (e) { JiTA.caught('credits.sched.tick', e); }
+                S._timer = setInterval(function () { try { S.tick(); } catch (e) { JiTA.caught('credits.sched.tick', e); } }, S.POLL_MS);
             }, S.STARTUP_DELAY_MS);
         }
     },
@@ -23308,8 +23376,8 @@ JiTA.leadduty.sched = {
         if (S._timer) { return; }
         try { window.addEventListener('pagehide', function () { S._release(S.LEASE_KEY); }); } catch (e) { /* ignore */ }
         setTimeout(function () {
-            try { S.tick(); } catch (e) { /* swallow */ }
-            S._timer = setInterval(function () { try { S.tick(); } catch (e2) { /* swallow */ } }, S.POLL_MS);
+            try { S.tick(); } catch (e) { JiTA.caught('leadduty.sched.tick', e); }
+            S._timer = setInterval(function () { try { S.tick(); } catch (e2) { JiTA.caught('leadduty.sched.tick', e2); } }, S.POLL_MS);
         }, S.STARTUP_DELAY_MS);
     }
 };
@@ -24674,6 +24742,109 @@ JiTA.ocr = {
  * for another version, or when parse() would pass over a line of it. Before v3.39.0 an entry had one `items` list;
  * those were sorted by version: an x.y.0 release brought features, an x.y.z release fixes.
  */
+// ---- Copy diagnostics (Settings > About > Debug) ----
+// A short plain-text report with what a message about a JiTA problem needs: the version and script manager, the browser,
+// the kind of page, the worker, what is stored and how far it is synced, the errors JiTA caught and went on from
+// (JiTA.caught), and the debug log when Debug logging is on. It goes to the clipboard and nowhere else. The page is given
+// by its kind and project, not its address, and nothing else in it names anyone.
+JiTA.diag = {
+    WAIT_MS: 3000,   // the database and worker lines give up after this, so neither can hold the report up
+
+    // Resolves the report. A part that cannot be read says so in its line; the report itself never fails.
+    report: function () {
+        var D = JiTA.diag, head = [
+            'JiTA diagnostics, ' + new Date().toISOString(),
+            'Version: ' + (JiTA.SCRIPT_VERSION || '?') + D._manager(),
+            'Browser: ' + D._safe(function () { return navigator.userAgent; }),
+            'Page: ' + D._page(),
+            'Debug logging: ' + (gmGet('sdDebug', false) ? 'on' : 'off')
+        ];
+        return Promise.all([D._worker(), D._data()]).then(function (got) {
+            var lines = head.concat(['Worker: ' + got[0], 'Data: ' + got[1], '']).concat(D._errors(), ['']);
+            if (gmGet('sdDebug', false)) {
+                lines.push('Debug log, the last ' + JiTA._dlogLines.length + ' lines:');
+                JiTA._dlogLines.forEach(function (l) { lines.push('  ' + l); });
+            } else {
+                lines.push('Debug log: off. For more detail turn on Settings > About > Debug logging, do what went wrong again, and copy this again.');
+            }
+            return lines.join('\n');
+        });
+    },
+
+    // f's answer as text, or '?' when it has none or throws.
+    _safe: function (f) {
+        try { var v = f(); return (v === undefined || v === null || v === '') ? '?' : String(v); } catch (e) { return '?'; }
+    },
+    // Settles with p's answer, or with `late` once WAIT_MS has passed, or with `failed(error)`.
+    _within: function (p, late, failed) {
+        var wait = new Promise(function (res) { setTimeout(function () { res(late); }, JiTA.diag.WAIT_MS); });
+        return Promise.race([Promise.resolve().then(p), wait]).then(null, failed);
+    },
+    _manager: function () {
+        try { return GM_info.scriptHandler ? ', in ' + (GM_info.scriptHandler + ' ' + (GM_info.version || '')).trim() : ''; } catch (e) { return ''; }
+    },
+    _page: function () {
+        return JiTA.diag._safe(function () {
+            var p = location.pathname || '', issue = /^\/browse\/([A-Z][A-Z0-9_]*)-\d+/.exec(p);
+            var kind = JITA_IS_FORGE_FRAME ? 'a Forge frame (the Zendesk panel)'
+                : /^\/wiki(\/|$)/.test(p) ? 'Confluence'
+                : issue ? 'an issue in ' + issue[1]
+                : /^\/issues(\/|$)/.test(p) ? 'the issue search'
+                : /^\/jira(\/|$)/.test(p) ? 'a Jira board, list or issue view' : 'another page';
+            return kind + (JITA_IS_SUBFRAME ? ', inside a frame' : '');
+        });
+    },
+    _worker: function () {
+        var w = JiTA.worker;
+        var state = JiTA.diag._safe(function () {
+            return !w._started ? 'not started' : !w.usable() ? 'gave up (it could not run in this browser)'
+                : (w._isLeader ? 'this tab leads it' : 'another tab leads it');
+        });
+        var live = false;
+        try { live = !!(w._started && w.usable()); } catch (e) { /* no worker in this frame */ }
+        if (!live) { return Promise.resolve(state); }
+        return JiTA.diag._within(function () {
+            return w.call('ping', null, { timeoutMs: JiTA.diag.WAIT_MS }).then(function (r) {
+                return state + ', backend ' + ((r && r.backend) || '?') + ', built from v' + ((r && r.version) || '?');
+            });
+        }, state + ', no answer to a ping', function () { return state + ', no answer to a ping'; });
+    },
+    _data: function () {
+        var db = JiTA.db;
+        return JiTA.diag._within(function () {
+            return Promise.all([db.countDefects(), db.countEbr(), db.getMeta('lastSyncHighWater'), db.getMeta('lastSyncHighWaterEbr'),
+                db.getMeta('dataVersionDefects'), db.getMeta('dataVersionEbr')]).then(function (v) {
+                return v[0] + ' issues stored, ' + v[1] + ' of them bug reports; synced up to ' + (v[2] || 'never') + ' (defects) and ' +
+                    (v[3] || 'never') + ' (bug reports); stored as data v' + (v[4] || '?') + ' and v' + (v[5] || '?') + ', this build reads v' +
+                    JiTA.DATA_VERSION + ' and v' + JiTA.DATA_VERSION_EBR;
+            });
+        }, 'no answer from the local database within ' + (JiTA.diag.WAIT_MS / 1000) + ' s', function (e) {
+            return 'could not be read (' + String((e && e.message) || e) + ')';
+        });
+    },
+    // The errors JiTA.caught kept, the latest first, each with how often and when, and the top of its stack.
+    _errors: function () {
+        var c = JiTA._caughtList.slice().sort(function (a, b) { return b.last - a.last; });
+        var out = ['Errors JiTA caught and went on from: ' + (c.length ? c.length + (c.length >= JiTA.CAUGHT_MAX ? ' (only the latest are kept)' : '') : 'none')];
+        c.forEach(function (x) {
+            out.push('  ' + x.n + 'x  ' + x.where + ': ' + x.msg + '  (' + (x.n > 1 ? 'first ' + JiTA.diag._time(x.first) + ', last ' : 'at ') + JiTA.diag._time(x.last) + ')');
+            x.stack.split('\n').slice(1).forEach(function (s) { if (s.trim()) { out.push('        ' + s.trim()); } });
+        });
+        return out;
+    },
+    _time: function (t) { return new Date(t).toISOString().slice(11, 19) + ' UTC'; },
+
+    // Puts text on the clipboard. Rejects where the browser will not.
+    copy: function (text) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) { return Promise.resolve(navigator.clipboard.writeText(text)); }
+        } catch (e) { return Promise.reject(e); }
+        return Promise.reject(new Error('no clipboard here'));
+    },
+
+    _noop: null
+};
+
 JiTA.changelog = {
     SEEN_KEY: 'jitaChangelogSeen',   // the newest version whose changes this browser has been shown
     PILL_ID: 'jita-changelog-pill',
@@ -24825,7 +24996,7 @@ JiTA.changelog = {
         var C = JiTA.changelog;
         C.watch();
         C.START_MS.forEach(function (ms) {
-            setTimeout(function () { try { C._armed = true; C.ensure(); } catch (e) { /* swallow */ } }, ms);
+            setTimeout(function () { try { C._armed = true; C.ensure(); } catch (e) { JiTA.caught('changelog.ensure', e); } }, ms);
         });
     },
 
@@ -24943,29 +25114,29 @@ function jitaArmLeadDuties() {
         // Armed from the cached verdict, and resolveMe() now says this account is not a Lead (any more): take the chip
         // down, and the Settings section with it. It used to stay for the rest of the session.
         if (mounted && !JiTA.leadduty.isLead()) {
-            try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }   // removes the chip for a non-Lead
-            try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { /* swallow */ }
+            try { JiTA.leadduty.reminder.mount(); } catch (e) { JiTA.caught('leadduty.reminder.mount', e); }   // removes the chip for a non-Lead
+            try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { JiTA.caught('menu.render', e); }
             return;
         }
         if (mounted || !JiTA.leadduty.isLead()) { return; }
         mounted = true;
-        try { JiTA.leadduty.reminder.mount(); } catch (e) { /* swallow */ }
+        try { JiTA.leadduty.reminder.mount(); } catch (e) { JiTA.caught('leadduty.reminder.mount', e); }
         // The chip just painted from the local mirror; check it against the shared ledger and repaint if a
         // completion made in another browser was missing.
         try {
             JiTA.leadduty.syncMirrors().then(function (changed) {
-                if (changed) { try { JiTA.leadduty.reminder.mount(); } catch (e2) { /* swallow */ } }
+                if (changed) { try { JiTA.leadduty.reminder.mount(); } catch (e2) { JiTA.caught('leadduty.reminder.mount', e2); } }
             });
-        } catch (e) { /* swallow */ }
-        try { JiTA.leadduty.sched.start(); } catch (e) { /* swallow */ }
+        } catch (e) { JiTA.caught('leadduty.syncMirrors', e); }
+        try { JiTA.leadduty.sched.start(); } catch (e) { JiTA.caught('leadduty.sched.start', e); }
         // The once-a-day dialog, after the page has settled. It checks its own quiet-until stamp, so this
         // fires at most once per session and at most once a day however many tabs are opened.
-        setTimeout(function () { try { JiTA.leadduty.reminder.nag(); } catch (e) { /* swallow */ } },
+        setTimeout(function () { try { JiTA.leadduty.reminder.nag(); } catch (e) { JiTA.caught('leadduty.reminder.nag', e); } },
             JiTA.leadduty.reminder.NAG_DELAY_MS);
         // No Tampermonkey menu command of its own: the chip, the once-a-day dialog and the Settings section
         // are already three ways in, and a fourth only lengthens a menu every Lead sees on every page.
         // If Settings happens to be open on a first-ever load, redraw it so the section appears at once.
-        try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { /* swallow */ }
+        try { if (document.querySelector('#jita-menu.jita-settings-view')) { JiTA.menu.render(); } } catch (e) { JiTA.caught('menu.render', e); }
     }
     arm();
     setTimeout(function () { JiTA.leadduty.resolveMe().then(arm, function () { /* ignore */ }); }, 3000);
@@ -24979,8 +25150,8 @@ function jitaArmLeadDuties() {
 if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
     (function () {
         if (!window.indexedDB) { return; }
-        setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { /* swallow */ } }, 1200);
-        try { JiTA.changelog.start(); } catch (e) { /* swallow */ }   // the "What's new" pill after an update
+        setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { JiTA.caught('jitaArmLeadDuties', e); } }, 1200);
+        try { JiTA.changelog.start(); } catch (e) { JiTA.caught('changelog.start', e); }   // the "What's new" pill after an update
         // The Lead chip and the What's new pill sit over the same Atlaskit sidebar here as on Jira, but Jira's shared
         // observer (which steps them aside for a menu) never runs on the wiki. Watch for menus here as well.
         try { new MutationObserver(function () { try { jitaPillsYieldSoon(); } catch (e) { /* ignore */ } }).observe(document.body, { childList: true, subtree: true }); } catch (e) { /* ignore */ }
@@ -24993,38 +25164,38 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
     if (JITA_NO_JIRA_UI || JITA_IS_SUBFRAME) { return; }   // the Forge iframe runs only the responses dropdown, Confluence its own boot (above), a frame in a page nothing
     // "What's new" after an update. Scheduled first, so nothing that boots after it can keep it from showing; start()
     // still waits for the page to settle, and the observer below puts the pill back if anything takes it away.
-    try { JiTA.changelog.start(); } catch (eCl) { /* swallow */ }
-    try { jitaNavSaid(); } catch (eNs) { /* swallow */ }   // a page load an in-app switch fell back to says why
+    try { JiTA.changelog.start(); } catch (eCl) { JiTA.caught('changelog.start', eCl); }
+    try { jitaNavSaid(); } catch (eNs) { JiTA.caught('jitaNavSaid', eNs); }   // a page load an in-app switch fell back to says why
     if (!window.indexedDB) { return; }   // feature unavailable in this environment
-    try { JiTA.dv._bindGlobal(); } catch (eDv) { /* swallow */ }   // the detail view's click hook works off /browse/ too (see _takeAll)
+    try { JiTA.dv._bindGlobal(); } catch (eDv) { JiTA.caught('dv._bindGlobal', eDv); }   // the detail view's click hook works off /browse/ too (see _takeAll)
     var scheduled = false;
     var observer = new MutationObserver(function () {
         // Synchronous first: if Jira just wiped our sidebar group, put it back THIS tick (with cached content)
         // so it never visibly vanishes. Cheap - a getElementById guard skips it whenever the group is present.
-        try { JiTA.ui._reensureFast(); } catch (e0) { /* swallow */ }
-        try { JiTA.checklist.reensure(); } catch (eCl0) { /* swallow */ }   // the Defect checklist card, if Jira wiped it
-        try { JiTA.dv._fast(); } catch (e1) { /* swallow */ }   // Jira replaced the layout the detail view pads
+        try { JiTA.ui._reensureFast(); } catch (e0) { JiTA.caught('ui._reensureFast', e0); }
+        try { JiTA.checklist.reensure(); } catch (eCl0) { JiTA.caught('checklist.reensure', eCl0); }   // the Defect checklist card, if Jira wiped it
+        try { JiTA.dv._fast(); } catch (e1) { JiTA.caught('dv._fast', e1); }   // Jira replaced the layout the detail view pads
         if (scheduled) { return; }
         scheduled = true;
         setTimeout(function () {
             scheduled = false;
-            try { JiTA.ui.ensure(); } catch (e) { /* swallow */ }
-            try { JiTA.ui.updateVisibility(); } catch (e2) { /* swallow */ }   // hide while an attachment viewer is open
-            try { JiTA.logsig.updateVisibility(); } catch (e3) { /* swallow */ }   // drop the "Defects in log" panel once the log viewer closes
-            try { JiTA.dv.ensure(); } catch (e4) { /* swallow */ }   // detail view: mount / follow the open issue / unmount off /browse/
-            try { JiTA.ocr.ensure(); } catch (e5) { /* swallow */ }  // screenshot translation: button on an open image attachment
-            try { JiTA.changelog.ensure(); } catch (e6) { /* swallow */ }   // the "What's new" pill, if something took it away
-            try { JiTA.checklist.ensure(); } catch (e7) { /* swallow */ }   // the Defect checklist: follow the defect on screen, judge it again after an edit
+            try { JiTA.ui.ensure(); } catch (e) { JiTA.caught('ui.ensure', e); }
+            try { JiTA.ui.updateVisibility(); } catch (e2) { JiTA.caught('ui.updateVisibility', e2); }   // hide while an attachment viewer is open
+            try { JiTA.logsig.updateVisibility(); } catch (e3) { JiTA.caught('logsig.updateVisibility', e3); }   // drop the "Defects in log" panel once the log viewer closes
+            try { JiTA.dv.ensure(); } catch (e4) { JiTA.caught('dv.ensure', e4); }   // detail view: mount / follow the open issue / unmount off /browse/
+            try { JiTA.ocr.ensure(); } catch (e5) { JiTA.caught('ocr.ensure', e5); }  // screenshot translation: button on an open image attachment
+            try { JiTA.changelog.ensure(); } catch (e6) { JiTA.caught('changelog.ensure', e6); }   // the "What's new" pill, if something took it away
+            try { JiTA.checklist.ensure(); } catch (e7) { JiTA.caught('checklist.ensure', e7); }   // the Defect checklist: follow the defect on screen, judge it again after an edit
         }, 300);
     });
     observer.observe(document.body, { childList: true, subtree: true });
     // also try once on load in case the breadcrumb is already present
-    setTimeout(function () { try { JiTA.ui.ensure(); } catch (e) { /* swallow */ } }, 1500);
+    setTimeout(function () { try { JiTA.ui.ensure(); } catch (e) { JiTA.caught('ui.ensure', e); } }, 1500);
     // one-time data-schema migration: re-fetch a local DB that predates a stored-field change. Runs before
     // the scheduler's startup tick (below) so its full re-fetch grabs the single-flight lock first.
-    setTimeout(function () { try { JiTA.migrate.run(); } catch (e) { /* swallow */ } }, 4000);
-    setTimeout(function () { try { JiTA.translate.prepare(); } catch (e) { /* swallow */ } }, 6000);   // background-translate the foreign-report backlog
-    setTimeout(function () { try { JiTA.logread.prepare(); } catch (e) { /* swallow */ } }, JiTA.logread.START_MS);   // read the open reports' logs, for the exception boost
+    setTimeout(function () { try { JiTA.migrate.run(); } catch (e) { JiTA.caught('migrate.run', e); } }, 4000);
+    setTimeout(function () { try { JiTA.translate.prepare(); } catch (e) { JiTA.caught('translate.prepare', e); } }, 6000);   // background-translate the foreign-report backlog
+    setTimeout(function () { try { JiTA.logread.prepare(); } catch (e) { JiTA.caught('logread.prepare', e); } }, JiTA.logread.START_MS);   // read the open reports' logs, for the exception boost
     // Keep the hidden set in sync across tabs: another tab hiding/unhiding an issue invalidates our cached map
     // and re-renders the open view so a just-hidden suggestion drops out (and an unhidden one comes back).
     if (typeof GM_addValueChangeListener === 'function') {
@@ -25093,16 +25264,16 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
         });
     })();
     // start the periodic background catch-up sync
-    try { JiTA.sched.start(); } catch (e) { /* swallow */ }
+    try { JiTA.sched.start(); } catch (e) { JiTA.caught('sched.start', e); }
     // Shared ranking worker: elect a leader + spawn the one worker all tabs share (ranking, embedding, credits).
-    try { JiTA.worker.start(); } catch (e) { /* swallow */ }
+    try { JiTA.worker.start(); } catch (e) { JiTA.caught('worker.start', e); }
     // ISD credit tracker: show the corner badge (from cache) and start the throttled background recompute.
     if (flagOn('credits')) {
-        try { JiTA.credits.badge.mount(); } catch (e) { /* swallow */ }
-        try { JiTA.credits.sched.start(); } catch (e) { /* swallow */ }
+        try { JiTA.credits.badge.mount(); } catch (e) { JiTA.caught('credits.badge.mount', e); }
+        try { JiTA.credits.sched.start(); } catch (e) { JiTA.caught('credits.sched.start', e); }
     }
     // ISD Lead duties: Leads only, and there is no feature flag - roster membership IS the gate.
-    try { jitaArmLeadDuties(); } catch (e) { /* swallow */ }
+    try { jitaArmLeadDuties(); } catch (e) { JiTA.caught('jitaArmLeadDuties', e); }
 })();
 
 
