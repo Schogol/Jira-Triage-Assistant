@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.11
+// @version     3.53.12
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.11
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.12
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -17249,9 +17249,9 @@ JiTA.dv = {
     // Our own URL change: the router takes it from here. Anything else that moves the URL (Back, a linked
     // issue, Jira's own links) arrives through _syncFromLocation instead.
     _nav: function (key) {
-        var D = JiTA.dv, path = '/browse/' + encodeURIComponent(key);
+        var D = JiTA.dv, path = '/browse/' + encodeURIComponent(key), was = D._locKey();
         D._lastNav = Date.now();
-        if (key === D._locKey()) { return; }
+        if (key === was) { return; }
         D._lastLoc = key;
         var fails = D._spaFails();
         if (fails >= D.SPA_FAIL_MAX) { location.assign(path); return; }
@@ -17264,8 +17264,11 @@ JiTA.dv = {
         D._navTimer = setTimeout(function check() {
             if (D._locKey() !== key) { return; }   // the user has moved on - nothing to rescue
             var c = D._crumbKey(), waited = Date.now() - t0;
-            // The router took it: the new issue is on screen, or another key (a moved issue shows its new one).
-            if (c && c !== from) { D._setSpaFails(0); return; }
+            // The router took it: this issue is on screen, or a key that is neither the issue switched from nor the one the
+            // address held before (a moved issue shows its new one). Switched back to the issue still on screen (Down, then
+            // Up before the first switch showed), the one switched from IS this one, so it never counted, and the issue being
+            // read was loaded again 15 s later. An earlier switch that shows late, after a skeleton, shows the address's key.
+            if (c && (c === key || (c !== from && c !== was))) { D._setSpaFails(0); return; }
             // A slow issue is not an ignored switch: counted as one, it turned every later click in the tab into a page load,
             // with Jira asking to leave the page. Jira keeps the issue switched from on screen, breadcrumb and all, until the
             // new one has loaded, so that one is given NAV_FALLBACK_MS; and one with no breadcrumb at all is still loading
@@ -17979,12 +17982,15 @@ JiTA.dv = {
         var D = JiTA.dv;
         if (D._mounted) { D._useFilter(f); return; }
         D._activeKey = null;   // the issue last open belongs to no list now: never go paging for it
+        // The issue page the click came from, if any: the view never mounts on Jira's page for a deleted issue, or one this
+        // user cannot see. Such a click is no move of the user's own, and taken as one it opened nothing and fell back to nothing.
+        var at = D._locKey();
         var slow = setTimeout(function () {
             if (seq === D._linkSeq && JiTA.ui && JiTA.ui.toast) { JiTA.ui.toast('Opening "' + (f.name || 'the filter') + '" in the detail view…'); }
         }, D.TAKE_TOAST_MS);
         Promise.resolve(D._useFilter(f)).then(function () {
             clearTimeout(slow);
-            if (seq !== D._linkSeq || D._mounted || D._locKey()) { return; }   // a newer click, or the user reached an issue on their own
+            if (seq !== D._linkSeq || D._mounted || D._locKey() !== at) { return; }   // a newer click, or the user reached an issue on their own
             var first = D._issues[0];
             if (!first) { location.assign(href); return; }
             D._activeKey = first.key;   // _nav records the key as already seen, so the highlight is set here

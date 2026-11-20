@@ -14,8 +14,10 @@ const muts = [
     ['nothing opened', "            D._nav(first.key);\n", ""],
     ['opened without its highlight', "            D._activeKey = first.key;   // _nav records", "            //"],
     ['empty filter swallowed', "if (!first) { location.assign(href); return; }", "if (!first) { return; }"],
-    ['older click still opens', "if (seq !== D._linkSeq || D._mounted || D._locKey()) { return; }", "if (D._mounted || D._locKey()) { return; }"],
-    ['user yanked off their issue', "if (seq !== D._linkSeq || D._mounted || D._locKey()) { return; }", "if (seq !== D._linkSeq || D._mounted) { return; }"],
+    ['older click still opens', "if (seq !== D._linkSeq || D._mounted || D._locKey() !== at) { return; }", "if (D._mounted || D._locKey() !== at) { return; }"],
+    ['user yanked off their issue', "if (seq !== D._linkSeq || D._mounted || D._locKey() !== at) { return; }", "if (seq !== D._linkSeq || D._mounted) { return; }"],
+    ['a click from an issue page the view never mounted on is taken as a move of their own', "if (seq !== D._linkSeq || D._mounted || D._locKey() !== at) { return; }", "if (seq !== D._linkSeq || D._mounted || D._locKey()) { return; }"],
+    ['the page the click came from is read when page one lands', "        var at = D._locKey();\n", "        var at = null;\n"],
     ['toast after a fast load', "            clearTimeout(slow);\n", ""],
     ['toast never shown', "}, D.TAKE_TOAST_MS);", "}, 1e9);"],
     ['hook only bound on mount', "    try { JiTA.dv._bindGlobal(); } catch (eDv) { JiTA.caught('dv._bindGlobal', eDv); }", "    /* mutated */"]
