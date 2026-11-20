@@ -2,17 +2,15 @@
 // reports that do not fit, in a Defect Profile card of its own. Evals the real JiTA.profile, the dxdiag / PDMData parsers, JiTA.logsig._logBlocks /
 // _fingerprint and JiTA.ocr's language labels against stubs, with real zips built here (node zlib).
 require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
-const fs = require('fs'), zlib = require('zlib');
-const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const zlib = require('zlib');
+const S = require('./source');   // finds the pieces by name
+const src = S.load();
 const once = (head) => {
     const s = src.indexOf(head);
     if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + head.trim().slice(0, 60)); }
     return s;
 };
-const member = (head) => { const s = once(head); return src.slice(s, src.indexOf('\n    },', s) + 7); };
-const line = (head) => { const s = once(head); return src.slice(s, src.indexOf('\n', s) + 1); };
-const fn = (head) => { const s = once(head); return src.slice(s, src.indexOf('\n}\n', s) + 3); };
-const block = (head, end) => { const s = once(head); return src.slice(s, src.indexOf(end, s) + end.length); };
+const line = (head) => { const s = once(head); return src.slice(s, src.indexOf('\n', s) + 1); };   // a statement inside the worker
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
@@ -24,26 +22,23 @@ global.gmGet = (k, d) => (k in store ? store[k] : d);
 global.gmSet = (k, v) => { store[k] = v; };
 const flags = {};
 global.flagOn = (n) => flags[n] !== false;
-(0, eval)([fn('function pdmGpus(machine) {'), fn('function pdmGpuName(gpu) {'), fn('function pdmBestGpu(machine) {'), fn('function convertTextToObject(text) {'),
-    block('var DX_BUGCHECK = {', '\n};\n'), block('var DX_EXCEPTION = {', '\n};\n'), fn('function dxBugcheckName(hex) {'), fn('function dxExceptionName(hex) {'),
-    fn('function parseWER(text) {'), line('var DX_APP_CRASH = '), fn('function dxWerKind(e) {'), fn('function dxCrashCode(e) {'), fn('function dxFirst(text, label) {'),
-    fn('function dxParseDate(s, order) {'), fn('function dxDateOrder(text) {'), fn('function dxNvidiaDriver(ver) {'), fn('function dxGpus(text, order) {')
-].join('\n') + '\nObject.assign(global, { pdmBestGpu, pdmGpuName, convertTextToObject, parseWER, dxWerKind, dxCrashCode, dxExceptionName, dxFirst, dxDateOrder, dxGpus });');
+(0, eval)(['pdmGpus', 'pdmGpuName', 'pdmBestGpu', 'convertTextToObject'].map((n) => S.fn(src, n)).concat(
+    S.top(src, 'var DX_BUGCHECK'), S.top(src, 'var DX_EXCEPTION'), S.fn(src, 'dxBugcheckName'), S.fn(src, 'dxExceptionName'), S.fn(src, 'parseWER'), S.top(src, 'var DX_APP_CRASH'),
+    ['dxWerKind', 'dxCrashCode', 'dxFirst', 'dxParseDate', 'dxDateOrder', 'dxNvidiaDriver', 'dxGpus'].map((n) => S.fn(src, n))
+).join('\n') + '\nObject.assign(global, { pdmBestGpu, pdmGpuName, convertTextToObject, parseWER, dxWerKind, dxCrashCode, dxExceptionName, dxFirst, dxDateOrder, dxGpus });');
 global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, repexc: { forget() {}, profileReady() {} } };
-Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isResolved: function (status, resolution) {') + '})'));
+Object.assign(JiTA.util, eval(S.members(src, 'JiTA.util', ['toPlainText', 'isResolved'])));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
-Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    OPEN_CUT: ') + line('    isTrace: function (sig) {') +
-    line('    isCut: function (sig) {') + line('    _traceKey: function (sig) {') + member('    _fingerprint: function (text) {') + member('    _logBlocks: function (text) {') +
-    member('    defectsForSigs: function (sigs) {') + member('    _defectsLocal: function (sigs) {') + member('    _crashOf: function (sig) {') +
-    member('    _traceMates: function (idx, sig) {') + member('    _pointAt: function (idx, sig, crashSig) {') + '})'));
+Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['MIN_FRAMES', 'CRASH_FRAMES', 'TRACE', 'OPEN_CUT', 'isTrace', 'isCut', '_traceKey', '_fingerprint', '_logBlocks',
+    'defectsForSigs', '_defectsLocal', '_crashOf', '_traceMates', '_pointAt'])));
 JiTA.hidden = { keys: {}, isHidden: (k) => !!JiTA.hidden.keys[k] };
 // What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
-Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
-eval(block('JiTA.excnoise = {', '\n};\n'));
-Object.assign(JiTA.ocr, eval('({' + block('    LANGS: [', '\n    ],\n') + member('    _langFromLabels: function (labels) {') + '})'));
+Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['isUserError', '_msgKey'])));
+eval(S.top(src, 'JiTA.excnoise'));
+Object.assign(JiTA.ocr, eval(S.members(src, 'JiTA.ocr', ['LANGS', '_langFromLabels'])));
 JiTA.db.getMeta = (k) => Promise.resolve(k in meta ? meta[k] : null);
 JiTA.db.setMeta = (k, v) => { metaSets.push(k); meta[k] = v; return Promise.resolve(); };
-eval(block('JiTA.profile = {', '\n    _noop: null\n};\n'));
+eval(S.top(src, 'JiTA.profile'));
 const P = JiTA.profile;
 
 // ---- a zip, built here: [{ name, data (Buffer), method 0 | 8, flags }] -> ArrayBuffer ----
@@ -571,7 +566,7 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     JiTA.worker.call = () => Promise.reject(new Error('unknown logsig op: defects'));
     sd = await JiTA.logsig.defectsForSigs([fA.sig]);
     ok('...and reads the index itself when the worker cannot answer (an older worker, say)', sd[fA.sig] === 'EDR-2', JSON.stringify(sd));
-    const workerSrc = fn('function jitaWorkerBody(cfg) {');
+    const workerSrc = S.fn(src, 'jitaWorkerBody');
     ok('the worker answers the lookup', /else if \(op === 'defects'\) \{ result = lgDefects\(payload\.sigs\); \}/.test(workerSrc));
 
     // ---- the profile ----
@@ -767,23 +762,23 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('...and keeps what summarising it again takes', lastOf().gen === N.gen && typeof lastOf().hiddenOf === 'function' && Array.isArray(lastOf().views) && 'defect' in lastOf());
 
     // ================= wiring =================
-    ok('renderReports draws the section on a defect', member('    renderReports: function (key, background) {').indexOf('JiTA.profile.renderSection(key, background);') >= 0);
-    ok('the views that are not a defect\'s clear it', ['    render: function (key, background) {', '    renderReporterReports: function (key) {', '    renderSimilarReports: function (key, background) {', '    renderTrending: function (key, background) {']
-        .every((h) => member(h).indexOf('JiTA.profile.clear();') >= 0));
-    ok('the profile left the Triage Assistant card; the floating panel keeps it as a section', member('    _sidebarBodyHtml: function () {').indexOf('jita-sd-profile') < 0 &&
-        member('    _ensureFloating: function () {').indexOf('<div id="jita-sd-profile"></div>') >= 0);
-    const sbg = member('    _buildSideGroup: function (o) {');
+    ok('renderReports draws the section on a defect', S.member(src, 'JiTA.ui', 'renderReports').indexOf('JiTA.profile.renderSection(key, background);') >= 0);
+    ok('the views that are not a defect\'s clear it', ['render', 'renderReporterReports', 'renderSimilarReports', 'renderTrending']
+        .every((n) => S.member(src, 'JiTA.ui', n).indexOf('JiTA.profile.clear();') >= 0));
+    ok('the profile left the Triage Assistant card; the floating panel keeps it as a section', S.member(src, 'JiTA.ui', '_sidebarBodyHtml').indexOf('jita-sd-profile') < 0 &&
+        S.member(src, 'JiTA.ui', '_ensureFloating').indexOf('<div id="jita-sd-profile"></div>') >= 0);
+    const sbg = S.member(src, 'JiTA.ui', '_buildSideGroup');
     ok('both cards come from one builder, which names, fills and remembers each by what it is given', sbg.indexOf('Triage Assistant') < 0 &&
         sbg.indexOf('titleEl.textContent = o.title;') >= 0 && sbg.indexOf('.textContent = o.title;') !== sbg.lastIndexOf('.textContent = o.title;') &&
         sbg.indexOf('freshBody.innerHTML = o.body;') >= 0 && sbg.indexOf('gmSet(o.collapseKey, isColl);') >= 0 && sbg.indexOf('gmGet(o.collapseKey, false)') >= 0 &&
-        member('    _ensureSidebar: function () {').indexOf("_buildSideGroup({ id: 'jita-side-group', title: 'Triage Assistant'") >= 0);
-    ok('the Triage Assistant card, rebuilt, keeps the profile card right above it', member('    _ensureSidebar: function () {').indexOf("group.parentNode.insertBefore(pg, group);") >= 0);
-    ok('the page observer puts a wiped card back', member('    _reensureFast: function () {').indexOf('JiTA.profile.reensure();') >= 0);
-    ok('switching to the floating panel, or turning the Triage Assistant off, takes the card too', member('    toggleStyle: function () {').indexOf('#jita-profile-group') >= 0 &&
-        member('    _ensurePanel: function () {').indexOf('#jita-profile-group') >= 0 && block('JiTA.menu = {', '\n};\n').indexOf("$('#jita-side-group, #jita-profile-group').remove();") >= 0);
-    const menuSrc = block('JiTA.menu = {', '\n};\n');
+        S.member(src, 'JiTA.ui', '_ensureSidebar').indexOf("_buildSideGroup({ id: 'jita-side-group', title: 'Triage Assistant'") >= 0);
+    ok('the Triage Assistant card, rebuilt, keeps the profile card right above it', S.member(src, 'JiTA.ui', '_ensureSidebar').indexOf("group.parentNode.insertBefore(pg, group);") >= 0);
+    ok('the page observer puts a wiped card back', S.member(src, 'JiTA.ui', '_reensureFast').indexOf('JiTA.profile.reensure();') >= 0);
+    ok('switching to the floating panel, or turning the Triage Assistant off, takes the card too', S.member(src, 'JiTA.ui', 'toggleStyle').indexOf('#jita-profile-group') >= 0 &&
+        S.member(src, 'JiTA.ui', '_ensurePanel').indexOf('#jita-profile-group') >= 0 && S.top(src, 'JiTA.menu').indexOf("$('#jita-side-group, #jita-profile-group').remove();") >= 0);
+    const menuSrc = S.top(src, 'JiTA.menu');
     ok('Settings has the igbr.zip switch, on by default', menuSrc.indexOf('gmSet(JiTA.profile.ZIP_KEY, !JiTA.profile.zipOn());') >= 0 && P.zipOn() === true);
-    const flagSrc = eval('(function () { ' + line('var savedVariables = ') + line('var FLAG = ') + ' return { savedVariables: savedVariables, FLAG: FLAG }; })()');
+    const flagSrc = eval('(function () { ' + S.top(src, 'var savedVariables') + '\n' + S.top(src, 'var FLAG') + '\n' + ' return { savedVariables: savedVariables, FLAG: FLAG }; })()');
     ok('the defect profile is a feature of its own, on by default like every feature', flagSrc.FLAG.defectProfile === 8 && flagSrc.savedVariables[8][0] === 'defectProfile' &&
         flagSrc.savedVariables[8][1] === '', JSON.stringify(flagSrc.savedVariables[8]));
     const featStart = menuSrc.indexOf("JiTA.menu._toggleRow('Defect profile', 8,"), subStart = menuSrc.indexOf("if (flagOn('defectProfile')) {", featStart);
