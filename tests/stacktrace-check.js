@@ -366,6 +366,13 @@ const LOG = [other('20:32:44', 'blue::Memory', 'Python memory: 902224K')].concat
     global.gmGet = realGm;
     ok('the profile\'s build reads a report\'s own logs again when they were read before stacktraces, the zip switched off', texts.length === 1 && meta['rp:EBR-31'].lv === P.LOG_V &&
         built && built.views[0].exc.some((ee) => ee.sig === fData.sig), texts.join() + ' ' + J(meta['rp:EBR-31']).slice(0, 100));
+    // ...and leaves as it is a reading that is current, of the logs the report has now
+    const current = meta['rp:EBR-31'] = { v: P.V, key: 'EBR-31', logs: true, hasLog: true, exc: [], logSig: 'logs.txt:500', lv: P.LOG_V, zip: false };
+    texts = [];
+    global.gmGet = (k, d) => (k === P.ZIP_KEY ? false : d);
+    await P.build('EDR-32', null, () => true);
+    global.gmGet = realGm;
+    ok('...while a current reading of the logs the report has now is left as it is: not read, not stored again', texts.length === 0 && meta['rp:EBR-31'] === current, texts.join());
 
     // ================= the profile's words =================
     const tip = P._sigTip(fData.sig, MSG_DATA);

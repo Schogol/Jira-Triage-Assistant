@@ -187,6 +187,12 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
         Object.keys(unbombed).join() + ' ' + String((unbombed['dxdiag.txt'] || '').length));
     const fits = await P._inflate(zlib.deflateRawSync(Buffer.alloc(5000, 66)), 5000), whole = await P._inflate(zlib.deflateRawSync(Buffer.alloc(300000, 67)));
     ok('...one that fits the cap is unpacked whole, and with no cap given any is', fits.length === 5000 && fits[4999] === 66 && whole.length === 300000 && whole[299999] === 67, fits.length + ' ' + whole.length);
+    const inflate0 = P._inflate;
+    let inflated = 0;
+    P._inflate = function () { inflated++; return inflate0.apply(P, arguments); };
+    const overCap = await P.unzip(zip([{ name: 'dxdiag.txt', data: Buffer.alloc(2 * 1024 * 1024, 65), method: 8 }]), ['dxdiag.txt'], 1024 * 1024);
+    P._inflate = inflate0;
+    ok('...and one the zip says is over the cap is left out without unpacking it at all', inflated === 0 && !('dxdiag.txt' in overCap), String(inflated));
     ok('...so is the log inside the zip, by the same language label', files['logs.txt'].indexOf('连接') >= 0, files['logs.txt']);
 
     let texts = [], bytes = [], hints = [];
