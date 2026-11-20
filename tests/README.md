@@ -38,6 +38,23 @@ left out); only an entry with New features brings up the What's new pill:
   so GitHub shows the item as JiTA does.
 - The `@resource` line in `JiTA.user.js` ends in `?v=` and the same version, so Tampermonkey fetches the file again.
 
+`release.js` does all of that in one go: it raises `@version`, sets the `?v=` and puts the entry at the top, dated
+today, each item escaped. Write the items as JiTA shows them, without backslashes:
+
+```
+node tests/release.js patch --fix "What no longer goes wrong."
+node tests/release.js minor --feature "What a user can now do." --fix "What no longer goes wrong."
+node tests/release.js 3.60.0 --feature "..." --date 2026-12-01 --dry
+```
+
+`patch` raises the last digit, `minor` the middle one, `major` the first; a release with a feature raises the middle
+one at least. It refuses an item with an en or em dash, one over 240 characters or on two lines, and a changelog that
+does not start at the script's version, and then writes neither file. `--dry` only shows what it would write.
+`releasetool-check.js` runs it on copies of both files, and `mutate-releasetool.js` breaks its rules one at a time.
+
+Every release is tagged: when a push to `main` raises `@version`, `.github/workflows/tag.yml` puts the tag
+`v<version>` on that commit. So `git diff v3.52.0 v3.52.2` shows what changed between two releases.
+
 `changelog-check.js` fails unless the newest entry is the `@version` being released, the `@resource` line asks for
 that version, every line of the file is one the parser reads, and every item is escaped. Set `JITA_CHANGELOG` to
 check another copy of the file. `ci-static.js` guards the rest of the history: every version main has carried keeps

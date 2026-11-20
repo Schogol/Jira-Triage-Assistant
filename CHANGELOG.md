@@ -11,6 +11,7 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
   \ ` * _ [ ] < > # ~ | & (and before a - or + that starts an item), so GitHub shows the item as JiTA does.
 - The @resource line in JiTA.user.js ends in ?v=<the same version>, so Tampermonkey fetches this file afresh.
 - An entry already released is never removed or re-dated (tests/ci-static.js); its wording may be corrected.
+node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
 ## 3.52.2 (2026-11-18)
