@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.0
+// @version     3.53.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.0
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.1
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -57,10 +57,16 @@ function waitForKeyElements(selectorTxt, actionFunction, bWaitOnce, iframeSelect
 
             if (!alreadyFound) {
                 // The first calls run inside this script's own top-level code, so a callback that threw there stopped
-                // everything after it from loading. A failed callback is logged and its element counted as handled.
+                // everything after it from loading. A failed callback is logged and its element counted as handled. Those
+                // first calls run before the JiTA object exists, so the console has it then, and Copy diagnostics only later.
                 var cancelFound;
                 try { cancelFound = actionFunction(jThis); }
-                catch (e) { try { console.error('[JiTA] could not handle ' + selectorTxt + ':', e); } catch (e2) { /* ignore */ } }
+                catch (e) {
+                    try {
+                        if (typeof JiTA !== 'undefined' && JiTA && JiTA.error) { JiTA.error('[JiTA] could not handle ' + selectorTxt + ':', e); }
+                        else { console.error('[JiTA] could not handle ' + selectorTxt + ':', e); }
+                    } catch (e2) { /* ignore */ }
+                }
                 if (cancelFound)
                     btargetsFound = false;
                 else
@@ -711,7 +717,7 @@ function jitaTranslateRR(text, ep) {
 // Standard error report for the action buttons: log the raw response, then alert `msg` (default: the generic
 // failure text) followed by the shared "check console / report to Schogol" tail.
 function jitaAjaxError(data, msg) {
-    console.log(JSON.stringify(data));
+    JiTA.log(JSON.stringify(data));
     alert((msg || 'This failed for some reason.') + ' Check Console for errors and report issues to Schogol :).');
 }
 
@@ -909,7 +915,7 @@ function jitaNavSaid() {
         v = JSON.parse(raw);
     } catch (e) { return; }
     if (!v || !(Date.now() - (v.at || 0) < 2 * 60 * 1000)) { return; }
-    console.log('[JiTA] ' + v.key + ' was loaded the ordinary way: ' + Math.round((v.waited || 0) / 1000) + ' s after it was opened in-app, ' +
+    JiTA.log('[JiTA] ' + v.key + ' was loaded the ordinary way: ' + Math.round((v.waited || 0) / 1000) + ' s after it was opened in-app, ' +
         (v.on ? 'the page still showed ' + v.on + '.' : 'it had still not loaded.'));
 }
 // Opens `key` in-app, as a link in Jira does: the URL pushed and Jira's router told with a synthetic popstate (JiTA.dv
@@ -1262,7 +1268,7 @@ function addButtons() {
                     JiTA.ui.render(JiTA.ui.currentKey);
                 }
             })
-            .catch(function (e) { console.log('[JiTA] translate failed:', e); });
+            .catch(function (e) { JiTA.log('[JiTA] translate failed:', e); });
     });
 
 
@@ -1512,7 +1518,7 @@ function mountParser(viewHtml, parseFn) {
 // text is already gone.
 function jitaRunParse(parseFn) {
     try { parseFn(); } catch (e) {
-        console.log('[JiTA] log parser failed:', e);
+        JiTA.log('[JiTA] log parser failed:', e);
         var l = document.getElementById('loader');
         if (l) { l.style.display = 'none'; }
         var tc = document.getElementById('tableContent');
@@ -1559,7 +1565,7 @@ function SwapUI() {
         // A read that came back without the log (CodeMirror's internals moved) replaced the readable raw log with an
         // empty table, and said nothing. Leave the viewer as it is.
         if (!rows || rows.indexOf(LOG_HDR) === -1) {
-            console.warn('[JiTA] could not read the log text from the viewer, so it was left as it is');
+            JiTA.warn('[JiTA] could not read the log text from the viewer, so it was left as it is');
             jitaParserPending = 0;
             jitaRevealLogs();
             return;
@@ -3302,18 +3308,26 @@ var JiTA = {
     // and echoed back from its 'ping', so any tab can detect it's talking to a worker built from OLDER code (a
     // leader tab that wasn't reloaded after an update) and trigger a re-election. '' if GM_info is unavailable.
     SCRIPT_VERSION: (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '',
-    // Gated debug logger: emits to the console only when "Debug logging" is enabled in Settings (the 'sdDebug' flag).
-    // It also keeps the last DLOG_MAX lines, for Settings > Debug > Copy diagnostics (JiTA.diag).
+    // JiTA's console lines. log, warn and error write to the console as console.log, .warn and .error do, and keep the
+    // line too: the LOG_MAX latest, each "HH:MM:SS text", for Settings > About > Copy diagnostics (JiTA.diag), whether
+    // Debug logging is on or not. dlog is log for the detail only wanted while Debug logging is on (the 'sdDebug' flag).
+    // None of them throws. A line that dumps whole records (a ledger, a dry run's payload) goes to console.log
+    // directly, so it stays out of the report.
+    log: function () { JiTA._out('log', arguments); },
+    warn: function () { JiTA._out('warn', arguments); },
+    error: function () { JiTA._out('error', arguments); },
     dlog: function () {
+        try { if (gmGet('sdDebug', false)) { JiTA._out('log', arguments); } } catch (e) { /* ignore */ }
+    },
+    _out: function (level, args) {
+        try { if (window.console) { console[level].apply(console, args); } } catch (e) { /* ignore */ }
         try {
-            if (!gmGet('sdDebug', false)) { return; }
-            if (window.console) { console.log.apply(console, arguments); }
-            JiTA._dlogLines.push(new Date().toISOString().slice(11, 19) + ' ' + JiTA._fmtArgs(arguments));
-            if (JiTA._dlogLines.length > JiTA.DLOG_MAX) { JiTA._dlogLines.shift(); }
+            JiTA._logLines.push(new Date().toISOString().slice(11, 19) + ' ' + JiTA._fmtArgs(args));
+            if (JiTA._logLines.length > JiTA.LOG_MAX) { JiTA._logLines.shift(); }
         } catch (e) { /* ignore */ }
     },
-    DLOG_MAX: 200,
-    _dlogLines: [],
+    LOG_MAX: 200,
+    _logLines: [],
     // A log call's arguments as one line of text: an error by its name and message, anything else as JSON, each cut short.
     _fmtArgs: function (args) {
         var out = [];
@@ -3592,7 +3606,7 @@ JiTA.logsig = {
             JiTA.logsig._building = null;
             var nClusters = 0;
             Object.keys(sigMap).forEach(function (s) { if (sigMap[s].members.length >= 2) { nClusters++; } });
-            console.log('[JiTA] log signatures: ' + nSig + ' stack signatures (' + nClusters + ' shared across ≥2 defects) mined from ' + recs.length + ' defects');
+            JiTA.log('[JiTA] log signatures: ' + nSig + ' stack signatures (' + nClusters + ' shared across ≥2 defects) mined from ' + recs.length + ' defects');
             return JiTA.logsig._index;
         }).catch(function (e) { JiTA.logsig._building = null; throw e; });
         return JiTA.logsig._building;
@@ -3873,7 +3887,7 @@ JiTA.logsig = {
                 i = j;
             }
             JiTA.logsig.renderPanel(found);
-        }).catch(function (e) { console.log('[JiTA] log signature apply skipped:', e && e.message || e); });
+        }).catch(function (e) { JiTA.log('[JiTA] log signature apply skipped:', e && e.message || e); });
     },
 
     // Re-run the log->defect match against the CURRENT (possibly just-synced) signature index. Clears the
@@ -6047,7 +6061,7 @@ JiTA.sync = {
                 return run(rt.token).catch(function (e) {
                     if (!e || e.status !== 400) { throw e; }   // anything else is a real failure
                     var before = e.syncChanged || 0;
-                    console.log('[JiTA] Jira refused the saved sync position (HTTP 400) - crawling ' + (prefix ? 'the bug reports' : 'the defects') + ' from the start');
+                    JiTA.log('[JiTA] Jira refused the saved sync position (HTTP 400) - crawling ' + (prefix ? 'the bug reports' : 'the defects') + ' from the start');
                     return JiTA.db.setMeta(resumeKey, null)
                         .then(function () { return run(null); })
                         .then(function (res) { res.changed += before; return res; });
@@ -6198,7 +6212,7 @@ JiTA.sync = {
             })
             .catch(function (e) {
                 JiTA.sync.running = false;
-                console.log('[JiTA] defect refetch (migration) failed:', e && e.message || e);
+                JiTA.log('[JiTA] defect refetch (migration) failed:', e && e.message || e);
             });
     },
 
@@ -6221,7 +6235,7 @@ JiTA.sync = {
             })
             .catch(function (e) {
                 JiTA.sync.running = false;
-                console.log('[JiTA] bug report refetch (migration) failed:', e && e.message || e);
+                JiTA.log('[JiTA] bug report refetch (migration) failed:', e && e.message || e);
             });
     },
 
@@ -6331,13 +6345,13 @@ JiTA.sync = {
         }).then(function () {
             JiTA.sync.running = false;
             JiTA.sync._quiet = false;
-            console.log('[JiTA] auto-sync done (defects ' + (defectsChanged ? 'changed' : 'unchanged') + '; EBRs ' + (ebrChanged ? 'changed' : 'unchanged') + ')');
+            JiTA.log('[JiTA] auto-sync done (defects ' + (defectsChanged ? 'changed' : 'unchanged') + '; EBRs ' + (ebrChanged ? 'changed' : 'unchanged') + ')');
             JiTA.sync._afterSync(defectsChanged, ebrChanged, false);
             return true;
         }).catch(function (e) {
             JiTA.sync.running = false;
             JiTA.sync._quiet = false;
-            console.log('[JiTA] auto-sync error:', e && e.message || e);
+            JiTA.log('[JiTA] auto-sync error:', e && e.message || e);
             return false;
         });
     }
@@ -6562,7 +6576,7 @@ JiTA.embed = {
             JiTA.embed._preparing = null;
         }, function (e) {
             JiTA.embed._preparing = null;
-            console.log('[JiTA] worker embed pass skipped:', (e && e.message) || e);
+            JiTA.log('[JiTA] worker embed pass skipped:', (e && e.message) || e);
         });
         return JiTA.embed._preparing;
     }
@@ -6593,7 +6607,7 @@ JiTA.translate = {
             run = JiTA.translate.pass();
         }
         JiTA.translate._running = run.then(function () { JiTA.translate._running = null; },
-            function (e) { JiTA.translate._running = null; console.log('[JiTA] translate pass skipped:', e && e.message || e); });
+            function (e) { JiTA.translate._running = null; JiTA.log('[JiTA] translate pass skipped:', e && e.message || e); });
         return JiTA.translate._running;
     },
 
@@ -6658,7 +6672,7 @@ JiTA.translate = {
                                 // for as long as the tab stayed open, holding the translate lock: give the lane up. Its report stays
                                 // untranslated (lang == null) for the next pass; the other lane takes the rest.
                                 if (backoff >= JiTA.translate.BACKOFF_MAX && ++capped >= JiTA.translate.MAX_CAPPED) {
-                                    console.log('[JiTA] translate: endpoint ' + ep + ' keeps refusing - leaving the rest to the next pass');
+                                    JiTA.log('[JiTA] translate: endpoint ' + ep + ' keeps refusing - leaving the rest to the next pass');
                                     return;
                                 }
                                 var wait = backoff; backoff = Math.min(backoff * 2, JiTA.translate.BACKOFF_MAX);
@@ -6673,7 +6687,7 @@ JiTA.translate = {
                             // next prepare() started a second one beside it, translating some reports twice. Log it and go on;
                             // the report keeps lang == null, so the next pass tries it again.
                             return JiTA.db.updateRecord(item.key, apply).then(null, function (e) {
-                                console.log('[JiTA] translate: could not store ' + item.key + ':', e && e.message || e);
+                                JiTA.log('[JiTA] translate: could not store ' + item.key + ':', e && e.message || e);
                             }).then(function () {
                                 done++; report();
                                 return JiTA.util.delay(JiTA.translate.BATCH_DELAY).then(pull);   // per-lane rate-limit delay
@@ -8415,13 +8429,13 @@ JiTA.ui = {
                     // shows up as an open match on defects before the next EBR sync prunes it.
                     JiTA.db.deleteDefects([ebr]).then(function () {
                         JiTA.sync._ebrRemoved([ebr]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
-                    }, function (e) { console.log('[JiTA] could not drop ' + ebr + ' from the local DB:', e && e.message || e); });
+                    }, function (e) { JiTA.log('[JiTA] could not drop ' + ebr + ' from the local DB:', e && e.message || e); });
                 } else if (res.linked) {
                     jitaRefreshIssueView();   // the link alone
                 }
                 JiTA.ui.toast(msg);
             }, function (e) {
-                console.log('[JiTA] mark-dup failed (attachDuplicate rejected):', e && e.message || e);
+                JiTA.log('[JiTA] mark-dup failed (attachDuplicate rejected):', e && e.message || e);
                 $btn.removeClass('jita-sd-linking').text('Attach');
                 JiTA.ui.toast('Could not link: ' + (e && e.message || e));
             });
@@ -8530,12 +8544,12 @@ JiTA.ui = {
                             // attach", the button went back to Attach, and a retry posted a second issue link.
                             JiTA.db.deleteDefects([reportKey]).then(function () {
                                 JiTA.sync._ebrRemoved([reportKey]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
-                            }, function (e) { console.log('[JiTA] could not drop ' + reportKey + ' from the local DB:', e && e.message || e); })
+                            }, function (e) { JiTA.log('[JiTA] could not drop ' + reportKey + ' from the local DB:', e && e.message || e); })
                                 .then(function () { if (opts.done) { opts.done(reportKey); } else { JiTA.ui._fadeOutAndReplace($b.closest('li'), defectKey); } });
                         }
                     });
                 }).catch(function (e) {
-                    console.log('[JiTA] attach-report failed:', e && e.message || e);
+                    JiTA.log('[JiTA] attach-report failed:', e && e.message || e);
                     $b.removeClass('jita-sd-linking').text('Attach');
                     JiTA.ui.toast('Could not attach: ' + (e && e.message || e));
                 });
@@ -8653,7 +8667,7 @@ JiTA.ui = {
         if (!fresh.length) { return Promise.resolve(); }
         return JiTA.db.deleteDefects(fresh).then(function () {
             return JiTA.sync._ebrRemoved(fresh);
-        }, function (e) { console.log('[JiTA] could not drop ' + fresh.join(', ') + ' from the local DB:', e && e.message || e); }).then(function () {
+        }, function (e) { JiTA.log('[JiTA] could not drop ' + fresh.join(', ') + ' from the local DB:', e && e.message || e); }).then(function () {
             if (still()) { U.scheduleRender(); }
         });
     },
@@ -8716,7 +8730,7 @@ JiTA.ui = {
                     JiTA.ui._checkReportRows(function () { return JiTA.ui.currentKey === defectKey; });
                 });
             });
-        }).catch(function (e) { console.log('[JiTA] append-next-report skipped:', e && e.message || e); });
+        }).catch(function (e) { JiTA.log('[JiTA] append-next-report skipped:', e && e.message || e); });
     },
 
     // Append a freshly-built row to the list and animate it sliding/expanding in from a collapsed state. We
@@ -8972,7 +8986,7 @@ JiTA.ui = {
                         if (/\.txt$/i.test(fn) && /log/i.test(fn) && atts[i].content) { logs.push(atts[i]); }
                     }
                     if (!logs.length) { JiTA.ui._logExc[key] = []; resolve({}); return; }
-                    console.log('[JiTA] log scan ' + key + ': ' + logs.length + ' log attachment(s)');
+                    JiTA.log('[JiTA] log scan ' + key + ': ' + logs.length + ' log attachment(s)');
                     var merged = {}, pending = logs.length, exc = [], seen = {};
                     // The report's own exceptions, each once, fingerprinted as the profile does: the ranking boosts the
                     // defects that hold one (JiTA.repexc).
@@ -8999,7 +9013,7 @@ JiTA.ui = {
                             }
                         });
                         if (--pending === 0) {
-                            console.log('[JiTA] log scan ' + key + ': ' + Object.keys(merged).length + ' known defect(s) matched');
+                            JiTA.log('[JiTA] log scan ' + key + ': ' + Object.keys(merged).length + ' known defect(s) matched');
                             JiTA.ui._logExc[key] = exc;
                             resolve(merged);
                         }
@@ -9512,7 +9526,7 @@ JiTA.ui = {
             return JiTA.db.getDefect(key).then(function (rec) {
                 if (rec) { return; }   // already indexed - nothing to do
                 JiTA.ui._autoSyncedKeys[key] = true;   // don't retrigger for this key this session
-                console.log('[JiTA] ' + key + ' not in local DB - triggering catch-up sync');
+                JiTA.log('[JiTA] ' + key + ' not in local DB - triggering catch-up sync');
                 JiTA.sync.autoSync();   // quiet incremental catch-up (fetches the new defect/EO issue; embeds + refreshes)
             });
         });
@@ -10015,7 +10029,7 @@ JiTA.menu = {
                     if (!JiTA.menu._live($ldStatus)) { return; }
                     $show.prop('disabled', false);
                     var wiki = r[0], qc = r[1], bits = [];
-                    if (window.console) {
+                    if (window.console) {   // the whole ledgers, names and notes in them: the console only, never Copy diagnostics
                         console.log('[JiTA.leadduty] page ' + page + ' property ' + JiTA.leadduty.LEDGER_KEY + ':', wiki ? wiki.value : '(does not exist yet)');
                         console.log('[JiTA.leadduty] page ' + page + ' property ' + JiTA.leadduty.QC_LEDGER_KEY + ':', qc ? qc.value : '(does not exist yet)');
                     }
@@ -10345,7 +10359,7 @@ JiTA.migrate = {
                         var ebrStale = nEbr > 0 && (Number(ev) || 0) < JiTA.DATA_VERSION_EBR;   // the bug reports' own schema
                         if (!defStale && !ebrStale) { return; }
                         if (JiTA.sync.running) { JiTA.migrate._later(); return; }   // one started while we read
-                        console.log('[JiTA] local DB schema out of date (defects v' + (Number(dv) || 0) + ' of v' + JiTA.DATA_VERSION +
+                        JiTA.log('[JiTA] local DB schema out of date (defects v' + (Number(dv) || 0) + ' of v' + JiTA.DATA_VERSION +
                             ', reports v' + (Number(ev) || 0) + ' of v' + JiTA.DATA_VERSION_EBR +
                             ') - auto re-fetching to backfill new fields');
                         // Sequential: each refetch is single-flight (the `running` guard), so chain them.
@@ -10356,7 +10370,7 @@ JiTA.migrate = {
                     });
                 });
             });
-        }).catch(function (e) { console.log('[JiTA] migration check skipped:', e && e.message || e); });
+        }).catch(function (e) { JiTA.log('[JiTA] migration check skipped:', e && e.message || e); });
     }
 };
 
@@ -12696,7 +12710,7 @@ JiTA.dupfind = {
                     JiTA.db.deleteDefects(ghostKeys).then(function () {
                         JiTA.rank._dirty = true;   // the tab's defect keyword index (the worker's are dropped below)
                         if (JiTA.worker && JiTA.worker.usable()) { JiTA.worker.call('invalidate').catch(function () { /* ignore */ }); }
-                        if (window.console) { console.log('[JiTA] dupfind: deleted ' + ghostKeys.length + ' moved-key ghost record(s): ' + ghostKeys.join(', ')); }
+                        JiTA.log('[JiTA] dupfind: deleted ' + ghostKeys.length + ' moved-key ghost record(s): ' + ghostKeys.join(', '));
                     }).catch(function () { /* best effort - the next full rebuild drops them anyway */ });
                 }
                 var clusters = D._clusters(fresh);
@@ -14754,7 +14768,7 @@ JiTA.checklist = {
             var why = String((e && e.message) || e), shown = C._state[key];
             // For the viewer the card is for, said in the console and on the card; for anyone else (their first small read
             // failed) only with debug logging on.
-            if (e && e.sees) { console.log('[JiTA] checklist: could not check ' + key + ':', e); } else { JiTA.dlog('[JiTA] checklist: could not read ' + key + ':', why); }
+            if (e && e.sees) { JiTA.log('[JiTA] checklist: could not check ' + key + ':', e); } else { JiTA.dlog('[JiTA] checklist: could not read ' + key + ':', why); }
             if (!still()) { return; }
             C._seen = C._pageSig();   // checked again once the page changes, not on every change of it
             if (shown && shown.sees && !shown.error) { JiTA.ui.toast('The Defect checklist could not read ' + key + ' again: ' + why); return; }
@@ -14944,7 +14958,7 @@ JiTA.checklist = {
         JiTA.ui.toast(msg);
         C.refresh(key);
         jitaShowWritten(key, function () { return C._pageSig() !== before; }, function () {
-            console.log('[JiTA] checklist: Jira did not show the change on ' + key + ', so the page reloads to show it.');
+            JiTA.log('[JiTA] checklist: Jira did not show the change on ' + key + ', so the page reloads to show it.');
             try { window.location.reload(); } catch (e) { /* the toast and the card say it */ }
         });
     },
@@ -16410,7 +16424,7 @@ JiTA.logread = {
             : LR.pass();
         LR._running = Promise.resolve(run).then(function (n) { LR._running = null; return n; }, function (e) {
             LR._running = null;
-            console.log('[JiTA] reading the open reports\' logs stopped:', e && e.message || e);
+            JiTA.log('[JiTA] reading the open reports\' logs stopped:', e && e.message || e);
         });
         return LR._running;
     },
@@ -16453,7 +16467,7 @@ JiTA.logread = {
             }
             var listing = list(null).then(null, function (e) {
                 listOk = false;
-                console.log('[JiTA] could not list the open reports to read their logs:', e && e.message || e);
+                JiTA.log('[JiTA] could not list the open reports to read their logs:', e && e.message || e);
             }).then(function () { listed = true; });
             function lane() {
                 if (!LR.on()) { return Promise.resolve(); }
@@ -16481,7 +16495,7 @@ JiTA.logread = {
                 if (counted) { JiTA.db.setMeta(N.FREQ_KEY, counted).then(function () { N._setFreq(counted); }, none); }
                 return (whole ? JiTA.db.setMeta(LR.AT_KEY, { at: began, lv: JiTA.profile.LOG_V }).then(null, function () { /* listed again next time */ }) : Promise.resolve()).then(function () {
                     if (read) {
-                        console.log('[JiTA] read the logs of ' + read + ' open bug report(s)');
+                        JiTA.log('[JiTA] read the logs of ' + read + ' open bug report(s)');
                         if (JiTA.ui._isReportsKey(JiTA.ui.currentKey || '')) { JiTA.ui.scheduleRender(); }   // Matching bug reports can rank them now
                     }
                     return read;
@@ -18489,7 +18503,7 @@ JiTA.leadduty = {
                         '). It has outgrown a single Confluence property - raise the issue rather than losing history.');
                 }
                 if (L._dry()) {
-                    if (window.console) {
+                    if (window.console) {   // the whole payload: the console only, never Copy diagnostics
                         console.log('[JiTA.leadduty] DRY RUN: would ' + (prop ? ('PUT ' + key + ' v' + (prop.version + 1)) : ('POST ' + key)) +
                             ' (' + size + ' bytes)', next);
                     }
@@ -23451,7 +23465,7 @@ JiTA.worker = {
     _backendChanged: function () {
         var gpu = !!(gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false));
         if (!JiTA.worker._isLeader || !JiTA.worker._worker || JiTA.worker._spawnedGpu === gpu) { return; }
-        if (window.console) { console.log('[JiTA worker] embedding backend switched to ' + (gpu ? 'GPU' : 'CPU') + ' in another tab - rebuilding the worker'); }
+        JiTA.log('[JiTA worker] embedding backend switched to ' + (gpu ? 'GPU' : 'CPU') + ' in another tab - rebuilding the worker');
         JiTA.worker._spawnWorker();
     },
 
@@ -23465,7 +23479,7 @@ JiTA.worker = {
                     JiTA.worker._becomeLeader();
                 });
             });
-        } catch (e) { if (window.console) { console.log('[JiTA worker] leader election failed:', e); } }
+        } catch (e) { JiTA.log('[JiTA worker] leader election failed:', e); }
     },
 
     _becomeLeader: function () {
@@ -23523,11 +23537,11 @@ JiTA.worker = {
             JiTA.worker._worker = w;
             w.onmessage = JiTA.worker._onWorker;
             w.onerror = function (e) {
-                if (window.console) { console.log('[JiTA worker] worker error:', (e && e.message) || e); }
+                JiTA.log('[JiTA worker] worker error:', (e && e.message) || e);
                 JiTA.worker._onWorkerDead('error');
             };
             setTimeout(function () { try { URL.revokeObjectURL(url); } catch (x) { /* ignore */ } }, 15000);   // keep the URL alive long enough for the worker to load its module
-            if (window.console) { console.log('[JiTA worker] leader spawned worker' + (JiTA.worker._respawns ? ' (respawn ' + JiTA.worker._respawns + ')' : '')); }
+            JiTA.log('[JiTA worker] leader spawned worker' + (JiTA.worker._respawns ? ' (respawn ' + JiTA.worker._respawns + ')' : ''));
             // Embed anything outstanding in the worker (also warms the model there for ranking). Delayed so it
             // doesn't compete with first paint. Single-flight in the worker, so a concurrent prepare() is harmless.
             setTimeout(function () {
@@ -23535,7 +23549,7 @@ JiTA.worker = {
                 JiTA.worker._workerCall('embedPass').then(null, function () { /* ignore: the pass reports its end itself (embedPassDone) */ });
             }, 8000);
         } catch (e) {
-            if (window.console) { console.log('[JiTA worker] worker spawn failed:', e); }
+            JiTA.log('[JiTA worker] worker spawn failed:', e);
             JiTA.worker._onWorkerDead('spawn');
         }
     },
@@ -23561,9 +23575,9 @@ JiTA.worker = {
         JiTA.worker._recovering = true;
         JiTA.worker._killWorker();
         JiTA.worker._failStreak++;
-        if (window.console) { console.log('[JiTA worker] worker down (' + reason + '); failure ' + JiTA.worker._failStreak); }
+        JiTA.log('[JiTA worker] worker down (' + reason + '); failure ' + JiTA.worker._failStreak);
         if (JiTA.worker._failStreak >= JiTA.worker.GIVEUP_AFTER) {
-            if (window.console) { console.log('[JiTA worker] giving up leadership after ' + JiTA.worker._failStreak + ' consecutive failures'); }
+            JiTA.log('[JiTA worker] giving up leadership after ' + JiTA.worker._failStreak + ' consecutive failures');
             JiTA.worker._gaveUp = true;
             JiTA.worker._recovering = false;
             JiTA.worker._stepDown(false);   // release the lock; do NOT re-request
@@ -23574,7 +23588,7 @@ JiTA.worker = {
             var wait = JiTA.worker.RESPAWN_BACKOFF_MS * JiTA.worker._respawns;
             setTimeout(function () { JiTA.worker._recovering = false; JiTA.worker._spawnWorker(); }, wait);
         } else {
-            if (window.console) { console.log('[JiTA worker] respawn budget spent; stepping down for re-election'); }
+            JiTA.log('[JiTA worker] respawn budget spent; stepping down for re-election');
             JiTA.worker._recovering = false;
             JiTA.worker._stepDown(true);   // release the lock so another tab can lead; re-request after a delay
         }
@@ -23618,7 +23632,7 @@ JiTA.worker = {
             var wv = (r && r.version) || '';
             if (!wv) { return; }   // a pre-stamp (older) worker reports no version -> nothing reliable to compare
             if (JiTA.worker._verCmp(wv, JiTA.SCRIPT_VERSION) < 0) {
-                if (window.console) { console.log('[JiTA worker] running worker is v' + wv + ' but this tab is v' + JiTA.SCRIPT_VERSION + ' -> requesting re-election'); }
+                JiTA.log('[JiTA worker] running worker is v' + wv + ' but this tab is v' + JiTA.SCRIPT_VERSION + ' -> requesting re-election');
                 try { if (JiTA.worker._bc) { JiTA.worker._bc.postMessage({ kind: 'reelect', want: JiTA.SCRIPT_VERSION }); } } catch (e) { /* ignore */ }
             } else {
                 JiTA.dlog('[JiTA worker] worker version OK (v' + wv + ')');
@@ -23632,7 +23646,7 @@ JiTA.worker = {
     _applyReelect: function (want) {
         if (want && JiTA.worker._verCmp(want, JiTA.worker._maxSeenVersion) > 0) { JiTA.worker._maxSeenVersion = want; }
         if (JiTA.worker._isLeader && want && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, want) < 0) {
-            if (window.console) { console.log('[JiTA worker] stale leader (v' + JiTA.SCRIPT_VERSION + ' < v' + want + '); stepping down for re-election'); }
+            JiTA.log('[JiTA worker] stale leader (v' + JiTA.SCRIPT_VERSION + ' < v' + want + '); stepping down for re-election');
             JiTA.worker._stepDown(true);
         }
     },
@@ -23700,13 +23714,13 @@ JiTA.worker = {
     _applyEvent: function (d) {
         if (!d) { return; }
         if (d.event === 'embedPassDone' && d.embedded > 0) {
-            if (window.console) { console.log('[JiTA worker] embed pass finished: ' + d.embedded + ' embedded'); }
+            JiTA.log('[JiTA worker] embed pass finished: ' + d.embedded + ' embedded');
             try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // re-rank the open view now the new vectors exist
             return;
         }
         // A failed pass used to be dropped here, so nothing was logged and its last "Embedding N / M" stayed on screen.
         if (d.event === 'embedPassError') {
-            if (window.console) { console.log('[JiTA worker] embed pass failed:', d.error); }
+            JiTA.log('[JiTA worker] embed pass failed:', d.error);
             try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // the view's own status replaces the progress line
             return;
         }
@@ -24760,12 +24774,13 @@ JiTA.diag = {
             'Debug logging: ' + (gmGet('sdDebug', false) ? 'on' : 'off')
         ];
         return Promise.all([D._worker(), D._data()]).then(function (got) {
-            var lines = head.concat(['Worker: ' + got[0], 'Data: ' + got[1], '']).concat(D._errors(), ['']);
-            if (gmGet('sdDebug', false)) {
-                lines.push('Debug log, the last ' + JiTA._dlogLines.length + ' lines:');
-                JiTA._dlogLines.forEach(function (l) { lines.push('  ' + l); });
-            } else {
-                lines.push('Debug log: off. For more detail turn on Settings > About > Debug logging, do what went wrong again, and copy this again.');
+            var lines = head.concat(['Worker: ' + got[0], 'Data: ' + got[1], '']).concat(D._errors(), ['']), log = JiTA._logLines;
+            lines.push(!log.length ? 'Log: nothing logged since this page loaded.'
+                : log.length >= JiTA.LOG_MAX ? 'Log, the latest ' + log.length + ' lines:'
+                : 'Log since this page loaded, ' + log.length + (log.length === 1 ? ' line:' : ' lines:'));
+            log.forEach(function (l) { lines.push('  ' + l); });
+            if (!gmGet('sdDebug', false)) {
+                lines.push('', 'Debug logging is off. For more detail turn it on in Settings > About, do what went wrong again, and copy this again.');
             }
             return lines.join('\n');
         });
@@ -24805,7 +24820,10 @@ JiTA.diag = {
         if (!live) { return Promise.resolve(state); }
         return JiTA.diag._within(function () {
             return w.call('ping', null, { timeoutMs: JiTA.diag.WAIT_MS }).then(function (r) {
-                return state + ', backend ' + ((r && r.backend) || '?') + ', built from v' + ((r && r.version) || '?');
+                var v = (r && r.version) || '?';
+                // A worker from older code: the tab that leads it has not been reloaded since an update, and has not handed over.
+                var older = v !== '?' && JiTA.SCRIPT_VERSION && w._verCmp(v, JiTA.SCRIPT_VERSION) < 0;
+                return state + ', backend ' + ((r && r.backend) || '?') + ', built from v' + v + (older ? ', older than this tab' : '');
             });
         }, state + ', no answer to a ping', function () { return state + ', no answer to a ping'; });
     },

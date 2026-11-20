@@ -56,6 +56,7 @@ let toasts = [], deleted = [], removed = [], renders = 0, collapsed = [], remove
 global.gmSet = () => {};
 global.confirm = () => true;
 global.JiTA = { HOST: 'https://jira', sched: { tabId: 't1' }, rank: {}, link: {}, ui: {}, db: {}, sync: {}, util: {} };
+require('./logstub')(JiTA);
 Object.assign(JiTA.util, eval('({' + member('    isClosedStatus: function (status) {') + '})'));
 JiTA.sync._apiPost = (path, body) => { posts.push(body); return postAnswer(body); };
 JiTA.db.deleteDefects = (keys) => { deleted.push(keys.join()); return keys.some((k) => deleteFails[k]) ? Promise.reject(new Error('QuotaExceededError')) : Promise.resolve(); };

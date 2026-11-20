@@ -100,6 +100,15 @@ opening line had. `source-check.js` checks that every object member and function
 a change the rule would cut wrong fails there first. Older harnesses still cut by text; move one over when you touch it
 (`attach`, `panelattach`, `profile` and `excfind` have).
 
+The script logs through `JiTA.log`, `JiTA.warn` and `JiTA.error` (so Copy diagnostics keeps the lines). A harness that
+builds its own `JiTA` and runs code that logs gives it those three with `logstub.js`; they pass on to `console`, so a
+harness that swaps `console.log` to catch a line still catches it:
+
+```js
+global.JiTA = { db: {}, sync: {} };
+require('./logstub')(JiTA);
+```
+
 ## Breakage suites (`mutate-*.js`)
 
 Each one breaks a specific guard in a copy of the script on purpose and requires the harness that owns it to

@@ -169,6 +169,7 @@ global.jitaConvertButtonState = () => {};
 global.jitaConvertClick = () => {};
 global.jitaCloseClick = () => {};   // the Close button's handler once v3.38.16 is in
 global.flagOn = () => false;
+require('./logstub')(JiTA);   // the translate handler logs its failure through JiTA.log
 (0, eval)(cut('\nfunction addButtons(', '\n};\n') + '\n};');
 addButtons();
 const log0 = console.log;

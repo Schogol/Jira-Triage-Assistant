@@ -31,6 +31,7 @@ global.flagOn = () => true;
 global.GM_addStyle = () => {};
 global.JiTA = { HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {},
     hidden: { isHidden: () => false }, worker: { usable: () => false }, rank: {} };
+require('./logstub')(JiTA);
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isClosedStatus: function (status) {') + '})'));
 JiTA.ocr._langFromLabels = () => null;
 const L = JiTA.logsig;

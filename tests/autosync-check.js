@@ -38,6 +38,7 @@ global.JiTA = {
     sync: { running: false, autoSync: () => { syncs++; syncD = deferred(); return syncD.promise; } },
     logsig: null
 };
+require('./logstub')(JiTA);
 eval(cut('JiTA.sched = {', '\n};\n') + '\n};');
 const S = JiTA.sched;
 const lease = () => store[S.LEASE_KEY];
@@ -107,7 +108,8 @@ const live = () => intervals.filter((h) => h.on);
             incrementalSyncEbr: () => Promise.resolve({ stored: 0 }),
             fullSync: () => Promise.resolve({ stored: 0 }), fullSyncEbr: () => Promise.resolve({ stored: 0 })
         },
-        db: db, sched: { markSynced() {} }, embed: { prepare() {} }, translate: { prepare() {} }, ui: { currentKey: null }
+        db: db, sched: { markSynced() {} }, embed: { prepare() {} }, translate: { prepare() {} }, ui: { currentKey: null },
+        log() {}   // as quiet as the console it is handed
     };
     const auto = new Function('JiTA', 'console', 'return ({' + cut('    autoSync: function () {', '\n    }\n};') + '\n    }}).autoSync;')(A, { log() {} });
     ok('a completed auto-sync resolves true', (await auto()) === true);
@@ -155,7 +157,8 @@ const live = () => intervals.filter((h) => h.on);
         db: {
             countDefectsOnly: () => { const d = deferred(); reads.push(d); return d.promise; },
             getMeta: () => Promise.resolve(4), countEbr: () => Promise.resolve(0)
-        }
+        },
+        log() {}   // as quiet as the console it is handed
     };
     timeouts = [];
     const mig = new Function('JiTA', 'flagOn', 'console', cut('JiTA.migrate = {', '\n};\n') + '\n};\nreturn JiTA.migrate;')(M, () => true, { log() {} });

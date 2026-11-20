@@ -57,6 +57,7 @@ global.JiTA = {
     db: { syncPut: (recs) => Promise.resolve({ changed: recs.length }), setMeta: () => Promise.resolve() },
     sync: {}
 };
+require('./logstub')(JiTA);
 JiTA.sync._run = eval('({' + cut("    _run: function (jql, opts) {\n        opts = opts || {};\n        var token = opts.startToken || null;", '\n    },') + '\n    }})')._run;
 JiTA.sync._mapIssue = (i) => ({ key: i.key, updated: i.updated, status: i.status || 'Open', textHash: 'h' });
 JiTA.sync._invalidateWorker = () => { invalidates++; };

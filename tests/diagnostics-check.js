@@ -1,36 +1,42 @@
-// diagnostics-check.js - Copy diagnostics (v3.53.0). Evals the real JiTA.caught, JiTA.dlog and JiTA.diag against stubs:
+// diagnostics-check.js - Copy diagnostics (v3.53.0; JiTA's console lines in it since v3.53.1). Evals the real JiTA.caught,
+// the JiTA.log family and JiTA.diag against stubs:
 //  - an error JiTA catches and goes on from is kept, once per place and message with how often it came, the latest
 //    CAUGHT_MAX of them, logged the first time when Debug logging is on; the recorder never throws, whatever it is given
 //  - no catch in the script drops its error any more: each one that used to say "swallow" passes it on, naming the call
-//  - the debug log keeps its last DLOG_MAX lines, only while Debug logging is on, each argument cut short
-//  - the report has the version, script manager, browser, kind of page (never its address), worker, stored data and
-//    the errors, and the debug log when it is on; a database or worker that does not answer, or fails, is a line that
-//    says so, and the report still comes
+//  - JiTA.log, .warn and .error print as console.log, .warn and .error do and keep the line, whether Debug logging is on
+//    or not; JiTA.dlog does the same only while it is on; the latest LOG_MAX lines, each argument cut short; none throws
+//  - the page's console lines go through them, except the three that dump whole ledgers or payloads
+//  - the report has the version, script manager, browser, kind of page (never its address), worker (saying when it is
+//    older than the tab), stored data, the errors and the log; a database or worker that does not answer, or fails, is
+//    a line that says so, and the report still comes
 //  - copying uses the clipboard and rejects where there is none
 require('./clock').install();   // the report's waits run on a clock of their own (clock.js)
 const S = require('./source');
 const src = S.load();
 
-const realConsole = console.log;   // the debug log prints with console.log, which the stubs below catch
+const realConsole = console.log;   // JiTA.log prints with console.log, which the stubs below catch
 let fail = 0;
 const ok = (n, c, x) => { realConsole((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
 const flush = async () => { for (let i = 0; i < 10; i++) { await new Promise((r) => setImmediate(r)); } };
 
 // ---- stubs ----
 let debug = false;
-const logged = [];
+const logged = [], warned = [], errored = [];
 global.gmGet = (k, d) => (k === 'sdDebug' ? debug : d);
 global.window = { console: console };
 console.log = (...a) => { logged.push(a); };
+console.warn = (...a) => { warned.push(a); };
+console.error = (...a) => { errored.push(a); };
 global.JITA_IS_FORGE_FRAME = false; global.JITA_IS_SUBFRAME = false;
 global.location = { pathname: '/browse/EDR-41291' };
 Object.defineProperty(global, 'navigator', { value: { userAgent: 'Mozilla/5.0 TestBrowser/1.0' }, configurable: true, writable: true });   // Node has one of its own
 global.GM_info = { scriptHandler: 'Tampermonkey', version: '5.3.3' };
-global.JiTA = eval(S.members(src, 'var JiTA', ['dlog', 'DLOG_MAX', '_dlogLines', '_fmtArgs', 'caught', 'CAUGHT_MAX', '_caughtList']));
+global.JiTA = eval(S.members(src, 'var JiTA', ['log', 'warn', 'error', 'dlog', '_out', 'LOG_MAX', '_logLines', '_fmtArgs', 'caught', 'CAUGHT_MAX', '_caughtList']));
 Object.assign(JiTA, { SCRIPT_VERSION: '3.53.0', DATA_VERSION: 3, DATA_VERSION_EBR: 4 });
 eval(S.top(src, 'JiTA.diag'));
 const D = JiTA.diag;
-const reset = () => { JiTA._caughtList.length = 0; JiTA._dlogLines.length = 0; logged.length = 0; };
+const verCmp = eval('({' + S.member(src, 'JiTA.worker', '_verCmp') + '})')._verCmp;   // the real comparator, for the worker stubs
+const reset = () => { JiTA._caughtList.length = 0; JiTA._logLines.length = 0; logged.length = 0; warned.length = 0; errored.length = 0; };
 
 (async () => {
     // ================= JiTA.caught =================
@@ -79,21 +85,51 @@ const reset = () => { JiTA._caughtList.length = 0; JiTA._dlogLines.length = 0; l
     ok('the page observer\'s steps are among them', /JiTA\.ui\.ensure\(\); \} catch \(e\) \{ JiTA\.caught\('ui\.ensure', e\); \}/.test(src) && /JiTA\.dv\.ensure\(\); \} catch \(e4\) \{ JiTA\.caught\('dv\.ensure', e4\); \}/.test(src) &&
         /JiTA\.checklist\.reensure\(\); \} catch \(eCl0\) \{ JiTA\.caught\('checklist\.reensure', eCl0\); \}/.test(src));
 
-    // ================= the debug log =================
+    // ================= the log =================
+    const L = JiTA._logLines;
     reset();
     debug = false;
+    JiTA.log('[JiTA] auto-sync done', 7);
+    ok('JiTA.log prints as console.log does, and keeps the line, with Debug logging off too', logged.length === 1 && logged[0][0] === '[JiTA] auto-sync done' && logged[0][1] === 7 &&
+        L.length === 1 && /^\d\d:\d\d:\d\d \[JiTA\] auto-sync done 7$/.test(L[0]), JSON.stringify(logged) + ' / ' + L.join(' | '));
+    JiTA.warn('[JiTA] a warning');
+    JiTA.error('[JiTA] an error', new TypeError('bad'));
+    ok('...JiTA.warn and JiTA.error print as console.warn and console.error do, and are kept the same way', warned.length === 1 && errored.length === 1 && logged.length === 1 &&
+        / \[JiTA\] a warning$/.test(L[1]) && / \[JiTA\] an error TypeError: bad$/.test(L[2]), L.join(' | '));
     JiTA.dlog('[JiTA] not kept', 1);
-    ok('with Debug logging off, the debug log keeps nothing and prints nothing', JiTA._dlogLines.length === 0 && logged.length === 0);
+    ok('JiTA.dlog with Debug logging off keeps nothing and prints nothing', L.length === 3 && logged.length === 1);
+    reset();
     debug = true;
     JiTA.dlog('[JiTA] sync:', { stored: 3, changed: 1 }, new RangeError('far'), undefined, 'x'.repeat(400));
     ok('with it on, a line is printed and kept: its time, then each argument as text, an error by name and message, JSON cut short',
-        logged.length === 1 && JiTA._dlogLines.length === 1 && /^\d\d:\d\d:\d\d \[JiTA\] sync: \{"stored":3,"changed":1\} RangeError: far undefined x{300}\.\.\.$/.test(JiTA._dlogLines[0]), JiTA._dlogLines[0]);
-    const loop = {}; loop.self = loop;
-    JiTA.dlog('a loop', loop);
-    ok('...an argument JSON cannot write is still a line', /a loop \[object Object\]$/.test(JiTA._dlogLines[1]), JiTA._dlogLines[1]);
-    for (let i = 0; i < JiTA.DLOG_MAX + 5; i++) { JiTA.dlog('line ' + i); }
-    ok('...and only the last ' + JiTA.DLOG_MAX + ' lines are kept', JiTA._dlogLines.length === JiTA.DLOG_MAX && / line 5$/.test(JiTA._dlogLines[0]), JiTA._dlogLines[0]);
+        logged.length === 1 && L.length === 1 && /^\d\d:\d\d:\d\d \[JiTA\] sync: \{"stored":3,"changed":1\} RangeError: far undefined x{300}\.\.\.$/.test(L[0]), L[0]);
     debug = false;
+    const loop = {}; loop.self = loop;
+    JiTA.log('a loop', loop);
+    ok('...an argument JSON cannot write is still a line', /a loop \[object Object\]$/.test(L[1]), L[1]);
+    for (let i = 0; i < JiTA.LOG_MAX + 5; i++) { JiTA.log('line ' + i); }
+    ok('...and only the latest ' + JiTA.LOG_MAX + ' lines are kept', L.length === JiTA.LOG_MAX && / line 5$/.test(L[0]), L[0]);
+    reset();
+    const catching = console.warn;
+    console.warn = () => { throw new Error('console gone'); };   // the code checks window.console, then calls console
+    let lthrew = null;
+    try { JiTA.warn('[JiTA] still kept'); } catch (e) { lthrew = e; }
+    console.warn = catching;
+    global.window = {};
+    try { JiTA.log('[JiTA] no console at all'); } catch (e) { lthrew = lthrew || e; }
+    global.window = { console: console };
+    ok('none of them throws, with a console that throws or none at all, and the line is kept anyway', !lthrew && L.length === 2 && / \[JiTA\] still kept$/.test(L[0]) &&
+        / \[JiTA\] no console at all$/.test(L[1]) && logged.length === 0, (lthrew && lthrew.message) + ' / ' + L.join(' | ') + ' / ' + logged.length);
+
+    // The page's console lines go through them. Only the worker (which has no JiTA) and the lines that dump whole ledgers
+    // or a dry run's payload write to the console directly, and waitForKeyElements when it runs before JiTA exists.
+    const wb = src.indexOf('\nfunction jitaWorkerBody'), we = src.indexOf('\n}', wb);
+    const pageCode = src.slice(0, wb) + src.slice(we);
+    const direct = (pageCode.match(/.*console\.(log|warn|error)\(.*/g) || []).map((l) => l.trim());
+    const allowed = [/^console\.log\('\[JiTA\.leadduty\] page ' \+ page \+ ' property '/, /^console\.log\('\[JiTA\.leadduty\] DRY RUN: would /, /^else \{ console\.error\('\[JiTA\] could not handle '/];
+    ok('the page\'s console lines are kept for the report: only the ledger dumps, a dry run\'s payload and the earliest error skip it',
+        wb > 0 && direct.length === 4 && direct.every((l) => allowed.some((re) => re.test(l))) && (pageCode.match(/JiTA\.log\(/g) || []).length >= 40, direct.join(' | '));
+    ok('...the earliest error goes to JiTA.error once JiTA is there', /if \(typeof JiTA !== 'undefined' && JiTA && JiTA\.error\) \{ JiTA\.error\('\[JiTA\] could not handle ' \+ selectorTxt \+ ':', e\); \}/.test(src));
 
     // ================= the report =================
     reset();
@@ -104,7 +140,7 @@ const reset = () => { JiTA._caughtList.length = 0; JiTA._dlogLines.length = 0; l
     const meta = { lastSyncHighWater: '2026-11-19T08:00:00.000+0000', lastSyncHighWaterEbr: '2026-11-19T08:01:00.000+0000', dataVersionDefects: 3, dataVersionEbr: 4 };
     JiTA.db = { countDefects: () => Promise.resolve(5210), countEbr: () => Promise.resolve(2423), getMeta: (k) => Promise.resolve(meta[k]) };
     let pings = 0;
-    JiTA.worker = { _started: true, usable: () => true, _isLeader: true, call: (t) => { pings++; return Promise.resolve({ backend: 'webgpu/fp32', version: '3.53.0' }); } };
+    JiTA.worker = { _started: true, usable: () => true, _isLeader: true, _verCmp: verCmp, call: (t) => { pings++; return Promise.resolve({ backend: 'webgpu/fp32', version: '3.53.0' }); } };
     let r = await D.report();
     const lines = r.split('\n');
     ok('the report starts with when, the version and script manager, the browser and the kind of page', /^JiTA diagnostics, \d{4}-\d\d-\d\dT/.test(lines[0]) &&
@@ -115,15 +151,35 @@ const reset = () => { JiTA._caughtList.length = 0; JiTA._dlogLines.length = 0; l
         (r.match(/^Data:.*$/m) || [])[0]);
     ok('...the errors, the latest first, each with its count and times and the top of its stack', /^Errors JiTA caught and went on from: 2$/m.test(r) &&
         r.indexOf('  1x  migrate.run: quota exceeded  (at ') < r.indexOf('  2x  ui.ensure: x is undefined  (first ') && /^        at /m.test(r), r.slice(r.indexOf('Errors')));
-    ok('...and with Debug logging off, says how to get more', /^Debug log: off\. For more detail turn on Settings > About > Debug logging/m.test(r) && r.indexOf('Debug log, the last') < 0);
+    ok('...nothing logged yet: it says so, and with Debug logging off, how to get more', /^Log: nothing logged since this page loaded\.$/m.test(r) &&
+        /\n\nDebug logging is off\. For more detail turn it on in Settings > About, do what went wrong again, and copy this again\.$/.test(r), r.slice(r.indexOf('Log')));
+    JiTA.log('[JiTA] auto-sync error:', 'HTTP 401');
+    JiTA.log('[JiTA] attach-report failed:', 'HTTP 403');
+    r = await D.report();
+    ok('JiTA\'s console lines are in it with Debug logging off, each with its time', /^Log since this page loaded, 2 lines:\n  \d\d:\d\d:\d\d \[JiTA\] auto-sync error: HTTP 401\n  \d\d:\d\d:\d\d \[JiTA\] attach-report failed: HTTP 403\n\nDebug logging is off\./m.test(r),
+        r.slice(r.indexOf('Log')));
     debug = true;
     JiTA.dlog('[JiTA] kept line');
     r = await D.report();
-    ok('with Debug logging on, the debug log is in it', /^Debug logging: on$/m.test(r) && /^Debug log, the last 1 lines:\n  \d\d:\d\d:\d\d \[JiTA\] kept line$/m.test(r), r.slice(r.indexOf('Debug log')));
+    ok('with Debug logging on, its lines join them, and the hint is gone', /^Debug logging: on$/m.test(r) && /^Log since this page loaded, 3 lines:\n(  .*\n){2}  \d\d:\d\d:\d\d \[JiTA\] kept line$/m.test(r) &&
+        r.indexOf('Debug logging is off') < 0, r.slice(r.indexOf('Log')));
+    JiTA._logLines.splice(0, 2);
+    r = await D.report();
+    ok('...one line is "1 line"', /^Log since this page loaded, 1 line:$/m.test(r), (r.match(/^Log.*$/m) || [])[0]);
+    for (let i = 0; i < JiTA.LOG_MAX; i++) { JiTA.log('line ' + i); }
+    r = await D.report();
+    ok('...and a full log says it holds only the latest lines', /^Log, the latest 200 lines:$/m.test(r), (r.match(/^Log.*$/m) || [])[0]);
     debug = false;
     reset();
     r = await D.report();
     ok('no errors caught: it says none', /^Errors JiTA caught and went on from: none$/m.test(r));
+    JiTA.worker.call = () => Promise.resolve({ backend: 'webgpu/fp32', version: '3.51.5' });
+    r = await D.report();
+    ok('a worker built from older code than the tab says so', /^Worker: this tab leads it, backend webgpu\/fp32, built from v3\.51\.5, older than this tab$/m.test(r), (r.match(/^Worker:.*$/m) || [])[0]);
+    JiTA.worker.call = () => Promise.resolve({ backend: 'webgpu/fp32', version: '3.54.0' });
+    ok('...a newer one does not', /^Worker: this tab leads it, backend webgpu\/fp32, built from v3\.54\.0$/m.test(await D.report()));
+    JiTA.worker.call = () => Promise.resolve({ backend: 'wasm' });
+    ok('...nor one that does not say', /^Worker: this tab leads it, backend wasm, built from v\?$/m.test(await D.report()));
 
     // ---- what cannot be read ----
     JiTA.db = { countDefects: () => new Promise(() => {}), countEbr: () => Promise.resolve(1), getMeta: () => Promise.resolve(null) };

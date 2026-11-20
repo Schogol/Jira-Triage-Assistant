@@ -31,6 +31,7 @@ global.JiTA = {
     ui: { setStatus: (m) => { statuses.push(m); }, scheduleRender: () => { renders++; }, currentKey: null },
     rank: {}, embed: { prepare() {} }
 };
+require('./logstub')(JiTA);
 eval(src.slice(s0 + 1, e0) + '\n};');
 const T = JiTA.translate;
 const reports = (n) => Array.from({ length: n }, (_, i) => ({ key: 'EBR-' + (i + 1), project: 'EBR', status: 'Open', summary: 'texto ' + i, description: '' }));

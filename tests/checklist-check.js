@@ -179,6 +179,7 @@ global.JiTA = {
         _changelog: (key) => { gets.push('changelog ' + key); return histOf[key] instanceof Error ? Promise.reject(histOf[key]) : Promise.resolve(JSON.parse(J(histOf[key] || []))); }
     }
 };
+require('./logstub')(JiTA);
 let gets = [], meta = {}, searches = [], searchAnswer = [], editmetaOf = {};
 let copied = [], copiedHtml = [], copyAnswer = true, built = 0, fieldRows = [], logText = {};
 // The fingerprints of a description: "EXC[<sig>]" for each exception pasted in it.

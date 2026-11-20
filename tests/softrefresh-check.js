@@ -12,6 +12,8 @@ let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
 const J = (x) => JSON.stringify(x);
 
+global.JiTA = require('./logstub')({});   // the page load's console line goes through JiTA.log
+
 // ---- a fake clock ----
 let now = 1000, timers = [], seq = 0;
 Date.now = () => now;

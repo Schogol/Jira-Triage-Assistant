@@ -4,14 +4,17 @@ const fs = require('fs');
 const { execSync } = require('child_process');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const H = 'boot-check.js';
-const TRY = "try { cancelFound = actionFunction(jThis); }\n                catch (e) { try { console.error('[JiTA] could not handle ' + selectorTxt + ':', e); } catch (e2) { /* ignore */ } }";
+const CATCH = "catch (e) {\n                    try {\n                        if (typeof JiTA !== 'undefined' && JiTA && JiTA.error) { JiTA.error('[JiTA] could not handle ' + selectorTxt + ':', e); }\n" +
+    "                        else { console.error('[JiTA] could not handle ' + selectorTxt + ':', e); }\n                    } catch (e2) { /* ignore */ }\n                }";
+const TRY = "try { cancelFound = actionFunction(jThis); }\n                " + CATCH;
 const muts = [
     [H, 'the busy map is declared below the first issue check again', [
         ['var jitaConvertBusy = {};\n\n// waitForKeyElements waits', '\n// waitForKeyElements waits'],
         ['// The Convert to Defect button reflects the report on screen', 'var jitaConvertBusy = {};\n// The Convert to Defect button reflects the report on screen']]],
     [H, 'a callback that throws escapes waitForKeyElements', [[TRY, 'cancelFound = actionFunction(jThis);']]],
-    [H, 'a failed callback is retried every poll', [["catch (e) { try { console.error('[JiTA] could not handle '", "catch (e) { cancelFound = true; try { console.error('[JiTA] could not handle '"]]],
-    [H, 'a failed callback is swallowed in silence', [["catch (e) { try { console.error('[JiTA] could not handle ' + selectorTxt + ':', e); } catch (e2) { /* ignore */ } }", 'catch (e) { /* ignore */ }']]],
+    [H, 'a failed callback is retried every poll', [[CATCH, CATCH.replace('catch (e) {', 'catch (e) { cancelFound = true;')]]],
+    [H, 'a failed callback is swallowed in silence', [[CATCH, 'catch (e) { /* ignore */ }']]],
+    [H, 'a failed callback is not said before JiTA exists', [["                        else { console.error('[JiTA] could not handle ' + selectorTxt + ':', e); }\n", '']]],
     [H, 'the start-up stops on a throwing callback after all', [[TRY, TRY.replace('catch (e) {', 'catch (e) { if (selectorTxt.indexOf("current-issue") >= 0) { throw e; }')], ['var jitaConvertBusy = {};\n\n// waitForKeyElements waits', 'var jitaConvertBusy;\n\n// waitForKeyElements waits']]]
 ];
 let allRed = true;

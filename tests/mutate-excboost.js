@@ -123,7 +123,7 @@ const muts = [
     [X, 'a Vanguard report not read for the exception search', '                        if (JiTA.util.isClosedStatus(f.status && f.status.name)) { return; }', '                        if (JiTA.util.isClosedStatus(f.status && f.status.name) || JiTA.util.isLeftOut(f)) { return; }'],
     [X, 'every pass lists every report', `(since ? ' AND updated >= "' + since + '"' : '')`, "''"],
     [X, 'the mark moves past a failed read', '                var whole = listOk && !failed && LR.on() && next >= queue.length;', '                var whole = listOk && LR.on() && next >= queue.length;'],
-    [X, 'the mark moves past a failed listing', "                listOk = false;\n                console.log('[JiTA] could not list", "                console.log('[JiTA] could not list"],
+    [X, 'the mark moves past a failed listing', "                listOk = false;\n                JiTA.log('[JiTA] could not list", "                JiTA.log('[JiTA] could not list"],
     [X, 'a log that did not download counts as read', '                        if (!(r && r.rec && r.rec.logs)) { failed++; }   // a log that did not download\n', ''],
     [X, 'cached reports count as downloads', 'if (r && !r.cached && JiTA.profile._logFiles(item.fields.attachment).length) { read++;', 'if (r && JiTA.profile._logFiles(item.fields.attachment).length) { read++;'],
     [X, 'a report with no log file counts as a download, and waits', 'if (r && !r.cached && JiTA.profile._logFiles(item.fields.attachment).length) { read++;', 'if (r && !r.cached) { read++;'],

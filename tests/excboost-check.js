@@ -53,6 +53,7 @@ global.JiTA = {
     trend: { badge: () => null },
     excfind: { WAIT_MS: 0, SCOPE: 'project = EBR AND statusCategory != Done AND <not the launcher\'s>' }   // the real one: excfind-check
 };
+require('./logstub')(JiTA);
 Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    staleFactor: function (brCreatedIso, resolutionDateIso) {') +
     member('    humanizeAge: function (days) {') + member('    isClosedStatus: function (status) {') +
     member('    isLeftOut: function (rec) {') + member('    jqlSince: function (iso, now) {') + '})'));

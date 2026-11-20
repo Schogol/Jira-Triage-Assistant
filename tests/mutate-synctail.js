@@ -39,8 +39,8 @@ const muts = [
     [H, 'rebuilding the bug reports does not translate them', 'JiTA.sync._afterSync(false, true, true);   // re-embed and re-translate', 'JiTA.sync._afterSync(true, false, true);   // re-embed and re-translate'],
     [H, 'a manual sync that changed nothing does not redraw', "                JiTA.sync._afterSync(!!(res && res.changed), false, true);\n                return res;", "                JiTA.sync._afterSync(!!(res && res.changed), false, false);\n                return res;"],
     [H, 'the background sync is not quiet', '        JiTA.sync.running = true;\n        JiTA.sync._quiet = true;\n', '        JiTA.sync.running = true;\n'],
-    [H, 'a failed background sync stays quiet', "            JiTA.sync._quiet = false;\n            console.log('[JiTA] auto-sync error:'", "            console.log('[JiTA] auto-sync error:'"],
-    [H, 'a write-only meta key comes back', "            console.log('[JiTA] auto-sync error:', e && e.message || e);", "            JiTA.db.setMeta('lastError', String(e)); console.log('[JiTA] auto-sync error:', e && e.message || e);"]
+    [H, 'a failed background sync stays quiet', "            JiTA.sync._quiet = false;\n            JiTA.log('[JiTA] auto-sync error:'", "            JiTA.log('[JiTA] auto-sync error:'"],
+    [H, 'a write-only meta key comes back', "            JiTA.log('[JiTA] auto-sync error:', e && e.message || e);", "            JiTA.db.setMeta('lastError', String(e)); JiTA.log('[JiTA] auto-sync error:', e && e.message || e);"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
