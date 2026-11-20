@@ -396,71 +396,7 @@ const actorTests = Promise.all([
     });
 });
 
-// ---------------------------------------------------------------- the property cap (v3.53.5)
-// A QC month is its sample and 30 verdicts with 3 Leads, about 4.4 KB: six of them came to 28 KB with no follow-up at
-// all, and mutate() then refused every QC write.
-const qcMonth = (n) => {
-    const assign = {}, actors = {}, done = {}, names = ['ISD BH Somebody', 'ISD Another Hunter', 'ISD Third Person'];
-    L.ROSTER().forEach((h, i) => {
-        assign[h] = [];
-        for (let k = 0; k < 10; k++) {
-            const key = (k < 2 ? 'EDR-' : 'EBR-') + (68300 + n * 30 + i * 10 + k);
-            assign[h].push(key); actors[key] = names[(i + k) % 3];
-            done[key] = { by: h, at: '2026-11-20T16:22:03.403Z', verdict: 'ok', actor: names[(i + k) % 3] };
-        }
-    });
-    return { rec: { roster: L.ROSTER(), quota: 10, poolSize: 2137, minDefects: 2, poolDefects: 61, assign, actors, createdAt: '2026-11-02T08:00:00.000Z', createdBy: 'schogol' }, done };
-};
-const qcLedger = (months) => {
-    const v = { v: 1, months: {}, done: {}, flags: {} };
-    for (let n = 0; n < months; n++) { const ym = '2026-' + String(3 + n).padStart(2, '0'), m = qcMonth(n); v.months[ym] = m.rec; v.done[ym] = m.done; }
-    return v;
-};
-console.log('\nThe ledger and the property cap');
-ok('six full QC months are over the cap (the old retention)', JSON.stringify(qcLedger(6)).length > L.MAX_PROP_BYTES, String(JSON.stringify(qcLedger(6)).length));
-const qc3 = L._prune(qcLedger(6), L.QC_KEEP_MONTHS);
-ok('the QC ledger keeps QC_KEEP_MONTHS months, the newest', Object.keys(qc3.months).join() === '2026-06,2026-07,2026-08' && Object.keys(qc3.done).join() === '2026-06,2026-07,2026-08',
-    Object.keys(qc3.months).join());
-ok('...which leave room for follow-ups', JSON.stringify(qc3).length < L.MAX_PROP_BYTES * 0.6, String(JSON.stringify(qc3).length));
-const dropFlags = { v: 1, flags: { 'EBR-5': { resolvedAt: iso(120 * DAY) }, 'EBR-6': { resolvedAt: iso(60 * DAY) } } };
-L._prune(dropFlags, L.QC_KEEP_MONTHS);
-ok('...and resolved follow-ups age out on the same clock', !dropFlags.flags['EBR-5'] && !!dropFlags.flags['EBR-6'], Object.keys(dropFlags.flags).join());
-const four = qcLedger(4);
-ok('_dropOldest drops the oldest month from both maps', L._dropOldest(four) && !four.months['2026-03'] && !four.done['2026-03'] && !!four.months['2026-04'], Object.keys(four.months).join());
-const two = qcLedger(2);
-ok('...but never the last MIN_MONTHS', L.MIN_MONTHS === 2 && !L._dropOldest(two) && Object.keys(two.months).length === 2, Object.keys(two.months).join());
-
-const capTests = (async () => {
-    const conf0 = { get: JiTA.conf.getProperty, save: JiTA.conf.saveProperty };
-    let stored = null, saved = null;
-    JiTA.conf.getProperty = () => Promise.resolve(stored ? { id: '9', key: 'k', value: JSON.parse(JSON.stringify(stored)), version: 4 } : null);
-    JiTA.conf.saveProperty = (page, key, value) => { saved = value; return Promise.resolve({ id: '9', key: key, value: value, version: 5 }); };
-    try {
-        stored = qcLedger(6);   // what an older build's six-month retention left behind
-        const r = await L.ledger.mutate(L.QC_LEDGER_KEY, (v) => { v.done['2026-08']['EBR-99999'] = { by: 'schogol', at: 'x', verdict: 'ok' }; return v; });
-        ok('a QC write onto a ledger an older build filled goes through', r.written && JSON.stringify(saved).length <= L.MAX_PROP_BYTES, r.written + ' ' + (saved && JSON.stringify(saved).length));
-        ok('...trimmed to the QC retention, the verdict kept', Object.keys(saved.months).length === L.QC_KEEP_MONTHS && !!saved.done['2026-08']['EBR-99999'], Object.keys(saved.months).join());
-
-        stored = { v: 1, lastReviewed: {}, months: {}, done: {} };
-        for (let n = 1; n <= 6; n++) { const ym = '2026-0' + n; stored.months[ym] = { pad: 'p'.repeat(5500) }; stored.done[ym] = {}; }
-        saved = null;
-        const w = await L.ledger.mutate(L.LEDGER_KEY, (v) => { v.done['2026-06'].X = { by: 'schogol' }; return v; });
-        ok('a write still over the cap drops the oldest months instead of being refused', w.written && JSON.stringify(saved).length <= L.MAX_PROP_BYTES &&
-            !!saved.months['2026-06'] && !saved.months['2026-01'] && !!saved.done['2026-06'].X, w.written + ' ' + (saved && Object.keys(saved.months).join()));
-
-        stored = { v: 1, lastReviewed: { big: 'p'.repeat(L.MAX_PROP_BYTES) }, months: { '2026-05': {}, '2026-06': {} }, done: {} };
-        saved = null;
-        let err = null;
-        try { await L.ledger.mutate(L.LEDGER_KEY, (v) => { v.months['2026-06'].x = 1; return v; }); } catch (e) { err = e; }
-        ok('...and one too big with only the months work needs left is still refused, nothing written', err && /is full/.test(err.message) && saved === null &&
-            Object.keys(stored.months).length === 2, err && err.message);
-    } finally {
-        JiTA.conf.getProperty = conf0.get;
-        JiTA.conf.saveProperty = conf0.save;
-    }
-})().catch((e) => { ok('the cap checks ran', false, e && e.stack); });
-
-Promise.all([actorTests, capTests]).then(() => {
+actorTests.then(() => {
     console.log('\n' + (failures ? (failures + ' FAILURE(S)') : 'All checks passed.'));
     process.exit(failures ? 1 : 0);
 });

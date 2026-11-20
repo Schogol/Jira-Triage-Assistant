@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.5
+// @version     3.53.4
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.5
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.4
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -18327,15 +18327,10 @@ JiTA.leadduty = {
     DRY_KEY: 'leadDutyDryRun',
 
     KEEP_MONTHS: 6,              // how many months of `months` / `done` history the ledger retains
-    // ...and the QC ledger. A QC month is its sample and 30 verdicts, about 4.4 KB with 3 Leads, so six of them came to
-    // 28 KB with no follow-up at all, and every QC write was refused as the ledger filled. Three are about 14 KB.
-    QC_KEEP_MONTHS: 3,
-    MIN_MONTHS: 2,               // the months a write over the cap never drops: the one worked on and the one before
     // Stay under Confluence's 32KB per-property cap, with headroom. The per-page maps dominate: roughly 48
     // bytes a page now that four eyes needs the previous review date alongside the last one, so the ceiling
     // is somewhere near 550 pages. Well clear of the ~230 in rotation, but worth knowing before the section
-    // doubles in size - _prune trims month history first, a write still over the cap drops the oldest month
-    // down to MIN_MONTHS (_dropOldest), and only then is it refused rather than truncated.
+    // doubles in size - _prune trims month history first and the write then refuses rather than truncating.
     MAX_PROP_BYTES: 28000,
     POOL_TTL_MS: 24 * 60 * 60 * 1000,
     SNOOZE_MS: 24 * 60 * 60 * 1000,
@@ -18562,9 +18557,8 @@ JiTA.leadduty = {
                 var cur = (prop && prop.value) || null;
                 var next = fn(L._clone(cur));
                 if (!next) { return { value: cur, prop: prop, written: false }; }
-                next = L._prune(next, key === L.QC_LEDGER_KEY ? L.QC_KEEP_MONTHS : L.KEEP_MONTHS);
+                next = L._prune(next);
                 var size = JSON.stringify(next).length;
-                while (size > L.MAX_PROP_BYTES && L._dropOldest(next)) { size = JSON.stringify(next).length; }
                 if (size > L.MAX_PROP_BYTES) {
                     throw new Error('The lead-duty ledger (' + key + ') is full (' + size + ' bytes, cap ' + L.MAX_PROP_BYTES +
                         '). It has outgrown a single Confluence property - raise the issue rather than losing history.');
@@ -18615,40 +18609,27 @@ JiTA.leadduty = {
         return bits.join(' · ');
     },
 
-    // Keep only the newest `keep` (KEEP_MONTHS unless given) entries of the month-keyed maps, so the ledger cannot grow
-    // without bound. lastReviewed / reviewedBy are per PAGE and are pruned separately, against a fresh pool.
-    _prune: function (val, keep) {
+    // Keep only the newest KEEP_MONTHS entries of the month-keyed maps, so the ledger cannot grow without
+    // bound. lastReviewed / reviewedBy are per PAGE and are pruned separately, against a fresh pool.
+    _prune: function (val) {
         var L = JiTA.leadduty;
-        keep = keep || L.KEEP_MONTHS;
         ['months', 'done'].forEach(function (f) {
             var m = val[f];
             if (!m) { return; }
             var keys = Object.keys(m).sort();
-            while (keys.length > keep) { delete m[keys.shift()]; }
+            while (keys.length > L.KEEP_MONTHS) { delete m[keys.shift()]; }
         });
         // Flags deliberately sit OUTSIDE `done`, so a follow-up raised in March is still open in September
         // rather than vanishing with its month. Only RESOLVED ones age out, once they are older than the
         // retention window - an open flag is never dropped, however old.
         if (val.flags) {
-            var cutoff = new Date(Date.now() - keep * 31 * 24 * 60 * 60 * 1000).toISOString();
+            var cutoff = new Date(Date.now() - L.KEEP_MONTHS * 31 * 24 * 60 * 60 * 1000).toISOString();
             Object.keys(val.flags).forEach(function (k) {
                 var f = val.flags[k];
                 if (f && f.resolvedAt && f.resolvedAt < cutoff) { delete val.flags[k]; }
             });
         }
         return val;
-    },
-
-    // A write over the cap: drop the oldest month of `months` and `done` both, unless only MIN_MONTHS are left. Old
-    // months are history; refusing the write instead stopped every verdict, every follow-up and the next month's
-    // freeze. True when it dropped one.
-    _dropOldest: function (val) {
-        var L = JiTA.leadduty, all = {};
-        ['months', 'done'].forEach(function (f) { Object.keys(val[f] || {}).forEach(function (k) { all[k] = true; }); });
-        var keys = Object.keys(all).sort();
-        if (keys.length <= L.MIN_MONTHS) { return false; }
-        ['months', 'done'].forEach(function (f) { if (val[f]) { delete val[f][keys[0]]; } });
-        return true;
     },
 
     // ---- wiki page pool ------------------------------------------------------------------------------
