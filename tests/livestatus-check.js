@@ -47,7 +47,7 @@ global.$ = (x) => {
 };
 $.ajax = (o) => {
     ajaxCalls.push(o.url);
-    const k = (/issue\/([A-Z]+-\d+)\?/.exec(o.url) || [])[1];
+    const k = (/issue\/([A-Z]+-\d+)\?/.exec(o.url) || [])[1] || (/\/rest\/api\/2\/myself$/.test(o.url) ? 'myself' : undefined);
     const r = ajaxScript[k] || { ok: true, data: {} };
     const d = { done(f) { if (r.ok) { setImmediate(() => f(r.data)); } return d; }, fail(f) { if (!r.ok) { setImmediate(() => f(r.xhr)); } return d; } };
     return d;
@@ -62,7 +62,7 @@ JiTA.sync._apiPost = (path, body) => { posts.push(body); return postAnswer(body)
 JiTA.db.deleteDefects = (keys) => { deleted.push(keys.join()); return keys.some((k) => deleteFails[k]) ? Promise.reject(new Error('QuotaExceededError')) : Promise.resolve(); };
 JiTA.sync._ebrRemoved = (keys) => { removed.push(keys.join()); return removedD ? removedD.promise : Promise.resolve(); };
 Object.assign(JiTA.ui, eval('({' + line('    OPEN_OK_MS: ') + line('    _openSeen: {},') + line('    _liveGone: {},') + line('    _isOpenStatus: function (s) {') +
-    member('    _liveStatus: function (keys) {') + member('    _checkReportRows: function (still) {') + member('    _takeOffList: function (keys, still) {') +
+    member('    _liveStatus: function (keys) {') + member('    _ifSignedIn: function (out) {') + member('    _checkReportRows: function (still) {') + member('    _takeOffList: function (keys, still) {') +
     member('    _collapseRow: function (el, done) {') + '})'));
 const realLive = JiTA.ui._liveStatus, realCollapse = JiTA.ui._collapseRow;
 JiTA.ui.scheduleRender = () => { renders++; };
@@ -101,6 +101,28 @@ Date.now = () => clock;
     posts = [];
     st = await JiTA.ui._liveStatus([]);
     ok('no rows, no request', posts.length === 0 && Object.keys(st).length === 0);
+    ok('a batch where some report has a status never asks who is signed in', !ajaxCalls.some((u) => /myself/.test(u)), ajaxCalls.join());
+
+    // ---- a lapsed session: Jira shows the visitor no issues, so every key reads as gone ----
+    ajaxCalls = [];
+    postAnswer = () => Promise.resolve({ data: { issues: [] } });
+    ajaxScript = { myself: { ok: false, xhr: { status: 401 } } };
+    st = await JiTA.ui._liveStatus(['EBR-1', 'EBR-2']);
+    ok('a search with no report in its answer asks Jira who is signed in, fresh', ajaxCalls.length === 1 && /\/rest\/api\/2\/myself$/.test(ajaxCalls[0]), ajaxCalls.join());
+    ok('...and with the session lapsed nothing is known: every row stays', Object.keys(st).length === 0, JSON.stringify(st));
+    ajaxScript = { myself: { ok: true, data: {} } };
+    st = await JiTA.ui._liveStatus(['EBR-1', 'EBR-2']);
+    ok('...an answer with no account in it is no session either', Object.keys(st).length === 0, JSON.stringify(st));
+    ajaxScript = { myself: { ok: true, data: { accountId: 'me-1' } } };
+    st = await JiTA.ui._liveStatus(['EBR-1', 'EBR-2']);
+    ok('...while signed in, the reports Jira no longer has are gone', st['EBR-1'] === '' && st['EBR-2'] === '', JSON.stringify(st));
+    ajaxCalls = [];
+    postAnswer = () => Promise.reject(Object.assign(new Error('Jira API failed: HTTP 400'), { status: 400 }));
+    ajaxScript = { 'EBR-1': { ok: false, xhr: { status: 404 } }, 'EBR-2': { ok: false, xhr: { status: 404 } }, myself: { ok: false, xhr: { status: 401 } } };
+    st = await JiTA.ui._liveStatus(['EBR-1', 'EBR-2']);
+    ok('a refused search whose keys all come back not found, with the session lapsed, leaves every row', Object.keys(st).length === 0 &&
+        ajaxCalls.filter((u) => /myself/.test(u)).length === 1, JSON.stringify(st) + ' ' + ajaxCalls.join());
+    ajaxScript = {};
 
     // ================= the rows on screen =================
     let asked = [], answer = {};

@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.3 (2026-11-20)
+
+### Fixed issues
+
+- When your Jira session runs out, the lists of open bug reports no longer take every report off as if it had been closed: JiTA first checks that Jira still knows who you are.
+
 ## 3.53.2 (2026-11-20)
 
 ### Fixed issues
