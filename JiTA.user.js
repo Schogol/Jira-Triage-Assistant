@@ -6015,9 +6015,12 @@ JiTA.sync = {
                     var nextToken = data.nextPageToken || null, last = !!(data.isLast || !nextToken);
                     // A full crawl saves where it got to, so a reload mid-crawl carries on from there, and the mark its catch-up
                     // starts from (opts.from, see _sweepFrom).
-                    var tok = { jql: jql, token: nextToken, v: JiTA.sync._schema(jql) };
-                    if (opts.from) { tok.from = opts.from; }
-                    var saved = opts.resume ? JiTA.db.setMeta(resumeKey, last ? null : tok) : Promise.resolve();
+                    var saved = Promise.resolve();
+                    if (opts.resume) {
+                        var tok = last ? null : { jql: jql, token: nextToken, v: JiTA.sync._schema(jql) };
+                        if (tok && opts.from) { tok.from = opts.from; }
+                        saved = JiTA.db.setMeta(resumeKey, tok);
+                    }
                     return saved
                         .then(function () { return JiTA.db.setMeta(hwKey, maxUpdated); })
                         .then(function () {

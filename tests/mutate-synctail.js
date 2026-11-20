@@ -11,7 +11,7 @@ const muts = [
     [H, 'a closed report never stored counts as pruned', 'if (old) { store.delete(rec.key); changed++; }', 'store.delete(rec.key); changed++;'],
     [H, 'the derived fields count as synced ones', "            if (k === 'embedding' || k === 'embeddingModelVersion' || k === 'lang' || k === 'enText') { continue; }\n", ''],
     // ---- a run ----
-    [H, 'an incremental run saves a resume token', 'var saved = opts.resume ? JiTA.db.setMeta(resumeKey', 'var saved = true ? JiTA.db.setMeta(resumeKey'],
+    [H, 'an incremental run saves a resume token', '                    if (opts.resume) {\n', '                    if (true) {\n'],
     [H, 'a bare token is saved', '{ jql: jql, token: nextToken, v: JiTA.sync._schema(jql) }', 'nextToken'],
     [H, 'a bug report crawl saved and resumed under the defects\' schema', 'return jql === JiTA.sync.FULL_JQL_EBR ? JiTA.DATA_VERSION_EBR : JiTA.DATA_VERSION;', 'return JiTA.DATA_VERSION;'],
     [H, 'a defect crawl saved and resumed under the bug reports\' schema', 'return jql === JiTA.sync.FULL_JQL_EBR ? JiTA.DATA_VERSION_EBR : JiTA.DATA_VERSION;', 'return JiTA.DATA_VERSION_EBR;'],
@@ -46,7 +46,7 @@ const muts = [
     [H, 'the catch-up runs from the mark the crawl left', "return JiTA.db.setMeta('lastSyncHighWaterEbr', from).then(function () {", 'return Promise.resolve().then(function () {'],
     [H, 'the catch-up deletes nothing', "{ startHighWater: hw, metaPrefix: 'Ebr', pruneResolved: true, isEbr: true }", "{ startHighWater: hw, metaPrefix: 'Ebr', isEbr: true }"],
     [H, 'a crawl carried on forgets its mark', "resuming ? (rt.from || '')", "resuming ? ''"],
-    [H, 'a crawl\'s saved position leaves the mark out', '                    if (opts.from) { tok.from = opts.from; }\n', ''],
+    [H, 'a crawl\'s saved position leaves the mark out', '                        if (tok && opts.from) { tok.from = opts.from; }\n', ''],
     [H, 'a crawl into an empty store catches up as well', "return JiTA.db.countEbr().then(function (n) { return n ? hw : ''; }", 'return JiTA.db.countEbr().then(function (n) { return hw; }'],
     [H, 'a defect crawl is given a catch-up mark', "if (prefix !== 'Ebr' || !hw) { return ''; }", "if (!hw) { return ''; }"],
     [H, 'a catch-up that fails fails the crawl', "            JiTA.log('[JiTA] could not catch up on the bug reports closed during the full crawl (the next sync does):', e && e.message || e);", '            throw e;'],
