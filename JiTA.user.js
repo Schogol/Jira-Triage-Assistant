@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.8
+// @version     3.53.9
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.8
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.9
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -20491,6 +20491,7 @@ JiTA.leadduty.ui = {
         $('<button class="ld-tab" data-tab="flags" title="Everything any Lead flagged during quality control and nobody has closed out yet">Follow-ups</button>').appendTo($tabs);
         $('<button class="ld-tab" data-tab="apps" title="Read the applications waiting in VMS here instead of clicking through the site. Read-only - acting on one still happens in VMS.">Applications</button>').appendTo($tabs);
         $('<button class="ld-tab" data-tab="members" title="Every member with what they actioned in each of the last 6 months, against the 40 a month ECAID asks for, with a role and a note every Lead shares">Members</button>').appendTo($tabs);
+        $tabs.children('.ld-tab').each(function () { $(this).attr('data-label', $(this).text()); });   // see _tabText
         $tabs.on('click', '.ld-tab', function () { U._tab = $(this).attr('data-tab'); U._render(); });
         $('<div class="ld-scroll" id="ld-body"></div>').appendTo(ov.$menu);
         var $foot = $('<div class="ld-foot"></div>').appendTo(ov.$menu);
@@ -20542,14 +20543,19 @@ JiTA.leadduty.ui = {
             var $a = $('#ld-apps');
             if (!U.isOpen() || !$a.length) { return; }
             $a.text('VMS: ' + L.apps.line(rec)).toggleClass('warn', !!(rec && !rec.ok));
-            $('#jita-menu.jita-leadduty-view .ld-tab[data-tab="apps"]')
-                .text((rec && rec.ok && rec.total) ? ('Applications (' + rec.total + ')') : 'Applications');
+            U._tabText('apps', (rec && rec.ok && rec.total) ? ('Applications (' + rec.total + ')') : 'Applications');
         });
+    },
+    // A tab's label, and the copy of it its ::after keeps (data-label), in bold and out of sight: every tab is as wide as
+    // its label in bold, so opening one (bold) does not push the tabs after it along.
+    _tabText: function (tab, text) {
+        $('#jita-menu.jita-leadduty-view .ld-tab[data-tab="' + tab + '"]').text(text).attr('data-label', text);
     },
 
     _load: function (force) {
         var L = JiTA.leadduty, U = L.ui;
         if (!U.isOpen()) { return; }
+        U._body().removeClass('ld-fill');   // only the Applications list fills the tab (_renderApps); every other tab scrolls as one
         if (U._tab === 'wiki') { U._loadWiki(force); }
         else if (U._tab === 'flags') { U._loadFlags(force); }
         else if (U._tab === 'apps') { U._loadApps(force); }
@@ -20561,7 +20567,7 @@ JiTA.leadduty.ui = {
     // clicking through. Called by whichever load path happens to have read the QC ledger.
     _tabCount: function (ledgerValue) {
         var n = JiTA.leadduty.qc.openFlags(ledgerValue).length;
-        $('#jita-menu.jita-leadduty-view .ld-tab[data-tab="flags"]').text(n ? ('Follow-ups (' + n + ')') : 'Follow-ups');
+        JiTA.leadduty.ui._tabText('flags', n ? ('Follow-ups (' + n + ')') : 'Follow-ups');
     },
 
     _loadWiki: function (force) {
@@ -21166,7 +21172,7 @@ JiTA.leadduty.ui = {
     _renderApps: function () {
         var L = JiTA.leadduty, U = L.ui, st = U._apps;
         if (!st || !U.isOpen()) { return; }
-        var $b = U._body().empty();
+        var $b = U._body().empty().addClass('ld-fill');   // the list and the application take what the lines above leave (_load takes it off)
         $('<div class="ld-sub"></div>')
             .text(st.items.length + ' application' + (st.items.length === 1 ? '' : 's') + ' waiting on ' + L.apps.TEAM +
                 ' · oldest first · ↑/↓ to move').appendTo($b);
@@ -21907,12 +21913,15 @@ JiTA.leadduty.ui = {
         U._cssInjected = true;
         try {
             GM_addStyle(
-                '#jita-menu.jita-leadduty-view { width: 1180px; max-width: 96vw; display: flex; flex-direction: column; overflow: hidden; }' +
+                // One height for every tab (the most #jita-menu takes), so the tabs stay where they are when another is opened:
+                // each tab's content scrolls inside it instead of growing the window (Schogol 2026-11-20).
+                '#jita-menu.jita-leadduty-view { width: 1180px; max-width: 96vw; height: 82vh; max-height: 82vh; display: flex; flex-direction: column; overflow: hidden; }' +
                 '.jita-leadduty-view .ld-tabs { flex: 0 0 auto; display: flex; gap: 6px; padding: 8px 16px 0; border-bottom: 1px solid #3a434d; }' +
                 '.jita-leadduty-view .ld-tab { background: transparent; color: #9aa6b2; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; padding: 7px 14px; cursor: pointer; font-size: 12px; }' +
                 '.jita-leadduty-view .ld-tab:hover { color: #e6e6e6; }' +
                 '.jita-leadduty-view .ld-tab.on { background: #22272b; color: #e6e6e6; border-color: #3a434d; font-weight: 700; }' +
-                '.jita-leadduty-view .ld-scroll { flex: 1 1 auto; min-height: 0; max-height: 70vh; overflow-y: auto; padding: 10px 16px; }' +
+                '.jita-leadduty-view .ld-tab::after { content: attr(data-label); display: block; height: 0; overflow: hidden; visibility: hidden; font-weight: 700; }' +   // see _tabText
+                '.jita-leadduty-view .ld-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 16px; }' +
                 '.jita-leadduty-view .ld-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid #3a434d; background: #282d33; }' +
                 '.jita-leadduty-view .ld-muted, .jita-leadduty-view #ld-status { color: #9aa6b2; font-size: 11px; flex: 1; }' +
                 '.jita-leadduty-view .ld-apps { color: #6bd0dc; font-size: 11px; text-decoration: none; flex: 0 0 auto; white-space: nowrap; }' +
@@ -21972,7 +21981,9 @@ JiTA.leadduty.ui = {
                 '.jita-leadduty-view .ld-outcome { display: block; margin-top: 2px; color: #7fdca4; font-size: 11px; }' +
                 // Applications: a list beside the answers, each scrolling on its own, so walking the queue
                 // never moves the reading pane's scroll position out from under you.
-                '.jita-leadduty-view .ld-apps-wrap { display: flex; gap: 14px; height: 62vh; }' +
+                // The Applications list and the application fill the tab under its lines, each scrolling on its own.
+                '.jita-leadduty-view .ld-scroll.ld-fill { display: flex; flex-direction: column; overflow: hidden; }' +
+                '.jita-leadduty-view .ld-apps-wrap { display: flex; gap: 14px; flex: 1 1 auto; min-height: 0; }' +
                 '.jita-leadduty-view .ld-apps-list { flex: 0 0 240px; overflow-y: auto; overflow-x: hidden; border-right: 1px solid #2c333a; padding-right: 6px; }' +
                 '.jita-leadduty-view .ld-apps-detail { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding-right: 4px; }' +
                 '.jita-leadduty-view .ld-arow { padding: 7px 8px; border: 1px solid transparent; border-bottom: 1px solid #262c32; cursor: pointer; }' +

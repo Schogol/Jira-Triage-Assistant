@@ -1,6 +1,7 @@
 // layout-check.js - the layouts a fake DOM cannot see, measured in a real headless Chromium (tests/browser.js): the Lead
 // duties Members tab's columns, the result cards in the Triage Assistant's sidebar grid, Settings keeping its size on
-// every tab, and the Quality control rows keeping their columns once checked. The other harnesses stub GM_addStyle and
+// every tab, the Quality control rows keeping their columns once checked, and the Lead duties window keeping its size and
+// its tabs' places on every tab (the Applications list filling it). The other harnesses stub GM_addStyle and
 // draw into fake DOMs, so a column that shifted per row (the Members tab's note columns before v3.49.1) passed them all.
 //
 // Each view gets a page of its own with the REAL userscript in it: jQuery from the script's own @require (checked against
@@ -388,11 +389,87 @@ function qcChecks(rows) {
         long && short ? (long.sumSw + ' px of text in ' + long.sumCw + ', ' + r1(long.sum.h) + ' px high against ' + r1(short.sum.h)) : 'a row is missing');
 }
 
+// ================= 5. Lead duties, every tab =================
+// Every tab clicked in turn, each with what the fixtures give it (five quality control rows, an empty Follow-ups, the
+// wiki and the members unreadable): the window, the tab buttons and the content area, measured with each open. Before
+// v3.53.9 the window was as high as the open tab's content and stood in the middle of the page, so the tabs moved.
+async function ldTabsView() {
+    const U = JiTA.leadduty.ui, { box } = window.__lc;
+    window.__lc.leadDuties(window.__lc.qcMonth());
+    U.open('wiki');
+    const menu = document.getElementById('jita-menu'), tabs = Array.prototype.slice.call(menu.querySelectorAll('.ld-tab'));
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const states = [];
+    for (const t of tabs) {
+        t.click();
+        await wait(300);   // what each tab reads answers at once or fails at once (no network here)
+        const body = document.getElementById('ld-body'), top = body.getBoundingClientRect().top;
+        // How far the tab's own content reaches (its scrollHeight is the area's height while the content is shorter).
+        const content = Array.prototype.reduce.call(body.children, (m, c) => Math.max(m, c.getBoundingClientRect().bottom - top), 0);
+        states.push({ tab: t.getAttribute('data-tab'), on: t.classList.contains('on'), box: box(menu), tabs: tabs.map(box), body: box(body), content: Math.round(content) });
+    }
+    // Then the Applications list, long enough to scroll, and a Members tab after it (the list's fill must not stay on).
+    const L = JiTA.leadduty, people = [];
+    for (let i = 0; i < 40; i++) { people.push({ id: 'A' + i, name: 'ISD Applicant ' + i, url: '#', state: 'Pending', applied: '2026-11-01' }); }
+    L.apps.list = () => Promise.resolve({ ok: true, items: people });
+    L.apps.adopt = () => Promise.resolve(null);
+    L.apps.detail = () => new Promise(() => {});   // the application stays "Loading"
+    const tab = (name) => tabs.filter((t) => t.getAttribute('data-tab') === name)[0];
+    tab('apps').click();
+    await wait(300);
+    const body = document.getElementById('ld-body'), wrap = body.querySelector('.ld-apps-wrap'), list = body.querySelector('.ld-apps-list');
+    const apps = { box: box(menu), body: box(body), wrap: box(wrap), padB: parseFloat(getComputedStyle(body).paddingBottom),
+        rows: list ? list.children.length : 0, listSh: list ? list.scrollHeight : 0, listCh: list ? list.clientHeight : 0, bodyOver: body.scrollHeight - body.clientHeight };
+    tab('members').click();
+    await wait(300);
+    apps.after = { fill: body.classList.contains('ld-fill'), overflow: getComputedStyle(body).overflowY };
+    // A count on a tab, as a ledger read puts it there: the tab is as wide in bold (open) as not.
+    const open = {};
+    for (let i = 0; i < 12; i++) { open['EBR-' + i] = { ym: L._prevYm(), by: 'schogol', at: '2026-11-0' + (i % 9 + 1) + 'T10:00:00Z', note: 'x' }; }
+    L.ui._tabCount({ v: 1, months: {}, done: {}, flags: open });
+    const fl = tab('flags'), widths = [];
+    fl.classList.remove('on'); widths.push(fl.getBoundingClientRect().width);
+    fl.classList.add('on'); widths.push(fl.getBoundingClientRect().width);
+    fl.classList.remove('on');
+    const count = { text: fl.textContent, widths: widths };
+    return { vh: window.innerHeight, states: states, apps: apps, count: count };
+}
+function ldTabsChecks(m) {
+    const st = m.states;
+    ok('Lead duties: its five tabs, each opening when clicked', st.length === 5 && st.map((s) => s.tab).join(',') === 'wiki,qc,flags,apps,members' && st.every((s) => s.on),
+        st.map((s) => s.tab + (s.on ? '' : ' (not opened)')).join(','));
+    if (!st.length) { return; }
+    ok('Lead duties: the tabs hold contents of different heights (so the next checks measure something)', spread(st.map((s) => s.content)) > 50,
+        st.map((s) => s.tab + ' ' + s.content).join(', '));
+    ok('Lead duties: the window keeps its place and its size on every tab', spread(st.map((s) => s.box.t)) <= PX && spread(st.map((s) => s.box.h)) <= PX && spread(st.map((s) => s.box.w)) <= PX,
+        st.map((s) => s.tab + ' top ' + r1(s.box.t) + ', ' + r1(s.box.w) + 'x' + r1(s.box.h)).join('; '));
+    ok('...as high as the most a JiTA window takes, 82% of the page', Math.abs(st[0].box.h - 0.82 * m.vh) <= 3, r1(st[0].box.h) + ' px of ' + m.vh);
+    const off = [];
+    st[0].tabs.forEach((t, i) => {
+        if (spread(st.map((s) => s.tabs[i].t)) > PX || spread(st.map((s) => s.tabs[i].l)) > PX) {
+            off.push(st[i].tab + ' at ' + st.map((s) => r1(s.tabs[i].l) + ',' + r1(s.tabs[i].t)).join(' / '));
+        }
+    });
+    ok('Lead duties: the tab buttons keep their places whichever tab is open', !off.length, off.join('; '));
+    ok('...and so does the content area, filling the window between the tabs and the footer', spread(st.map((s) => s.body.t)) <= PX && spread(st.map((s) => s.body.h)) <= PX && st[0].body.h > 0.6 * m.vh,
+        st.map((s) => s.tab + ' ' + r1(s.body.t) + '+' + r1(s.body.h)).join('; '));
+    const c = m.count;
+    ok('Lead duties: a tab with a count is as wide open (in bold) as not', c.text === 'Follow-ups (12)' && near(c.widths[0], c.widths[1]), c.text + ': ' + c.widths.map(r1).join(' / '));
+    const a = m.apps;
+    ok('Lead duties, Applications: a long list keeps the window as it is', !!a.wrap && a.rows >= 40 && near(a.box.h, st[0].box.h) && near(a.box.t, st[0].box.t),
+        a.wrap ? (a.rows + ' rows, ' + r1(a.box.t) + '+' + r1(a.box.h) + ' against ' + r1(st[0].box.t) + '+' + r1(st[0].box.h)) : 'no list drawn');
+    if (!a.wrap) { return; }
+    ok('...the list scrolls on its own, and the tab itself does not', a.listSh > a.listCh + 50 && a.bodyOver <= 1, 'list ' + a.listSh + ' in ' + a.listCh + ', tab ' + a.bodyOver + ' px over');
+    ok('...the list and the application reach the bottom of the tab', Math.abs(a.wrap.b - (a.body.b - a.padB)) <= 1, 'they end at ' + r1(a.wrap.b) + ', the tab at ' + r1(a.body.b - a.padB));
+    ok('...and the next tab scrolls as one again', !a.after.fill && a.after.overflow === 'auto', JSON.stringify(a.after));
+}
+
 const VIEWS = [
     { title: 'Members', page: membersView, check: membersChecks },
     { title: 'Cards', page: cardsView, check: cardsChecks },
     { title: 'Settings', page: settingsView, check: settingsChecks },
-    { title: 'Quality control', page: qcView, check: qcChecks }
+    { title: 'Quality control', page: qcView, check: qcChecks },
+    { title: 'Lead duties tabs', page: ldTabsView, check: ldTabsChecks }
 ];
 
 (async () => {
