@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.5
+// @version     3.53.6
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.5
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.6
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -10198,6 +10198,7 @@ JiTA.menu = {
                         // The local mirror drives the chip's outstanding count, so leaving it behind would
                         // show work against a ledger that no longer exists.
                         var L = JiTA.leadduty;
+                        L.pool._own = null;   // this tab's own copy of the page tree too, or the re-freeze would not crawl afresh
                         return Promise.all([
                             JiTA.db.setMeta(L.wiki.localKey(L._ym()), null),
                             JiTA.db.setMeta(L.qc.localKey(L._prevYm()), null),
@@ -18864,6 +18865,11 @@ JiTA.leadduty = {
                 // see past a folder and would keep an excluded subtree in the rotation for another day. Treat
                 // it as due for a re-crawl however young it is; it still serves as the outage fallback below.
                 var fresh = usable && cached.parents && (Date.now() - (cached.fetchedAt || 0)) < L.POOL_TTL_MS;
+                // This tab's own last crawl, when the meta store did not keep it (_saveCrawl): served while it is younger
+                // than POOL_TTL_MS and newer than any fresh cache. Without it, every publish after a crawl crawled again.
+                var own = L.pool._own, mine = own && own.rootId === root && (Date.now() - own.fetchedAt) < L.POOL_TTL_MS &&
+                    !(fresh && (cached.fetchedAt || 0) >= own.fetchedAt);
+                if (!force && mine) { return L.pool._applyExclusions(own); }
                 if (!force && fresh) { return L.pool._applyExclusions(cached); }
                 return L.pool._crawlOnce(root).then(function (r) {
                     if (!r.pages.length) {
@@ -18879,8 +18885,7 @@ JiTA.leadduty = {
                         if (usable) { return L.pool._applyExclusions(cached); }
                         return out;   // nothing better to serve; `verified: false` stops it cutting a month
                     }
-                    return JiTA.db.setMeta(L.pool.CACHE_KEY, rec)
-                        .then(function () { return L.pool._crawled(out); }, function () { return L.pool._crawled(out); });
+                    return L.pool._saveCrawl(rec).then(function () { return L.pool._crawled(out); });
                 }, function (e) {
                     if (usable) { return L.pool._applyExclusions(cached); }   // keep serving the last good list through an outage
                     throw e;
@@ -18900,10 +18905,25 @@ JiTA.leadduty = {
         //
         // schedule() is debounced and publish() skips on an unchanged hash, so a crawl that found nothing
         // new costs one hash comparison, not a page version. It cannot recurse: publish() calls
-        // ensureFresh(false), which by then reads a fresh cache and never reaches this line.
+        // ensureFresh(false), which by then serves the crawl just made (from the cache, or from this tab's
+        // memory when the meta store did not keep it, see _saveCrawl) and never reaches this line.
         _crawled: function (out) {
             try { JiTA.leadduty.report.schedule(); } catch (e) { /* publishing is cosmetic - never fail the crawl */ }
             return out;
+        },
+
+        // Save a crawl as the cache, and read it back. setMeta resolves once the put succeeds, even when its transaction
+        // then aborts (over the IndexedDB quota), and a store that is closed refuses it outright: then the next read
+        // found no fresh cache, crawled again, and _crawled asked for another publish, which read again, for as long as
+        // the tab was open. A crawl the store did not keep stays in this tab's memory (_own) instead; one it kept clears
+        // that, so the shared cache is the one copy again (Clear ledger empties it, and the next read crawls afresh).
+        // Never rejects.
+        _own: null,
+        _saveCrawl: function (rec) {
+            var P = JiTA.leadduty.pool;
+            return JiTA.db.setMeta(P.CACHE_KEY, rec).then(function () { return JiTA.db.getMeta(P.CACHE_KEY); }).then(function (back) {
+                P._own = (back && back.fetchedAt === rec.fetchedAt) ? null : rec;
+            }, function () { P._own = rec; });
         },
 
         // ONE crawl at a time, however many callers ask at once. Clear ledger empties the cache, and the

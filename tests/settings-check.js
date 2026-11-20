@@ -43,6 +43,7 @@ const flush = async () => { for (let i = 0; i < 8; i++) { await new Promise((r) 
     global.$ldStatus = { text: (v) => { if (v === undefined) { return status; } status = v; return $ldStatus; } };
     const wipe = (0, eval)('(' + cut("function () {\n                    var page = JiTA.leadduty.ledgerPage();\n                    if (!confirm('Delete BOTH", '\n                });') + '\n                })');
     refuse = 'qc-id';
+    L.pool._own = { fetchedAt: 1 };
     wipe();
     ok('Clear ledger disables its button while it works (control)', disabled === true && /Clearing the ledgers/.test(status));
     await flush();
@@ -51,6 +52,7 @@ const flush = async () => { for (let i = 0; i < 8; i++) { await new Promise((r) 
     ok('...the button comes back', disabled === false);
     ok('...and the mirror and the scheduler are reset all the same', metas.length === 3 && store.last === 0 && store.failTs === 0 && L.qc._actorCache && Object.keys(L.qc._actorCache).length === 0,
         metas.join() + ' / ' + JSON.stringify(store));
+    ok('...and so is the page tree this tab kept when its cache could not be saved (v3.53.6), so the re-freeze crawls afresh', L.pool._own === null, JSON.stringify(L.pool._own));
     status = ''; disabled = null; deletes = []; refuse = null; listFails = true;
     wipe();
     await flush();

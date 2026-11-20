@@ -199,6 +199,66 @@ L.report.schedule = () => { published++; };
     ok('simultaneous callers share ONE crawl', crawls === 1, crawls + ' crawls');
     ok('...and every one of them gets a verified pool', many.every((p) => p.verified === true));
 
+    // ---- a meta store that does not keep the crawl (review 2026-11-20, leadduty-robust-3, v3.53.6) ----
+    // Every crawl asks for a publish (_crawled), and publish reads the pool with ensureFresh(false). When the cache write
+    // had not landed (IndexedDB closed, or over its quota: the put succeeds and its transaction then aborts), that read
+    // found no fresh cache and crawled again, and asked for another publish, for as long as the tab was open.
+    const db = { get: JiTA.db.getMeta, set: JiTA.db.setMeta };
+    const settle = async () => { for (let i = 0; i < 40; i++) { await new Promise((r) => setImmediate(r)); } };
+    const asPublish = () => { published++; if (published < 20) { L.pool.ensureFresh(false).catch(() => {}); } };   // what publish() does
+    const loop = async (label) => {
+        meta['leadduty:pool'] = null; L.pool._own = null;
+        crawls = 0; published = 0;
+        L.report.schedule = asPublish;
+        const p = await L.pool.ensureFresh(true);
+        await settle();
+        ok(label + ': the publish after a crawl serves that crawl, and does not crawl again', crawls === 1 && published === 1 && p.verified === true,
+            crawls + ' crawls, ' + published + ' publishes');
+        ok('...the crawl is kept in this tab instead', !!L.pool._own && L.pool._own.fetchedAt === p.fetchedAt && !!L.pool._own.parents);
+    };
+    JiTA.db.getMeta = () => Promise.reject(new Error('the database connection is closing'));
+    JiTA.db.setMeta = () => Promise.reject(new Error('the database connection is closing'));
+    await loop('a meta store that refuses every read and write');
+    JiTA.db.getMeta = db.get;
+    JiTA.db.setMeta = () => Promise.resolve();   // the put "succeeds", the transaction aborts: nothing is stored
+    await loop('a cache write that reports success but does not land');
+    L.report.schedule = () => { published++; };
+    crawls = 0;
+    const again = await L.pool.ensureFresh(false);
+    ok('...a later read in this tab is served from it too, with no crawl', crawls === 0 && again.fetchedAt === L.pool._own.fetchedAt, crawls + ' crawls');
+    L.pool._own.fetchedAt = Date.now() - L.POOL_TTL_MS - 1000;
+    crawls = 0;
+    await L.pool.ensureFresh(false);
+    ok('...but only while it is younger than POOL_TTL_MS', crawls === 1, crawls + ' crawls');
+    L.pool._own.rootId = 'another root';
+    crawls = 0;
+    await L.pool.ensureFresh(false);
+    ok('...and only for the same root page', crawls === 1, crawls + ' crawls');
+
+    // The store keeps it again: the shared cache is the one copy, so a Clear ledger (which empties it) crawls afresh.
+    JiTA.db.setMeta = db.set;
+    L.pool._own = { fetchedAt: Date.now(), rootId: ROOT, pages: [{ id: 'x' }], parents: {} };
+    const kept2 = await L.pool.ensureFresh(true);
+    ok('a crawl the store kept clears the copy in this tab', L.pool._own === null && meta['leadduty:pool'] && meta['leadduty:pool'].fetchedAt === kept2.fetchedAt);
+    meta['leadduty:pool'] = null;
+    crawls = 0;
+    await L.pool.ensureFresh(false);
+    ok('...so an emptied cache is crawled again', crawls === 1, crawls + ' crawls');
+
+    // Which copy is served when both are fresh: the newer one.
+    const cachedRec = JSON.parse(JSON.stringify(meta['leadduty:pool']));
+    L.pool._own = Object.assign(JSON.parse(JSON.stringify(cachedRec)), { fetchedAt: cachedRec.fetchedAt - 60000 });
+    crawls = 0;
+    let served = await L.pool.ensureFresh(false);
+    ok('a fresh cache newer than this tab\'s copy (another tab crawled since) is served', crawls === 0 && served.fetchedAt === cachedRec.fetchedAt);
+    L.pool._own = Object.assign(JSON.parse(JSON.stringify(cachedRec)), { fetchedAt: cachedRec.fetchedAt + 60000 });
+    served = await L.pool.ensureFresh(false);
+    ok('this tab\'s copy newer than a fresh cache (a re-scan the store did not keep) is served', crawls === 0 && served.fetchedAt === cachedRec.fetchedAt + 60000);
+    crawls = 0;
+    await L.pool.ensureFresh(true);
+    ok('a forced crawl (Re-scan) still crawls, whatever is kept', crawls === 1, crawls + ' crawls');
+    L.pool._own = null;
+
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'wiki-pool exclusion checks passed.'));
     process.exit(fail ? 1 : 0);
 })();
