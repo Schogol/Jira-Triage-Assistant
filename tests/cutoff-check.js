@@ -9,7 +9,7 @@ const END = '\n    },';
 const slice = (head) => { const s = src.indexOf(head); if (s < 0) { throw new Error('could not slice ' + head.trim()); } return src.slice(s, src.indexOf(END, s) + END.length); };
 const U = slice('    jqlSince: function (iso, now) {');
 const S1 = slice('    incrementalSync: function () {');
-const S2 = slice('    incrementalSyncEbr: function () {');
+const S2 = slice('    incrementalSyncEbr: function () {') + slice('    _ebrSince: function (hw) {');
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };

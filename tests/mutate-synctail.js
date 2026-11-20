@@ -11,7 +11,7 @@ const muts = [
     [H, 'a closed report never stored counts as pruned', 'if (old) { store.delete(rec.key); changed++; }', 'store.delete(rec.key); changed++;'],
     [H, 'the derived fields count as synced ones', "            if (k === 'embedding' || k === 'embeddingModelVersion' || k === 'lang' || k === 'enText') { continue; }\n", ''],
     // ---- a run ----
-    [H, 'an incremental run saves a resume token', '                    var saved = opts.resume\n', '                    var saved = true\n'],
+    [H, 'an incremental run saves a resume token', 'var saved = opts.resume ? JiTA.db.setMeta(resumeKey', 'var saved = true ? JiTA.db.setMeta(resumeKey'],
     [H, 'a bare token is saved', '{ jql: jql, token: nextToken, v: JiTA.sync._schema(jql) }', 'nextToken'],
     [H, 'a bug report crawl saved and resumed under the defects\' schema', 'return jql === JiTA.sync.FULL_JQL_EBR ? JiTA.DATA_VERSION_EBR : JiTA.DATA_VERSION;', 'return JiTA.DATA_VERSION;'],
     [H, 'a defect crawl saved and resumed under the bug reports\' schema', 'return jql === JiTA.sync.FULL_JQL_EBR ? JiTA.DATA_VERSION_EBR : JiTA.DATA_VERSION;', 'return JiTA.DATA_VERSION_EBR;'],
@@ -40,7 +40,18 @@ const muts = [
     [H, 'a manual sync that changed nothing does not redraw', "                JiTA.sync._afterSync(!!(res && res.changed), false, true);\n                return res;", "                JiTA.sync._afterSync(!!(res && res.changed), false, false);\n                return res;"],
     [H, 'the background sync is not quiet', '        JiTA.sync.running = true;\n        JiTA.sync._quiet = true;\n', '        JiTA.sync.running = true;\n'],
     [H, 'a failed background sync stays quiet', "            JiTA.sync._quiet = false;\n            JiTA.log('[JiTA] auto-sync error:'", "            JiTA.log('[JiTA] auto-sync error:'"],
-    [H, 'a write-only meta key comes back', "            JiTA.log('[JiTA] auto-sync error:', e && e.message || e);", "            JiTA.db.setMeta('lastError', String(e)); JiTA.log('[JiTA] auto-sync error:', e && e.message || e);"]
+    [H, 'a write-only meta key comes back', "            JiTA.log('[JiTA] auto-sync error:', e && e.message || e);", "            JiTA.db.setMeta('lastError', String(e)); JiTA.log('[JiTA] auto-sync error:', e && e.message || e);"],
+    // v3.53.4: a full bug report crawl over a filled store catches up from the mark it started at
+    [H, 'a full bug report crawl ends without a catch-up', '            return JiTA.sync._sweepEbr(res).then(function () { return res; });\n', '            return res;\n'],
+    [H, 'the catch-up runs from the mark the crawl left', "return JiTA.db.setMeta('lastSyncHighWaterEbr', from).then(function () {", 'return Promise.resolve().then(function () {'],
+    [H, 'the catch-up deletes nothing', "{ startHighWater: hw, metaPrefix: 'Ebr', pruneResolved: true, isEbr: true }", "{ startHighWater: hw, metaPrefix: 'Ebr', isEbr: true }"],
+    [H, 'a crawl carried on forgets its mark', "resuming ? (rt.from || '')", "resuming ? ''"],
+    [H, 'a crawl\'s saved position leaves the mark out', '                    if (opts.from) { tok.from = opts.from; }\n', ''],
+    [H, 'a crawl into an empty store catches up as well', "return JiTA.db.countEbr().then(function (n) { return n ? hw : ''; }", 'return JiTA.db.countEbr().then(function (n) { return hw; }'],
+    [H, 'a defect crawl is given a catch-up mark', "if (prefix !== 'Ebr' || !hw) { return ''; }", "if (!hw) { return ''; }"],
+    [H, 'a catch-up that fails fails the crawl', "            JiTA.log('[JiTA] could not catch up on the bug reports closed during the full crawl (the next sync does):', e && e.message || e);", '            throw e;'],
+    [H, 'the refetch throws the bug reports\' mark away again', "                return JiTA.db.setMeta('resumeTokenEbr', null);\n",
+        "                return JiTA.db.setMeta('resumeTokenEbr', null).then(function () { return JiTA.db.setMeta('lastSyncHighWaterEbr', ''); });\n"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
