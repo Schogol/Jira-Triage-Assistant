@@ -191,13 +191,13 @@ R.schedule = () => { R._scheduled = (R._scheduled || 0) + 1; };
 
     // A read that FAILED is not a ledger with nothing in it, and neither half may be published as one (v3.38.15):
     // without the QC ledger the page says the month was never sampled, without the page tree nothing is excluded.
-    const goodRead = L.ledger.read;
-    L.ledger.read = (key) => (key === L.QC_LEDGER_KEY ? Promise.reject(new Error('HTTP 503')) : goodRead(key));
+    const goodQc = L.qcl.read;
+    L.qcl.read = () => Promise.reject(new Error('HTTP 503'));   // the QC ledger is read in parts (v3.53.5)
     writes = 0;
     const noQc = await R.publish(true);
     ok('a QC ledger that cannot be read is not published as an unsampled month', writes === 0 &&
         !!(noQc && noQc.skipped && /quality control ledger could not be read/.test(noQc.skipped)), JSON.stringify(noQc));
-    L.ledger.read = goodRead;
+    L.qcl.read = goodQc;
     L.pool.ensureFresh = () => Promise.reject(new Error('the crawl failed'));
     const noPool = await R.publish(true);
     ok('a page tree that cannot be read is not published as one that excludes nothing', writes === 0 &&

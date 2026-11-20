@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.5 (2026-11-20)
+
+### Fixed issues
+
+- Lead duties: quality control no longer stops saving Checked and Flag once the Lead Ledger holds several months of them. Each month is now kept on its own on the ledger page, still for six months.
+
 ## 3.53.4 (2026-11-20)
 
 ### Fixed issues

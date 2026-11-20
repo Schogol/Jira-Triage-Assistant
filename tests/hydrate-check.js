@@ -5,7 +5,7 @@
 // the real JiTA.leadduty.qc._hydrate against stubbed reads.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
-const head = '        _hydrate: function (ym, record, ledgerValue, shared, pool) {';
+const head = '        _hydrate: function (ym, record, ledgerValue, shared, pool, parts) {';
 const s = src.indexOf(head), e = src.indexOf('\n        },', s);
 if (s < 0 || e < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice qc._hydrate'); }
 

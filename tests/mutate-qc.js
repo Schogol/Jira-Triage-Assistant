@@ -22,7 +22,7 @@ const muts = [
     [H, 'a note is not capped', '.slice(0, JiTA.leadduty.NOTE_MAX)', ''],
     [H, 'a capped note leaves a space dangling', ".slice(0, JiTA.leadduty.NOTE_MAX).replace(/\\s+$/, '');", '.slice(0, JiTA.leadduty.NOTE_MAX);'],
     [H, 'a flag reason is not tidied', 'var txt = L._note(note);\n            var actor', 'var txt = String(note == null ? \'\' : note);\n            var actor'],
-    [H, 'a resolution note is not tidied', 'var txt = L._note(note);\n            return L.ledger.mutate', 'var txt = String(note == null ? \'\' : note);\n            return L.ledger.mutate'],
+    [H, 'a resolution note is not tidied', 'var txt = L._note(note);\n            return L.qcl.mutate', 'var txt = String(note == null ? \'\' : note);\n            return L.qcl.mutate'],
     [H, 'the follow-up message indents only the first line', ".split('\\n').map(function (l) { return l ? '  ' + l : ''; }).join('\\n'));", ").replace(/^/, '  '));"],
     [H, 'the follow-up message indents blank lines', "return l ? '  ' + l : '';", "return '  ' + l;"],
     [H, 'older flags lose their reason', "return d.note || (flag && flag.ym === ym && flag.note) || '(no reason given)';", "return d.note || '(no reason given)';"],
@@ -35,7 +35,8 @@ const muts = [
     [H, 'a resolved flag can be undone', "                if (f && f.ym === ym && f.resolvedAt) { return null; }\n", ''],
     // ---- Resolve all (v3.43.0) ----
     [H, "a resolve overwrites another Lead's resolution", '                    if (!f || f.resolvedAt) { return; }', '                    if (!f) { return; }'],
-    [H, 'a resolve with nothing left open still writes', '                return n ? v : null;', '                return v;'],
+    // (No breakage for resolveFlags' `return n ? v : null` since v3.53.5: qcl.mutate writes only the parts that changed,
+    // so a resolve that changes nothing writes nothing either way. mutate-qcl.js breaks that comparison instead.)
     [H, 'a resolve closes out only the first follow-up', '                (keys || []).forEach(function (key) {\n                    var f = v && v.flags', '                (keys || []).slice(0, 1).forEach(function (key) {\n                    var f = v && v.flags'],
     [H, 'the open follow-up survives an Undo', "                if (f && f.ym === ym) { delete v.flags[key]; }\n", ''],
     [H, "another month's follow-up is withdrawn", "                if (f && f.ym === ym) { delete v.flags[key]; }\n", "                if (f) { delete v.flags[key]; }\n"],

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.4
+// @version     3.53.5
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.4
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.5
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -10076,14 +10076,14 @@ JiTA.menu = {
                 $ldStatus.text('Reading the ledger…');
                 Promise.all([
                     JiTA.conf.getProperty(page, JiTA.leadduty.LEDGER_KEY),
-                    JiTA.conf.getProperty(page, JiTA.leadduty.QC_LEDGER_KEY)
+                    JiTA.leadduty.qcl.read('all')
                 ]).then(function (r) {
                     if (!JiTA.menu._live($ldStatus)) { return; }
                     $show.prop('disabled', false);
-                    var wiki = r[0], qc = r[1], bits = [];
+                    var wiki = r[0], qcv = r[1].value, bits = [];
                     if (window.console) {   // the whole ledgers, names and notes in them: the console only, never Copy diagnostics
                         console.log('[JiTA.leadduty] page ' + page + ' property ' + JiTA.leadduty.LEDGER_KEY + ':', wiki ? wiki.value : '(does not exist yet)');
-                        console.log('[JiTA.leadduty] page ' + page + ' property ' + JiTA.leadduty.QC_LEDGER_KEY + ':', qc ? qc.value : '(does not exist yet)');
+                        console.log('[JiTA.leadduty] page ' + page + ' property ' + JiTA.leadduty.QC_LEDGER_KEY + ' with its parts (' + JiTA.leadduty.QC_MONTH_PREFIX + 'YYYY_MM, ' + JiTA.leadduty.QC_FLAGS_KEY + '):', qcv || '(does not exist yet)');
                     }
                     if (!wiki) {
                         bits.push('wiki ledger: not created yet - open Lead duties once to freeze this month');
@@ -10093,9 +10093,14 @@ JiTA.menu = {
                         bits.push('wiki ledger v' + wiki.version + ': ' + Object.keys(v.lastReviewed || {}).length +
                             ' page(s) reviewed, month(s) ' + (months.join(', ') || 'none'));
                     }
-                    bits.push(qc
-                        ? ('QC ledger v' + qc.version + ': month(s) ' + (Object.keys((qc.value || {}).months || {}).sort().join(', ') || 'none'))
-                        : 'QC ledger: not created yet');
+                    if (!qcv) {
+                        bits.push('QC ledger: not created yet');
+                    } else {
+                        var nv = 0;
+                        Object.keys(qcv.done || {}).forEach(function (ym) { nv += Object.keys(qcv.done[ym] || {}).length; });
+                        bits.push('QC ledger: month(s) ' + (Object.keys(qcv.months || {}).sort().join(', ') || 'none') + ', ' + nv + ' verdict(s), ' +
+                            JiTA.leadduty.qc.openFlags(qcv).length + ' open follow-up(s)');
+                    }
                     bits.push('full JSON in the console (F12)');
                     $ldStatus.text(bits.join(' · '));
                 }, function (e) {
@@ -10182,7 +10187,13 @@ JiTA.menu = {
                         }).catch(function (e) { out.push(key + ': ' + String(e && e.message || e)); });
                     }
                     drop(JiTA.leadduty.LEDGER_KEY).then(function () {
-                        return drop(JiTA.leadduty.QC_LEDGER_KEY);
+                        // The QC ledger is in parts (qcl): the months, each month's verdicts and the follow-ups. A listing
+                        // that fails still takes the two whose keys are known.
+                        var L = JiTA.leadduty;
+                        return L.qcl.keys().catch(function () { return [L.QC_FLAGS_KEY]; }).then(function (keys) {
+                            var all = [L.QC_LEDGER_KEY].concat(keys.filter(function (k) { return k !== L.QC_LEDGER_KEY; }));
+                            return all.reduce(function (p, k) { return p.then(function () { return drop(k); }); }, Promise.resolve());
+                        });
                     }).then(function () {
                         // The local mirror drives the chip's outstanding count, so leaving it behind would
                         // show work against a ledger that no longer exists.
@@ -18275,7 +18286,10 @@ JiTA.conf = {
 JiTA.leadduty = {
     // ---- Confluence property keys (see the [a-z0-9_] constraint in JiTA.conf) ----
     LEDGER_KEY: 'jita_leadduty_v1',
+    // The quality-control ledger, in parts (see qcl): each month's frozen sample here, as before...
     QC_LEDGER_KEY: 'jita_leadduty_qc_v1',
+    QC_MONTH_PREFIX: 'jita_leadduty_qc_v1_',     // ...+ 'YYYY_MM': that month's verdicts...
+    QC_FLAGS_KEY: 'jita_leadduty_qc_flags_v1',   // ...and the follow-ups
     PROBE_KEY: 'jita_leadduty_probe',
     ACTIVITY_KEY: 'jita_leadduty_activity_v1',   // Members tab: each month's counts, counted once for all Leads
     MEMBERS_KEY: 'jita_leadduty_members_v1',     // Members tab: roles and notes, and who published the members page
@@ -18581,6 +18595,205 @@ JiTA.leadduty = {
                     throw err;
                 });
             });
+        }
+    },
+
+    // ---- the quality-control ledger, kept in parts ---------------------------------------------------------------
+    // One content property holds 32 KB, and JiTA writes at most MAX_PROP_BYTES of it. A QC month (its sample and its 30
+    // verdicts with 3 Leads) is about 4.4 KB, so the six months KEEP_MONTHS keeps came to 28 KB with no follow-up at
+    // all, and every QC write was refused. So the QC ledger is kept in properties of its own on the ledger page:
+    // QC_LEDGER_KEY holds each month's frozen sample (`months`), as before; QC_MONTH_PREFIX + 'YYYY_MM' that month's
+    // verdicts; QC_FLAGS_KEY the follow-ups. To the code that uses it, it is still one value,
+    // { v, months, done: { ym: { key: verdict } }, flags }, read and changed as ledger.read and ledger.mutate do.
+    //
+    // A tab still on an older build keeps writing its verdicts and follow-ups into QC_LEDGER_KEY. Every read moves what
+    // it finds there into the parts (_drain), so none of it is lost; and the months stay there, where an older build
+    // looks for them, so it never freezes a month again.
+    qcl: {
+        // A month's verdicts property: { v: 1, ym, verdicts: { key: verdict } }. Not `done`: _prune would keep a `done`
+        // map to its newest KEEP_MONTHS keys, as if they were months. Property keys take [a-z0-9_] only.
+        monthKey: function (ym) { return JiTA.leadduty.QC_MONTH_PREFIX + String(ym).replace('-', '_'); },
+
+        // The ledger with the months `yms` ('all': every month it holds): { value, parts }, `parts` the version of each
+        // property read ({ legacy, flags, months: { ym } }, 0 for one not written yet), for ui._qcAdopt.
+        read: function (yms) {
+            var Q = JiTA.leadduty.qcl;
+            return Q._gather(yms).then(function (parts) { return { value: Q._view(parts), parts: Q._versions(parts) }; });
+        },
+
+        // Change the ledger as ledger.mutate changes one property: fn gets a clone of the value with the months `yms` and
+        // returns the value to store, or null for no change. Each part that changed is written, the follow-ups first,
+        // then the verdicts, then the months: a write that fails part way leaves what fn decides by (a verdict there or
+        // not) for last, so running fn again finishes it. A part another Lead changed meanwhile runs fn again on the
+        // fresh value. The verdicts of a month the months no longer hold are deleted. Resolves { value, parts, written, dry }.
+        mutate: function (yms, fn, tries) {
+            var L = JiTA.leadduty, Q = L.qcl, page = L.ledgerPage();
+            tries = (tries == null) ? L.CAS_TRIES : tries;
+            return Q._gather(yms).then(function (parts) {
+                var cur = Q._view(parts), next = fn(L._clone(cur));
+                if (!next) { return { value: cur, parts: Q._versions(parts), written: false }; }
+                next = L._prune(next);
+                var stored = parts.legacy.value || {}, writes = [], same = function (a, b) { return JSON.stringify(a) === JSON.stringify(b); };
+                Object.keys(next.done || {}).forEach(function (ym) {
+                    if (!parts.months[ym]) { throw new Error('QC ledger: the verdicts of ' + ym + ' were changed without being read'); }
+                });
+                var flags = next.flags || {};
+                if (!same(flags, (parts.flags.value && parts.flags.value.flags) || {})) {
+                    writes.push({ key: L.QC_FLAGS_KEY, part: parts.flags, value: { v: 1, flags: flags } });
+                }
+                Object.keys(parts.months).sort().forEach(function (ym) {
+                    var v = (next.done && next.done[ym]) || {}, part = parts.months[ym];
+                    if (!same(v, (part.value && part.value.verdicts) || {})) { writes.push({ key: Q.monthKey(ym), part: part, value: { v: 1, ym: ym, verdicts: v } }); }
+                });
+                if (!same(next.months || {}, stored.months || {})) {
+                    var lv = L._clone(stored);
+                    lv.v = lv.v || 1;
+                    lv.months = next.months || {};
+                    writes.push({ key: L.QC_LEDGER_KEY, part: parts.legacy, value: lv });
+                }
+                var gone = Object.keys(stored.months || {}).filter(function (ym) { return !(next.months || {})[ym]; });
+                var vers = Q._versions(parts), dry = L._dry();
+                if (!writes.length) { return { value: next, parts: vers, written: false }; }
+                // In a dry run ledger.mutate shows each part's payload in the console and writes nothing.
+                return writes.reduce(function (p, w) {
+                    return p.then(function () {
+                        // Written only over the value fn was given: one another Lead changed meanwhile runs fn again.
+                        return L.ledger.mutate(w.key, function (fresh) {
+                            if (!same(fresh, w.part.value)) { var e = new Error('QC ledger: ' + w.key + ' changed meanwhile'); e.status = 409; throw e; }
+                            return w.value;
+                        }, 1).then(function (r) { Q._bump(vers, w.key, r.prop); });
+                    });
+                }, Promise.resolve()).then(function () {
+                    return Promise.all((dry ? [] : gone).map(function (ym) {
+                        return JiTA.conf.getProperty(page, Q.monthKey(ym)).then(function (prop) {
+                            return prop ? JiTA.conf.deleteProperty(page, prop.id) : null;
+                        }).catch(function (e) { JiTA.log('[JiTA] could not delete the QC verdicts of ' + ym + ', a month no longer kept:', e && e.message || e); });
+                    }));
+                }).then(function () { return dry ? { value: next, parts: vers, written: false, dry: true } : { value: next, parts: vers, written: true }; });
+            }).catch(function (e) {
+                if (tries > 1 && JiTA.conf.isConflict(e)) {
+                    return new Promise(function (res) { setTimeout(res, 200 + Math.floor(Math.random() * 600)); })
+                        .then(function () { return Q.mutate(yms, fn, tries - 1); });
+                }
+                throw e;
+            });
+        },
+
+        // Every QC property on the ledger page, by key: what Show ledger reads and Clear ledger deletes. Resolves [key].
+        keys: function () {
+            var L = JiTA.leadduty, out = [], guard = 0, page = L.ledgerPage();
+            function step(path) {
+                if (++guard > 50) { return Promise.resolve(); }
+                return JiTA.conf._ajax('GET', path).then(function (r) {
+                    var d = r.data || {};
+                    (d.results || []).forEach(function (p) {
+                        var k = p && p.key;
+                        if (k === L.QC_LEDGER_KEY || k === L.QC_FLAGS_KEY || (typeof k === 'string' && k.indexOf(L.QC_MONTH_PREFIX) === 0)) { out.push(k); }
+                    });
+                    var next = (d._links && d._links.next) || JiTA.conf._nextLink(r.xhr);
+                    return next ? step(JiTA.conf._relPath(next)) : null;
+                });
+            }
+            return step('/wiki/api/v2/pages/' + encodeURIComponent(page) + '/properties?limit=' + JiTA.conf.PAGE_LIMIT).then(function () { return out.sort(); });
+        },
+
+        // The properties the months `yms` need: { legacy, flags, months: { ym: part } }, each { prop, value } (null for
+        // one not written yet). An older build's verdicts and follow-ups found in the legacy property are moved into the
+        // parts first (unless `settled`), so what fn sees and what is stored agree.
+        _gather: function (yms, settled) {
+            var L = JiTA.leadduty, Q = L.qcl, page = L.ledgerPage();
+            if (!page) { return Promise.reject(L._notConfigured()); }
+            var get = function (key) { return JiTA.conf.getProperty(page, key).then(function (prop) { return { prop: prop, value: (prop && prop.value) || null }; }); };
+            return get(L.QC_LEDGER_KEY).then(function (legacy) {
+                if (!settled && !L._dry() && Q._stray(legacy.value)) {
+                    var again = function () { return Q._gather(yms, true); };
+                    return Q._drain(legacy.value).then(again, function (e) {
+                        JiTA.log('[JiTA] could not move the QC verdicts an older build wrote into their own properties (the next read tries again):', e && e.message || e);
+                        return again();
+                    });
+                }
+                var lv = legacy.value || {}, list = (yms === 'all') ? Q._months(lv) : (yms || []);
+                return Promise.all([get(L.QC_FLAGS_KEY)].concat(list.map(function (ym) { return get(Q.monthKey(ym)); }))).then(function (r) {
+                    var months = {};
+                    list.forEach(function (ym, i) { months[ym] = r[i + 1]; });
+                    return { legacy: legacy, flags: r[0], months: months };
+                });
+            });
+        },
+        // Every month the legacy property names, in `months` or in `done`.
+        _months: function (lv) {
+            var all = {};
+            ['months', 'done'].forEach(function (f) { Object.keys((lv && lv[f]) || {}).forEach(function (ym) { all[ym] = true; }); });
+            return Object.keys(all).sort();
+        },
+        // The one value the parts make, null when none of them exists yet (as ledger.read gives a property not written).
+        // Verdicts and follow-ups still in the legacy property (a move that failed) are folded in, so nothing an older
+        // build wrote is out of sight.
+        _view: function (parts) {
+            var L = JiTA.leadduty, Q = L.qcl, lv = parts.legacy.value || {};
+            var any = parts.legacy.prop || parts.flags.prop || Object.keys(parts.months).some(function (ym) { return parts.months[ym].prop; });
+            if (!any) { return null; }
+            var out = { v: 1, months: L._clone(lv.months || {}), done: {}, flags: {} };
+            Object.keys(parts.months).forEach(function (ym) {
+                var own = parts.months[ym].value;
+                out.done[ym] = Q._fold(L._clone((own && own.verdicts) || {}), (lv.done && lv.done[ym]) || {});
+            });
+            out.flags = Q._fold(L._clone((parts.flags.value && parts.flags.value.flags) || {}), lv.flags || {});
+            return out;
+        },
+        // The entries of `more` folded into `into`: one `into` lacks is added, one it has is replaced by a newer one (by
+        // when it was resolved, else given). Returns `into`.
+        _fold: function (into, more) {
+            var at = function (e) { return String((e && (e.resolvedAt || e.at)) || ''); };
+            Object.keys(more || {}).forEach(function (k) { if (!into[k] || at(more[k]) > at(into[k])) { into[k] = more[k]; } });
+            return into;
+        },
+        _versions: function (parts) {
+            var ver = function (p) { return (p && p.prop && p.prop.version) || 0; }, out = { legacy: ver(parts.legacy), flags: ver(parts.flags), months: {} };
+            Object.keys(parts.months).forEach(function (ym) { out.months[ym] = ver(parts.months[ym]); });
+            return out;
+        },
+        // A part just written: its new version in `vers`.
+        _bump: function (vers, key, prop) {
+            var L = JiTA.leadduty, ver = (prop && prop.version) || 0;
+            if (key === L.QC_LEDGER_KEY) { vers.legacy = ver; } else if (key === L.QC_FLAGS_KEY) { vers.flags = ver; }
+            else { Object.keys(vers.months).forEach(function (ym) { if (L.qcl.monthKey(ym) === key) { vers.months[ym] = ver; } }); }
+        },
+
+        // Whether the legacy property holds verdicts or follow-ups: an older build's, or a ledger from before the parts.
+        _stray: function (lv) {
+            if (!lv) { return false; }
+            if (lv.flags && Object.keys(lv.flags).length) { return true; }
+            return Object.keys(lv.done || {}).some(function (ym) { return Object.keys(lv.done[ym] || {}).length > 0; });
+        },
+        // Move them into the parts: each is folded in (a newer one wins), then taken out of the legacy property, unless an
+        // older build changed it there meanwhile (the next read moves that). The months stay.
+        _drain: function (lv) {
+            var L = JiTA.leadduty, Q = L.qcl, flags = lv.flags || {}, done = lv.done || {}, steps = [];
+            var same = function (a, b) { return JSON.stringify(a) === JSON.stringify(b); };
+            var yms = Object.keys(done).filter(function (ym) { return Object.keys(done[ym] || {}).length > 0; });
+            if (Object.keys(flags).length) {
+                steps.push(function () {
+                    return L.ledger.mutate(L.QC_FLAGS_KEY, function (v) { v = v || { v: 1, flags: {} }; v.flags = Q._fold(v.flags || {}, flags); return v; });
+                });
+            }
+            yms.forEach(function (ym) {
+                steps.push(function () {
+                    return L.ledger.mutate(Q.monthKey(ym), function (v) { v = v || { v: 1, ym: ym, verdicts: {} }; v.verdicts = Q._fold(v.verdicts || {}, done[ym]); return v; });
+                });
+            });
+            steps.push(function () {
+                return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
+                    var n = 0;
+                    if (!v) { return null; }
+                    Object.keys(flags).forEach(function (k) { if (v.flags && same(v.flags[k], flags[k])) { delete v.flags[k]; n++; } });
+                    yms.forEach(function (ym) {
+                        Object.keys(done[ym]).forEach(function (k) { if (v.done && v.done[ym] && same(v.done[ym][k], done[ym][k])) { delete v.done[ym][k]; n++; } });
+                    });
+                    return n ? v : null;
+                });
+            });
+            return steps.reduce(function (p, s) { return p.then(s); }, Promise.resolve());
         }
     },
 
@@ -19302,14 +19515,14 @@ JiTA.leadduty = {
             ym = ym || L._prevYm();
             var roster = L.ROSTER();
             if (!roster.length) { return Promise.reject(new Error('The Lead roster is empty (JiTA.credits.LEADS).')); }
-            return L.ledger.read(L.QC_LEDGER_KEY).then(function (cur) {
-                return { value: cur.value, shared: true };
+            return L.qcl.read([ym]).then(function (cur) {
+                return { value: cur.value, parts: cur.parts, shared: true };
             }, function () {
                 return { value: null, shared: false };   // Confluence unreachable: compute locally instead
             }).then(function (state) {
                 var val = state.value;
                 if (val && val.months && val.months[ym]) {
-                    return Q._hydrate(ym, val.months[ym], val, true);
+                    return Q._hydrate(ym, val.months[ym], val, true, null, state.parts);
                 }
                 return Q.fetchPool(ym).then(function (pool) {
                     return L.roster.resolve(false).then(function (rr) {
@@ -19337,7 +19550,7 @@ JiTA.leadduty = {
                             });
                             if (!state.shared) { return Q._hydrate(ym, rec, val, false, pool); }
                             var stored = rec;
-                            return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
+                            return L.qcl.mutate([ym], function (v) {
                                 v = v || { v: 1, months: {}, done: {}, flags: {} };
                                 v.months = v.months || {};
                                 v.done = v.done || {};
@@ -19345,7 +19558,7 @@ JiTA.leadduty = {
                                 v.months[ym] = rec;
                                 return v;
                             }).then(L.report.tap).then(function (r) {   // as in wiki.claimMonth: publish the fresh sample now
-                                return Q._hydrate(ym, (r.value && r.value.months && r.value.months[ym]) || stored, r.value, true, pool);
+                                return Q._hydrate(ym, (r.value && r.value.months && r.value.months[ym]) || stored, r.value, true, pool, r.parts);
                             }, function () {
                                 return Q._hydrate(ym, rec, val, false, pool);
                             });
@@ -19356,8 +19569,8 @@ JiTA.leadduty = {
         },
 
         // Turn a frozen record into rows for MY list: resolve each key's summary, from the pool when we just
-        // fetched it, otherwise via a single targeted search.
-        _hydrate: function (ym, record, ledgerValue, shared, pool) {
+        // fetched it, otherwise via a single targeted search. `parts` are the ledger's part versions (qcl.read).
+        _hydrate: function (ym, record, ledgerValue, shared, pool, parts) {
             var L = JiTA.leadduty;
             var me = (L.me() && L.me().handle) || null;
             var keys = (me && record.assign && record.assign[me]) || [];
@@ -19404,7 +19617,7 @@ JiTA.leadduty = {
                 var doneMap = (ledgerValue && ledgerValue.done && ledgerValue.done[ym]) || {};
                 var mineDone = {};
                 Object.keys(doneMap).forEach(function (key) { if (doneMap[key] && doneMap[key].by === me) { mineDone[key] = doneMap[key]; } });
-                return { ym: ym, record: record, items: items, done: mineDone, shared: shared, ledgerValue: ledgerValue };
+                return { ym: ym, record: record, items: items, done: mineDone, shared: shared, ledgerValue: ledgerValue, qcParts: parts || null };
             });
         },
 
@@ -19421,7 +19634,7 @@ JiTA.leadduty = {
             var nowIso = new Date().toISOString();
             var txt = L._note(note);
             var actor = String((item && item.actor) || '').slice(0, 80);
-            return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
+            return L.qcl.mutate([ym], function (v) {
                 v = v || { v: 1, months: {}, done: {}, flags: {} };
                 v.done = v.done || {};
                 v.done[ym] = v.done[ym] || {};
@@ -19456,7 +19669,7 @@ JiTA.leadduty = {
             var L = JiTA.leadduty;
             ym = ym || L._prevYm();
             var handle = (L.me() && L.me().handle) || '?';
-            return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
+            return L.qcl.mutate([ym], function (v) {
                 var d = v && v.done && v.done[ym] && v.done[ym][key];
                 if (!d || d.by !== handle) { return null; }
                 var f = v.flags && v.flags[key];
@@ -19484,7 +19697,7 @@ JiTA.leadduty = {
             var handle = (L.me() && L.me().handle) || '?';
             var nowIso = new Date().toISOString();
             var txt = L._note(note);
-            return L.ledger.mutate(L.QC_LEDGER_KEY, function (v) {
+            return L.qcl.mutate([], function (v) {
                 var n = 0;
                 (keys || []).forEach(function (key) {
                     var f = v && v.flags && v.flags[key];
@@ -19819,7 +20032,7 @@ JiTA.leadduty = {
                 return changed ? L.local.put(key, rec).then(function () { return true; }) : false;
             });
         }
-        L._syncing = Promise.all([L.ledger.read(L.LEDGER_KEY), L.ledger.read(L.QC_LEDGER_KEY)]).then(function (r) {
+        L._syncing = Promise.all([L.ledger.read(L.LEDGER_KEY), L.qcl.read([qym])]).then(function (r) {
             return Promise.all([merge(L.wiki.localKey(wym), r[0].value, wym, 'pageIds'), merge(L.qc.localKey(qym), r[1].value, qym, 'items')]);
         }).then(function (c) { L._syncing = null; return !!(c[0] || c[1]); },
             function () { L._syncing = null; return false; });
@@ -19918,7 +20131,7 @@ JiTA.leadduty = {
             var QC_UNREAD = { value: null };   // a QC read that failed, as against a QC ledger with nothing in it yet
             return Promise.all([
                 L.ledger.read(L.LEDGER_KEY),
-                L.ledger.read(L.QC_LEDGER_KEY).catch(function () { return QC_UNREAD; }),
+                L.qcl.read([L._prevYm()]).catch(function () { return QC_UNREAD; }),
                 L.pool.ensureFresh(false).catch(function () { return null; })
             ]).then(function (r) {
                 var wiki = r[0].value, qc = r[1].value, pool = r[2];
@@ -20286,7 +20499,7 @@ JiTA.leadduty.ui = {
         U._warmQc().catch(function () { /* the tab surfaces the error properly when it is opened */ });
         // One cheap read so the Follow-ups tab carries its count from the moment the overlay opens, whichever
         // tab is showing - an open flag from another Lead should not need a click to be noticed.
-        L.ledger.read(L.QC_LEDGER_KEY).then(function (cur) { if (U.isOpen()) { U._tabCount(cur.value); } },
+        L.qcl.read([]).then(function (cur) { if (U.isOpen()) { U._tabCount(cur.value); } },
             function () { /* Confluence unreachable - the tab just stays uncounted */ });
     },
 
@@ -20490,6 +20703,28 @@ JiTA.leadduty.ui = {
         if (res && ver && res.ledgerVersion && ver < res.ledgerVersion) { return null; }
         if (res && ver) { res.ledgerVersion = ver; }
         return r.value;
+    },
+    // The same for the QC ledger, which is kept in parts (qcl): a result is taken part by part, the months, each
+    // month's verdicts and the follow-ups, each only when it is not older than the one the tab holds (res.qcParts),
+    // into the tab's copy (res.ledgerValue). A part the result did not read is left as the tab has it. Returns the
+    // tab's copy, or the result's value when there is no tab state (res null), or null when it took nothing.
+    _qcAdopt: function (res, r) {
+        if (!r || !r.value || r.dry || !r.parts) { return null; }
+        if (!res) { return r.value; }
+        var have = res.qcParts || (res.qcParts = { legacy: 0, flags: 0, months: {} }), took = false;
+        var lv = res.ledgerValue || (res.ledgerValue = { v: 1, months: {}, done: {}, flags: {} });
+        var fresh = function (known, ver) { return !(known && ver && ver < known); };
+        if (fresh(have.legacy, r.parts.legacy)) { have.legacy = r.parts.legacy || have.legacy; lv.months = r.value.months || {}; took = true; }
+        if (fresh(have.flags, r.parts.flags)) { have.flags = r.parts.flags || have.flags; lv.flags = r.value.flags || {}; took = true; }
+        have.months = have.months || {};
+        Object.keys(r.parts.months || {}).forEach(function (ym) {
+            if (!fresh(have.months[ym], r.parts.months[ym])) { return; }
+            have.months[ym] = r.parts.months[ym] || have.months[ym];
+            lv.done = lv.done || {};
+            lv.done[ym] = (r.value.done && r.value.done[ym]) || {};
+            took = true;
+        });
+        return took ? lv : null;
     },
 
     // Put a freshly drawn row in place of the one with the same key, leaving every other row where it is.
@@ -20696,13 +20931,12 @@ JiTA.leadduty.ui = {
     // Undo took it out, null: it was left alone), and the copy this tab read at load is moved the same way instead
     // of being read again. The state is kept current even when the tab is no longer on screen.
     _qcSettle: function (key, marked, r, note) {
-        var L = JiTA.leadduty, U = L.ui, res = U._qc, v = U._adopt(res, r), it = null;
+        var L = JiTA.leadduty, U = L.ui, res = U._qc, v = U._qcAdopt(res, r), it = null;
         var local = U._qcLocalDone || (U._qcLocalDone = {});
         if (marked === true) { local[key] = new Date().toISOString(); } else if (marked === false) { delete local[key]; }
         if (res) {
-            if (v) { res.ledgerValue = v; }
             // This row's verdict, from the newest ledger the tab holds - which is not always this write's own
-            // answer (see _adopt), but always includes it when it was written.
+            // answer (see _qcAdopt), but always includes it when it was written.
             var me = (L.me() && L.me().handle) || null, lv = res.ledgerValue || {};
             var d = lv.done && lv.done[res.ym] && lv.done[res.ym][key];
             if (d && d.by === me) { res.done[key] = d; } else { delete res.done[key]; }
@@ -20723,7 +20957,7 @@ JiTA.leadduty.ui = {
         U._status('Reading follow-ups…');
         U._body().empty().append($('<div class="ld-empty">Reading the Confluence ledger…</div>'));
         void force;   // nothing is cached here - the ledger read IS the load
-        L.ledger.read(L.QC_LEDGER_KEY).then(function (cur) {
+        L.qcl.read([]).then(function (cur) {
             if (!U.isOpen()) { return; }
             if (U._tab !== 'flags') { U._tabCount(cur.value); return; }   // the Lead moved on: keep the count, leave the body
             U._renderFlags(cur.value);
@@ -20751,8 +20985,7 @@ JiTA.leadduty.ui = {
     // tab is on screen.
     _afterResolve: function (r) {
         var U = JiTA.leadduty.ui;
-        var v = U._adopt(U._qc, r);
-        if (v && U._qc) { U._qc.ledgerValue = v; }   // the QC tab's Undo reads whether a flag is resolved
+        var v = U._qcAdopt(U._qc, r);                 // into the QC tab's copy too: its Undo reads whether a flag is resolved
         if (!U.isOpen()) { return; }
         if (v) { U._tabCount(v); }                    // the count shows on every tab
         if (U._tab !== 'flags') { return; }
