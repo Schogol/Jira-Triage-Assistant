@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.6
+// @version     3.53.7
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.6
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.7
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -21349,6 +21349,7 @@ JiTA.leadduty.ui = {
         var $post = $('<button class="jita-btn ld-mini">Post note</button>').appendTo($row);
         var $msg = $('<span class="ld-nmsg"></span>').appendTo($row);
         $('<span class="ld-nhint">Ctrl+Enter posts</span>').appendTo($row);
+        if (U._noteBusy[it.id]) { $post.prop('disabled', true); $msg.text('Sending to VMS…'); }   // posted from the composer this one replaced
 
         function remember() {
             if (!st || !st.drafts) { return; }
@@ -21364,25 +21365,41 @@ JiTA.leadduty.ui = {
         open(!!draft);   // a half-written note reopens where it was left, rather than hiding behind the button
 
         function post() {
+            // One note at a time for an application, from this composer or one built meanwhile (Refresh, a tab switch):
+            // Ctrl+Enter pressed again while the first was on its way posted it twice, and VMS cannot delete either.
+            if (U._noteBusy[it.id]) { return; }
             var text = ($ta.val() || '').replace(/^\s+|\s+$/g, '');
             if (!text) { $msg.addClass('warn').text('Write something first.'); return; }
             var vis = $sel.val();
+            U._noteBusy[it.id] = true;
             $post.prop('disabled', true);
             $msg.removeClass('warn').text('Sending to VMS…');
-            L.apps.addNote(it.id, text, vis).then(function (res) {
-                if (!U.isOpen() || U._tab !== 'apps' || U._apps !== st) { return; }
+            var landed = function (res) {
+                delete U._noteBusy[it.id];
+                // A posted note's draft goes whatever is on screen now. The drafts are carried over when the tab is
+                // rebuilt, so a composer built meanwhile reopened holding the note already posted.
+                if (res.ok && st.drafts) { delete st.drafts[it.id]; }
+                if (!U.isOpen() || U._tab !== 'apps') { return; }
+                if (U._apps !== st) {
+                    // Rebuilt while the note was on its way: redraw the application if it is the one on screen (from VMS
+                    // when the note went in), and say how it went.
+                    var cur = U._apps, on = cur && cur.items[cur.idx];
+                    if (on && on.id === it.id) { if (res.ok) { delete cur.qa[it.id]; } U._showApp(cur.idx); }
+                    U._status(res.ok ? ('✓ Note added on ' + (res.name || target.name) + "'s account.") : ('✗ Note not posted: ' + res.message));
+                    return;
+                }
                 $post.prop('disabled', false);
                 // The text stays exactly where it is on a failure. Losing a paragraph somebody just wrote
                 // because their session expired would be a worse bug than not having the feature at all.
                 if (!res.ok) { $msg.addClass('warn').text('✗ ' + res.message); return; }
                 $ta.val('');
-                if (st.drafts) { delete st.drafts[it.id]; }
                 U._status('✓ Note added on ' + (res.name || target.name) + "'s account.");
                 // Re-read the application so the list shows what VMS actually stored, rather than an
                 // optimistic copy of what we sent - the same rule the action buttons follow.
                 delete st.qa[it.id];
                 U._showApp(st.idx);
-            });
+            };
+            L.apps.addNote(it.id, text, vis).then(landed, function (e) { landed({ ok: false, message: String((e && e.message) || e) }); });
         }
         $toggle.on('click', function () { open(!$c.is(':visible')); if (!$c.is(':visible')) { remember(); } });
         $post.on('click', post);
@@ -21513,6 +21530,8 @@ JiTA.leadduty.ui = {
     // A note typed but not saved yet, by where it was typed: the issue key for a Flag, _resolveDraft() for a Resolve.
     // The note dialog offers it again, so a dialog cancelled or a save that failed costs the Lead a click, not the text.
     _drafts: {},
+    // The applications a VMS note is on its way for, by application id (_noteComposer): one note at a time for each.
+    _noteBusy: {},
 
     // The dialog a Flag or a Resolve asks for its note in: a text area that takes several lines, over the Lead duties
     // window. o: { title, hint, save (the Save button's label), draft (its _drafts key), value (the note being edited,
