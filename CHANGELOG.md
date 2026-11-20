@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.7 (2026-11-20)
+
+### Fixed issues
+
+- Lead duties: pressing Ctrl+Enter again while a VMS note is being sent no longer posts it twice, and a note already posted no longer comes back as an unsent draft after a Refresh.
+
 ## 3.53.6 (2026-11-20)
 
 ### Fixed issues
