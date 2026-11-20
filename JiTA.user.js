@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.7
+// @version     3.53.8
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.7
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.8
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -14812,7 +14812,11 @@ JiTA.checklist = {
     // The defect read in full, judged: first on itself and its bug report, then again once the report's logs are read.
     _judgeAll: function (key, issue, hist, sees, me, onState) {
         var C = JiTA.checklist, f = issue.fields || {}, srcKey = C._source(f, hist), ids = C._ids(issue.names, f);
-        return Promise.all([srcKey ? C._readSource(srcKey, ids).then(null, function () { return null; }) : null, C._serverNames(key, ids.server)]).then(function (r) {
+        // A bug report Jira says is not there (404: deleted, or one this viewer cannot see) is judged as no report. Any other
+        // failure (a 5xx, a 429, the network) says nothing about the defect: judged as no report, the card dropped every item
+        // the report decides and could say Ready for FC. It fails the load instead, and the card says it could not check.
+        var noSource = function (e) { if (e && e.status === 404) { return null; } throw e; };
+        return Promise.all([srcKey ? C._readSource(srcKey, ids).then(null, noSource) : null, C._serverNames(key, ids.server)]).then(function (r) {
             var src = r[0], d = C._facts(issue, hist, src, r[1]), s = C._judge(d, sees, me, hist);
             onState(s);
             if (!src) { return s; }

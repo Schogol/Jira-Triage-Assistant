@@ -8,6 +8,9 @@ const src = fs.readFileSync((process.env.JITA_SRC || require('path').join(__dirn
 const CK = 'checklist-check.js';
 const CL = ['\nJiTA.checklist = {', '\n    _noop: null\n};'], BOOT = ['// ---- Jira boot: watch the DOM', 'observer.observe(document.body'], UTIL = ['\nJiTA.util = {', '\n};\n'];
 const muts = [
+    // ---- a bug report that cannot be read (v3.53.8) ----
+    [CK, 'a failed bug report read is judged as no report', 'var noSource = function (e) { if (e && e.status === 404) { return null; } throw e; };', 'var noSource = function () { return null; };'],
+    [CK, 'a bug report that is not there fails the load', 'var noSource = function (e) { if (e && e.status === 404) { return null; } throw e; };', 'var noSource = function (e) { throw e; };'],
     // ---- small parts ----
     [CK, 'a list value reads as nothing', "if (Array.isArray(v)) { return v.map(JiTA.checklist._val).filter(function (x) { return !!x; }).join(', '); }", "if (Array.isArray(v)) { return ''; }"],
     [CK, 'of two fields with one name, the first', "if (!out[k] || (!JiTA.checklist._val((fields || {})[out[k]]) && JiTA.checklist._val((fields || {})[id]))) { out[k] = id; }", 'if (!out[k]) { out[k] = id; }'],
@@ -218,7 +221,7 @@ const muts = [
     [CK, "a mark wipes the others", "all = { w: map(v && v.w), ok: map(v && v.ok) };", "all = { w: {}, ok: map(v && v.ok) };"],
     [CK, "a mark wipes the ticks", "all = { w: map(v && v.w), ok: map(v && v.ok) };", "all = { w: map(v && v.w), ok: {} };"],
     [CK, "the ticks are not written back", "return C._req('PUT', path, { v: 1, w: all.w, ok: all.ok });", "return C._req('PUT', path, { v: 1, w: all.w });"],
-    [CK, 'no marks yet is an error', 'function (e) { if (e && e.status === 404) { return null; } throw e; }', 'function (e) { throw e; }'],
+    [CK, 'no marks yet is an error', '}, function (e) { if (e && e.status === 404) { return null; } throw e; }).then(function (v) {', '}, function (e) { throw e; }).then(function (v) {'],
     [CK, "a mark says nobody", "var rec = { by: s.me, name: me.displayName || '', at: new Date().toISOString() };", "var rec = { at: new Date().toISOString() };"],
     [CK, 'the labels come off unasked', "        if (!window.confirm('Take the bug report\\'s labels off ' + key + ': ' + labels.join(', ') + '?\\n\\ncloned and jira_escalated stay.')) { return Promise.resolve(); }\n", ''],
     [CK, 'the exception is added unasked', "        if (!window.confirm('Add this exception to the end of the description of ' + key + ', in an expand titled:\\n\\n' + title +\n            '\\n\\nSave or cancel an edit of the description first: saved afterwards, it would take the expand out again.')) { return Promise.resolve(); }\n", ''],
