@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.1
+// @version     3.53.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.1
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.2
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -23423,6 +23423,7 @@ JiTA.worker = {
     RESPAWN_MAX: 3,           // respawn a dead worker up to this many times per leadership session before stepping down
     RESPAWN_BACKOFF_MS: 1000, // base backoff between respawns (grows per attempt: 1s, 2s, 3s)
     REELECT_DELAY_MS: 3000,   // after stepping down, wait this long before re-requesting the leader lock
+    ANNOUNCE_MS: 5 * 60 * 1000,   // how often a tab says its version to the others (_announce)
     GIVEUP_AFTER: 12,         // consecutive failures (no successful RPC in between) before giving up entirely
     MAX_STANDASIDE: 2,        // times a stale tab yields the lock to a newer one before leading anyway (so a closed newer tab can't leave us leaderless)
 
@@ -23458,6 +23459,12 @@ JiTA.worker = {
         // Once things settle, verify the (leader's) worker was built from THIS script version. If it's older, a
         // leader tab wasn't reloaded after an update -> request a re-election so a fresher tab rebuilds the worker.
         // Two spaced attempts cover a leader whose worker isn't up yet on the first try.
+        // ...and before that, without asking the worker anything: this tab's version, said now and every ANNOUNCE_MS. A leader
+        // running older code steps down on hearing it. The checks alone left a stale leader in place whenever its worker was
+        // too busy to answer either ping in time, until its tab was reloaded; the repeat reaches an older tab that takes the
+        // lead later (the tab that led closed).
+        JiTA.worker._announce();
+        setInterval(JiTA.worker._announce, JiTA.worker.ANNOUNCE_MS);
         setTimeout(JiTA.worker._checkWorkerVersion, 12000);
         setTimeout(JiTA.worker._checkWorkerVersion, 30000);
         // The GPU / CPU switch in Settings reloads the tab it was clicked in, which rebuilds the worker only when that
@@ -23646,7 +23653,19 @@ JiTA.worker = {
             } else {
                 JiTA.dlog('[JiTA worker] worker version OK (v' + wv + ')');
             }
-        }, function () { /* worker unreachable -> self-heal covers it */ });
+        }, function (e) {   // unreachable or busy: _announce covers a stale leader, the self-heal a dead worker
+            JiTA.log('[JiTA worker] version check: the worker did not answer (' + ((e && e.message) || e) + ')');
+        });
+    },
+
+    // This tab's version, to every other tab. It goes as a re-election request, which every version since v3.4.0 acts on
+    // (_applyReelect): a leader running older code steps down, one at this version or newer carries on, and the tabs
+    // waiting for the lock remember not to take it with older code. Not from a tab that gave up leading: its worker
+    // cannot run here, and a leader stepping down for it would only take the lead back.
+    _announce: function () {
+        var w = JiTA.worker;
+        if (!w._bc || !JiTA.SCRIPT_VERSION || w._gaveUp) { return; }
+        try { w._bc.postMessage({ kind: 'reelect', want: JiTA.SCRIPT_VERSION }); } catch (e) { /* ignore */ }
     },
 
     // Handle a re-election request (broadcast by a tab that saw a stale worker): remember the newest version known

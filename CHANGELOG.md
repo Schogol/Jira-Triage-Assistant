@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.2 (2026-11-20)
+
+### Fixed issues
+
+- After an update, a tab still open from before no longer keeps JiTA's background work (matching, credits) on the old version until it is reloaded: an updated tab takes it over within seconds.
+
 ## 3.53.1 (2026-11-20)
 
 ### Fixed issues
