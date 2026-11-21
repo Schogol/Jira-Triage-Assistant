@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.13 (2026-11-20)
+
+### Fixed issues
+
+- Defect Profile: an exception the attached reports share counts by its message, however many ways the game reached it, so the card shows it as the pattern and points out the reports that lack it.
+
 ## 3.53.12 (2026-11-20)
 
 ### Fixed issues

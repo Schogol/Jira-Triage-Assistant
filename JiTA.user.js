@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.12
+// @version     3.53.13
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.12
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.13
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -13740,7 +13740,7 @@ JiTA.profile = {
     },
 
     // ---- the profile --------------------------------------------------------------------------------------------
-    // Count what the reports share. Returns { n, dims, exc, excGroups, hiddenExc, withLog, domExc, crashes, withWer,
+    // Count what the reports share. Returns { n, dims, excGroups, hiddenExc, withLog, domExc, crashes, withWer,
     // domCrash, builds, first, last, afterFix, outliers }. A pattern (dims[].dominant, domExc, domCrash) needs DOMINANT of
     // at least MIN_N reports that say anything about it; a report that says nothing is neither for nor against it.
     // `hiddenOf(sig)`, when given, names the defect an exception is hidden under in the Triage Assistant ('' when it is
@@ -13776,20 +13776,14 @@ JiTA.profile = {
             out.dims.push({ id: d.id, label: d.label, outlier: d.outlier, get: d.get, known: known, dominant: dom, domCount: dom ? counts[top] : 0,
                 values: vals.map(function (x) { return { value: x, count: counts[x], keys: keys[x] }; }) });
         });
-        var withLog = views.filter(function (v) { return v.logRead === true; }), sigs = {};
-        withLog.forEach(function (v) {
-            v.exc.forEach(function (e) {
-                if (hid(e.sig)) { return; }
-                if (left(e.sig)) { return; }
-                var s = sigs[e.sig] || (sigs[e.sig] = { sig: e.sig, msg: e.msg, count: 0 });
-                s.count++;
-            });
-        });
+        var withLog = views.filter(function (v) { return v.logRead === true; });
         out.withLog = withLog.length;
-        out.exc = Object.keys(sigs).map(function (k) { return sigs[k]; }).filter(function (s) { return s.count >= 2; })
-            .sort(function (a, b) { return b.count - a.count || (a.msg < b.msg ? -1 : 1); });
-        out.domExc = (out.exc[0] && withLog.length >= P.MIN_N && out.exc[0].count / withLog.length >= P.DOMINANT) ? out.exc[0] : null;
         out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig) && !left(e.sig); });
+        // The pattern is a message, counted by the reports that hold it through any stack, as the full profile counts it: one
+        // message reached from six callers is six stacks of one each, and counted per stack it made no pattern at all. `sig`
+        // is its most common stack, for the hover.
+        var g0 = out.excGroups[0];
+        out.domExc = (g0 && withLog.length >= P.MIN_N && g0.count / withLog.length >= P.DOMINANT) ? { key: g0.key, msg: g0.msg, count: g0.count, sig: g0.paths[0].sig } : null;
         out.hiddenExc = P._groups(withLog, function (e) { return hid(e.sig); });
         out.leftExc = P._groups(withLog, function (e) { return !hid(e.sig) && !!left(e.sig); });
         out.leftExc.forEach(function (g) { g.why = left(g.paths[0].sig); });
@@ -13811,7 +13805,7 @@ JiTA.profile = {
             });
             // The same message through another call stack is the same error here, not an outlier, even when that stack's
             // defect is hidden.
-            if (out.domExc && v.logRead === true && !v.exc.some(function (e) { return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })) {
+            if (out.domExc && v.logRead === true && !v.exc.some(function (e) { return P._sigParts(e.sig).msg === out.domExc.key; })) {
                 why.push('its log lacks the ' + (JiTA.logsig.isTrace(out.domExc.sig) ? 'stacktrace ' : 'exception ') + out.domExc.count + ' of ' + out.withLog + ' logs share');
             }
             if (out.domCrash && v.crashRead === true && !v.crashes.some(function (c) { return c.module === out.domCrash.module; })) {
@@ -14051,10 +14045,11 @@ JiTA.profile = {
             any = true;
             P._chip(d.label + ': ' + d.dominant + ' ' + d.domCount + '/' + d.known, 'strong').appendTo($c);
         });
-        if (sm.exc[0]) {
+        var g0 = sm.excGroups[0];   // the most shared message, by the reports that hold it through any stack (summarise)
+        if (g0) {
             any = true;
-            P._chip((JiTA.logsig.isTrace(sm.exc[0].sig) ? 'Stacktrace in ' : 'Exception in ') + sm.exc[0].count + '/' + sm.withLog + ' logs: ' + sm.exc[0].msg,
-                sm.domExc ? 'strong' : '', P._sigTip(sm.exc[0].sig, sm.exc[0].msg)).appendTo($c);
+            P._chip((JiTA.logsig.isTrace(g0.key) ? 'Stacktrace in ' : 'Exception in ') + g0.count + '/' + sm.withLog + ' logs: ' + (g0.msg || g0.key),
+                sm.domExc ? 'strong' : '', P._sigTip(g0.paths.map(function (p) { return p.sig; }), g0.msg)).appendTo($c);
         }
         if (sm.crashes[0] && sm.crashes[0].count >= 2) { any = true; P._chip('Crash in ' + sm.crashes[0].module + ' ' + sm.crashes[0].count + '/' + sm.withWer, sm.domCrash ? 'strong' : '').appendTo($c); }
         if (!any) { $('<span class="jp-none"></span>').text(sm.n < P.MIN_N ? 'Too few reports for a pattern yet.' : 'No shared pattern.').appendTo($c); }
@@ -14158,12 +14153,12 @@ JiTA.profile = {
         if (!sm.dims.length) { $('<div class="jpv-none"></div>').text('No report has Computer Info, dxdiag.txt or PDMData.txt to read.').appendTo($b); }
 
         sect('Exceptions and stacktraces shared by 2 or more logs (' + sm.withLog + ' logs read)');
-        var domSig = sm.domExc && sm.domExc.sig;
+        var domKey = sm.domExc && sm.domExc.key;   // the pattern is a message: its row is marked, not one of its stacks
         // A stacktrace's row says it is one (its group is keyed by its signature's message, which starts with the tag).
         function kind($r, g) { if (JiTA.logsig.isTrace(g.key)) { $('<span class="jpv-kind"></span>').text('stacktrace').appendTo($r); } }
         sm.excGroups.slice(0, 15).forEach(function (g) {
             var $r = $('<div class="jpv-row"></div>').appendTo($b);
-            $('<span class="jpv-count"></span>').toggleClass('dom', g.paths.some(function (p) { return p.sig === domSig; })).text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
+            $('<span class="jpv-count"></span>').toggleClass('dom', g.key === domKey).text(g.count + '/' + sm.withLog).attr('title', P._who(g.keys)).appendTo($r);
             kind($r, g);
             $('<span class="jpv-msg"></span>').text(g.msg || g.key).attr('title', P._sigTip(g.paths.map(function (p) { return p.sig; }), g.msg)).appendTo($r);
             act($r, 'ignore', 'Leave this message out for every defect, at any stack: no match, no defect pointed at', function () { return P._ignore(g.paths[0].sig, g.msg || g.key); });
@@ -14172,7 +14167,7 @@ JiTA.profile = {
             var labels = P._pathLabels(g.paths.map(function (p) { return P._sigParts(p.sig).frames; }));
             g.paths.slice(0, 5).forEach(function (p, i) {
                 var $s = $('<div class="jpv-row jpv-path"></div>').appendTo($b);
-                $('<span class="jpv-count"></span>').toggleClass('dom', p.sig === domSig).text(p.count + '/' + sm.withLog).attr('title', P._who(p.keys)).appendTo($s);
+                $('<span class="jpv-count"></span>').text(p.count + '/' + sm.withLog).attr('title', P._who(p.keys)).appendTo($s);
                 $('<span class="jpv-msg"></span>').text('via ' + labels[i]).attr('title', P._sigTip(p.sig, g.msg)).appendTo($s);
             });
             if (g.paths.length > 5) { $('<div class="jpv-row jpv-path"></div>').text('and ' + (g.paths.length - 5) + ' more call stacks').appendTo($b); }

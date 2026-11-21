@@ -50,7 +50,18 @@ const muts = [
     [H, 'text in the zip is read as UTF-8 only', '        return JiTA.profile._decodeLog(b, hint);\n    },', "        return new TextDecoder('utf-8').decode(b);\n    },"],
     // the same message through other call stacks
     [H, 'a message reached two ways is two rows', '                var k = P._sigParts(e.sig).msg, g = msgs[k]', '                var k = e.sig, g = msgs[k]'],
-    [H, 'a report that reaches the shared message another way is an outlier', 'return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg;', 'return e.sig === out.domExc.sig;'],
+    [H, 'a report that reaches the shared message another way is an outlier', 'return P._sigParts(e.sig).msg === out.domExc.key;', 'return e.sig === out.domExc.sig;'],
+    // ---- the pattern is a message, counted through any stack (review 2026-11-20 profile-logic-1) ----
+    [H, 'the pattern is not the most shared message', 'var g0 = out.excGroups[0];', 'var g0 = out.excGroups[1];'],
+    [H, 'a pattern needs no minimum of logs', 'g0 && withLog.length >= P.MIN_N && g0.count / withLog.length >= P.DOMINANT', 'g0 && g0.count / withLog.length >= P.DOMINANT'],
+    [H, 'a pattern counted by its most common stack', 'g0.count / withLog.length >= P.DOMINANT', 'g0.paths[0].count / withLog.length >= P.DOMINANT'],
+    [H, 'the pattern\'s count is its most common stack\'s', 'msg: g0.msg, count: g0.count, sig:', 'msg: g0.msg, count: g0.paths[0].count, sig:'],
+    [H, 'the pattern names no stack', 'sig: g0.paths[0].sig }', 'sig: g0.key }'],
+    [H, 'the card\'s chip is not the most shared message', 'var g0 = sm.excGroups[0];', 'var g0 = sm.excGroups[1];'],
+    [H, 'the card\'s chip counts the most common stack', "g0.count + '/' + sm.withLog + ' logs: '", "g0.paths[0].count + '/' + sm.withLog + ' logs: '"],
+    [H, 'the card\'s chip hovers one stack', 'P._sigTip(g0.paths.map(function (p) { return p.sig; }), g0.msg)).appendTo($c);', 'P._sigTip(g0.paths[0].sig, g0.msg)).appendTo($c);'],
+    [H, 'the full profile marks no pattern', "toggleClass('dom', g.key === domKey)", "toggleClass('dom', false)"],
+    [H, 'the full profile marks the pattern\'s stacks too', "                $('<span class=\"jpv-count\"></span>').text(p.count", "                $('<span class=\"jpv-count\"></span>').toggleClass('dom', true).text(p.count"],
     [H, 'a "<module>" frame is cut in two', "        String(sig).slice(at + 1).split('>').forEach(function (p) {\n            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }",
         "        String(sig).slice(at + 1).split('>').forEach(function (p) {\n            if (p) { frames.push(p); }"],
     [H, 'call stacks are labelled by their whole chain', 'full[0][full[0].length - 1 - cs]; })) { cs++; }', 'full[0][full[0].length - 1 - cs]; })) { break; }'],
@@ -129,12 +140,12 @@ const muts = [
     [H, 'the lookup never asks the worker', "        if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'defects', sigs: sigs })", "        if (false) { return JiTA.worker.call('logsig', { op: 'defects', sigs: sigs })"],
     [H, 'a worker that cannot answer leaves no answer', "{ op: 'defects', sigs: sigs }).catch(function () { return JiTA.logsig._defectsLocal(sigs); }); }", "{ op: 'defects', sigs: sigs }); }"],
     // ...the profile
-    [H, 'a hidden exception still makes the pattern', '                if (hid(e.sig)) { return; }\n', ''],
+    // (a hidden exception making the pattern: the pattern is the shared groups' first, so the breakage below covers it)
     [H, 'a hidden exception stays among the shared ones', 'out.excGroups = P._groups(withLog, function (e) { return !hid(e.sig) && !left(e.sig); });', 'out.excGroups = P._groups(withLog, function (e) { return !left(e.sig); });'],
     [H, 'hidden exceptions are not listed apart', 'out.hiddenExc = P._groups(withLog, function (e) { return hid(e.sig); });', 'out.hiddenExc = [];'],
     [H, 'a hidden exception does not name its defect', "                if (typeof hit === 'string' && g.defects.indexOf(hit) < 0) { g.defects.push(hit); }\n", ''],
-    [H, 'a report with the shared message only by a hidden stack is an outlier', '!v.exc.some(function (e) { return P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })',
-        '!v.exc.some(function (e) { return !hid(e.sig) && P._sigParts(e.sig).msg === P._sigParts(out.domExc.sig).msg; })'],
+    [H, 'a report with the shared message only by a hidden stack is an outlier', '!v.exc.some(function (e) { return P._sigParts(e.sig).msg === out.domExc.key; })',
+        '!v.exc.some(function (e) { return !hid(e.sig) && P._sigParts(e.sig).msg === out.domExc.key; })'],
     // ...building
     [H, 'the defects are never looked up', 'var look = P._lookup(views, def), late = false, timer = null;', 'var look = null, late = false, timer = null;'],
     [H, 'the profile is drawn before the lookup', 'var wait = look ? Promise.race(', 'var wait = look ? Promise.resolve() || Promise.race('],

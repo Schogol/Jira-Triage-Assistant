@@ -116,7 +116,7 @@ const muts = [
     [T, 'a stack cut off labelled by nothing', "            if (!c.length) { return '(stack cut off)'; }\n", ''],
     [T, 'stacks labelled with the cut one among them', '        var full = chains.filter(function (c) { return c.length; });', '        var full = chains;'],
     [T, 'an outlier lacks an exception, whatever it lacks', "(JiTA.logsig.isTrace(out.domExc.sig) ? 'stacktrace ' : 'exception ')", "'exception '"],
-    [PC, 'a shared stacktrace shown as an exception', "(JiTA.logsig.isTrace(sm.exc[0].sig) ? 'Stacktrace in ' : 'Exception in ')", "'Exception in '"],
+    [PC, 'a shared stacktrace shown as an exception', "(JiTA.logsig.isTrace(g0.key) ? 'Stacktrace in ' : 'Exception in ')", "'Exception in '"],
     [PC, 'the full profile says nothing of a stacktrace', 'function kind($r, g) { if (JiTA.logsig.isTrace(g.key)) {', 'function kind($r, g) { if (false) {'],
     [PC, 'a report\'s stacktraces counted as exceptions', "(v.exc.length - nSt) + ' exception(s)' + (nSt ? ', ' + nSt + ' stacktrace(s)' : '')", "v.exc.length + ' exception(s)'"],
     // ---- the exception search ----
