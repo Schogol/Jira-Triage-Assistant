@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.32 (2026-11-21)
+
+### Fixed issues
+
+- Copy diagnostics names the menu or dialog a corner pill stepped aside for (its tag, role and test id), where it said "\[object HTMLDivElement\]".
+
 ## 3.53.31 (2026-11-21)
 
 ### Fixed issues

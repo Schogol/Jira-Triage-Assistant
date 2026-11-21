@@ -31,7 +31,7 @@ global.JITA_IS_FORGE_FRAME = false; global.JITA_IS_SUBFRAME = false;
 global.location = { pathname: '/browse/EDR-41291' };
 Object.defineProperty(global, 'navigator', { value: { userAgent: 'Mozilla/5.0 TestBrowser/1.0' }, configurable: true, writable: true });   // Node has one of its own
 global.GM_info = { scriptHandler: 'Tampermonkey', version: '5.3.3' };
-global.JiTA = eval(S.members(src, 'var JiTA', ['log', 'warn', 'error', 'dlog', '_out', 'LOG_MAX', '_logLines', '_fmtArgs', 'caught', 'CAUGHT_MAX', '_caughtList', 'CAUGHT_FRAMES', '_frames']));
+global.JiTA = eval(S.members(src, 'var JiTA', ['log', 'warn', 'error', 'dlog', '_out', 'LOG_MAX', '_logLines', '_fmtArgs', '_fmtEl', 'caught', 'CAUGHT_MAX', '_caughtList', 'CAUGHT_FRAMES', '_frames']));
 Object.assign(JiTA, { SCRIPT_VERSION: '3.53.0', DATA_VERSION: 3, DATA_VERSION_EBR: 4 });
 eval(S.top(src, 'JiTA.diag'));
 const D = JiTA.diag;
@@ -122,6 +122,28 @@ const reset = () => { JiTA._caughtList.length = 0; JiTA._logLines.length = 0; lo
     ok('...an argument JSON cannot write is still a line', /a loop \[object Object\]$/.test(L[1]), L[1]);
     for (let i = 0; i < JiTA.LOG_MAX + 5; i++) { JiTA.log('line ' + i); }
     ok('...and only the latest ' + JiTA.LOG_MAX + ' lines are kept', L.length === JiTA.LOG_MAX && / line 5$/.test(L[0]), L[0]);
+    // A page element (the menu a corner pill steps aside for) is named by what identifies it, never by its bare type.
+    const el = (tag, attrs, up) => ({ nodeType: 1, tagName: tag, getAttribute: (n) => (Object.prototype.hasOwnProperty.call(attrs, n) ? attrs[n] : null),
+        parentElement: { closest: (sel) => (sel === '[data-testid]' ? up || null : null) } });
+    const nav = el('NAV', { 'data-testid': 'side-nav' });
+    reset();
+    JiTA.log('[JiTA] pill steps aside for', el('DIV', { role: 'menu', 'data-testid': 'popup', 'aria-label': 'More  spaces', class: 'css-1 css-2' }, nav));
+    ok('a page element is named by its tag, role, data-testid and aria-label, its spacing squeezed, not by a class or what is around it',
+        L[0] && / pill steps aside for div\[role="menu"\]\[data-testid="popup"\]\[aria-label="More spaces"\]$/.test(L[0]), L[0]);
+    JiTA.log('a', el('SPAN', { id: 'x7', class: 'c9' }, nav));
+    ok('...an id goes after the tag and names it, so no class; with no data-testid of its own, the nearest one around it is named too', / a span#x7 in \[data-testid="side-nav"\]$/.test(L[1]), L[1]);
+    JiTA.log('b', el('DIV', { class: '  css-1abc   css-2  ' }));
+    ok('...one with nothing else that names it shows its first class', / b div\.css-1abc$/.test(L[2]), L[2]);
+    JiTA.log('c', el('SECTION', { role: 'x'.repeat(200) }, el('NAV', { 'data-testid': 'y'.repeat(200) })));
+    ok('...a long attribute is cut short, and so is the one around it', L[3] && L[3].indexOf('[role="' + 'x'.repeat(80) + '"]') > 0 && L[3].indexOf('x'.repeat(81)) < 0 &&
+        L[3].indexOf(' in [data-testid="' + 'y'.repeat(80) + '"]') > 0 && L[3].indexOf('y'.repeat(81)) < 0, L[3]);
+    const bad = el('DIV', {});
+    bad.getAttribute = () => { throw new Error('sandbox'); };
+    JiTA.log('d', bad);
+    ok('...one that cannot be read is still a line', L.length === 5 && / d /.test(L[4]), L.join(' | '));
+    JiTA.log('e', { tagName: 'Rookie', n: 2 }, { nodeType: 1, n: 3 });
+    ok('...a record that only looks like one is written as JSON', / e \{"tagName":"Rookie","n":2\} \{"nodeType":1,"n":3\}$/.test(L[5]), L[5]);
+    ok('...and no element is ever written as its bare type', !L.some((l) => /\[object [A-Z]\w*Element\]/.test(l)), L.join(' | '));
     reset();
     const catching = console.warn;
     console.warn = () => { throw new Error('console gone'); };   // the code checks window.console, then calls console
