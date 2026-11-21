@@ -7,7 +7,8 @@ const src = fs.readFileSync((process.env.JITA_SRC || require('path').join(__dirn
 const NL = String.fromCharCode(10);
 const muts = [
     ['page one never opens it', [["            if (first) { D._openFirst(gen); }" + NL, ""]]],
-    ['pick never recorded', [["        D._firstFor = { gen: D._gen, from: D._locKey() };", "        /* mutated */"]]],
+    ['pick never recorded', [["        D._firstFor = { gen: D._gen, from: from !== undefined ? from : D._locKey() };", "        /* mutated */"]]],
+    ['the pick is judged from where the answer found the user', [["from: from !== undefined ? from : D._locKey() };", "from: D._locKey() };"]]],
     ['any later run opens it', [["if (!want || want.gen !== gen) { return; }", "if (!want) { return; }"]]],
     // the null-out and the page-one gate each stop a second firing alone; only losing both is observable
     ['every page reopens it', [
