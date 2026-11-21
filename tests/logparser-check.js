@@ -1,5 +1,6 @@
-// logparser-check.js - the log parsers (v3.38.17). Evals the real Parse* functions, the panel buttons and filter,
-// SwapUI's choice of editor and file, and the PDM reader against fake tables and a small jQuery stand-in:
+// logparser-check.js - the log parser (v3.38.17; JiTA.logparser since refactor 2). Evals the real module, the panel
+// buttons and filter, swap()'s choice of editor and file, the watches start() sets up at load, and the PDM reader against
+// fake tables and a small jQuery stand-in:
 //  - a line with fewer than four columns no longer throws and leaves the spinner going; a parser that throws ends
 //    the spinner with a message; logging errors after an exception are not marked as exceptions; no stray border
 //  - the panel buttons recompute the parsed table only: Only Exceptions no longer hides the header or Jira's rows,
@@ -9,41 +10,30 @@
 //    the parser for a later file; a click with the parser off leaves nothing pending
 //  - Method Calls / Process Health keep their last row; no NaN; numeric comparisons; the PDM reader keeps
 //    colons in values and survives a stray brace
+//  - the parser keeps its state and its wiring in JiTA.logparser, and starts watching only once the module is there
 const fs = require('fs');
+const S = require('./source');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
-const fnSrc = (name, indent) => {
-    indent = indent || '';
-    const head = '\n' + indent + 'function ' + name + '(';
-    const s = src.indexOf(head);
-    if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + name); }
-    const e = src.indexOf('\n' + indent + '}', s + 1);
-    return src.slice(s + 1, e + indent.length + 2);
-};
-const load = (name, indent) => (0, eval)(fnSrc(name, indent));
 
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
 
-global.LOG_HDR = 'Time\tFacility\tType\tMessage';
 global.SELECTORS = { CODE_BLOCK: "[data-testid='code-block']", CM_LINE: '.cm-line' };
-global.rows = '';
-global.jitaIgbrFile = null;
-global.jitaParserGen = 0;
-global.jitaParserPending = 0;
 let parserOn = true;
 global.flagOn = (name) => (name === 'parser' ? parserOn : false);
 let timers = [];
 global.setTimeout = (fn) => { timers.push(fn); return timers.length; };
 global.clearTimeout = () => {};
 const runTimers = () => { while (timers.length) { timers.shift()(); } };
-global.JiTA = require('./logstub')({});   // these functions log through JiTA.log and JiTA.warn
+global.JiTA = require('./logstub')({});   // the parser logs through JiTA.log and JiTA.warn
 console.log = ((log) => (...a) => { if (a[0] !== '[JiTA] log parser failed:') { log(...a); } })(console.log);
 console.warn = () => {};
 
-['convertTextToObject', 'jitaRunParse', 'mountParser',
-    'readCodeBlock', 'jitaInEditable', 'SwapUI', 'jitaRunParserWhenLoaded', 'jitaWireLogControls', 'jitaApplyLogFilter'].forEach((n) => load(n));
-eval(require('./source').top(src, 'JiTA.logparser'));   // the table builder and its types
-const realDraw = JiTA.logparser.draw;
+(0, eval)(S.fn(src, 'convertTextToObject'));   // the PDM reader
+eval(S.top(src, 'JiTA.logparser'));             // the parser: its state, its plumbing, the builder and its types
+const P = JiTA.logparser;
+const HDR = P.HDR;
+const realDraw = P.draw;
 
 // ---- a fake parsed table ----
 function Cell() { return { innerHTML: '', className: '', colSpan: 1, set textContent(v) { this.innerHTML = String(v); }, get textContent() { return this.innerHTML; } }; }
@@ -68,8 +58,8 @@ global.document = {
     querySelectorAll: () => []
 };
 let regroups = 0;
-global.jitaBuildLogGroups = () => {};
-global.jitaRegroupLog = () => { regroups++; };
+P.buildGroups = () => {};
+P.regroup = () => { regroups++; };
 
 // ---- a small jQuery stand-in: J(list) over fake nodes, $ routed per section ----
 const htmlOf = {}, textOf = {}, handlers = {};
@@ -90,6 +80,7 @@ function J(list, sel) {
     j.each = (f) => { list.forEach((e, i) => f.call(e, i, e)); return j; };
     j.click = (f) => { list.forEach((e) => { e.onclick = f; }); return j; };
     j.on = (ev, f) => { handlers[sel + ' ' + ev] = f; list.forEach((e) => { e['on' + ev] = f; }); return j; };
+    j.off = () => j;
     j.val = () => (list[0] ? list[0].value : undefined);
     const has = (e, c) => (' ' + e.className + ' ').indexOf(' ' + c + ' ') >= 0;
     j.hasClass = (c) => list.some((e) => has(e, c));
@@ -103,7 +94,7 @@ global.$ = (sel) => (typeof sel === 'string' ? J(route(sel) || [], sel) : J([sel
 
 // ============ the game log ============
 mountTable();
-rows = [LOG_HDR,
+let rows = [HDR,
     '12:00:00\tnet\tnotice\tconnected',
     '12:00:01\tui\terror\tEXCEPTION #1 logged at 03/12/2025 12:00:01',
     '12:00:01\tui\terror\tTraceback (most recent call last)',
@@ -114,7 +105,7 @@ rows = [LOG_HDR,
     '12:00:03\tnet\tinfo\tkey\tvalue',
     '12:00:04\tnet\tnotice\tthe last line'].join('\r\n') + '\r\n';
 let threw = null;
-try { JiTA.logparser.draw('log', rows); } catch (e) { threw = e; }
+try { P.draw('log', rows); } catch (e) { threw = e; }
 const msg = (r) => (r.cells[3] ? r.cells[3].innerHTML : '');
 const byMsg = (re) => tbody.rows.filter((r) => re.test(msg(r)))[0];
 ok('a log with short lines parses without throwing', !threw, threw && threw.message);
@@ -133,19 +124,19 @@ ok('a message with a tab of its own keeps its tail', !!tabbed && /^key\tvalue/.t
 
 // ============ a parser that throws ============
 mountTable();
-jitaRunParse(() => { throw new Error('boom'); });
+P.run(() => { throw new Error('boom'); });
 ok('a parser that throws ends the spinner', loader.style.display === 'none');
 ok('...and says so in the table, which is shown', tbody.rows.length === 1 && /could not be parsed \(boom\)/.test(tbody.rows[0].cells[0].innerHTML) && table.style.display === 'table',
     tbody.rows[0] && tbody.rows[0].cells[0].innerHTML);
 mountTable();
-jitaRunParse(() => {});
+P.run(() => {});
 ok('...a parser that does not throw adds nothing (control)', tbody.rows.length === 0 && loader.style.display === 'block');
 mountTable(); timers = [];
 route = () => [];
-JiTA.logparser.draw = () => { throw new Error('late'); };
-mountParser('<chrome>', 'log');
+P.draw = () => { throw new Error('late'); };
+P.mount('log');
 runTimers();
-JiTA.logparser.draw = realDraw;
+P.draw = realDraw;
 ok('a mounted parser runs guarded, so its failure ends the spinner too', loader.style.display === 'none' && tbody.rows.length === 1);
 
 // ============ Method Calls ============
@@ -154,7 +145,7 @@ mountTable(); timers = [];
 route = (sel) => (sel === '.peakMachoCell' ? [] : null);
 rows = [mcHdr, '12:00:00\tfoo\t20', '12:00:01\tbar\t600', '   ', '12:00:02\tbaz\t1600'].join('\r\n') + '\r\n';
 threw = null;
-try { JiTA.logparser.draw('mc', rows); } catch (e) { threw = e; }
+try { P.draw('mc', rows); } catch (e) { threw = e; }
 ok('Method Calls without a GetTime call parses', !threw, threw && threw.message);
 ok('...says n/a for the average and the peak instead of NaN', /: n\/a /.test(htmlOf['#averageMacho'] || '') && /: n\/a /.test(htmlOf['#peakMacho'] || '') && !/NaN/.test(htmlOf['#averageMacho']),
     (htmlOf['#averageMacho'] || '').slice(0, 50));
@@ -164,7 +155,7 @@ try { handlers['#peakMacho click'](); } catch (e) { threw = e; }
 ok('...and a click on the peak with no peak row does nothing', !threw, threw && threw.message);
 mountTable();
 rows = [mcHdr, '12:00:00\tmachoNet::GetTime (RemoteServiceCall)\t100', '12:00:01\tmachoNet::GetTime (RemoteServiceCall)\t300', '12:00:02\tfoo\t5'].join('\r\n') + '\r\n';
-JiTA.logparser.draw('mc', rows);
+P.draw('mc', rows);
 ok('with GetTime calls the average and the peak are given in ms (control)', /: 200ms /.test(htmlOf['#averageMacho']) && /: 300ms /.test(htmlOf['#peakMacho']), htmlOf['#averageMacho'].slice(0, 50));
 ok('...and the last call is listed too', tbody.rows.length === 3 && tbody.rows[2].cells[1].innerHTML === 'foo', tbody.rows.length + ' rows');
 
@@ -174,7 +165,7 @@ const ph = (sessions, tidi) => ['12:00:00', '1', '10', '5', '100', '200', '5', '
 mountTable();
 route = () => null;
 rows = [phHdr, ph('10', '1.0'), ph('1', '.15'), ph('1', '0.5'), ph('1', '.9'), ph('1', '1.10'), ph('2', '1.0')].join('\r\n') + '\r\n';
-JiTA.logparser.draw('ph', rows);
+P.draw('ph', rows);
 const cls = (i, c) => (tbody.rows[i] ? tbody.rows[i].cells[c].className : 'no row');
 ok('Process Health keeps its last row', tbody.rows.length === 6, tbody.rows.length + ' rows');
 ok('ten sessions is red (as text, "10" sorts below "2")', cls(0, 16) === 'red', cls(0, 16));
@@ -183,6 +174,7 @@ ok('time dilation .15 is red', cls(1, 17) === 'red', cls(1, 17));
 ok('...0.5 is yellow (control)', cls(2, 17) === 'yellow', cls(2, 17));
 ok('....9 is fine (as text it compares below "0.2")', cls(3, 17) === '', cls(3, 17));
 ok('...1.10 is red and 1.0 is fine (control)', cls(4, 17) === 'red' && cls(0, 17) === '', cls(4, 17) + '/' + cls(0, 17));
+ok('the Process Health header the parser is found by is the file\'s', P.PH_HDR === phHdr && P.MC_HDR === mcHdr, JSON.stringify(P.PH_HDR));
 
 // ============ PDM ============
 let pdm = null;
@@ -190,6 +182,19 @@ threw = null;
 try { pdm = convertTextToObject('{System}\n\tTIME: 12:34:56\n\tNAME: rig\n}\n}\nOS: Windows 11\n'); } catch (e) { threw = e; }
 ok('a PDM value with colons is read whole', !!pdm && pdm.System && pdm.System.TIME === '12:34:56', pdm && JSON.stringify(pdm.System));
 ok('a stray closing brace at the top does not stop the reading', !threw && pdm.OS === 'Windows 11', threw ? threw.message : JSON.stringify(pdm));
+
+// ============ the views ============
+const V = { log: P.view('log'), ph: P.view('ph'), mc: P.view('mc'), oc: P.view('oc'), lc: P.view('lc') };
+const h1 = (v) => (/<h1>([^<]*)<\/h1>/.exec(v) || [])[1];
+ok('every table view has its title, its loader and its hidden table, with the shared CSS and FontAwesome', Object.keys(V).every((k) => /<div id="loader"><\/div>/.test(V[k]) &&
+    /<table id="tableContent" style="display:none;" class="fixedHead">/.test(V[k]) && V[k].indexOf(P.CSS) >= 0 && V[k].indexOf(P.FA) >= 0) &&
+    JSON.stringify(Object.keys(V).map((k) => h1(V[k]))) === JSON.stringify(['Logfile Parser', 'Process Health', 'Method Calls', 'Outstanding Calls', 'Last Crashes']),
+    JSON.stringify(Object.keys(V).map((k) => h1(V[k]))));
+ok('...the game log alone has the panel and its own CSS', /id = "jita-group-toggle"/.test(V.log) && /id="jita-log-search"/.test(V.log) && V.log.indexOf(P.TYPES.log.css) >= 0 &&
+    /\.notice \{/.test(V.log) && !/\.notice \{/.test(V.ph) && !/id="gpanel"/.test(V.oc));
+ok('...Method Calls has its GetTime figures, Last Crashes its crash ids', /id="averageMacho"/.test(V.mc) && /id="peakMacho"/.test(V.mc) && /Crash ID/.test(V.lc) && !/Crash ID/.test(V.oc));
+ok('...and the Quick Info boxes hold what their files fill in', /id="Requirements"/.test(P.info('pdm')) && /id="driverAge"/.test(P.info('pdm')) && /id="dxdiag"/.test(P.info('dx')) &&
+    /Quick Info:/.test(P.info('dx')) && P.info('dx').indexOf(P.CSS) >= 0 && !/Requirements/.test(P.info('dx')));
 
 // ============ the panel buttons and the filter ============
 function A(id, cls) { return { id: id, className: cls || '', attrs: {}, getAttribute() { return null; } }; }
@@ -217,7 +222,7 @@ route = (sel) => {
 };
 document.getElementById = (id) => (id === 'tableContent' ? table : null);
 timers = []; regroups = 0;
-jitaWireLogControls();
+P.wire();
 const click = (id) => { const a = aById(id); a.onclick.call(a, { preventDefault() {} }); runTimers(); };
 const shown = () => bodyRows.map((r) => (r.style.display === 'none' ? 0 : 1)).join('');
 click('onlyexception');
@@ -248,7 +253,7 @@ ok('Group Repeats marks itself off and regroups', /\btoggle\b/.test(aById('jita-
 click('jita-group-toggle');
 ok('...and on again', !/\btoggle\b/.test(aById('jita-group-toggle').className), aById('jita-group-toggle').className);
 
-// ============ SwapUI: which editor, which file ============
+// ============ swap(): which editor, which file ============
 function N(cls, attrs, kids, text) {
     const n = { className: cls || '', attrs: attrs || {}, kids: kids || [], text: text || '', parentElement: null, style: {} };
     n.kids.forEach((k) => { k.parentElement = n; });
@@ -267,90 +272,176 @@ function N(cls, attrs, kids, text) {
 }
 // CodeMirror marks its content contenteditable="true" in BOTH places; only the host tells them apart.
 const editor = (text) => { const line = N('cm-line', {}, [], text); const content = N('cm-content', { contenteditable: 'true' }, [line]); return { line: line, content: content, ed: N('cm-editor', {}, [content]) }; };
-let comment, viewer, cmText = '', cbNodes = [], reveals = 0, parsedWith = [], dxRuns = 0, reqText = null;
-global.html = 'LOG'; global.phHtml = 'PH'; global.McHtml = 'MC'; global.ocHtml = 'OC'; global.lcHtml = 'LC'; global.dxdiagHtml = 'DX'; global.pdmHtml = 'PDM';
-global.getCmDocText = () => cmText;
-global.jitaRevealLogs = () => { reveals++; };
-JiTA.logparser.draw = (type) => { parsedWith.push(type); };   // which table a file is drawn as
+let comment, viewer, cmText = '', cbNodes = [], reveals = 0, parsedWith = [], dxRuns = 0;
+const VIEWS = { log: 'LOG', ph: 'PH', mc: 'MC', oc: 'OC', lc: 'LC' };
+P.view = (type) => VIEWS[type];
+P.info = (kind) => kind.toUpperCase();
+P.cmText = () => cmText;
+P.reveal = () => { reveals++; };
+P.draw = (type) => { parsedWith.push(type); };   // which table a file is drawn as
 global.renderDxdiag = () => { dxRuns++; };
 global.renderRequirements = () => {};
 const CB = SELECTORS.CODE_BLOCK;
 route = (sel) => {
-    if (sel === SELECTORS.CM_LINE + ':contains(' + LOG_HDR + ')') { return [comment, viewer].filter(Boolean).map((e) => e.line).filter((l) => l.text.indexOf(LOG_HDR) >= 0); }
+    if (sel === SELECTORS.CM_LINE + ':contains(' + HDR + ')') { return [comment, viewer].filter(Boolean).map((e) => e.line).filter((l) => l.text.indexOf(HDR) >= 0); }
     if (sel === CB) { return cbNodes; }
     return null;
 };
 function scene(opts) {
-    comment = opts.comment ? editor(LOG_HDR) : null;
+    comment = opts.comment ? editor(HDR) : null;
     if (comment) { N('ProseMirror', { contenteditable: 'true' }, [N('code-block-wrap', { contenteditable: 'false' }, [comment.ed])]); }
-    viewer = opts.viewer ? editor(LOG_HDR) : null;
+    viewer = opts.viewer ? editor(HDR) : null;
     if (viewer) { N('media-viewer', {}, [viewer.ed]); }
     cmText = opts.cmText || '';
     cbNodes = opts.cb ? [N('code-block', {}, [], opts.cb)] : [];
     Object.keys(htmlOf).forEach((k) => { delete htmlOf[k]; });
     Object.keys(textOf).forEach((k) => { delete textOf[k]; });
-    timers = []; reveals = 0; parsedWith = []; dxRuns = 0; jitaParserPending = 7;
+    timers = []; reveals = 0; parsedWith = []; dxRuns = 0; P.pending = 7;
 }
-const LOG_TEXT = LOG_HDR + '\n12:00:00\tnet\tnotice\thi\n';
+const LOG_TEXT = HDR + '\n12:00:00\tnet\tnotice\thi\n';
 scene({ comment: true });
-SwapUI(); runTimers();
+P.swap(); runTimers();
 ok('a log header typed in the comment box is not parsed', !comment.ed.mounted && parsedWith.length === 0, String(comment.ed.mounted));
 scene({ comment: true, viewer: true, cmText: LOG_TEXT });
-SwapUI(); runTimers();
+P.swap(); runTimers();
 ok('with a log open as well, the log viewer is parsed and the comment box left alone', viewer.ed.mounted === 'LOG' && !comment.ed.mounted && parsedWith.join() === 'log',
     viewer.ed.mounted + ' / ' + comment.ed.mounted);
+ok('...from the text read out of the viewer', P.text === LOG_TEXT, JSON.stringify(P.text));
 scene({ viewer: true, cmText: LOG_TEXT });
 mountTable();
 document.getElementById = (id) => (id === 'tableContent' ? table : id === 'loader' ? loader : null);
-JiTA.logparser.draw = () => { throw new Error('bad line'); };
+P.draw = () => { throw new Error('bad line'); };
 threw = null;
-try { SwapUI(); runTimers(); } catch (e) { threw = e; }
+try { P.swap(); runTimers(); } catch (e) { threw = e; }
 ok('a log in the viewer that fails to parse ends the spinner with the reason', !threw && loader.style.display === 'none' && tbody.rows.length === 1, threw ? threw.message : loader.style.display);
-JiTA.logparser.draw = (type) => { parsedWith.push(type); };
+P.draw = (type) => { parsedWith.push(type); };
 scene({ viewer: true, cmText: '' });
-SwapUI(); runTimers();
+P.swap(); runTimers();
 ok('a viewer that hands over no text is left as it is, not emptied', !viewer.ed.mounted && parsedWith.length === 0, String(viewer.ed.mounted));
-ok('...and is revealed, with nothing left pending', reveals >= 1 && jitaParserPending === 0, reveals + ' / ' + jitaParserPending);
+ok('...and is revealed, with nothing left pending', reveals >= 1 && P.pending === 0, reveals + ' / ' + P.pending);
 
 // the hide-before-paint observer
-const hideSig = src.split('\n').filter((l) => /^    var HIDE_SIG = /.test(l));
-if (hideSig.length !== 1) { throw new Error('could not slice HIDE_SIG'); }
-(0, eval)(hideSig[0].trim().replace(/^var /, 'global.'));
-load('hideLogs', '    ');
 scene({ comment: true, viewer: true });
 document.getElementById = () => null;
 document.querySelectorAll = () => [comment.content, viewer.content];
-hideLogs();
+P.hide();
 ok('the observer never hides a draft in the comment box', !comment.content.classList.contains('jita-log-hiding'), comment.content.className);
 ok('...but does hide the log viewer until it is parsed (control)', viewer.content.classList.contains('jita-log-hiding'), viewer.content.className);
+const samples = ['', 'raw outstanding calls', HDR, 'pre ' + HDR, 'dateTime\tpyDateTime\tprocCpu\tthreadCpu', 'Time\tMethod\tDuration [ms]', 'Time\tFacility\tType', 'dateTime pyDateTime procCpu'];
+ok('a file is taken for one with a header row by how its header starts', samples.map((s) => (P.headed(s) ? 1 : 0)).join('') === '00111100', samples.map((s) => (P.headed(s) ? 1 : 0)).join(''));
 document.querySelectorAll = () => [];   // and no parsed table from here on: the igbr poll waits for none
 
 // header-less igbr.zip files
 scene({ cb: 'raw outstanding calls' });
 parserOn = false;
-let flagged = 0;
-jitaParserPending = 0;
-jitaRunParserWhenLoaded(() => { flagged++; jitaIgbrFile = 'oc'; });
-ok('a file click with the parser off leaves nothing pending', timers.length === 0 && flagged === 0 && jitaParserPending === 0, timers.length + ' timers');
-jitaIgbrFile = 'oc';
-SwapUI();
-ok('a file left asked for while the parser was off is dropped by the next pass', jitaIgbrFile === null && !htmlOf[CB], String(jitaIgbrFile));
+P.pending = 0; P.igbr = null;
+P.whenLoaded('oc');
+ok('a file click with the parser off leaves nothing pending', timers.length === 0 && P.igbr === null && P.pending === 0, timers.length + ' timers');
+P.igbr = 'oc';
+P.swap();
+ok('a file left asked for while the parser was off is dropped by the next pass', P.igbr === null && !htmlOf[CB], String(P.igbr));
 parserOn = true;
 scene({ cb: 'raw dxdiag' });
-jitaIgbrFile = 'dx';
-SwapUI(); runTimers();
-ok('...so the next file opens in its own parser', dxRuns === 1 && htmlOf[CB] !== 'OC' && parsedWith.indexOf('oc') < 0, dxRuns + ' / ' + htmlOf[CB]);
+P.igbr = 'dx';
+P.swap(); runTimers();
+ok('...so the next file opens in its own parser', dxRuns === 1 && htmlOf[CB] !== 'OC' && htmlOf[CB + ' +'] === 'DX' && parsedWith.indexOf('oc') < 0, dxRuns + ' / ' + htmlOf[CB]);
 scene({ cb: 'before' });
-jitaRunParserWhenLoaded(() => { jitaIgbrFile = 'oc'; });
+P.whenLoaded('oc');
 cbNodes[0].text = 'raw outstanding calls';
 runTimers();
-ok('a click with the parser on opens the file in the parser it asked for (control)', htmlOf[CB] === 'OC' && parsedWith.join() === 'oc' && jitaIgbrFile === null, htmlOf[CB] + ' / ' + parsedWith.join());
+ok('a click with the parser on opens the file in the parser it asked for (control)', htmlOf[CB] === 'OC' && parsedWith.join() === 'oc' && P.igbr === null, htmlOf[CB] + ' / ' + parsedWith.join());
+ok('...from the text that loaded', P.text === 'raw outstanding calls', JSON.stringify(P.text));
+scene({ cb: 'before' });
+P.whenLoaded('lc');
+cbNodes[0].text = 'raw last crashes';
+runTimers();
+ok('Last Crashes opens in its own view, its rows drawn as its own type', htmlOf[CB] === 'LC' && parsedWith.join() === 'lc', htmlOf[CB] + ' / ' + parsedWith.join());
+scene({ cb: 'before' });
+const genWas = P.gen;
+P.whenLoaded('oc');
+P.gen++;   // another file entry clicked meanwhile (the capture listener)
+cbNodes[0].text = 'fitting.txt text';
+runTimers();
+ok('a poll another click cancelled opens nothing', !htmlOf[CB] && parsedWith.length === 0 && P.gen === genWas + 2, htmlOf[CB] + ' / ' + P.gen);
+scene({ cb: 'before' });
+P.whenLoaded('oc');
+cbNodes[0].text = HDR + '\n12:00:00\tnet\tnotice\thi';
+timers.shift();   // the safety timer; the poll alone from here
+let polls = 0;
+while (timers.length && polls < 5) { timers.shift()(); polls++; }
+ok('...and so does one whose code-block got a file with a header row', !htmlOf[CB] && parsedWith.length === 0 && timers.length === 1, htmlOf[CB] + ' / ' + parsedWith.join());
+timers = [];
 scene({ cb: 'garbled' });
 global.convertTextToObject = () => { throw new Error('bad pdm'); };
-jitaIgbrFile = 'pdm';
+P.igbr = 'pdm';
 threw = null;
-try { SwapUI(); } catch (e) { threw = e; }
+try { P.swap(); } catch (e) { threw = e; }
 ok('a PDM file that cannot be read still reveals the view, with the reason in the box', !threw && reveals >= 1 && /Could not evaluate/.test(textOf['#Requirements'] || ''), threw ? threw.message : textOf['#Requirements']);
+
+// ============ start(): the watches set up at load ============
+const watches = [];
+let listener = null, observer = null, styled = 0;
+global.waitForKeyElements = (sel, fn) => { watches.push([sel, fn]); };
+global.GM_addStyle = () => { styled++; };
+global.window = { MutationObserver: function () {} };
+global.MutationObserver = function (fn) { observer = { fn: fn }; this.observe = (node, opts) => { observer.opts = opts; }; };
+document.addEventListener = (type, fn, capture) => { listener = { type: type, fn: fn, capture: capture }; };
+document.body = {};
+const fresh = () => {
+    watches.length = 0; listener = null; observer = null; styled = 0;
+    eval(S.top(src, 'JiTA.logparser'));   // the real module again, unstubbed
+};
+global.JITA_NO_JIRA_UI = false;
+fresh();
+const Q = JiTA.logparser;
+let hides = 0, loaded = [];
+Q.hide = () => { hides++; };
+Q.whenLoaded = (file) => { loaded.push(file); };
+Q.start();
+const headSels = watches.slice(0, 4).map((w) => w[0]);
+ok('start() watches for each header row, the CodeMirror viewer\'s too, and swaps what it finds', JSON.stringify(headSels) === JSON.stringify([CB + ':contains(' + HDR + ')',
+    CB + ':contains(' + Q.PH_HDR + ')', CB + ':contains(' + Q.MC_HDR + ')', SELECTORS.CM_LINE + ':contains(' + HDR + ')']) && watches.slice(0, 4).every((w) => w[1] === Q.swap),
+    JSON.stringify(headSels));
+const fileWatch = watches.slice(4);
+ok('...and for each header-less igbr.zip file\'s entry', JSON.stringify(fileWatch.map((w) => w[0])) === JSON.stringify(['outstandingcalls.txt', 'lastcrashes.txt', 'PDMData.txt', 'dxdiag.txt']
+    .map((n) => 'span[data-item-title="true"]:contains(' + n + ')')), JSON.stringify(fileWatch.map((w) => w[0])));
+const bound = {};
+route = (sel) => { const m = /^button:contains\('(.+)'\)$/.exec(sel); if (m) { const b = { attrs: {} }; bound[m[1]] = b; return [b]; } return null; };
+fileWatch.forEach((w) => w[1]());
+Object.keys(bound).forEach((name) => { bound[name]['onclick.jita'](); });
+ok('...whose button opens it as its file', JSON.stringify(loaded) === JSON.stringify(['oc', 'lc', 'pdm', 'dx']), JSON.stringify(loaded));
+const genAt = Q.gen;
+const fileBtn = { querySelector: (s) => (s === '[data-item-title]' ? {} : null) }, otherBtn = { querySelector: () => null };
+listener.fn({ target: { closest: () => fileBtn } });
+const afterFile = Q.gen;
+listener.fn({ target: { closest: () => otherBtn } });
+listener.fn({ target: { closest: () => null } });
+ok('a file entry clicked counts as a click in the capture phase, any other button not', listener.type === 'click' && listener.capture === true && afterFile === genAt + 1 && Q.gen === genAt + 1,
+    afterFile + ' / ' + Q.gen);
+Q.pending = 0;
+observer.fn([{ addedNodes: [] }]);
+const onKey = hides;
+observer.fn([{ addedNodes: [{}] }]);
+const onAdd = hides;
+Q.pending = 3;
+observer.fn([{ addedNodes: [] }]);
+ok('the observer looks when a node was added, or while a header-less file loads, not on a keystroke', onKey === 0 && onAdd === 1 && hides === 2 && styled === 1 &&
+    observer.opts.childList && observer.opts.subtree && observer.opts.characterData, onKey + '/' + onAdd + '/' + hides);
+global.JITA_NO_JIRA_UI = true;
+fresh();
+JiTA.logparser.start();
+ok('off a Jira page there is no observer and no click listener', !observer && !listener && styled === 0 && watches.length === 8, (!!observer) + ' / ' + (!!listener));
+global.JITA_NO_JIRA_UI = false;
+
+// ============ the parser keeps its state in JiTA.logparser ============
+const OLD = ['SwapUI', 'jitaIgbrFile', 'jitaParserGen', 'jitaParserPending', 'LOG_HDR', 'mountParser', 'readCodeBlock', 'getCmDocText', 'jitaRunParse', 'jitaRevealLogs',
+    'jitaInEditable', 'jitaWireLogControls', 'jitaApplyLogFilter', 'jitaBuildLogGroups', 'jitaRegroupLog', 'jitaRunParserWhenLoaded', 'parserShell', 'cssLogParser',
+    'FA_LINK', 'IGBR_FILES', 'phHtml', 'McHtml', 'ocHtml', 'lcHtml', 'pdmHtml', 'dxdiagHtml', 'hideLogs'];
+const left = OLD.filter((n) => new RegExp('\\b' + n + '\\b').test(src)).concat(/^var (rows|css|html)\b/m.test(src) ? ['var rows / css / html'] : []);
+ok('no parser global is left: its state, plumbing and views are JiTA.logparser\'s', !left.length && ['text', 'igbr', 'gen', 'pending'].every((k) => k in P), left.join());
+const defAt = src.indexOf('\nJiTA.logparser = {'), starts = src.split('\nJiTA.logparser.start();\n').length - 1;
+ok('the watches start once, at load, after the module (a file already on the page is swapped at once)', starts === 1 && src.indexOf('\nJiTA.logparser.start();\n') > defAt && defAt > 0,
+    starts + ' call(s)');
 
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'Log parser checks passed.'));
 process.exit(fail ? 1 : 0);

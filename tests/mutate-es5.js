@@ -7,8 +7,8 @@ const { execFileSync } = require('child_process');
 const src = fs.readFileSync(process.env.JITA_SRC || path.join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const TMP = 'mut.js';
 
-// Page code: the first statement of jitaRunParserWhenLoaded. Worker code: the first line inside jitaWorkerBody.
-const PAGE = '\nfunction jitaRunParserWhenLoaded(setFlag) {\n';
+// Page code: the first statement of jitaConvertClick. Worker code: the first line inside jitaWorkerBody.
+const PAGE = '\nfunction jitaConvertClick() {\n';
 const WORKER = '\nfunction jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiTA.worker._src)\n';
 const at = (anchor, line) => (t) => {
     if (t.split(anchor).length !== 2) { throw new Error('ANCHOR'); }

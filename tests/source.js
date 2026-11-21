@@ -23,11 +23,31 @@ function load() {
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const indentOf = (line) => /^ */.exec(line)[0].length;
 
-// Where each name starts in text, { name: [index, ...] }, for every match of re (flags m and g, the name its group 1).
+// Where each name starts in text, { name: [index, ...] }, for every match of re (flags m and g, the name its group 1) at
+// the start of a line of code (codeLines): a line inside a template string, such as the parser's CSS, starts nothing.
 function names(text, re) {
-    const at = {};
+    const at = {}, code = codeLines(text);
     let m;
-    while ((m = re.exec(text))) { (at[m[1]] = at[m[1]] || []).push(m.index); }
+    while ((m = re.exec(text))) { if (code.has(m.index)) { (at[m[1]] = at[m[1]] || []).push(m.index); } }
+    return at;
+}
+// Where each line of text that starts in code begins: not inside a template string or a block comment, nor in a string
+// the line before ran on with a backslash.
+const codeMemo = new Map();   // the last few texts asked about: the script, and the objects cut out of it
+function codeLines(text) {
+    if (codeMemo.has(text)) { return codeMemo.get(text); }
+    if (codeMemo.size > 8) { codeMemo.delete(codeMemo.keys().next().value); }
+    const at = new Set();
+    codeMemo.set(text, at);
+    let st = { tpl: false, cmt: false }, p = 0, ranOn = false;
+    for (;;) {
+        const q = text.indexOf('\n', p), line = q < 0 ? text.slice(p) : text.slice(p, q);
+        if (!st.tpl && !st.cmt && !ranOn) { at.add(p); }
+        st = scan(line, st);
+        ranOn = /\\$/.test(line);
+        if (q < 0) { break; }
+        p = q + 1;
+    }
     return at;
 }
 // The one place a name starts, or a throw that says what was looked for.
@@ -152,4 +172,4 @@ function workerLogsig(src, idx) {
     return { SH: SH, build: w.build, op: w.op };
 }
 
-module.exports = { load: load, top: top, member: member, members: members, fn: fn, block: block, shared: shared, logsigShared: logsigShared, workerLogsig: workerLogsig };
+module.exports = { load: load, top: top, member: member, members: members, fn: fn, block: block, codeLines: codeLines, shared: shared, logsigShared: logsigShared, workerLogsig: workerLogsig };

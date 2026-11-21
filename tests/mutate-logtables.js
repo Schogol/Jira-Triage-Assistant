@@ -16,8 +16,8 @@ const muts = [
     [H, 'a stacktrace has no border below', 'if (msg.indexOf(\'STACKTRACE END\') >= 0) { cls += \' borderbot\'; st.stt = \'\'; }', 'if (msg.indexOf(\'STACKTRACE END\') >= 0) { st.stt = \'\'; }'],
     [H, 'a short line loses its time', "cols = cols.length > 1 ? [cols[0], '', '', cols.slice(1).join(' ')]", "cols = cols.length > 1 ? ['', '', '', cols.slice(1).join(' ')]"],
     [H, 'a message loses a tab of its own', 'msg = cols.slice(3).join(\'\\t\');', 'msg = cols[3];'],
-    [H, 'repeats are not grouped', '                jitaBuildLogGroups();\n                jitaRegroupLog();\n', '                jitaBuildLogGroups();\n'],
-    [H, 'a block keeps no blank line after it', "            while (i < rows.length && cellText(rows[i], 3).trim() === '') { i++; }\n", ''],
+    [H, 'repeats are not grouped', '                JiTA.logparser.buildGroups();\n                JiTA.logparser.regroup();\n', '                JiTA.logparser.buildGroups();\n'],
+    [H, 'a block keeps no blank line after it', "                while (i < rows.length && cellText(rows[i], 3).trim() === '') { i++; }\n", ''],
     [H, 'a repeat badge says no times', "badge.title = runCount + ' identical in a row' + (span ? ' · ' + span : '');", "badge.title = runCount + ' identical in a row';"],
     // ---- Method Calls ----
     [H, 'a call of 500 ms is not yellow', '} else if (cols[2] >= 500) { cls = \'yellow\'; }', '} else if (cols[2] > 500) { cls = \'yellow\'; }'],
@@ -26,7 +26,9 @@ const muts = [
     [H, 'the first of the peak calls is marked', 'cols[2] >= Number(st.peak)) {', 'cols[2] >= Number(st.peak) && !$(\'.peakMachoCell\').length) {'],
     // ---- Outstanding Calls / Last Crashes ----
     [H, 'a call is split at a bare dash', '                var cols = line.split(\' - \');', '                var cols = line.split(\'-\');'],
-    [H, 'the first line is left out', '        oc: {\n            from: 0,', '        oc: {\n            from: 1,'],
+    [H, 'the first line is left out', "            from: 0,\n            row: function (line) {\n                var cols = line.split(' - ');", "            from: 1,\n            row: function (line) {\n                var cols = line.split(' - ');"],
+    [H, 'Last Crashes draws its rows another way', '            row: function (line) { return JiTA.logparser.TYPES.oc.row(line); }', "            row: function (line) { return { cls: 'row', cells: [line] }; }"],
+    [H, 'Last Crashes starts from its second line', "            from: 0,\n            row: function (line) { return JiTA.logparser.TYPES.oc.row(line); }", "            from: 1,\n            row: function (line) { return JiTA.logparser.TYPES.oc.row(line); }"],
     // ---- Process Health ----
     [H, 'the CPU is not rounded', 'Math.round(num(2)), Math.round(num(3))', 'num(2), Math.round(num(3))'],
     [H, 'the frame time is shown as written', '{ html: Math.round(1 / num(9) * 10000) / 10000, cls: spf }', '{ html: c[9], cls: spf }'],
@@ -36,8 +38,9 @@ const muts = [
     [H, 'the FPS header does not toggle', "    $('#tableContent > thead > tr > th:nth-child(10)').on('click', clickHandler());", ''],
     [H, 'the toggle leaves the header as it was', "            $('#tableContent > thead > tr > th:nth-child(10)').html($(this).html() == FPS ? spf : FPS);\n", ''],
     // ---- one builder for every file (refactor 2) ----
-    [H, 'Last Crashes is mounted as a type of its own', "        mountParser(lcHtml, 'oc');", "        mountParser(lcHtml, 'lc');"],
-    [H, 'the game log in the viewer is drawn some other way', "jitaRunParse(function () { JiTA.logparser.draw('log', rows); });", "jitaRunParse(function () { JiTA.logparser.draw('log', String(rows).trim()); });"]
+    [H, 'Last Crashes opens in another view', "(igbr === 'oc' || igbr === 'lc') && flagOn('parser')) { P.mount(igbr); }", "(igbr === 'oc' || igbr === 'lc') && flagOn('parser')) { P.mount(igbr === 'lc' ? 'oc' : igbr); }"],
+    [H, 'Method Calls is mounted as another type', "P.mount('mc')", "P.mount('ph')"],
+    [H, 'the game log in the viewer is drawn some other way', "P.run(function () { P.draw('log', P.text); });", "P.run(function () { P.draw('log', String(P.text).trim()); });"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

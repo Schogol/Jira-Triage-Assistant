@@ -95,6 +95,10 @@ ok('...and so does a name found twice', throws(() => S.fn(T, 'inner'), /more tha
 ok('a deeper line is never taken for a member', throws(() => S.member(T, 'JiTA.demo', 'return 2;'), /no member/) && throws(() => S.member('JiTA.x = {\n    a: {\n        b: 1\n    }\n};', 'JiTA.x', 'b'), /no member b/));
 ok('names are taken as they are, not as patterns', throws(() => S.member(T, 'JiTA.demo', 'K.Y'), /no member/) && throws(() => S.top(T, 'JiTA.dem.'), /no top-level/));
 ok('...even one with a bracket in it', throws(() => S.top(T, 'JiTA.demo('), /no top-level JiTA\.demo\(/));
+const TT = 'JiTA.tpl = {\n    CSS: `\n* {\n    color: red;\n    }\n`,\n    /* a block comment\n    note: 2,\n    */\n    after: 1\n};\n';
+ok('a line inside a template string or a block comment starts no member, and the template is one piece', S.member(TT, 'JiTA.tpl', 'CSS') === '    CSS: `\n* {\n    color: red;\n    }\n`' &&
+    S.member(TT, 'JiTA.tpl', 'after') === '    after: 1' && throws(() => S.member(TT, 'JiTA.tpl', 'color'), /no member color/) && throws(() => S.member(TT, 'JiTA.tpl', 'note'), /no member note/) &&
+    [...S.codeLines(TT)].map((p) => TT.slice(p, TT.indexOf('\n', p))).join('|') === 'JiTA.tpl = {|    CSS: `|    /* a block comment|    after: 1|};|', JSON.stringify(S.member(TT, 'JiTA.tpl', 'CSS')));
 ok('a piece that runs to the end of the text, with no line after it, is all of it', S.fn('function z() {\n    return 1;\n}', 'z') === 'function z() {\n    return 1;\n}' &&
     S.member('JiTA.q = {\n    a: function () {\n        return 1;', 'JiTA.q', 'a') === '    a: function () {\n        return 1;');
 ok('...nor as what every object has', throws(() => S.member(T, 'JiTA.demo', 'constructor'), /no member constructor/) && throws(() => S.fn(T, 'toString'), /no function toString\(/));
@@ -111,7 +115,10 @@ ok('load() reads the script JITA_SRC names, with LF line ends', loaded === '// =
 
 // ---- the whole script ----
 const src = S.load();
-const names = (re, text) => { const c = {}; let m; while ((m = re.exec(text))) { c[m[1]] = (c[m[1]] || 0) + 1; } return c; };
+// How often each name starts a line of code (S.codeLines): a line inside a template string or a comment counts for none.
+const names = (re, text) => { const c = {}, code = S.codeLines(text); let m; while ((m = re.exec(text))) { if (code.has(m.index)) { c[m[1]] = (c[m[1]] || 0) + 1; } } return c; };
+// The lines of text, each with whether it starts in code.
+const codeOf = (text) => { const code = S.codeLines(text); let off = 0; return text.split('\n').map((l) => { const c = code.has(off); off += l.length + 1; return c; }); };
 const tops = names(/^((?:JiTA|window)(?:\.[\w$]+)+) = /gm, src);
 const bad = [], uncovered = [], runOn = [];
 let nTop = 0, nObj = 0, nMem = 0;
@@ -121,14 +128,14 @@ Object.keys(tops).filter((t) => tops[t] === 1).forEach((t) => {
     const lines = text.split('\n');
     if (!/ = \{$/.test(lines[0])) { return; }
     nObj++;
-    const covered = lines.map((l, i) => i === 0 || i === lines.length - 1);
+    const covered = lines.map((l, i) => i === 0 || i === lines.length - 1), tc = codeOf(text);
     const mem = names(/^    ([\w$]+): /gm, text);
     Object.keys(mem).filter((n) => mem[n] === 1).forEach((n) => {
         let piece;
         // with a member after it, so a comma left on the piece shows as two
         try { piece = S.member(src, t, n); new Function('return ({\n' + piece + '\n,\nnext: 1\n});'); nMem++; } catch (e) { bad.push(t + '.' + n + ': ' + e.message); return; }
-        const pl = piece.split('\n'), at = lines.findIndex((l) => l.indexOf('    ' + n + ': ') === 0);
-        if (pl.slice(1).some((l) => /^    [\w$]+: /.test(l) && !/^ {5}/.test(l))) { runOn.push(t + '.' + n); }
+        const pl = piece.split('\n'), pc = codeOf(piece), at = lines.findIndex((l, i) => tc[i] && l.indexOf('    ' + n + ': ') === 0);
+        if (pl.some((l, k) => k > 0 && pc[k] && /^    [\w$]+: /.test(l) && !/^ {5}/.test(l))) { runOn.push(t + '.' + n); }
         pl.forEach((l, k) => { covered[at + k] = true; });
     });
     lines.forEach((l, i) => { if (!covered[i] && l.trim() && !/^\s*(\/\/|\/\*|\*)/.test(l)) { uncovered.push(t + ' +' + i + ': ' + l.trim().slice(0, 60)); } });
