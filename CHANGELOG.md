@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.30 (2026-11-21)
+
+### Fixed issues
+
+- ISD credits: your own count of reports attached now includes one the automation attached for you that was reopened and given to someone else since, as the full count does.
+
 ## 3.53.29 (2026-11-21)
 
 ### Fixed issues

@@ -25,7 +25,10 @@ const muts = [
     ['a Duplicate counted as created', "            'AND (resolution is EMPTY OR resolution != Duplicate)';\n        return crFetchIssues(jql, ['reporter', 'project', 'resolution'])",
         "            '';\n        return crFetchIssues(jql, ['reporter', 'project', 'resolution'])"],
     ['the month\'s two counts share no record', "return crDefectsCreated(allAccounts, b, acctToName, rows, seen)", "return crDefectsCreated(allAccounts, b, acctToName, rows)"],
-    ['the self panel\'s two counts share no record', "return crDefectsCreated(id.myAccounts, b, acctToName, rows, seen)", "return crDefectsCreated(id.myAccounts, b, acctToName, rows)"]
+    ['the self panel\'s two counts share no record', "return crDefectsCreated(id.myAccounts, b, acctToName, rows, seen)", "return crDefectsCreated(id.myAccounts, b, acctToName, rows)"],
+    ["your own count misses the automation attaches reassigned since", "var autoWas = crc.AUTOMATION_ID ? (", "var autoWas = false ? ("],
+    ["the automation attaches are taken by the assignee now", "' AND assignee WAS IN (' + crAccList(accs) + ') ' + win) : null;", "' AND assignee in (' + crAccList(accs) + ')') : null;"],
+    ["a reassigned automation attach is counted without its changelog", "if (keys.hasOwnProperty(kw) && movedOut[kw]) { attSet[kw] = true; }", "if (keys.hasOwnProperty(kw)) { attached++; }"]
 ];
 let allRed = true;
 muts.forEach(([name, a, b]) => {
