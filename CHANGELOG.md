@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.16 (2026-11-21)
+
+### Fixed issues
+
+- Stored log readings left by an older version of the log reader are deleted, once, a minute after a Jira page loads, so they no longer take up space in your browser.
+
 ## 3.53.15 (2026-11-21)
 
 ### Fixed issues

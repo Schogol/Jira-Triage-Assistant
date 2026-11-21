@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.15
+// @version     3.53.16
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.15
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.16
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -5882,7 +5882,34 @@ JiTA.db = {
 
     getMeta: function (k) { return JiTA.db._req('meta', 'readonly', function (s) { return s.get(k); }, function (v) { return v ? v.v : null; }); },
 
-    setMeta: function (k, v) { return JiTA.db._req('meta', 'readwrite', function (s) { return s.put({ k: k, v: v }); }); }
+    setMeta: function (k, v) { return JiTA.db._req('meta', 'readwrite', function (s) { return s.put({ k: k, v: v }); }); },
+
+    // Delete the meta rows whose key starts with `prefix` and whose value `drop(value)` says to. A transaction reads
+    // SWEEP_N rows at most and the next one goes on after the last key it saw, so no other tab's write waits long.
+    // Resolves how many rows went.
+    SWEEP_N: 400,
+    sweepMeta: function (prefix, drop) {
+        var D = JiTA.db, KR = D._keyRange(), top = prefix + String.fromCharCode(0xFFFF), gone = 0;
+        function part(after) {
+            return D.open().then(function (db) {
+                return new Promise(function (resolve, reject) {
+                    var tx = db.transaction('meta', 'readwrite'), n = 0, last = null;
+                    var req = tx.objectStore('meta').openCursor(after == null ? KR.bound(prefix, top) : KR.bound(after, top, true, false));
+                    req.onsuccess = function () {
+                        var c = req.result;
+                        if (!c) { return; }
+                        last = c.key;
+                        if (drop(c.value ? c.value.v : null)) { c.delete(); gone++; }
+                        if (++n < D.SWEEP_N) { c.continue(); }
+                    };
+                    tx.oncomplete = function () { resolve(n < D.SWEEP_N ? null : last); };
+                    tx.onerror = function () { reject(tx.error); };
+                    tx.onabort = function () { reject(tx.error || new Error('IndexedDB transaction aborted')); };
+                });
+            }).then(function (next) { return next == null ? gone : part(next); });
+        }
+        return part(null);
+    }
 };
 
 
@@ -13950,6 +13977,27 @@ JiTA.profile = {
         } };
     },
     _usable: function (rec) { return (rec && rec.v === JiTA.profile.V) ? rec : null; },
+    // Readings of an older reader version (v below V) are never used again (_usable), so they are deleted: once each
+    // time this browser runs a reader version other than the one that swept last. A newer build's readings stay, for the
+    // tab that runs it. Readings of this version stay however old they are: only old versions go (Schogol, 2026-11-21).
+    SWEPT_KEY: 'jitaReadingsSweptV',   // GM: the reader version that swept last
+    SWEEP_DELAY_MS: 60000,             // after the page has loaded, so the sweep never competes with the first draw
+    _sweeping: false,
+    sweepOld: function () {
+        var P = JiTA.profile;
+        if (P._sweeping || gmGet(P.SWEPT_KEY, 0) === P.V) { return Promise.resolve(0); }
+        P._sweeping = true;
+        return JiTA.db.sweepMeta(P.CACHE_PREFIX, function (r) { return !(r && r.v >= P.V); }).then(function (n) {
+            P._sweeping = false;
+            gmSet(P.SWEPT_KEY, P.V);
+            if (n) { JiTA.log('[JiTA] profile: deleted ' + n + ' stored log reading(s) of an older reader version'); }
+            return n;
+        }, function (e) {
+            P._sweeping = false;
+            JiTA.log('[JiTA] profile: could not delete the old stored log readings (tried again on the next page load):', e);
+            return 0;
+        });
+    },
     // A reading of logs other than the report has now (a log added or replaced since: logSig) is read again too, as the
     // exception search reads it again (excfind._read).
     _needs: function (rec, zip, att) { return !rec || !rec.logs || (zip && !rec.zip) || !JiTA.profile._logsCurrent(rec, att, zip) || JiTA.profile._otherLogs(rec, att); },
@@ -26026,6 +26074,7 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
     setTimeout(function () { try { JiTA.migrate.run(); } catch (e) { JiTA.caught('migrate.run', e); } }, 4000);
     setTimeout(function () { try { JiTA.translate.prepare(); } catch (e) { JiTA.caught('translate.prepare', e); } }, 6000);   // background-translate the foreign-report backlog
     setTimeout(function () { try { JiTA.logread.prepare(); } catch (e) { JiTA.caught('logread.prepare', e); } }, JiTA.logread.START_MS);   // read the open reports' logs, for the exception boost
+    setTimeout(function () { try { JiTA.profile.sweepOld(); } catch (e) { JiTA.caught('profile.sweepOld', e); } }, JiTA.profile.SWEEP_DELAY_MS);   // stored readings of an older reader version
     // Keep the hidden set in sync across tabs: another tab hiding/unhiding an issue invalidates our cached map
     // and re-renders the open view so a just-hidden suggestion drops out (and an unhidden one comes back).
     if (typeof GM_addValueChangeListener === 'function') {
