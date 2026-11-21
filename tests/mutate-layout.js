@@ -1,6 +1,6 @@
 // mutate-layout.js - breaks what keeps each view in line, in turn, and requires layout-check (a real headless Chromium) to
 // go red: the Members tab's note columns (the v3.49.1 fix) and month numbers, the Quality control columns, the cards'
-// footers and grid, and Settings' and the Lead duties window's fixed size and steady tabs. Every breakage starts a browser,
+// footers and grid, Settings' and the Lead duties window's fixed size and steady tabs, and the Settings window's width. Every breakage starts a browser,
 // so there are only a few.
 //
 // The check runs on the unbroken script first: a breakage proves nothing in a browser that fails anyway. Only a FAIL line
@@ -27,7 +27,11 @@ const muts = [
     [LC, 'the open Lead duties tab in bold pushes the others along', "'.jita-leadduty-view .ld-tab::after { content: attr(data-label); display: block; height: 0; overflow: hidden; visibility: hidden; font-weight: 700; }'", "''"],
     [LC, 'a count on a Lead duties tab keeps the bold width of the label before it', ".text(text).attr('data-label', text);", '.text(text);'],
     [LC, 'the Applications list grows the tab instead of filling it', "var $b = U._body().empty().addClass('ld-fill');", 'var $b = U._body().empty();'],
-    [LC, 'the Applications fill stays on the next tab', "        U._body().removeClass('ld-fill');", '        U._body();']
+    [LC, 'the Applications fill stays on the next tab', "        U._body().removeClass('ld-fill');", '        U._body();'],
+    // ---- the Settings window of a settings.yaml: one width on every tab (v3.54.1) ----
+    [LC, 'the Settings window is as wide as its widest line again', '#jita-setv { display: flex; flex-direction: column; box-sizing: border-box; width: 950px;',
+        '#jita-setv { display: flex; flex-direction: column; box-sizing: border-box;'],
+    [LC, 'the Settings window runs past the right edge of a small screen', "            el.style.maxWidth = Math.max(480, window.innerWidth - r.left - 12) + 'px';\n", '']
 ];
 // The check's output on a copy: { out, fails, passed, skip }. Only a check that ran to its end says passed or FAILURE.
 function check(text) {

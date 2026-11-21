@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.54.0
+// @version     3.54.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,8 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.54.0
-// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.54.0
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.54.1
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.54.1
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -3815,10 +3815,14 @@ JiTA.settingsview = {
     wire: function (el, text) {
         var SV = JiTA.settingsview, $el = $(el), timer = 0;
         if (!el) { return; }
-        // As tall as the screen below it: the code-block it sits in grows with its content.
+        // As tall as the screen below it: the code-block it sits in grows with its content. As wide as the CSS says, on every
+        // tab: the code-block is only as wide as what it holds, so the window followed its widest line, narrower once the
+        // top bar lost its subtitle and wider on the tabs with long text. Never wider than the screen right of it.
         function fit() {
             if (!document.body.contains(el)) { $(window).off('resize.jitasetv'); return; }
-            el.style.height = Math.max(320, window.innerHeight - el.getBoundingClientRect().top - 12) + 'px';
+            var r = el.getBoundingClientRect();
+            el.style.height = Math.max(320, window.innerHeight - r.top - 12) + 'px';
+            el.style.maxWidth = Math.max(480, window.innerWidth - r.left - 12) + 'px';
         }
         fit();
         $(window).off('resize.jitasetv').on('resize.jitasetv', fit);
@@ -3878,7 +3882,7 @@ JiTA.settingsview = {
     // The in-game window's look (the Photon theme): near-black panels, the chosen entry highlighted on the left, teal ticks
     // and slider knobs, greyed controls the game disables. Scoped to #jita-setv; the code-block's own monospace undone.
     CSS: `
-#jita-setv { display: flex; flex-direction: column; box-sizing: border-box; min-height: 320px; background: #0b0d0f; color: #c8ced2;
+#jita-setv { display: flex; flex-direction: column; box-sizing: border-box; width: 950px; min-height: 320px; background: #0b0d0f; color: #c8ced2;
     font: 12px/1.45 "Segoe UI", Roboto, Arial, sans-serif; white-space: normal; text-align: left; border: 1px solid #1f2529; }
 #jita-setv * { box-sizing: border-box; font-family: inherit; }
 #jita-setv .jsv-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid #1f2529; background: #0f1215; }
