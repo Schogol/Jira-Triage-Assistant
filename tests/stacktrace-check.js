@@ -176,9 +176,18 @@ const LOG = [other('20:32:44', 'blue::Memory', 'Python memory: 902224K')].concat
         msgCol(LOCK).join(' ') + ' ' + msgCol(VIEW).join(' ') + ' then ' + msgCol(exception({ n: 2, time: '01:00:01', msg: 'ValueError: bad', frames: [B + 's/baz.py(9) Run', B + 's/qux.py(10) Go'] })).join(' '));
     ok('a description holding both kinds splits into each, every one ending at its END line or the next block',
         mixed.length === 4 && J(mixed.map((b) => L.isTrace(L._fingerprint(b).sig))) === '[false,true,true,false]' && !/STACKTRACE/.test(mixed[0]) && /STACKTRACE END$/.test(mixed[1].trim()), J(mixed.map((b) => b.slice(0, 20))));
+    // Pasted raw with the line the log goes on with: a cut stacktrace ends there, as on the log side.
+    const NEXT = other('20:32:53', 'svc::godma', 'InitSlots.no quantity Mjolnir in ' + B + 'eve/client/script/godma/godma.py(812) InitSlots');
+    const runOn = DATA.concat([NEXT]).join(' '), runOnCode = DATA.concat([NEXT]).join('\n');
+    ok('a cut stacktrace in a raw log pasted in ends at the next line logged under other columns, so it reads as the log\'s',
+        L._fingerprint(L._splitBlocks(runOn)[0]).sig === fData.sig && L._fingerprint(L._splitBlocks(runOnCode)[0]).sig === fData.sig && !/InitSlots/.test(L._splitBlocks(runOn)[0]),
+        L._fingerprint(L._splitBlocks(runOn)[0]).sig);
+    const twoRaw = L._splitBlocks(DATA.concat([NEXT], LOCK2).join(' '));
+    ok('...and the next stacktrace still reads as its own', twoRaw.length === 2 && L._fingerprint(twoRaw[1]).sig === fLock2.sig, twoRaw.length + ' ' + J(twoRaw.map((b) => b.slice(0, 20))));
+    ok('...while lines under its own columns stay in it (control)', L._splitBlocks(raw).length === 1 && /Traced at:/.test(L._splitBlocks(raw)[0]));
     const bare = L._fingerprint('Traced at: ' + msgCol(DATA).slice(-5).join(' '));
     ok('a stack pasted without its first line is a stacktrace\'s, with no message', L.isTrace(bare.sig) && bare.msg === '' && !L.isCut(bare.sig), bare.sig);
-    const samples = [LOG, code, flat, raw, msgCol(LOCK).join(' '), msgCol(VIEW).join('\n'), 'Traced at: ' + msgCol(DATA).slice(-5).join(' '), cutExc.concat(LOCK).join(' '), 'no exception here'];
+    const samples = [LOG, code, flat, raw, runOn, runOnCode, DATA.concat([NEXT], LOCK2).join(' '), msgCol(LOCK).join(' '), msgCol(VIEW).join('\n'), 'Traced at: ' + msgCol(DATA).slice(-5).join(' '), cutExc.concat(LOCK).join(' '), 'no exception here'];
     ok('the worker\'s copy splits and reads every sample exactly as the tab\'s does',
         samples.every((s) => J(L._splitBlocks(s).map(L._fingerprint)) === J(W.split(s).map(W.fp))),
         samples.filter((s) => J(L._splitBlocks(s).map(L._fingerprint)) !== J(W.split(s).map(W.fp))).map((s) => s.slice(0, 40)).join(' | '));
@@ -294,6 +303,11 @@ const LOG = [other('20:32:44', 'blue::Memory', 'Python memory: 902224K')].concat
     ok('...its block ends where the log moves on: the next facility\'s line is a line of its own', /InitSlots/.test(after.lastElementChild.textContent) && after.getAttribute('data-jita-sig') === '0' &&
         rows.slice(rows.indexOf(rData) + 1, rows.indexOf(rData) + DATA.length).every((r) => r.getAttribute('data-jita-sig') === '0'));
     ok('...and the panel counts each defect', found && found['EDR-1'].count === 2 && found['EDR-2'].loose === true && found['EDR-4'].loose === true && found['EDR-7'].count === 1 && links(rData2) === '[EDR-1]', J(Object.keys(found || {})));
+    // Two passes pending at once (a log opened while the index built, and a re-match): the second finds the rows marked.
+    found = null;
+    await L.applyToTable();
+    ok('a second pass over rows the first one marked keeps the message under each defect', found && found['EDR-1'].raw === MSG_DATA && found['EDR-2'].raw === MSG_VIEW &&
+        found['EDR-1'].count === 2, J(found && Object.keys(found).map((k) => k + '=' + found[k].raw)));
     L.rematch();
     await flush();
     ok('a re-match leaves one mark each, its hover written again', links(rData) === '[EDR-1]' && links(rView) === '[~EDR-2]' && rView.lastElementChild.title === 'Possibly related (same message, stack cut off) · EDR-2');

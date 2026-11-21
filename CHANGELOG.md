@@ -14,6 +14,13 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.28 (2026-11-21)
+
+### Fixed issues
+
+- A defect whose description holds a pasted raw log with a stacktrace cut off before its end now matches logs that hold that stacktrace, instead of taking the next log line's code location as part of it.
+- Defects in log: the exception message under each defect no longer goes missing when the log is matched twice in a row.
+
 ## 3.53.27 (2026-11-21)
 
 ### Fixed issues

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.27
+// @version     3.53.28
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.27
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.28
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -3485,10 +3485,23 @@ JiTA.logsig = {
     // newlines collapsed to spaces, but the markers survive as substrings, so this works on the (collapsed) defect
     // description and on a (re-joined) log block. Ending at the END line matters: a STACKTRACE pasted after an exception
     // used to be read as more frames of the exception, so the defect's signature matched neither the same exception in a
-    // parsed log (which the log side ends there) nor anything else. KEEP IN SYNC with lgSplit in the worker.
+    // parsed log (which the log side ends there) nor anything else. A raw log pasted in keeps its columns: a stacktrace is
+    // one log message, every line of it under the time, facility and type logged in front of its "STACKTRACE #", and the
+    // client cuts a long one before its END. So it also ends at the first line logged under other columns, as _logBlocks
+    // ends it: run on, it took that line's frames for its own, and matched the same stacktrace in no log. KEEP IN SYNC with
+    // lgSplit in the worker.
     _splitBlocks: function (text) {
-        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\s\S]*?(?:\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m;
-        while ((m = re.exec(text))) { blocks.push(m[0]); if (re.lastIndex === m.index) { re.lastIndex++; } }
+        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\s\S]*?(?:\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m, c;
+        var col = /(^|\s)(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)/g;
+        while ((m = re.exec(text))) {
+            var b = m[0], pre = /^STACKTRACE/i.test(b) && /(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)\s*$/.exec(text.slice(Math.max(0, m.index - 200), m.index));
+            if (pre) {
+                col.lastIndex = 0;
+                while ((c = col.exec(b))) { if (c[2] !== pre[1]) { b = b.slice(0, c.index + c[1].length).replace(/\s+$/, ''); break; } }
+            }
+            blocks.push(b);
+            if (re.lastIndex === m.index) { re.lastIndex++; }
+        }
         return blocks.length ? blocks : [text || ''];
     },
 
@@ -3889,7 +3902,8 @@ JiTA.logsig = {
                 if (marked) {                                     // already processed in a previous pass
                     if (marked !== '0') {                          // ...re-count anchors for the panel
                         var lk = marked.charAt(0) === '~';        // '~' prefix = loose (crash-site) match
-                        tally(lk ? marked.slice(1) : marked, tr, null, lk);
+                        // With the message the first pass read: a second pass (two pending at once) drew every defect without it.
+                        tally(lk ? marked.slice(1) : marked, tr, tr.getAttribute('data-jita-sig-msg'), lk);
                     }
                     i++;
                     continue;
@@ -3917,7 +3931,10 @@ JiTA.logsig = {
                         blockRows[b].setAttribute('data-jita-sig', (b === 0 && defect) ? ((loose ? '~' : '') + defect) : '0');
                     }
                 }
-                if (defect) { markAnchor(tr, defect, loose, titleOf(fp.sig, hit.by)); tally(defect, tr, fp.msg, loose); }
+                if (defect) {
+                    if (fp.msg) { tr.setAttribute('data-jita-sig-msg', fp.msg); }   // for a later pass, which reads no block
+                    markAnchor(tr, defect, loose, titleOf(fp.sig, hit.by)); tally(defect, tr, fp.msg, loose);
+                }
                 i = j;
             }
             JiTA.logsig.renderPanel(found);
@@ -3934,6 +3951,7 @@ JiTA.logsig = {
         for (var i = 0; i < rows.length; i++) {
             var r = rows[i];
             r.removeAttribute('data-jita-sig');
+            r.removeAttribute('data-jita-sig-msg');
             // ...and what the last pass drew on the row, so it keeps a badge only if it matches now. Left in place,
             // every sync put another [EDR-x] in front of the last one, and a match that no longer held stayed up.
             r.classList.remove('sig-hit', 'sig-hit-loose');
@@ -11471,8 +11489,17 @@ function jitaWorkerBody(cfg) {
 
     // ---- logsig: exception-signature mining + queries (ported from JiTA.logsig so tabs hold no logsig index) --
     function lgSplit(text) {   // KEEP IN SYNC with JiTA.logsig._splitBlocks
-        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\s\S]*?(?:\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m;
-        while ((m = re.exec(text))) { blocks.push(m[0]); if (re.lastIndex === m.index) { re.lastIndex++; } }
+        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\s\S]*?(?:\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m, c;
+        var col = /(^|\s)(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)/g;
+        while ((m = re.exec(text))) {
+            var b = m[0], pre = /^STACKTRACE/i.test(b) && /(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)\s*$/.exec(text.slice(Math.max(0, m.index - 200), m.index));
+            if (pre) {
+                col.lastIndex = 0;
+                while ((c = col.exec(b))) { if (c[2] !== pre[1]) { b = b.slice(0, c.index + c[1].length).replace(/\s+$/, ''); break; } }
+            }
+            blocks.push(b);
+            if (re.lastIndex === m.index) { re.lastIndex++; }
+        }
         return blocks.length ? blocks : [text || ''];
     }
     function lgFp(text) {   // KEEP IN SYNC with JiTA.logsig._fingerprint
