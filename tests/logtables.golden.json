@@ -1,0 +1,1716 @@
+{
+ "game log": {
+  "first": {
+   "loader": "none",
+   "table": "table",
+   "rows": [
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:00",
+      "General",
+      "notice",
+      "Client starting\r"
+     ],
+     "a": {
+      "data-jita-grp": "0",
+      "data-jita-gsig": "L:General\u001fnotice\u001fClient starting\r"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:01",
+      "net",
+      "info",
+      "connected to &lt;proxy> & ready\r"
+     ],
+     "a": {
+      "data-jita-grp": "1",
+      "data-jita-gsig": "L:net\u001finfo\u001fconnected to <proxy> & ready\r"
+     }
+    },
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:02",
+      "net",
+      "notice",
+      "<span class=\"jita-rep-badge\">3×</span>ping\r"
+     ],
+     "a": {
+      "data-jita-grp": "2",
+      "data-jita-gsig": "L:net\u001fnotice\u001fping\r"
+     },
+     "badge": "3 identical in a row · 10:00:02 → 10:00:04"
+    },
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:03",
+      "net",
+      "notice",
+      "ping\r"
+     ],
+     "hidden": "none",
+     "a": {
+      "data-jita-grp": "3",
+      "data-jita-gsig": "L:net\u001fnotice\u001fping\r"
+     }
+    },
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:04",
+      "net",
+      "notice",
+      "ping\r"
+     ],
+     "hidden": "none",
+     "a": {
+      "data-jita-grp": "4",
+      "data-jita-gsig": "L:net\u001fnotice\u001fping\r"
+     }
+    },
+    {
+     "c": "warning",
+     "cells": [
+      "10:00:05",
+      "ui",
+      "warning",
+      "slow frame\r"
+     ],
+     "a": {
+      "data-jita-grp": "5",
+      "data-jita-gsig": "L:ui\u001fwarning\u001fslow frame\r"
+     }
+    },
+    {
+     "c": "error bordertop exception",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "<span class=\"jita-rep-badge\">2×</span>EXCEPTION #1 logged at 03/12/2026 10:00:06 : KeyError: 2\r"
+     ],
+     "a": {
+      "data-jita-grp": "6",
+      "data-jita-gsig": "B:ui\u001ferror\u001fEXCEPTION # logged at # # : KeyError: 2\r\u001eui\u001ferror\u001fFormatted exception info: KeyError: 2\r\u001eui\u001ferror\u001f/build/eve/a/x.py(10) one\r\u001eui\u001ferror\u001fEXCEPTION END\r"
+     },
+     "badge": "2 identical in a row · 10:00:06 → 10:00:07"
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "Formatted exception info: KeyError: 2\r"
+     ],
+     "a": {
+      "data-jita-grp": "6"
+     }
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "/build/eve/a/x.py(10) one\r"
+     ],
+     "a": {
+      "data-jita-grp": "6"
+     }
+    },
+    {
+     "c": "error exception borderbot",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "EXCEPTION END\r"
+     ],
+     "a": {
+      "data-jita-grp": "6"
+     }
+    },
+    {
+     "c": "error",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "\r"
+     ],
+     "a": {
+      "data-jita-grp": "6"
+     }
+    },
+    {
+     "c": "error bordertop exception",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "EXCEPTION #2 logged at 03/12/2026 10:00:07 : KeyError: 2\r"
+     ],
+     "hidden": "none",
+     "a": {
+      "data-jita-grp": "7",
+      "data-jita-gsig": "B:ui\u001ferror\u001fEXCEPTION # logged at # # : KeyError: 2\r\u001eui\u001ferror\u001fFormatted exception info: KeyError: 2\r\u001eui\u001ferror\u001f/build/eve/a/x.py(10) one\r\u001eui\u001ferror\u001fEXCEPTION END\r"
+     }
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "Formatted exception info: KeyError: 2\r"
+     ],
+     "hidden": "none",
+     "a": {
+      "data-jita-grp": "7"
+     }
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "/build/eve/a/x.py(10) one\r"
+     ],
+     "hidden": "none",
+     "a": {
+      "data-jita-grp": "7"
+     }
+    },
+    {
+     "c": "error exception borderbot",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "EXCEPTION END\r"
+     ],
+     "hidden": "none",
+     "a": {
+      "data-jita-grp": "7"
+     }
+    },
+    {
+     "c": "error",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "\r\r"
+     ],
+     "hidden": "none",
+     "a": {
+      "data-jita-grp": "7"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "",
+      "",
+      "",
+      "Logging error occurred\r"
+     ],
+     "a": {
+      "data-jita-grp": "8",
+      "data-jita-gsig": "L:\u001f\u001fLogging error occurred\r"
+     }
+    },
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:08",
+      "net",
+      "notice",
+      "ping\r"
+     ],
+     "a": {
+      "data-jita-grp": "9",
+      "data-jita-gsig": "L:net\u001fnotice\u001fping\r"
+     }
+    },
+    {
+     "c": "error bordertop",
+     "cells": [
+      "10:00:09",
+      "core",
+      "error",
+      "STACKTRACE #3 logged at 03/12/2026 10:00:09 : Lock held too long\r"
+     ],
+     "a": {
+      "data-jita-grp": "10",
+      "data-jita-gsig": "L:core\u001ferror\u001fSTACKTRACE # logged at # # : Lock held too long\r"
+     }
+    },
+    {
+     "c": "error",
+     "cells": [
+      "10:00:09",
+      "core",
+      "error",
+      "Traced at:\r"
+     ],
+     "a": {
+      "data-jita-grp": "11",
+      "data-jita-gsig": "L:core\u001ferror\u001fTraced at:\r"
+     }
+    },
+    {
+     "c": "error borderbot",
+     "cells": [
+      "10:00:09",
+      "core",
+      "error",
+      "STACKTRACE END\r"
+     ],
+     "a": {
+      "data-jita-grp": "12",
+      "data-jita-gsig": "L:core\u001ferror\u001fSTACKTRACE END\r"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:10",
+      "core",
+      "info",
+      "after the stacktrace\r"
+     ],
+     "a": {
+      "data-jita-grp": "13",
+      "data-jita-gsig": "L:core\u001finfo\u001fafter the stacktrace\r"
+     }
+    },
+    {
+     "c": "error bordertop exception",
+     "cells": [
+      "10:00:11",
+      "ui",
+      "error",
+      "EXCEPTION #4 logged at 03/12/2026 10:00:11 : ValueError: bad\r"
+     ],
+     "a": {
+      "data-jita-grp": "14",
+      "data-jita-gsig": "B:ui\u001ferror\u001fEXCEPTION # logged at # # : ValueError: bad\r\u001eui\u001ferror\u001fCaught at:\r\u001eui\u001fwarning\u001fa block cut off by the next second\r\u001e\u001f\u001fwarning facility is empty\r\u001e\u001f\u001fa line with no tabs at all\r\u001enet\u001finfo\u001fkey\tvalue\r\u001enet\u001funknowntype\u001fthe last line\r"
+     }
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:11",
+      "ui",
+      "error",
+      "Caught at:\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "warning bordertop",
+     "cells": [
+      "10:00:12",
+      "ui",
+      "warning",
+      "a block cut off by the next second\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:13",
+      "",
+      "",
+      "warning facility is empty\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "",
+      "",
+      "",
+      "a line with no tabs at all\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:14",
+      "net",
+      "info",
+      "key\tvalue\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:15",
+      "net",
+      "unknowntype",
+      "the last line\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    }
+   ],
+   "side": {},
+   "heads": {}
+  }
+ },
+ "game log, Group Repeats off": {
+  "first": {
+   "loader": "none",
+   "table": "table",
+   "rows": [
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:00",
+      "General",
+      "notice",
+      "Client starting\r"
+     ],
+     "a": {
+      "data-jita-grp": "0",
+      "data-jita-gsig": "L:General\u001fnotice\u001fClient starting\r"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:01",
+      "net",
+      "info",
+      "connected to &lt;proxy> & ready\r"
+     ],
+     "a": {
+      "data-jita-grp": "1",
+      "data-jita-gsig": "L:net\u001finfo\u001fconnected to <proxy> & ready\r"
+     }
+    },
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:02",
+      "net",
+      "notice",
+      "ping\r"
+     ],
+     "a": {
+      "data-jita-grp": "2",
+      "data-jita-gsig": "L:net\u001fnotice\u001fping\r"
+     }
+    },
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:03",
+      "net",
+      "notice",
+      "ping\r"
+     ],
+     "a": {
+      "data-jita-grp": "3",
+      "data-jita-gsig": "L:net\u001fnotice\u001fping\r"
+     }
+    },
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:04",
+      "net",
+      "notice",
+      "ping\r"
+     ],
+     "a": {
+      "data-jita-grp": "4",
+      "data-jita-gsig": "L:net\u001fnotice\u001fping\r"
+     }
+    },
+    {
+     "c": "warning",
+     "cells": [
+      "10:00:05",
+      "ui",
+      "warning",
+      "slow frame\r"
+     ],
+     "a": {
+      "data-jita-grp": "5",
+      "data-jita-gsig": "L:ui\u001fwarning\u001fslow frame\r"
+     }
+    },
+    {
+     "c": "error bordertop exception",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "EXCEPTION #1 logged at 03/12/2026 10:00:06 : KeyError: 2\r"
+     ],
+     "a": {
+      "data-jita-grp": "6",
+      "data-jita-gsig": "B:ui\u001ferror\u001fEXCEPTION # logged at # # : KeyError: 2\r\u001eui\u001ferror\u001fFormatted exception info: KeyError: 2\r\u001eui\u001ferror\u001f/build/eve/a/x.py(10) one\r\u001eui\u001ferror\u001fEXCEPTION END\r"
+     }
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "Formatted exception info: KeyError: 2\r"
+     ],
+     "a": {
+      "data-jita-grp": "6"
+     }
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "/build/eve/a/x.py(10) one\r"
+     ],
+     "a": {
+      "data-jita-grp": "6"
+     }
+    },
+    {
+     "c": "error exception borderbot",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "EXCEPTION END\r"
+     ],
+     "a": {
+      "data-jita-grp": "6"
+     }
+    },
+    {
+     "c": "error",
+     "cells": [
+      "10:00:06",
+      "ui",
+      "error",
+      "\r"
+     ],
+     "a": {
+      "data-jita-grp": "6"
+     }
+    },
+    {
+     "c": "error bordertop exception",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "EXCEPTION #2 logged at 03/12/2026 10:00:07 : KeyError: 2\r"
+     ],
+     "a": {
+      "data-jita-grp": "7",
+      "data-jita-gsig": "B:ui\u001ferror\u001fEXCEPTION # logged at # # : KeyError: 2\r\u001eui\u001ferror\u001fFormatted exception info: KeyError: 2\r\u001eui\u001ferror\u001f/build/eve/a/x.py(10) one\r\u001eui\u001ferror\u001fEXCEPTION END\r"
+     }
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "Formatted exception info: KeyError: 2\r"
+     ],
+     "a": {
+      "data-jita-grp": "7"
+     }
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "/build/eve/a/x.py(10) one\r"
+     ],
+     "a": {
+      "data-jita-grp": "7"
+     }
+    },
+    {
+     "c": "error exception borderbot",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "EXCEPTION END\r"
+     ],
+     "a": {
+      "data-jita-grp": "7"
+     }
+    },
+    {
+     "c": "error",
+     "cells": [
+      "10:00:07",
+      "ui",
+      "error",
+      "\r\r"
+     ],
+     "a": {
+      "data-jita-grp": "7"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "",
+      "",
+      "",
+      "Logging error occurred\r"
+     ],
+     "a": {
+      "data-jita-grp": "8",
+      "data-jita-gsig": "L:\u001f\u001fLogging error occurred\r"
+     }
+    },
+    {
+     "c": "notice",
+     "cells": [
+      "10:00:08",
+      "net",
+      "notice",
+      "ping\r"
+     ],
+     "a": {
+      "data-jita-grp": "9",
+      "data-jita-gsig": "L:net\u001fnotice\u001fping\r"
+     }
+    },
+    {
+     "c": "error bordertop",
+     "cells": [
+      "10:00:09",
+      "core",
+      "error",
+      "STACKTRACE #3 logged at 03/12/2026 10:00:09 : Lock held too long\r"
+     ],
+     "a": {
+      "data-jita-grp": "10",
+      "data-jita-gsig": "L:core\u001ferror\u001fSTACKTRACE # logged at # # : Lock held too long\r"
+     }
+    },
+    {
+     "c": "error",
+     "cells": [
+      "10:00:09",
+      "core",
+      "error",
+      "Traced at:\r"
+     ],
+     "a": {
+      "data-jita-grp": "11",
+      "data-jita-gsig": "L:core\u001ferror\u001fTraced at:\r"
+     }
+    },
+    {
+     "c": "error borderbot",
+     "cells": [
+      "10:00:09",
+      "core",
+      "error",
+      "STACKTRACE END\r"
+     ],
+     "a": {
+      "data-jita-grp": "12",
+      "data-jita-gsig": "L:core\u001ferror\u001fSTACKTRACE END\r"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:10",
+      "core",
+      "info",
+      "after the stacktrace\r"
+     ],
+     "a": {
+      "data-jita-grp": "13",
+      "data-jita-gsig": "L:core\u001finfo\u001fafter the stacktrace\r"
+     }
+    },
+    {
+     "c": "error bordertop exception",
+     "cells": [
+      "10:00:11",
+      "ui",
+      "error",
+      "EXCEPTION #4 logged at 03/12/2026 10:00:11 : ValueError: bad\r"
+     ],
+     "a": {
+      "data-jita-grp": "14",
+      "data-jita-gsig": "B:ui\u001ferror\u001fEXCEPTION # logged at # # : ValueError: bad\r\u001eui\u001ferror\u001fCaught at:\r\u001eui\u001fwarning\u001fa block cut off by the next second\r\u001e\u001f\u001fwarning facility is empty\r\u001e\u001f\u001fa line with no tabs at all\r\u001enet\u001finfo\u001fkey\tvalue\r\u001enet\u001funknowntype\u001fthe last line\r"
+     }
+    },
+    {
+     "c": "error exception",
+     "cells": [
+      "10:00:11",
+      "ui",
+      "error",
+      "Caught at:\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "warning bordertop",
+     "cells": [
+      "10:00:12",
+      "ui",
+      "warning",
+      "a block cut off by the next second\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:13",
+      "",
+      "",
+      "warning facility is empty\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "",
+      "",
+      "",
+      "a line with no tabs at all\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:14",
+      "net",
+      "info",
+      "key\tvalue\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    },
+    {
+     "c": "info",
+     "cells": [
+      "10:00:15",
+      "net",
+      "unknowntype",
+      "the last line\r"
+     ],
+     "a": {
+      "data-jita-grp": "14"
+     }
+    }
+   ],
+   "side": {},
+   "heads": {}
+  }
+ },
+ "game log, header only": {
+  "first": {
+   "loader": "none",
+   "table": "table",
+   "rows": [],
+   "side": {},
+   "heads": {}
+  }
+ },
+ "Method Calls": {
+  "first": {
+   "loader": "none",
+   "table": "table",
+   "rows": [
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "machoNet::GetTime (RemoteServiceCall)",
+      "100\r"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:01",
+      "foo::Bar",
+      "20\r"
+     ]
+    },
+    {
+     "c": "yellow",
+     "cells": [
+      "12:00:02",
+      "baz::Slow",
+      "500\r"
+     ]
+    },
+    {
+     "c": "yellow",
+     "cells": [
+      "12:00:03",
+      "baz::Slower",
+      "1499\r"
+     ]
+    },
+    {
+     "c": "red",
+     "cells": [
+      "12:00:04",
+      "baz::Slowest",
+      "1500\r"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:05",
+      "machoNet::GetTime (RemoteServiceCall)",
+      "300\r"
+     ]
+    },
+    {
+     "c": "row peakMachoCell",
+     "cells": [
+      "12:00:06",
+      "machoNet::GetTime (RemoteServiceCall)",
+      "300\r"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:07",
+      "q::&lt;lambda>",
+      "7\r"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:08",
+      "machoNet::GetTime (RemoteServiceCall)",
+      "50\r"
+     ]
+    }
+   ],
+   "side": {
+    "#averageMacho": "Average machoNet::GetTime duration: 188ms <i class=\"fa-regular fa-circle-question\" title=\"machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue.\"></i>",
+    "#peakMacho": "Peak machoNet::GetTime duration: 300ms <i class=\"fa-regular fa-circle-question\" title=\"Clicking this row scrolls to the highest GetTime value withing this log file.\"></i>"
+   },
+   "heads": {}
+  },
+  "scrolledTo": [
+   6
+  ]
+ },
+ "Method Calls without GetTime": {
+  "first": {
+   "loader": "none",
+   "table": "table",
+   "rows": [
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "foo",
+      "20\r"
+     ]
+    },
+    {
+     "c": "yellow",
+     "cells": [
+      "12:00:01",
+      "bar",
+      "600\r"
+     ]
+    }
+   ],
+   "side": {
+    "#averageMacho": "Average machoNet::GetTime duration: n/a <i class=\"fa-regular fa-circle-question\" title=\"machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue.\"></i>",
+    "#peakMacho": "Peak machoNet::GetTime duration: n/a <i class=\"fa-regular fa-circle-question\" title=\"Clicking this row scrolls to the highest GetTime value withing this log file.\"></i>"
+   },
+   "heads": {}
+  },
+  "scrolledTo": []
+ },
+ "Outstanding Calls": {
+  "first": {
+   "loader": "none",
+   "table": "table",
+   "rows": [
+    {
+     "c": "row",
+     "cells": [
+      "2026-11-21 12:00:00",
+      "machoNet::Call (RemoteServiceCall)\r"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "2026-11-21 12:00:01",
+      "inventory::&lt;GetItems>\r"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "a line without a dash\r",
+      "undefined"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "2026-11-21 12:00:02",
+      "a"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "2026-11-21 12:00:03",
+      "after the empty line\r"
+     ]
+    }
+   ],
+   "side": {},
+   "heads": {}
+  }
+ },
+ "Last Crashes": {
+  "first": {
+   "loader": "none",
+   "table": "table",
+   "rows": [
+    {
+     "c": "row",
+     "cells": [
+      "2026-11-20 09:15:00",
+      "3f2a9c1e-0000-4000-8000-000000000001\r"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "2026-11-21 10:30:00",
+      "3f2a9c1e-0000-4000-8000-000000000002\r"
+     ]
+    }
+   ],
+   "side": {},
+   "heads": {}
+  }
+ },
+ "Process Health, and the FPS / spf toggle": {
+  "first": {
+   "loader": "none",
+   "table": "table",
+   "rows": [
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "1700000000.5",
+      "10",
+      "6",
+      "101",
+      "2048",
+      "5",
+      "0",
+      "0.25",
+      "62.5",
+      "12",
+      "3",
+      "1000",
+      "900",
+      "10",
+      "9",
+      "1",
+      "1.0\r"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "1700000000.5",
+      "100",
+      "6",
+      "101",
+      "2048",
+      "5",
+      "0",
+      "0.25",
+      [
+       "30",
+       "yellow"
+      ],
+      "12",
+      "3",
+      "1000",
+      "900",
+      "10",
+      "9",
+      "1",
+      [
+       ".15\r",
+       "red"
+      ]
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "1700000000.5",
+      "10",
+      "6",
+      "101",
+      "2048",
+      "5",
+      "0",
+      "0.25",
+      [
+       "15",
+       "red"
+      ],
+      "12",
+      "3",
+      "1000",
+      "900",
+      "10",
+      "9",
+      "1",
+      [
+       "0.5\r",
+       "yellow"
+      ]
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "1700000000.5",
+      "10",
+      "6",
+      "101",
+      "2048",
+      "5",
+      "0",
+      "0.25",
+      [
+       "20",
+       "yellow"
+      ],
+      "12",
+      "3",
+      "1000",
+      "900",
+      "10",
+      "9",
+      [
+       "10",
+       "red"
+      ],
+      ".9\r"
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "1700000000.5",
+      "10",
+      "6",
+      "101",
+      "2048",
+      "5",
+      "0",
+      "0.25",
+      "50",
+      "12",
+      "3",
+      "1000",
+      "900",
+      "10",
+      "9",
+      [
+       "2",
+       "red"
+      ],
+      [
+       "1.10\r",
+       "red"
+      ]
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "1700000000.5",
+      "10",
+      "6",
+      "101",
+      "2048",
+      "5",
+      "0",
+      "0.25",
+      [
+       "10",
+       "red"
+      ],
+      "12",
+      "3",
+      "1000",
+      "900",
+      "10",
+      "9",
+      "1",
+      [
+       "0.2\r",
+       "red"
+      ]
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "1700000000.5",
+      "10",
+      "6",
+      "101",
+      "2048",
+      "5",
+      "0",
+      "0.25",
+      "80",
+      "12",
+      "3",
+      "1000",
+      "900",
+      "10",
+      "9",
+      "1",
+      [
+       "0.8\r",
+       "yellow"
+      ]
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "1700000000.5",
+      "10",
+      "6",
+      "101",
+      "2048",
+      "5",
+      "0",
+      "0.25",
+      "80",
+      "12",
+      "3",
+      "1000",
+      "900",
+      "10",
+      "9",
+      "1",
+      [
+       "1.05\r",
+       "red"
+      ]
+     ]
+    },
+    {
+     "c": "row",
+     "cells": [
+      "12:00:00",
+      "1700000000.5",
+      "10",
+      "6",
+      "101",
+      "2048",
+      "5",
+      "0",
+      "0.25",
+      "80",
+      "12",
+      "3",
+      "1000",
+      "900",
+      "10",
+      "9",
+      "1",
+      "1\r"
+     ]
+    }
+   ],
+   "side": {},
+   "heads": {
+    "9": "FPS <i class=\"fa-regular fa-circle-question\" title=\"Frames per second\"></i>"
+   }
+  },
+  "clicks": [
+   {
+    "loader": "none",
+    "table": "table",
+    "rows": [
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "0.016",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       "1.0\r"
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "100",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       [
+        "0.0333",
+        "yellow"
+       ],
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        ".15\r",
+        "red"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       [
+        "0.0667",
+        "red"
+       ],
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        "0.5\r",
+        "yellow"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       [
+        "0.05",
+        "yellow"
+       ],
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       [
+        "10",
+        "red"
+       ],
+       ".9\r"
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "0.02",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       [
+        "2",
+        "red"
+       ],
+       [
+        "1.10\r",
+        "red"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       [
+        "0.1",
+        "red"
+       ],
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        "0.2\r",
+        "red"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "0.0125",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        "0.8\r",
+        "yellow"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "0.0125",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        "1.05\r",
+        "red"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "0.0125",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       "1\r"
+      ]
+     }
+    ],
+    "side": {},
+    "heads": {
+     "9": "spf <i class=\"fa-regular fa-circle-question\" title=\"Seconds per frame\"></i>"
+    }
+   },
+   {
+    "loader": "none",
+    "table": "table",
+    "rows": [
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "62.5",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       "1.0\r"
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "100",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       [
+        "30.03",
+        "yellow"
+       ],
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        ".15\r",
+        "red"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       [
+        "14.9925",
+        "red"
+       ],
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        "0.5\r",
+        "yellow"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       [
+        "20",
+        "yellow"
+       ],
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       [
+        "10",
+        "red"
+       ],
+       ".9\r"
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "50",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       [
+        "2",
+        "red"
+       ],
+       [
+        "1.10\r",
+        "red"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       [
+        "10",
+        "red"
+       ],
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        "0.2\r",
+        "red"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "80",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        "0.8\r",
+        "yellow"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "80",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       [
+        "1.05\r",
+        "red"
+       ]
+      ]
+     },
+     {
+      "c": "row",
+      "cells": [
+       "12:00:00",
+       "1700000000.5",
+       "10",
+       "6",
+       "101",
+       "2048",
+       "5",
+       "0",
+       "0.25",
+       "80",
+       "12",
+       "3",
+       "1000",
+       "900",
+       "10",
+       "9",
+       "1",
+       "1\r"
+      ]
+     }
+    ],
+    "side": {},
+    "heads": {
+     "9": "FPS <i class=\"fa-regular fa-circle-question\" title=\"Frames per second\"></i>"
+    }
+   }
+  ]
+ }
+}
