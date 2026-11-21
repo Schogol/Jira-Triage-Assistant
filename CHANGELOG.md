@@ -14,6 +14,13 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.29 (2026-11-21)
+
+### Fixed issues
+
+- ISD credits: last month's final count is no longer skipped when another count was running at that moment.
+- ISD credits: when Jira is briefly unavailable while members' old accounts are looked up, the count is made again instead of going on with another person's old account, or none.
+
 ## 3.53.28 (2026-11-21)
 
 ### Fixed issues
