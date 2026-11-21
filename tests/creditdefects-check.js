@@ -118,6 +118,50 @@ const count = async (seen) => {
     const head = cut('JiTA.credits = {', '\n    PAGE_SIZE:');
     ok('the credits name no projects any more (defects count in every space)', !/PROJECTS:/.test(head) && src.indexOf('PROJECTS: C.PROJECTS') < 0);
 
+    // ================= reports attached: your own count and the full one agree =================
+    // An attach the automation made while Xena had the report, moved out of Attached since and given to Yuri: the full
+    // count credits it by its assignee then (crEffectiveActioner); the self count asked for the automation's attaches by
+    // the assignee now and missed it (review 2026-11-20 drift-own-3).
+    {
+        const at = (d) => '2026-11-' + d + 'T10:00:00.000+0000';
+        const st = (by, from, to, d) => ({ author: { accountId: by }, created: at(d), items: [{ field: 'status', fromString: from, toString: to }] });
+        const as = (to, d) => ({ author: { accountId: 'A-LEAD' }, created: at(d), items: [{ field: 'assignee', from: null, to: to }] });
+        const HIST = {
+            'EBR-1': [as('A-X', '02'), st('AUTO', 'Open', 'Attached', '03'), st('A-DEV', 'Attached', 'Open', '04'), st('AUTO', 'Open', 'Attached', '05'), as('A-Y', '06')],
+            'EBR-2': [st('A-X', 'Open', 'Attached', '07')],
+            'EBR-3': [as('A-X', '02'), st('AUTO', 'Open', 'Attached', '08')],
+            'EBR-4': [as('A-Y', '02'), st('AUTO', 'Open', 'Attached', '03'), st('A-DEV', 'Attached', 'Open', '04'), as('A-X', '05'), as('A-Z', '06'), st('AUTO', 'Open', 'Attached', '07')]
+        };
+        // Each search as Jira would answer it for that month, by its JQL; any other answers nothing, and is noted.
+        const unscripted = [];
+        const keysFor = (jql) => {
+            const ks = (arr) => arr.reduce((o, k) => { o[k] = true; return o; }, {});
+            if (/assignee WAS IN \("A-X"\)/.test(jql)) { return ks(['EBR-1', 'EBR-4']); }        // the automation's, moved out, Xena's at some point
+            if (/BY "AUTO".*AND assignee in \("A-X"\)$/.test(jql)) { return ks(['EBR-3']); }       // the automation's, Xena's now
+            if (/BY "AUTO".*AND assignee in \("A-Y"\)$/.test(jql)) { return ks(['EBR-1']); }       // ...Yuri's now
+            if (/CHANGED TO "Attached" BY "A-X"/.test(jql)) { return ks(['EBR-2']); }
+            if (/CHANGED TO "Attached" BY "A-Y"/.test(jql)) { return ks([]); }
+            if (/^project = EBR AND status CHANGED FROM "Attached" DURING \([^)]*\)$/.test(jql)) { return ks(['EBR-1', 'EBR-4']); }   // moved out this month
+            unscripted.push(jql);
+            return {};
+        };
+        const crc = { EBR: 'EBR', ATTACHED_STATUS: 'Attached', OPEN_STATUS: 'Open', CLOSED_STATUS: 'Closed', CONVERT_COMMENT: 'converted', AUTOMATION_ID: 'AUTO',
+            AUTOMATION_EMAIL: 'automation@x', CONCURRENCY: 4, CRAWL_DELAY_MS: 0 };
+        const A = new Function('crc', 'crAllKeys', 'crCount', 'crAllHistories', 'crTick', 'crProgress', 'crSleep',
+            cut('    function crAccList(', '\n') + '\n' + fn('crParallel') + fn('crSerial') + fn('crIsAutomation') + fn('crAssigneeAt') + fn('crEffectiveActioner') +
+            fn('crReportsActioned') + fn('crReportsActionedSelf') + '\nreturn { full: crReportsActioned, self: crReportsActionedSelf };')(
+            crc, (jql) => Promise.resolve(keysFor(jql)), () => Promise.resolve(0), (k) => Promise.resolve(HIST[k] || []), () => {}, () => {}, () => Promise.resolve());
+        const B2 = { start: '2026-11-01', end: '2026-12-01' };
+        const rows = { Xena: { attached: 0 }, Yuri: { attached: 0 } };
+        await A.full({ Xena: ['A-X'], Yuri: ['A-Y'] }, B2, rows, { 'A-X': 'Xena', 'A-Y': 'Yuri' });
+        const mine = await A.self(['A-X'], B2);
+        ok('(the full count credits Xena the attach the automation made for her, though Yuri has the report now)', rows.Xena.attached === 3 && rows.Yuri.attached === 0, J(rows));
+        ok('your own count of reports attached is the full count\'s: an automation attach moved out and reassigned since is yours too', mine.attached === rows.Xena.attached,
+            mine.attached + ' vs ' + rows.Xena.attached);
+        ok('...while one made for someone else, though it was yours later in the month, is not (control)', mine.attached === 3, String(mine.attached));
+        ok('...every search made is one the month answers (control)', unscripted.length === 0, unscripted.join(' | '));
+    }
+
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'credit defect checks passed.'));
     process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('CRASH ' + (e && e.stack || e)); process.exit(2); });

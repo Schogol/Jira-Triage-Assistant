@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.29
+// @version     3.53.30
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.29
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.30
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -12551,6 +12551,11 @@ function jitaWorkerBody(cfg) {
         if (crc.AUTOMATION_ID) {
             attQueries.push('project = ' + crc.EBR + ' AND status CHANGED TO "' + crc.ATTACHED_STATUS + '" BY "' + crc.AUTOMATION_ID + '" ' + win + ' AND assignee in (' + crAccList(accs) + ')');
         }
+        // The automation's attaches while the member had the report, moved out of Attached since and given to someone else:
+        // the full count credits each by its assignee then (crEffectiveActioner), the query above by its assignee now, so
+        // they were missing here. Only moved-out ones are taken, each read by its changelog as the full count reads it.
+        var autoWas = crc.AUTOMATION_ID ? ('project = ' + crc.EBR + ' AND status CHANGED TO "' + crc.ATTACHED_STATUS + '" BY "' + crc.AUTOMATION_ID + '" ' + win +
+            ' AND status CHANGED FROM "' + crc.ATTACHED_STATUS + '" ' + win + ' AND assignee WAS IN (' + crAccList(accs) + ') ' + win) : null;
         var movedOut = {}, attSet = {}, attached = 0, trashed = 0, reassigned = 0;
         return crSerial(accs, function (acc) {
             var base = 'project = ' + crc.EBR + ' AND status CHANGED FROM "' + crc.OPEN_STATUS + '" TO "' + crc.CLOSED_STATUS + '" BY "' + acc + '" ' + win;
@@ -12563,6 +12568,9 @@ function jitaWorkerBody(cfg) {
             });
         }).then(function () {
             return crSerial(attQueries, function (jql) { return crAllKeys(jql).then(function (keys) { for (var kk in keys) { if (keys.hasOwnProperty(kk)) { attSet[kk] = true; } } }); });
+        }).then(function () {
+            if (!autoWas) { return null; }
+            return crAllKeys(autoWas).then(function (keys) { for (var kw in keys) { if (keys.hasOwnProperty(kw) && movedOut[kw]) { attSet[kw] = true; } } });
         }).then(function () {
             var myAcc = {}; accs.forEach(function (a) { myAcc[a] = true; });
             var ambiguous = [];
