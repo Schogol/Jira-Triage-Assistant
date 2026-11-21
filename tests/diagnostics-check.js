@@ -31,7 +31,7 @@ global.JITA_IS_FORGE_FRAME = false; global.JITA_IS_SUBFRAME = false;
 global.location = { pathname: '/browse/EDR-41291' };
 Object.defineProperty(global, 'navigator', { value: { userAgent: 'Mozilla/5.0 TestBrowser/1.0' }, configurable: true, writable: true });   // Node has one of its own
 global.GM_info = { scriptHandler: 'Tampermonkey', version: '5.3.3' };
-global.JiTA = eval(S.members(src, 'var JiTA', ['log', 'warn', 'error', 'dlog', '_out', 'LOG_MAX', '_logLines', '_fmtArgs', 'caught', 'CAUGHT_MAX', '_caughtList']));
+global.JiTA = eval(S.members(src, 'var JiTA', ['log', 'warn', 'error', 'dlog', '_out', 'LOG_MAX', '_logLines', '_fmtArgs', 'caught', 'CAUGHT_MAX', '_caughtList', 'CAUGHT_FRAMES', '_frames']));
 Object.assign(JiTA, { SCRIPT_VERSION: '3.53.0', DATA_VERSION: 3, DATA_VERSION_EBR: 4 });
 eval(S.top(src, 'JiTA.diag'));
 const D = JiTA.diag;
@@ -45,8 +45,21 @@ const reset = () => { JiTA._caughtList.length = 0; JiTA._logLines.length = 0; lo
     JiTA.caught('ui.ensure', boom);
     let c = JiTA._caughtList;
     ok('a caught error is kept with where it was, its message, the top of its stack, and when', c.length === 1 && c[0].where === 'ui.ensure' && c[0].msg === 'x is undefined' &&
-        c[0].n === 1 && c[0].first === c[0].last && /^TypeError: x is undefined/.test(c[0].stack) && c[0].stack.split('\n').length <= 4, JSON.stringify(c[0]));
+        c[0].n === 1 && c[0].first === c[0].last && /^\s+at /.test(c[0].stack) && c[0].stack.indexOf('TypeError') < 0 && c[0].stack.split('\n').length <= JiTA.CAUGHT_FRAMES,
+        JSON.stringify(c[0]));
     ok('...and, with Debug logging off, logs nothing', logged.length === 0);
+    // Firefox and Safari start a stack with the frame that threw; Chrome and Edge with "Name: message", over every line of it.
+    const FX = ['ensure@moz-extension://abc/JiTA.user.js:120:5', 'run@moz-extension://abc/JiTA.user.js:200:3', 'observe@moz-extension://abc/JiTA.user.js:300:1', 'outer@moz-extension://abc/JiTA.user.js:400:1'];
+    JiTA.caught('ff.ensure', { name: 'TypeError', message: 'el is null', stack: FX.join('\n') + '\n' });
+    const fx = c.find((x) => x.where === 'ff.ensure');
+    ok('a Firefox stack keeps the frame that threw, which has no "Name: message" line before it', fx.stack === FX.slice(0, 3).join('\n'), JSON.stringify(fx.stack));
+    ok('...and Copy diagnostics shows it under the error', D._errors().indexOf('        ' + FX[0]) === D._errors().indexOf('  1x  ff.ensure: el is null  (at ' + D._time(fx.last) + ')') + 1, D._errors().join(' | '));
+    JiTA.caught('v8.ensure', { name: 'Error', message: 'two\nlines', stack: 'Error: two\nlines\n    at a (x.js:1:1)\n    at b (x.js:2:2)' });
+    ok('...while a Chrome stack leaves its header out, over every line of a message', c.find((x) => x.where === 'v8.ensure').stack === '    at a (x.js:1:1)\n    at b (x.js:2:2)',
+        JSON.stringify(c.find((x) => x.where === 'v8.ensure').stack));
+    reset();
+    JiTA.caught('ui.ensure', boom);
+    c = JiTA._caughtList;
     await new Promise((r) => setTimeout(r, 5000));
     for (let i = 0; i < 99; i++) { JiTA.caught('ui.ensure', new TypeError('x is undefined')); }
     ok('the same error in the same place, again and again (an observer on every page change), is one entry with its count', c.length === 1 && c[0].n === 100 && c[0].last - c[0].first === 5000, JSON.stringify(c[0]));

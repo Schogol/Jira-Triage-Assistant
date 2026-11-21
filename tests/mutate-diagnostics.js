@@ -14,7 +14,11 @@ const muts = [
     [H, 'a caught error is never logged', "            JiTA.dlog('[JiTA] caught in ' + where + ':', e);\n", ''],
     [H, 'the recorder throws on what it cannot read', '} catch (x) { /* the recorder never throws */ }', '} catch (x) { throw x; }'],
     [H, 'a long message is kept whole', "var msg = String((e && (e.message || e.name)) || e || 'unknown error').slice(0, 300);", "var msg = String((e && (e.message || e.name)) || e || 'unknown error');"],
-    [H, 'no stack is kept', "var stack = (e && typeof e.stack === 'string') ? e.stack.split('\\n').slice(0, 4).join('\\n') : '';", "var stack = '';"],
+    [H, "no stack is kept", "var stack = (e && typeof e.stack === 'string') ? JiTA._frames(e.stack) : '';", "var stack = '';"],
+    [H, "the stack's first line is always dropped", "        return lines.slice(at < 0 ? 0 : at).filter(function (s) { return !!s.trim(); }).slice(0, JiTA.CAUGHT_FRAMES).join('\\n');", "        return lines.slice(1).filter(function (s) { return !!s.trim(); }).slice(0, JiTA.CAUGHT_FRAMES).join('\\n');"],
+    [H, "a Chrome stack keeps its header", "        return lines.slice(at < 0 ? 0 : at).filter(function (s) { return !!s.trim(); }).slice(0, JiTA.CAUGHT_FRAMES).join('\\n');", "        return lines.filter(function (s) { return !!s.trim(); }).slice(0, JiTA.CAUGHT_FRAMES).join('\\n');"],
+    [H, "a Chrome header over two lines keeps its second", "        return lines.slice(at < 0 ? 0 : at).filter(function (s) { return !!s.trim(); }).slice(0, JiTA.CAUGHT_FRAMES).join('\\n');", "        return lines.slice(at < 0 ? 0 : 1).filter(function (s) { return !!s.trim(); }).slice(0, JiTA.CAUGHT_FRAMES).join('\\n');"],
+    [H, "the report drops the frame that threw", "            x.stack.split('\\n').forEach(function (s) { if (s.trim()) { out.push('        ' + s.trim()); } });", "            x.stack.split('\\n').slice(1).forEach(function (s) { if (s.trim()) { out.push('        ' + s.trim()); } });"],
     // ---- the catches ----
     [H, 'a catch drops its error again', "catch (e4) { JiTA.caught('dv.ensure', e4); }", 'catch (e4) { /* swallow */ }'],
     [H, 'a catch names another call', "catch (e2) { JiTA.caught('ui.updateVisibility', e2); }", "catch (e2) { JiTA.caught('ui.ensure', e2); }"],
