@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.31
+// @version     3.53.32
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.31
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.32
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -3353,20 +3353,39 @@ var JiTA = {
     },
     LOG_MAX: 200,
     _logLines: [],
-    // A log call's arguments as one line of text: an error by its name and message, anything else as JSON, each cut short.
+    // A log call's arguments as one line of text: an error by its name and message, a page element by what names it
+    // (_fmtEl), anything else as JSON, each cut short.
     _fmtArgs: function (args) {
         var out = [];
         for (var i = 0; i < args.length; i++) {
-            var a = args[i], s;
+            var a = args[i], s, el = JiTA._fmtEl(a);
             try {
                 s = typeof a === 'string' ? a
                     : (a instanceof Error) ? (a.name + ': ' + a.message)
+                    : el ? el
                     : (a === undefined || typeof a === 'function') ? String(a) : JSON.stringify(a);
             } catch (e) { s = Object.prototype.toString.call(a); }
             s = String(s);
             out.push(s.length > 300 ? s.slice(0, 300) + '...' : s);
         }
         return out.join(' ');
+    },
+    // A page element as a log line names it: its tag, then its id, role, data-testid and aria-label where it has them (its
+    // first class when it has none of these), and, when it has no data-testid of its own, that of the nearest element around
+    // it that has one. JSON has nothing to write for an element: Firefox's sandbox refused it, which logged "[object
+    // HTMLDivElement]", and Chrome wrote "{}". '' for anything that is no element. Never throws.
+    _fmtEl: function (a) {
+        try {
+            if (!a || typeof a !== 'object' || a.nodeType !== 1 || typeof a.tagName !== 'string') { return ''; }
+            var attr = function (n) { var v = a.getAttribute(n); return v ? String(v).replace(/\s+/g, ' ').trim().slice(0, 80) : ''; };
+            var s = a.tagName.toLowerCase(), id = attr('id'), named = !!id, own = attr('data-testid');
+            if (id) { s += '#' + id; }
+            ['role', 'data-testid', 'aria-label'].forEach(function (n) { var v = attr(n); if (v) { s += '[' + n + '="' + v + '"]'; named = true; } });
+            if (!named) { var cls = attr('class').split(' ')[0]; if (cls) { s += '.' + cls; } }
+            var up = (!own && a.parentElement && a.parentElement.closest) ? a.parentElement.closest('[data-testid]') : null;
+            if (up) { s += ' in [data-testid="' + String(up.getAttribute('data-testid') || '').slice(0, 80) + '"]'; }
+            return s;
+        } catch (e) { return ''; }
     },
     // An error JiTA caught and went on from: a background step that failed, a page observer pass that threw. Each used to
     // vanish without a trace. Kept for Copy diagnostics, one entry per place and message with how often it came (an
