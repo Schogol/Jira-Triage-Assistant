@@ -14,6 +14,14 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.23 (2026-11-21)
+
+### Fixed issues
+
+- Convert to Defect: opening another issue while a report converts no longer takes you to the new defect, and when no defect is made, Convert works again after 30 seconds instead of staying off until a reload.
+- Copy diagnostics in Firefox: each error keeps the line that says where it happened.
+- Small improvements behind the scenes.
+
 ## 3.53.22 (2026-11-21)
 
 ### Fixed issues

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.22
+// @version     3.53.23
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.22
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.23
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -176,6 +176,9 @@ var savedVariables = [["key",""], ["parser", ""], ["scrollbar", ""], ["credits",
 // Index 0 ("key") is a reserved legacy slot with no boolean feature and is deliberately omitted.
 var FLAG = { parser: 1, scrollbar: 2, credits: 3, buttons: 4, similarDefects: 5, detailView: 6, screenOcr: 7, defectProfile: 8, defectChecklist: 9 };
 function flagOn(name) { var i = FLAG[name]; return i != null && !!savedVariables[i][1]; }
+// A switch as the browser has it now, for every tab: flagOn is what this tab read at load, and a switch turned in another
+// tab reaches it only for 'buttons'. A stored value is never "" after the load above, which stores true for a new one.
+function flagStored(name) { var i = FLAG[name]; return i != null && !!gmGet(savedVariables[i][0], true); }
 function setFlag(name, val) {
     var i = FLAG[name];
     if (i == null) { return; }
@@ -945,7 +948,9 @@ function jitaOpenIssue(key, done) {
 // After Convert-to-Defect, the automation creates a defect and links it to the EBR. Poll the EBR's links for one that
 // wasn't there before (prefer a defect project) and open it in-app (jitaOpenIssue). When none appears within ~30 s (the
 // conversion linked it some other way, or never finished), the report is shown as Jira has it now and let go, and the
-// toast says to look at its links before converting it again.
+// toast says to look at its links before converting it again. A user who moved on is never taken to the defect, but
+// the links are still asked: polling stopped once they left, so a conversion that made no defect kept Convert off until
+// a reload.
 function jitaGoToNewDefect(ebrKey, beforeKeys) {
     var before = {};
     (beforeKeys || []).forEach(function (k) { before[k] = true; });
@@ -954,7 +959,7 @@ function jitaGoToNewDefect(ebrKey, beforeKeys) {
         if (tries >= 30) {
             delete jitaConvertBusy[ebrKey];
             jitaConvertButtonState();
-            jitaRefreshIssueView();
+            if (jitaCurrentKey() === ebrKey) { jitaRefreshIssueView(); }   // not another issue the user has moved on to
             JiTA.ui.toast('No new defect showed up among ' + ebrKey + '\'s links within 30 seconds. Check its links before converting it again.');
             return;
         }
@@ -963,13 +968,15 @@ function jitaGoToNewDefect(ebrKey, beforeKeys) {
     function poll() {
         // The user has moved on to another issue (Jira is one page): neither take them away from it nor reload it
         // under a comment they may be typing. The report shows the result when they come back to it, its Convert
-        // still disabled, no longer spinning.
-        if (jitaCurrentKey() !== ebrKey) { jitaConvertBusy[ebrKey] = 'left'; return; }
+        // disabled, no longer spinning, until its defect is there or the 30 seconds are up.
+        if (jitaCurrentKey() !== ebrKey && jitaConvertBusy[ebrKey] === true) { jitaConvertBusy[ebrKey] = 'left'; }
         $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks', type: 'GET', dataType: 'json' })
             .done(function (d) {
                 var fresh = jitaLinkedKeys(d.fields && d.fields.issuelinks).filter(function (k) { return !before[k]; });
                 var defect = fresh.filter(function (k) { return /^(EDR|EO|PLAT)-/.test(k); })[0] || fresh[0];
                 if (defect) {
+                    // Left before or while its links were read: the report counts as converted, and nobody is taken anywhere.
+                    if (jitaConvertBusy[ebrKey] === 'left' || jitaCurrentKey() !== ebrKey) { jitaConvertBusy[ebrKey] = defect; jitaConvertButtonState(); return; }
                     // The report stays on screen, its button spinning, until the defect has loaded; then it is converted.
                     jitaOpenIssue(defect, function () { jitaConvertBusy[ebrKey] = defect; jitaConvertButtonState(); });
                     return;
@@ -3366,7 +3373,7 @@ var JiTA = {
             for (var i = 0; i < list.length; i++) {
                 if (list[i].key === key) { list[i].n++; list[i].last = now; return; }
             }
-            var stack = (e && typeof e.stack === 'string') ? e.stack.split('\n').slice(0, 4).join('\n') : '';
+            var stack = (e && typeof e.stack === 'string') ? JiTA._frames(e.stack) : '';
             list.push({ key: key, where: where, msg: msg, stack: stack, n: 1, first: now, last: now });
             if (list.length > JiTA.CAUGHT_MAX) { list.shift(); }
             JiTA.dlog('[JiTA] caught in ' + where + ':', e);
@@ -3374,6 +3381,15 @@ var JiTA = {
     },
     CAUGHT_MAX: 50,
     _caughtList: [],
+    // The top CAUGHT_FRAMES frames of a stack, the frame that threw first. Chrome and Edge head a stack with the error's own
+    // "Name: message" (over as many lines as the message has) and write each frame as "    at ..."; Firefox and Safari start
+    // with the frame that threw ("fn@url:line:col"). Leaving out the first line always dropped that frame in Firefox.
+    CAUGHT_FRAMES: 3,
+    _frames: function (stack) {
+        var lines = String(stack).split('\n'), at = -1;
+        for (var i = 0; i < lines.length && at < 0; i++) { if (/^\s+at\s/.test(lines[i])) { at = i; } }
+        return lines.slice(at < 0 ? 0 : at).filter(function (s) { return !!s.trim(); }).slice(0, JiTA.CAUGHT_FRAMES).join('\n');
+    },
     // How many related issues the panel lists (similar defects / matching bug reports). User-configurable
     // from the settings menu, persisted in the GM flag 'sdTopN'; default 8, clamped 1..30 (kept below
     // JiTA.rank.CAND so the fusion candidate pool is never the limiting factor). Read live at query time,
@@ -25681,7 +25697,7 @@ JiTA.diag = {
         var out = ['Errors JiTA caught and went on from: ' + (c.length ? c.length + (c.length >= JiTA.CAUGHT_MAX ? ' (only the latest are kept)' : '') : 'none')];
         c.forEach(function (x) {
             out.push('  ' + x.n + 'x  ' + x.where + ': ' + x.msg + '  (' + (x.n > 1 ? 'first ' + JiTA.diag._time(x.first) + ', last ' : 'at ') + JiTA.diag._time(x.last) + ')');
-            x.stack.split('\n').slice(1).forEach(function (s) { if (s.trim()) { out.push('        ' + s.trim()); } });
+            x.stack.split('\n').forEach(function (s) { if (s.trim()) { out.push('        ' + s.trim()); } });   // frames only (JiTA._frames)
         });
         return out;
     },
@@ -25776,7 +25792,9 @@ JiTA.census = {
     entry: function () {
         var C = JiTA.census, f = {};
         C.FEATURES.forEach(function (x) {
-            try { f[x.id] = x.sub ? !!x.sub() : flagOn(x.id); } catch (e) { f[x.id] = null; }
+            // As stored, not as this tab read it at load: a tab that has not seen a switch turned elsewhere sent the old one, and
+            // two tabs that disagreed wrote in turn every hour.
+            try { f[x.id] = x.sub ? !!x.sub() : flagStored(x.id); } catch (e) { f[x.id] = null; }
         });
         var ua = '';
         try { ua = navigator.userAgent || ''; } catch (e) { ua = ''; }

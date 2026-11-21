@@ -123,11 +123,37 @@ go('EBR-2', []);
 current = 'EBR-9';   // the user moves on to another issue while it converts
 gets[0].d.resolve({ fields: { issuelinks: [] } });
 timers.shift()();
-ok('once the user is on another issue it stops: no request, no navigation, no refresh', gets.length === 1 && reloads === 0 && timers.length === 0 && !opened.length && viewRefreshes === 0,
-    gets.length + ' requests, ' + reloads + ' reloads');
+ok('once the user is on another issue: no navigation and no refresh, but its links are still asked', gets.length === 2 && reloads === 0 && !opened.length && viewRefreshes === 0,
+    gets.length + ' requests, ' + reloads + ' reloads, ' + opened.join());
 current = 'EBR-2'; button = Button(); jitaConvertButtonState();
 ok('...back on the report, its button is off but no longer spinning: the conversion may yet be done', jitaConvertBusy['EBR-2'] === 'left' && button.disabled && !spinning(button) &&
     button.attrs.title === 'Being converted: its links show the new defect once it is made.', JSON.stringify(button));
+current = 'EBR-9';
+gets[1].d.resolve({ fields: { issuelinks: [{ key: 'EDR-88' }] } });
+ok('...a defect made while the user is away is noted, and nobody is taken to it', jitaConvertBusy['EBR-2'] === 'EDR-88' && !opened.length && viewRefreshes === 0 && !timers.length,
+    JSON.stringify(jitaConvertBusy) + ' ' + opened.join());
+current = 'EBR-2'; button = Button(); jitaConvertButtonState();
+ok('...so back on the report, its button says to which defect', button.disabled === true && button.attrs.title === 'Converted to EDR-88.', JSON.stringify(button));
+current = 'EBR-6'; gets = []; timers = []; opened = []; jitaConvertBusy['EBR-6'] = true;
+go('EBR-6', []);
+current = 'EBR-9'; gets[0].d.resolve({ fields: { issuelinks: [] } }); timers.shift()();
+current = 'EBR-6'; gets[1].d.resolve({ fields: { issuelinks: [{ key: 'EDR-60' }] } });
+ok('...even back on the report when the defect shows up, a user who left is not taken to it', !opened.length && jitaConvertBusy['EBR-6'] === 'EDR-60', opened.join() + ' ' + jitaConvertBusy['EBR-6']);
+current = 'EBR-5'; gets = []; timers = []; opened = []; jitaConvertBusy['EBR-5'] = true;
+go('EBR-5', []);
+current = 'EBR-9';   // moved on while the links are read
+gets[0].d.resolve({ fields: { issuelinks: [{ key: 'EDR-55' }] } });
+ok('a user who moved on while the links were read is not taken to the defect they hold', !opened.length && jitaConvertBusy['EBR-5'] === 'EDR-55', opened.join() + ' ' + jitaConvertBusy['EBR-5']);
+current = 'EBR-7'; gets = []; timers = []; opened = []; viewRefreshes = 0; toasts = []; jitaConvertBusy['EBR-7'] = true;
+go('EBR-7', []);
+current = 'EBR-9';
+for (let i = 0; i < 31; i++) { gets[gets.length - 1].d.resolve({ fields: { issuelinks: [] } }); if (timers.length) { timers.shift()(); } }
+ok('away, it still gives up after 30 tries and lets the report go', !jitaConvertBusy['EBR-7'] && gets.length === 31 && !opened.length, gets.length + ' ' + JSON.stringify(jitaConvertBusy));
+ok('...without refreshing the issue the user is on, the toast naming the report', viewRefreshes === 0 && toasts.some((t) => /^No new defect showed up among EBR-7's links within 30 seconds\./.test(t)),
+    viewRefreshes + ' ' + toasts.join('|'));
+current = 'EBR-7'; button = Button(); jitaConvertButtonState();
+ok('...so back on it, Convert works again', button.disabled === false, JSON.stringify(button));
+viewRefreshes = 0; toasts = [];
 current = 'EBR-3'; gets = []; timers = []; reloads = 0; button = Button(); jitaConvertBusy['EBR-3'] = true; jitaConvertButtonState();
 go('EBR-3', []);
 for (let i = 0; i < 31; i++) { gets[gets.length - 1].d.reject({ status: 502 }); if (timers.length) { timers.shift()(); } }
