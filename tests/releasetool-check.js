@@ -5,6 +5,10 @@
 // mutate-releasetool.js takes it; JITA_SRC and JITA_CHANGELOG name the files it starts from.
 const fs = require('fs'), path = require('path'), os = require('os');
 const { spawnSync } = require('child_process');
+// Today, for the tool and for this check, is today where it is furthest ahead (UTC+14), so the newest real entry,
+// dated by its writer's own clock, is never after it. On CI (UTC) a release made just after midnight in Europe carried
+// tomorrow's date until UTC midnight, and the tool refused to date a new entry before it ("dated today" failed).
+process.env.TZ = 'Pacific/Kiritimati';
 const TOOL = path.resolve(process.env.JITA_RELEASE || path.join(__dirname, 'release.js'));
 const SRC1 = fs.readFileSync(process.env.JITA_SRC || path.join(__dirname, '..', 'JiTA.user.js'), 'utf8');
 const MD1 = fs.readFileSync(process.env.JITA_CHANGELOG || path.join(__dirname, '..', 'CHANGELOG.md'), 'utf8');
