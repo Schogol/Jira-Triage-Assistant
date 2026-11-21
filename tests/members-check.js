@@ -496,7 +496,8 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('picking the default role stores nothing, and asks for no publish', !w.written && saves.length === 0 && pubs === 0, pubs + ' publishes');
     w = await M.setRole('acc-dist', 'Senior', 'ISD Distillery');
     let mv = props[L.MEMBERS_KEY].value;
-    ok('another role is stored, with who set it and when', w.written && mv.m['acc-dist'].role === 'Senior' && mv.m['acc-dist'].by === 'schogol' && /^\d{4}-\d\d-\d\d$/.test(mv.m['acc-dist'].at), J(mv));
+    ok('another role is stored, with who set it and when', w.written && mv.m['acc-dist'].role === 'Senior' && mv.m['acc-dist'].roleBy === 'schogol' && /^\d{4}-\d\d-\d\d$/.test(mv.m['acc-dist'].roleAt) &&
+        !('by' in mv.m['acc-dist']) && !('noteBy' in mv.m['acc-dist']), J(mv));
     await later();
     ok('...and brings the page in step', pubs === 1 && pageWrites.length === 1 && pageWrites[0].id === L.MEMBERS_PAGE && /<td[^>]*>Senior<\/td><td[^>]*>ISD Distillery<\/td>/.test(pageWrites[0].html),
         pubs + ' publishes, ' + pageWrites.length + ' writes');
@@ -505,6 +506,39 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('a note is stored as notes are: spaces squeezed, one blank line at most', mv.m['acc-dist'].note === 'Ask for update?\n\nOn leave', J(mv.m['acc-dist'].note));
     w = await M.setNote('acc-dist', 'Ask for update?\n\nOn leave');
     ok('...the same note again writes nothing', !w.written);
+    // the note and the role each keep their own stamp (review 2026-11-20 members-robust-7)
+    let ent = props[L.MEMBERS_KEY].value.m['acc-dist'];
+    ok('the note gets a stamp of its own, the role keeps its own', ent.noteBy === 'schogol' && /^\d{4}-\d\d-\d\d$/.test(ent.noteAt) && ent.roleBy === 'schogol', J(ent));
+    const meNameWas = M._meName, todayWas = M._today;
+    M._meName = () => 'solnichka'; M._today = () => '2026-11-15';
+    await M.setRole('acc-dist', 'Rookie', 'ISD Distillery');
+    ent = props[L.MEMBERS_KEY].value.m['acc-dist'];
+    ok('...a role changed later by another Lead stamps the role only: the note stays the first Lead\'s', ent.roleBy === 'solnichka' && ent.roleAt === '2026-11-15' &&
+        ent.noteBy === 'schogol' && ent.noteAt !== '2026-11-15', J(ent));
+    let one = M.model(act0, props[L.MEMBERS_KEY].value, null, '2026-11').filter((x) => x.acc === 'acc-dist')[0];
+    ok('...and the note\'s hover says who wrote it and when', one && one.noteBy === 'schogol' && one.noteAt === ent.noteAt, J(one && { by: one.noteBy, at: one.noteAt }));
+    await M.setRole('acc-dist', 'Senior', 'ISD Distillery');
+    M._meName = meNameWas; M._today = todayWas;
+    w = await M.setNote('acc-dist', '');
+    ent = props[L.MEMBERS_KEY].value.m['acc-dist'];
+    ok('a note taken away takes its stamp with it, the role\'s stays', ent && !('note' in ent) && !('noteBy' in ent) && !('noteAt' in ent) && ent.roleBy === 'solnichka', J(ent));
+    await M.setNote('acc-dist', 'Ask for update?\n\nOn leave');
+    one = M.model(act0, { m: { 'acc-sen': { note: 'Old', by: 'lookuptable', at: '2026-03-01' } } }, null, '2026-11').filter((r) => r.acc === 'acc-sen')[0];
+    const both = M.model(act0, { m: { 'acc-sen': { note: 'New', noteBy: 'schogol', noteAt: '2026-11-20', by: 'lookuptable', at: '2026-03-01', role: 'Senior', roleBy: 'solnichka' } } }, null, '2026-11').filter((r) => r.acc === 'acc-sen')[0];
+    ok('...one stored before keeps its one stamp for its note, until the note is written again', one && one.noteBy === 'lookuptable' && one.noteAt === '2026-03-01' &&
+        both && both.noteBy === 'schogol' && both.noteAt === '2026-11-20', J([one && one.noteBy, both && both.noteBy]));
+    const legacy = { v: 1, m: { 'acc-ast': { note: 'Old', by: 'lookuptable', at: '2026-03-01' } } };
+    props[L.MEMBERS_KEY] = { id: L.MEMBERS_KEY, key: L.MEMBERS_KEY, value: clone(Object.assign({}, props[L.MEMBERS_KEY].value, { m: Object.assign({}, props[L.MEMBERS_KEY].value.m, legacy.m) })), version: props[L.MEMBERS_KEY].version + 1 };
+    await M.setRole('acc-ast', 'Senior', 'ISD Astaris');
+    ent = props[L.MEMBERS_KEY].value.m['acc-ast'];
+    ok('...a role set on such an entry leaves its note\'s stamp as it was', ent.by === 'lookuptable' && ent.at === '2026-03-01' && ent.roleBy === 'schogol', J(ent));
+    await M.setNote('acc-ast', 'Newer');
+    ent = props[L.MEMBERS_KEY].value.m['acc-ast'];
+    ok('...and its note written again gets a stamp of its own in its place', ent.noteBy === 'schogol' && !('by' in ent) && !('at' in ent), J(ent));
+    await M.setRole('acc-ast', 'Bug Hunter', 'ISD Astaris');
+    await M.setNote('acc-ast', '');
+    ok('...(the entry gone again once it holds nothing)', !props[L.MEMBERS_KEY].value.m['acc-ast'], J(props[L.MEMBERS_KEY].value.m['acc-ast']));
+    await later();
     w = await M.setNote('acc-pg', ' Mentor\n\nOn leave ', 'Mentor\nOn leave');
     ok('a note the team page has already is not stored: the tab follows the page, empty lines aside', !w.written && !(props[L.MEMBERS_KEY].value.m || {})['acc-pg']);
     w = await M.setNote('acc-pg', 'Mentor, and more', 'Mentor\nOn leave');
@@ -1089,6 +1123,10 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     roleOf(rowFor('acc-dist')).value = 'Rookie'; roleOf(rowFor('acc-dist')).fire('change');
     await settle();
     ok('...and a role picked meanwhile asks nothing about it, and is kept in the tab', confirmAsked.length === 0 && props[L.MEMBERS_KEY].value.m['acc-dist'].role === 'Rookie', J(confirmAsked));
+    roleOf(rowFor('acc-dist')).value = 'Bug Hunter'; roleOf(rowFor('acc-dist')).fire('change');
+    await settle();
+    ok('...even one their name alone would give: stored as picked, as the rank the page gives is not known (review 2026-11-20 members-logic-4)',
+        props[L.MEMBERS_KEY].value.m['acc-dist'] && props[L.MEMBERS_KEY].value.m['acc-dist'].role === 'Bug Hunter', J(props[L.MEMBERS_KEY].value.m['acc-dist']));
 
     // picking a role asks to change the team page too
     await later();
@@ -1157,6 +1195,20 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
         teamWrites[0].message === 'Added ISD Newcomer as Snr Bughunter (JiTA Members tab)' && hintOf(rowFor('acc-new')).text() === '', J(teamWrites.map((x) => x.message)));
     ok('...and the role set to the same goes, the page now giving it', !('role' in (props[L.MEMBERS_KEY].value.m['acc-new'] || {})) && picked(rowFor('acc-new')) === 'Senior',
         J(props[L.MEMBERS_KEY].value.m['acc-new']));
+    // someone another Lead (or a hand edit) added to the team page since this tab read it (review 2026-11-20 members-robust-4)
+    await later();
+    const addedPage = teamBody;
+    teamBody = teamPage([teamRow(mention('acc-dist'), 'Snr Bughunter'), teamRow(mention('acc-me'), 'Snr Bughunter'), teamRow(mention('acc-ast'), 'Bughunter')]);
+    U._loadMembers(true);
+    await settle();
+    ok('(this tab reads the team page without ISD Newcomer, and shows them as Bug Hunter)', hintOf(rowFor('acc-new')).text() === '?' && picked(rowFor('acc-new')) === 'Bug Hunter', picked(rowFor('acc-new')));
+    teamBody = addedPage; teamVersion++;
+    confirmAnswer = true; confirmAsked.length = 0; teamWrites = [];
+    hintOf(rowFor('acc-new')).fire('click');
+    await settle();
+    ok('someone added to the team page since: nothing is written, the role this tab showed is not stored over their rank there, and the Lead is told',
+        teamWrites.length === 0 && !('role' in (props[L.MEMBERS_KEY].value.m['acc-new'] || {})) && picked(rowFor('acc-new')) === 'Senior' && hintOf(rowFor('acc-new')).text() === '' &&
+        status.textContent === 'ISD Newcomer is on the ECAID - Team Members page already: their rank there is shown now.', status.textContent + ' ' + J(props[L.MEMBERS_KEY].value.m['acc-new']));
 
     // notes from the team page, and a note edited in the tab
     await later();
@@ -1253,6 +1305,66 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...with no publish asked for', pubs === 0 && pageWrites.length === 0, pubs + ' publishes');
     await M.publish(true);
     ok('no page ever shows an internal note', pageWrites.length === 1 && !/Asked for a break|Second one/.test(pageWrites[0].html), pageWrites.length + ' writes');
+
+    // ================= the team page as this tab writes it (review 2026-11-20 members-logic-2, members-robust-1) =================
+    await later();
+    teamBody = TEAM0; teamVersion = 40; M._team = null; M._teamP = null; teamFail = null; afterTeamSave = null; teamRefuse = null;
+    const getPage0 = JiTA.conf.getPage;
+    let hold = false, letGo = null;
+    JiTA.conf.getPage = (id, withBody) => {
+        if (id !== L.TEAM_PAGE || !hold) { return getPage0(id, withBody); }
+        hold = false;
+        const was = { body: teamBody, version: teamVersion };   // the page as it was when the read was answered
+        return new Promise((r) => { letGo = () => r({ id: id, title: 'ECAID - Team Members', version: was.version, status: 'current', body: was.body }); });
+    };
+    hold = true;
+    const early = M.team(true);   // a background read (the six-hourly publish), answered late
+    await settle();
+    pubs = 0; pageWrites = [];
+    const peopleWere = J(props[L.MEMBERS_KEY].value.m);
+    await M.setRank('acc-ast', 'Senior', 'ISD Astaris');
+    const freshT = await Promise.race([M.team(true), new Promise((r) => setTimeout(() => r({ ranks: {}, held: true }), 1000))]);   // never the held read
+    ok('a read asked for after the tab wrote the team page is not one begun before the write', freshT.ranks['acc-ast'] === 'Senior' && freshT.version === teamVersion, J(freshT.ranks));
+    letGo();
+    const earlyT = await early;
+    ok('...and the one begun before, landing late, is not kept: the page as it is now stays', earlyT.ranks['acc-ast'] === 'Bug Hunter' && M._team && M._team.value.ranks['acc-ast'] === 'Senior',
+        J(M._team && M._team.value.ranks));
+    JiTA.conf.getPage = getPage0;
+    await later();
+    ok('a rank changed on the team page from the tab brings the Members page in step, though the tab stores nothing', pubs >= 1 && pageWrites.some((p) => p.id === L.MEMBERS_PAGE) &&
+        J(props[L.MEMBERS_KEY].value.m) === peopleWere, pubs + ' publishes, ' + pageWrites.length + ' writes');
+    pubs = 0;
+    const skipped = await M.addToTeam('acc-ast', 'Senior', 'ISD Astaris', () => '');
+    await later();
+    ok('...while a change that writes nothing (someone already on it) publishes nothing', skipped.skipped === 'already on it' && pubs === 0, pubs + ' publishes');
+
+    // ================= a reload that lands after a save (review 2026-11-20 members-logic-5) =================
+    await later();
+    U._loadMembers(true);
+    await settle();
+    const memNow = clone(props[L.MEMBERS_KEY]), inNow = props[L.INOTES_KEY] ? clone(props[L.INOTES_KEY]) : null;
+    U._memVer = { ledgerVersion: memNow.version }; U._mem.mem = memNow.value;
+    if (inNow) { U._inVer = { ledgerVersion: inNow.version }; U._mem.inotes = inNow.value; }
+    // a reload whose reads were answered before the save above: the ledger as it was one version back
+    const olderMem = { id: memNow.id, key: memNow.key, value: { v: 1, m: {} }, version: memNow.version - 1 };
+    const olderIn = inNow ? { id: inNow.id, key: inNow.key, value: { v: 1, m: {} }, version: inNow.version - 1 } : null;
+    onRead = (key) => {
+        if (key === L.MEMBERS_KEY) { props[key] = olderMem; setImmediate(() => { props[L.MEMBERS_KEY] = memNow; }); }
+        if (key === L.INOTES_KEY && olderIn) { props[key] = olderIn; setImmediate(() => { props[L.INOTES_KEY] = inNow; }); }
+    };
+    U._loadMembers(false);
+    await settle();
+    onRead = null;
+    props[L.MEMBERS_KEY] = memNow; if (inNow) { props[L.INOTES_KEY] = inNow; }
+    ok('a reload whose read is older than a save the tab took keeps what the save brought, and its version', J(U._mem.mem) === J(memNow.value) && U._memVer.ledgerVersion === memNow.version,
+        U._memVer.ledgerVersion + ' ' + J(U._mem.mem).slice(0, 120));
+    ok('...so do the internal notes', !inNow || (J(U._mem.inotes) === J(inNow.value) && U._inVer.ledgerVersion === inNow.version), inNow ? (U._inVer.ledgerVersion + ' ' + J(U._mem.inotes).slice(0, 80)) : '');
+    props[L.MEMBERS_KEY] = { id: memNow.id, key: memNow.key, value: clone(memNow.value), version: memNow.version + 2 };
+    props[L.MEMBERS_KEY].value.m['acc-me'] = { note: 'Written in another browser', noteBy: 'solnichka', noteAt: '2026-11-21' };
+    U._loadMembers(false);
+    await settle();
+    ok('...while a newer one is taken as it is', U._memVer.ledgerVersion === memNow.version + 2 && U._mem.mem.m['acc-me'].note === 'Written in another browser', String(U._memVer.ledgerVersion));
+    delete props[L.MEMBERS_KEY].value.m['acc-me'];
 
     // ================= a Lead west of UTC (review 2026-11-20 members-logic-3, worker-logic-1) =================
     // The months shown are UTC months; a Lead in New York counts them in New York time, where October goes on for four hours
