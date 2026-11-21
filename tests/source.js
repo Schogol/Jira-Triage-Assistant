@@ -130,4 +130,13 @@ function fn(src, name, within) {
     return block(text, one(at, name, 'function ' + name + '('));
 }
 
-module.exports = { load: load, top: top, member: member, members: members, fn: fn, block: block };
+// What the page and the worker share (jitaShared), run as both run it: the real function, from this script.
+function shared(src) { return new Function(fn(src, 'jitaShared') + '\nreturn jitaShared();')(); }
+// Its exception-matching pieces under the names JiTA.logsig hands them on by, to Object.assign onto a JiTA.logsig stub.
+function logsigShared(src) {
+    const SH = shared(src);
+    return { MIN_FRAMES: SH.MIN_FRAMES, CRASH_FRAMES: SH.CRASH_FRAMES, TRACE: SH.TRACE, OPEN_CUT: SH.OPEN_CUT, isTrace: SH.isTrace, isCut: SH.isCut,
+        _traceKey: SH.traceKey, isUserError: SH.isUserError, _splitBlocks: SH.splitBlocks, _fingerprint: SH.fingerprint, _logBlocks: SH.logBlocks, _crashOf: SH.crashOf };
+}
+
+module.exports = { load: load, top: top, member: member, members: members, fn: fn, block: block, shared: shared, logsigShared: logsigShared };

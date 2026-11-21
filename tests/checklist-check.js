@@ -189,7 +189,7 @@ let copied = [], copiedHtml = [], copyAnswer = true, built = 0, fieldRows = [], 
 // The fingerprints of a description: "EXC[<sig>]" for each exception pasted in it.
 function fpsOf(text) { const out = [], re = /EXC\[([^\]]+)\]/g; let m; while ((m = re.exec(String(text)))) { out.push({ sig: m[1], msg: m[1] }); } return out; }
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + '})'));
-Object.assign(JiTA.logsig, eval('({' + member('    _crashOf: function (sig) {') + '})'));
+Object.assign(JiTA.logsig, { _crashOf: require('./source').logsigShared(src)._crashOf });   // jitaShared
 Object.assign(JiTA.profile, eval('({' + member('    _pickLogs: function (att) {') + '})'));   // the logs the reader reads, as Add looks through them
 eval(src.slice(cs + 1, ce) + '\n    _noop: null\n};');
 const C = JiTA.checklist;

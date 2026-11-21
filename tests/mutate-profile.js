@@ -130,10 +130,9 @@ const muts = [
     [H, 'Read igbr.zip shows with the profile off', "        if (flagOn('defectProfile')) {\n            var $zipRow", "        if (true) {\n            var $zipRow"],
     [H, 'switching it off in Settings leaves the card', "            if (!flagOn('defectProfile')) { JiTA.profile.clear(); return; }", "            if (!flagOn('defectProfile')) { return; }"],
     // exceptions whose defect is hidden in the Triage Assistant (v3.44.0): the lookup
-    [H, 'a crash site keeps every frame', "        return s.slice(0, at) + '|' + frames.slice(-JiTA.logsig.CRASH_FRAMES).join('>');", "        return s.slice(0, at) + '|' + frames.join('>');"],
-    [H, 'a crash site cuts a "<module>" frame in two', "            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }\n        });\n        if (frames.length < JiTA.logsig.MIN_FRAMES)",
-        "            if (p) { frames.push(p); }\n        });\n        if (frames.length < JiTA.logsig.MIN_FRAMES)"],
-    [H, 'the worker\'s crash site keeps every frame', "        return s.slice(0, at) + '|' + frames.slice(-LG_CRASH).join('>');", "        return s.slice(0, at) + '|' + frames.join('>');"],
+    [H, 'a crash site keeps every frame', "        return s.slice(0, at) + '|' + frames.slice(-CRASH_FRAMES).join('>');", "        return s.slice(0, at) + '|' + frames.join('>');"],
+    [H, 'a crash site cuts a "<module>" frame in two', "            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }\n        });\n        if (frames.length < MIN_FRAMES)",
+        "            if (p) { frames.push(p); }\n        });\n        if (frames.length < MIN_FRAMES)"],
     [H, 'no defect is found by its crash site', '        var cs = crashSig !== undefined ? crashSig : L._crashOf(sig);', '        var cs = null;'],
     [H, 'the crash site beats the same stack', "L._crashOf(sig);\n        if ((c = idx.sigMap[sig]) && c.members.length) { return { key: c.members[0].key, by: 'stack' }; }\n        if (cs && (c = idx.crashMap[cs]) && c.members.length) { return { key: c.members[0].key, by: 'site' }; }",
         "L._crashOf(sig);\n        if (cs && (c = idx.crashMap[cs]) && c.members.length) { return { key: c.members[0].key, by: 'site' }; }\n        if ((c = idx.sigMap[sig]) && c.members.length) { return { key: c.members[0].key, by: 'stack' }; }"],

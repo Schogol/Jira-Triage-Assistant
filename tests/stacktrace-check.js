@@ -35,15 +35,15 @@ require('./logstub')(JiTA);
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isClosedStatus: function (status) {') + '})'));
 JiTA.ocr._langFromLabels = () => null;
 const L = JiTA.logsig;
-Object.assign(L, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    OPEN_CUT: ') + line('    isTrace: function (sig) {') +
-    line('    isCut: function (sig) {') + line('    _traceKey: function (sig) {') + member('    _splitBlocks: function (text) {') + member('    _fingerprint: function (text) {') +
-    lsMember('    ensure: function () {') + member('    applyToTable: function () {') + member('    rematch: function () {') + member('    _logBlocks: function (text) {') +
+Object.assign(L, require('./source').logsigShared(src));   // jitaShared
+Object.assign(L, eval('({' +
+    lsMember('    ensure: function () {') + member('    applyToTable: function () {') + member('    rematch: function () {') +
     member('    _matchTextLocal: function (text) {') + member('    _defectsLocal: function (sigs) {') + member('    _holdingLocal: function (sigs) {') +
-    member('    _sigsOfLocal: function (key) {') + member('    _crashOf: function (sig) {') + member('    _traceMates: function (idx, sig) {') +
+    member('    _sigsOfLocal: function (key) {') + member('    _traceMates: function (idx, sig) {') +
     member('    _pointAt: function (idx, sig, crashSig) {') + member('    sigsOf: function (key) {') + member('    defectsForSigs: function (sigs) {') + '})'));
 L._index = null; L._dirty = true; L._building = null;
 // What counts (JiTA.excnoise), the real one (excnoise-check.js covers it; nothing here is ignored or common).
-Object.assign(L, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
+Object.assign(L, eval('({' + line('    _msgKey: function (sig) {') + '})'));
 Object.assign(JiTA.util, eval('({' + member('    hash: function (str) {') + '})'));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 eval(block('JiTA.excnoise = {', '\n};\n'));
@@ -53,13 +53,13 @@ eval(block('JiTA.excfind = {', '\n    _noop: null\n};\n'));
 (0, eval)(block('JiTA.rank._boostRow = function (', '\n};\n'));
 const P = JiTA.profile, X = JiTA.excfind, R = JiTA.repexc;
 // The worker's copies, from jitaWorkerBody itself: the logsig section and the index build.
-const W = new Function('isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'cfg',
-    'var vecCache = null, kwCache = null, logsigCache = null;\n' + line('    var LG_MIN = 2') + line('    var LG_TRACE = ') +
+const W = new Function('isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'cfg', 'SH',
+    'var vecCache = null, kwCache = null, logsigCache = null;\n' + line('    var lgSplit = SH.') + line('    var lgIsTrace = SH.') +
     src.slice(once('    // ---- logsig: exception-signature mining'), once('\n    // One load at a time')) +
     src.slice(once('    function buildIndexes(recs) {'), once('    // Cosine == dot product')) +
     '\nreturn { split: lgSplit, fp: lgFp, blocks: lgBlocks, match: lgMatch, defects: lgDefects, holding: lgHolding, sigsOf: lgSigsOf, mates: function (s) { return lgMates(logsigCache, s); },' +
     ' point: function (s, c) { return lgPoint(logsigCache, s, c); }, build: function (r) { buildIndexes(r); return logsigCache; } };')(
-    () => false, () => false, (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean), (r) => (r.summary || '') + ' ' + (r.description || ''), { MODEL_VERSION: 'm' });
+    () => false, () => false, (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean), (r) => (r.summary || '') + ' ' + (r.description || ''), { MODEL_VERSION: 'm' }, require('./source').shared(src));
 
 // ---- logs as the client writes them ----
 const col = (t, fac, type) => t + '\t' + fac + '\t' + type + '\t';

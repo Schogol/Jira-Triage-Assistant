@@ -58,8 +58,8 @@ const LOOSE = { sigMap: {}, crashMap: { C1: { members: [{ key: 'EDR-2' }] } }, k
 const NONE = { sigMap: {}, crashMap: {}, keyToSigs: {}, keyToCrash: {} };
 global.JiTA = { logsig: {} };
 const line = (head) => { const s = src.indexOf(head); if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + head.trim()); } return src.slice(s, src.indexOf('\n', s) + 1); };
-Object.assign(JiTA.logsig, eval('({' + slice('    applyToTable: function () {') + slice('    rematch: function () {') + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') +
-    line('    TRACE: ') + line('    isTrace: function (sig) {') + line('    isCut: function (sig) {') + line('    _traceKey: function (sig) {') + slice('    _crashOf: function (sig) {') +
+Object.assign(JiTA.logsig, require('./source').logsigShared(src));   // jitaShared
+Object.assign(JiTA.logsig, eval('({' + slice('    applyToTable: function () {') + slice('    rematch: function () {') +
     slice('    _traceMates: function (idx, sig) {') + slice('    _pointAt: function (idx, sig, crashSig) {') + '})'), {
     ensure: () => Promise.resolve(idx),
     _fingerprint: (text) => (/Boom/.test(text) ? { sig: 'S1', crashSig: 'C1', msg: 'Boom' } : {}),

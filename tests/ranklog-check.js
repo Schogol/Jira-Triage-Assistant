@@ -95,9 +95,8 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
 
     // ================= the fingerprint, in both copies =================
     global.JiTA = { logsig: { MIN_FRAMES: 2, CRASH_FRAMES: 2 } };
-    Object.assign(JiTA.logsig, eval('({' + cut('    TRACE: ', '\n') + '\n' + cut('    OPEN_CUT: ', '\n') + '\n' + cut('    _splitBlocks: function (text) {', '\n    },\n') + '\n    },' +
-        cut('    _fingerprint: function (text) {', '\n    },\n') + '\n    }})'));
-    const W = new Function('LG_MIN', 'LG_CRASH', cut('    var LG_TRACE = ', '\n') + '\n' + cut('    function lgSplit(text) {', '    function lgSiblings(key) {') + '\nreturn { split: lgSplit, fp: lgFp };')(2, 2);
+    Object.assign(JiTA.logsig, require('./source').logsigShared(src));   // jitaShared
+    const W = new Function('SH', cut('    var lgSplit = SH.', '\n') + '\nreturn { split: lgSplit, fp: lgFp };')(require('./source').shared(src));   // the worker's, from the same
     const tab = (x) => JiTA.logsig._splitBlocks(x).map((b) => JiTA.logsig._fingerprint(b).sig);
     const wrk = (x) => W.split(x).map((b) => W.fp(b).sig);
     const LOG = ['EXCEPTION #1 logged at 10/02/2026 12:00:00', 'Formatted exception info: KeyError: 2', 'Thrown at:', '/eve/a/foo.py(130) baz', '/eve/b/qux.py(40) quux', 'EXCEPTION END'].join('\n');

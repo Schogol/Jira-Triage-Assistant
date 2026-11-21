@@ -7,9 +7,9 @@ const fs = require('fs');
 const { execSync } = require('child_process');
 const src = fs.readFileSync((process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js')), 'utf8').replace(/\r\n/g, '\n');
 const T = 'stacktrace-check.js', XF = 'excfind-check.js', PC = 'profile-check.js', XB = 'excboost-check.js';
-const TFP = ['    _fingerprint: function (text) {', '\n    },'], WFP = ['    function lgFp(text) {', '\n    }\n'];
-const TSPLIT = ['    _splitBlocks: function (text) {', '\n    },'], WSPLIT = ['    function lgSplit(text) {', '\n    }\n'];
-const TLB = ['    _logBlocks: function (text) {', '\n    },'], WLB = ['    function lgBlocks(text) {', '\n    }\n'];
+const TFP = ['    function fingerprint(text) {', '\n    }\n'];   // jitaShared: the tab's and the worker's
+const TSPLIT = ['    function splitBlocks(text) {', '\n    }\n'];
+const TLB = ['    function logBlocks(text) {', '\n    }\n'];
 const APPLY = ['    applyToTable: function () {', '\n    },'];
 const TIDX = ['    // A stacktrace also files its defect under its message (traceMsg)', '\n    },'], WIDX = ['    function buildIndexes(recs) {', '\n    }\n'];
 const TPT = ['    _pointAt: function (idx, sig, crashSig) {', '\n    },'], WPT = ['    function lgPoint(idx, sig, crashSig) {', '\n    }\n'];
@@ -17,19 +17,14 @@ const TMATES = ['    _traceMates: function (idx, sig) {', '\n    },'], WMATES = 
 const THOLD = ['    _holdingLocal: function (sigs) {', '\n    },'], WHOLD = ['    function lgHolding(sigs) {', '\n    }\n'];
 const muts = [
     // ---- the tag, the cut, the message part ----
-    [T, 'stacktraces share the exceptions\' signatures', "    TRACE: '[stacktrace] ',", "    TRACE: '',"],
-    [T, 'the worker gives stacktraces no tag', "    var LG_TRACE = '[stacktrace] ',", "    var LG_TRACE = '',"],
-    [T, 'nothing is ever cut off', "return JiTA.logsig.isTrace(s) && s.charAt(s.length - 1) === '|'; },", 'return false; },'],
-    [T, 'an exception with no frames taken for one cut off', "return JiTA.logsig.isTrace(s) && s.charAt(s.length - 1) === '|'; },", "return s.charAt(s.length - 1) === '|'; },"],
-    [T, 'the worker cuts nothing off', "return lgIsTrace(s) && s.charAt(s.length - 1) === '|'; }", 'return false; }'],
-    [T, 'a stacktrace\'s message part taken whole', "_traceKey: function (sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); },",
-        "_traceKey: function (sig) { return String(sig == null ? '' : sig); },"],
-    [T, 'the worker takes the message part whole', "function lgTraceKey(sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); }",
-        "function lgTraceKey(sig) { return String(sig == null ? '' : sig); }"],
+    [T, 'stacktraces share the exceptions\' signatures', "    var TRACE = '[stacktrace] ';", "    var TRACE = '';"],
+    [T, 'nothing is ever cut off', "return isTrace(s) && s.charAt(s.length - 1) === '|'; }", 'return false; }'],
+    [T, 'an exception with no frames taken for one cut off', "return isTrace(s) && s.charAt(s.length - 1) === '|'; }", "return s.charAt(s.length - 1) === '|'; }"],
+    [T, 'a stacktrace\'s message part taken whole', "function traceKey(sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); }",
+        "function traceKey(sig) { return String(sig == null ? '' : sig); }"],
     // ---- a description's blocks ----
     [T, 'a description\'s stacktraces not split out', 're = /(EXCEPTION|STACKTRACE) #', 're = /(EXCEPTION) #', TSPLIT],
     [T, 'a block in a description runs on past the next of the other kind', '(?=(?:EXCEPTION|STACKTRACE) #)', '(?=\\1 #)', TSPLIT],
-    [T, 'the worker splits out no stacktrace', 're = /(EXCEPTION|STACKTRACE) #', 're = /(EXCEPTION) #', WSPLIT],
     // ---- the fingerprint ----
     [T, 'a stacktrace read as an exception', 'var trace = si >= 0 ? (ei < 0 || si < ei)', 'var trace = si >= 0 ? false', TFP],
     [T, 'an exception quoting a stacktrace read as one', 'var trace = si >= 0 ? (ei < 0 || si < ei)', 'var trace = si >= 0 ? true', TFP],
@@ -41,16 +36,12 @@ const muts = [
     [T, 'a stacktrace\'s message runs past its stack', '|\\b(?:Common path prefix|Traced at|Thread Locals|Stackhash|Reported from|STACKTRACE END)\\b/i.exec(rest);', '/i.exec(rest);', TFP],
     [T, 'a message that may run on never open', 'open = !(end && /[\\n\\t]/.test(end[0]));', 'open = false;', TFP],
     [T, 'every stacktrace message open', 'open = !(end && /[\\n\\t]/.test(end[0]));', 'open = true;', TFP],
-    [T, 'a run-on message kept whole', '        if (open) { msg = msg.slice(0, L.OPEN_CUT).trim(); }\n', ''],
+    [T, 'a run-on message kept whole', '        if (open) { msg = msg.slice(0, OPEN_CUT).trim(); }\n', ''],
     [T, 'a stacktrace\'s message taken from an exception in its dump', 'if (!trace && (mm = /Formatted exception info', 'if ((mm = /Formatted exception info', TFP],
-    [T, 'no tag on a stacktrace\'s signature', '        if (trace) { nmsg = L.TRACE + nmsg; }\n', ''],
+    [T, 'no tag on a stacktrace\'s signature', '        if (trace) { nmsg = TRACE + nmsg; }\n', ''],
     [T, 'a stacktrace cut off before its stack has no signature', ": ((trace && msg) ? (nmsg + '|').toLowerCase() : null);", ': null;', TFP],
     [T, 'an exception with too few frames matched by its message', ": ((trace && msg) ? (nmsg + '|').toLowerCase() : null);", ": (msg ? (nmsg + '|').toLowerCase() : null);", TFP],
     [T, 'a cut stacktrace with no message matched by anything', ": ((trace && msg) ? (nmsg + '|').toLowerCase() : null);", ": (trace ? (nmsg + '|').toLowerCase() : null);", TFP],
-    [T, 'the worker reads a stacktrace as an exception', 'var trace = si >= 0 ? (ei < 0 || si < ei)', 'var trace = si >= 0 ? false', WFP],
-    [T, 'the worker\'s run-on messages never open', 'open = !(end && /[\\n\\t]/.test(end[0]));', 'open = false;', WFP],
-    [T, 'the worker keeps a run-on message whole', '        if (open) { msg = msg.slice(0, LG_OPEN).trim(); }\n', ''],
-    [T, 'the worker cuts no stacktrace off', ": ((trace && msg) ? (nmsg + '|').toLowerCase() : null);", ': null;', WFP],
     // ---- a raw log's blocks ----
     [T, 'a raw log\'s stacktraces not blocks', "var trace = messages[i].indexOf('STACKTRACE #') !== -1;", 'var trace = false;', TLB],
     [T, 'an exception runs on into a stacktrace in a raw log', "|| messages[j].indexOf('STACKTRACE #') !== -1 ", '', TLB],
@@ -59,8 +50,6 @@ const muts = [
     [T, 'a line without its time ends a stacktrace', 'pres.push((parts.length > 1 && parts[0]) ?', 'pres.push((parts.length > 1) ?', TLB],
     [T, 'a stacktrace waits for an exception\'s END line', "endLine = trace ? 'STACKTRACE END' : 'EXCEPTION END';", "endLine = 'EXCEPTION END';", TLB],
     [T, 'every line of a stacktrace a record of its own', "pre = trace ? pres[i] : ''", "pre = trace ? 'x' : ''", TLB],
-    [T, 'the worker\'s raw log stacktraces not blocks', "var trace = messages[i].indexOf('STACKTRACE #') !== -1;", 'var trace = false;', WLB],
-    [T, 'the worker lets a cut stacktrace run on', '(pre && pres[j] && pres[j] !== pre)', 'false', WLB],
     // ---- what a block points at ----
     [T, 'a log\'s loose matches counted exact', "loose = !!hit && hit.by !== 'stack';\n                if (!defect) { return; }", 'loose = false;\n                if (!defect) { return; }'],
     [T, 'the worker counts a log\'s loose matches exact', "var defect = hit.key, loose = hit.by !== 'stack';", 'var defect = hit.key, loose = false;'],
@@ -164,9 +153,6 @@ const muts = [
     [T, "the tab: a cut stacktrace in a pasted raw log runs on into the next facility", "        while ((c = col.exec(b))) { if (c[2] !== pre[1]) { b = b.slice(0, c.index + c[1].length).replace(/\\s+$/, ''); break; } }", "", TSPLIT],
     [T, "the tab: the columns before a stacktrace are never read", "pre = /^STACKTRACE/i.test(b) && /(\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t)\\s*$/.exec(text.slice(Math.max(0, m.index - 200), m.index));", "pre = null;", TSPLIT],
     [T, "the tab: a stacktrace ends at the first line logged at all", "if (c[2] !== pre[1]) {", "if (c[2]) {", TSPLIT],
-    [T, "the worker: a cut stacktrace in a pasted raw log runs on into the next facility", "        while ((c = col.exec(b))) { if (c[2] !== pre[1]) { b = b.slice(0, c.index + c[1].length).replace(/\\s+$/, ''); break; } }", "", WSPLIT],
-    [T, "the worker: the columns before a stacktrace are never read", "pre = /^STACKTRACE/i.test(b) && /(\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t)\\s*$/.exec(text.slice(Math.max(0, m.index - 200), m.index));", "pre = null;", WSPLIT],
-    [T, "the worker: a stacktrace ends at the first line logged at all", "if (c[2] !== pre[1]) {", "if (c[2]) {", WSPLIT],
     [T, "a second pass forgets the message the first one read", "tally(lk ? marked.slice(1) : marked, tr, tr.getAttribute('data-jita-sig-msg'), lk);", "tally(lk ? marked.slice(1) : marked, tr, null, lk);"],
     [T, "the message is never kept on the row", "                    if (fp.msg) { tr.setAttribute('data-jita-sig-msg', fp.msg); }   // for a later pass, which reads no block\n", ""]
 ];

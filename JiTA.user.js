@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.30
+// @version     3.53.31
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.30
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.31
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -3432,6 +3432,183 @@ var JiTA = {
 };
 
 
+/* ---- Shared with the worker: written once, run by the page and by the worker ------------------------------------------
+ * The shared worker (jitaWorkerBody) runs from its own source text (JiTA.worker._src) and sees nothing of the page, so
+ * code both sides need was kept twice, marked KEEP IN SYNC, and pairs of it drifted apart (review 2026-11-20). What is
+ * here is written once: plain functions with no JiTA, DOM, jQuery or GM storage in them. The worker is handed this
+ * function's source and runs it; the page runs it here, and JiTA.logsig hands its pieces on under their old names.
+ */
+function jitaShared() {
+    var MIN_FRAMES = 2;        // need at least this many stack frames to trust a stack signature (else too generic)
+    var CRASH_FRAMES = 2;      // crash-site signature uses only the INNERMOST this-many frames (the throw location),
+                               // so the same bug reached via a different call path still matches as "possibly related"
+    var TRACE = '[stacktrace] ';   // a stacktrace's signature starts with this, so it never matches an exception's
+    var OPEN_CUT = 300;        // characters kept of a stacktrace message that may run on (see fingerprint)
+
+    // Whether a signature is a stacktrace's; and whether it is one the client cut off before its stack, which has no frames
+    // and is matched by its message alone.
+    function isTrace(sig) { return String(sig == null ? '' : sig).indexOf(TRACE) === 0; }
+    function isCut(sig) { var s = String(sig == null ? '' : sig); return isTrace(s) && s.charAt(s.length - 1) === '|'; }
+    // A stacktrace signature's message part, its tag kept: what a cut one is matched by. Frames hold no "|", so the
+    // message ends at the last.
+    function traceKey(sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); }
+    // Whether a signature is a UserError's: an exception (a stacktrace's starts with its tag) of the class UserError, its
+    // module named or not (eveexceptions.UserError). The game raises one to tell the player something (ThrottleGeneric when
+    // clicking too fast, PerformSessionChangeInProgress during a session change): no bug, so it is not indexed and does not
+    // count (JiTA.excnoise).
+    function isUserError(sig) { return /^(?:[a-z_]\w*\.)*usererror\b/.test(String(sig == null ? '' : sig)); }
+
+    // Split a blob of text into individual EXCEPTION and STACKTRACE blocks: each from "EXCEPTION #" (or "STACKTRACE #")
+    // up to its "EXCEPTION END" (or "STACKTRACE END"), or up to the next block of either kind. Stored descriptions have
+    // newlines collapsed to spaces, but the markers survive as substrings, so this works on the (collapsed) defect
+    // description and on a (re-joined) log block. Ending at the END line matters: a STACKTRACE pasted after an exception
+    // used to be read as more frames of the exception, so the defect's signature matched neither the same exception in a
+    // parsed log (which the log side ends there) nor anything else. A raw log pasted in keeps its columns: a stacktrace is
+    // one log message, every line of it under the time, facility and type logged in front of its "STACKTRACE #", and the
+    // client cuts a long one before its END. So it also ends at the first line logged under other columns, as _logBlocks
+    // ends it: run on, it took that line's frames for its own, and matched the same stacktrace in no log.
+    function splitBlocks(text) {
+        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\s\S]*?(?:\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m, c;
+        var col = /(^|\s)(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)/g;
+        while ((m = re.exec(text))) {
+            var b = m[0], pre = /^STACKTRACE/i.test(b) && /(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)\s*$/.exec(text.slice(Math.max(0, m.index - 200), m.index));
+            if (pre) {
+                col.lastIndex = 0;
+                while ((c = col.exec(b))) { if (c[2] !== pre[1]) { b = b.slice(0, c.index + c[1].length).replace(/\s+$/, ''); break; } }
+            }
+            blocks.push(b);
+            if (re.lastIndex === m.index) { re.lastIndex++; }
+        }
+        return blocks.length ? blocks : [text || ''];
+    }
+
+    // Fingerprint one exception or stacktrace block -> { sig, crashSig, msg, open }. `sig` is the lowercased
+    // "<message>|<frame>>...>frame>" built from the file:function chain (line numbers dropped for cross-build
+    // robustness), or null when there aren't enough frames to be distinctive; `msg` is the human text (used as a
+    // panel / cluster label): an exception's "Formatted exception info", a stacktrace's first line after "logged at
+    // ... :". (The "Stackhash: <n>" literal is per-user, so it is no longer extracted.)
+    // A stacktrace's signature starts with TRACE. The client logs a stacktrace as one message and cuts it at 6400
+    // characters, so a long dump ahead of "Traced at:" can take its whole stack: such a one keeps the signature
+    // "<TRACE message>|", with no frames (isCut), matched by its message alone. `open` says a stacktrace's message may
+    // run on past where it ends: in a description whose lines Jira joined, what followed its first line has become
+    // part of it, so only OPEN_CUT characters of it are kept.
+    function fingerprint(text) {
+        text = text || '';
+        var si = text.search(/STACKTRACE #/i), ei = text.search(/EXCEPTION #/i), msg = '', open = false, mm;
+        // A stacktrace starts at "STACKTRACE #", or, pasted without its first line, has a "Traced at:" stack and none of an
+        // exception's markers.
+        var trace = si >= 0 ? (ei < 0 || si < ei)
+            : (ei < 0 && /\bTraced at\b/i.test(text) && !/\b(?:Formatted exception info|Caught at|Thrown at)\b/i.test(text));
+        if (trace && (mm = /STACKTRACE #\d*\s+logged at\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s*:[ \t]?/i.exec(text))) {
+            // Its message is the rest of its first line, read before the log columns are stripped below: in a pasted log
+            // whose lines were joined, the next line's columns are where the first one ended. With neither, it ends at
+            // what follows the message in a stacktrace, or the text's end, and may have run on.
+            var rest = text.slice(mm.index + mm[0].length);
+            var end = /\n|\s\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t|\b(?:Common path prefix|Traced at|Thread Locals|Stackhash|Reported from|STACKTRACE END)\b/i.exec(rest);
+            msg = rest.slice(0, end ? end.index : rest.length);
+            open = !(end && /[\n\t]/.test(end[0]));
+        }
+        // Strip the EVE log-line prefix ("HH:MM:SS<TAB>facility<TAB>type<TAB>") that a DEFECT DESCRIPTION
+        // carries when someone pastes the RAW log into it. Without this, the blank lines between "Formatted
+        // exception info:" and "Common path prefix" leak their "timestamp facility type" prefix into the
+        // captured message, so the defect's signature (e.g. "keyerror: 2 22:10:48 client::general error|…")
+        // no longer matches the SAME exception seen in the parsed log, whose rows are message-column only
+        // ("keyerror: 2|…"). Stripping here normalizes both sides. (Log-side block text has no such prefix,
+        // so this is a no-op there.) Not only at line starts: a stored description has its lines joined by spaces, so
+        // only the first prefix was stripped and the rest leaked into the message.
+        text = text.replace(/(^|\s)\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/g, '$1');
+        if (!trace && (mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text))) {
+            msg = mm[1] || '';
+        }
+        msg = msg.replace(/\s+/g, ' ').trim();
+        if (open) { msg = msg.slice(0, OPEN_CUT).trim(); }
+        var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.pyx?)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;   // .py OR .pyx (EVE's Cython frames)
+        while ((fm = fre.exec(text))) {
+            frames.push(fm[1].replace(/^.*[\/\\]/, '') + ':' + fm[3]);   // basename:function (no line number)
+        }
+        // The SAME bug at the SAME stack site is constantly reported with DIFFERENT volatile numbers baked into
+        // the exception MESSAGE, which would otherwise make every report's signature unique even though the
+        // frame chain is identical. We normalize ONLY the clearly-incidental numbers to '#' for the SIGNATURE
+        // (the RAW msg is kept for the human-readable label), and DELIBERATELY leave a bare scalar argument
+        // alone so it still distinguishes otherwise-identical exceptions:
+        //   - 0x hex addresses (object repr ids)                       e.g. "at 0x254ffd..."   -> "at 0x#"
+        //   - python longs (`<digits>L`) - always an id               "KeyError: 90022...218L" -> "KeyError: #"
+        //   - runs of 4+ digits - long item/type/char ids             "...(.., 1677)" -> "...(.., #)"
+        //   - numbers INSIDE a tuple/list/dict payload (bracket- or    "(12, 1677)" / "(13, 1)" -> "(#, #)"
+        //     comma-adjacent), since those are per-report args
+        // The bare-scalar exception, though, is preserved: "KeyError: 2" and "KeyError: 188" stay DISTINCT
+        // (1-3 digits, not bracketed), because for a KeyError/ValueError the scalar key IS the meaningful part.
+        // Identifiers/words (UserError, MISMATCH_COST, ...) are never touched, and the stack still gates every
+        // match on top of this.
+        var nmsg = msg
+            .replace(/0x[0-9a-fA-F]+/g, '0x#')        // memory addresses (e.g. object repr ids)
+            .replace(/\b\d+L\b/g, '#')                 // python long literals - always an id (item/type/char/...)
+            .replace(/([(\[{,]\s*)\d+/g, '$1#')        // tuple/list/dict element (leading edge: after ( [ { or ,)
+            .replace(/\d+(\s*[)\]},])/g, '#$1')        // ...and trailing edge (before ) ] } or ,)
+            .replace(/\b\d{4,}\b/g, '#');              // other long numeric ids (a bare scalar < 4 digits survives)
+        if (trace) { nmsg = TRACE + nmsg; }
+        // A stacktrace with too few frames to trust was cut off before its stack: it keeps its message, if it has one.
+        var deep = frames.length >= MIN_FRAMES;
+        var sig = deep ? (nmsg + '|' + frames.join('>')).toLowerCase() : ((trace && msg) ? (nmsg + '|').toLowerCase() : null);
+        // Crash-site signature: message + only the INNERMOST CRASH_FRAMES frames (where the exception was
+        // actually thrown). Two defects that crash at the SAME place with the SAME message but were reached by
+        // a DIFFERENT call path share this even though their full `sig` differs - it drives the looser
+        // "possibly related" hint (never an exact cluster). Needs >= MIN_FRAMES, as `sig` does.
+        var crashSig = deep ? (nmsg + '|' + frames.slice(-CRASH_FRAMES).join('>')).toLowerCase() : null;
+        return { sig: sig, crashSig: crashSig, msg: msg, open: open };
+    }
+
+    // A raw log's exception and stacktrace blocks, segmented as applyToTable segments the rendered rows: the MESSAGE
+    // column of every record (everything after the 3rd tab; prefix-less continuation lines as-is, as cellText() reads each
+    // rendered row), grouped from EXCEPTION # (or STACKTRACE #) to EXCEPTION END (or STACKTRACE END) inclusive, or the
+    // next block of either kind. A stacktrace is one log message, every line of it under the same time, facility and type,
+    // and the client cuts it at 6400 characters, END line and all: so one also ends at the first line logged under another.
+    // A line of fewer than four columns keeps the time it has, as the log parser shows it, and one with none goes with the
+    // line before. Shared by the matching below and the defect profile.
+    function logBlocks(text) {
+        var lines = String(text || '').replace(/\r/g, '').split('\n'), messages = [], pres = [], blocks = [];
+        for (var li = 0; li < lines.length; li++) {
+            var parts = lines[li].split('\t');
+            messages.push(parts.length >= 4 ? parts.slice(3).join('\t') : lines[li]);
+            pres.push((parts.length > 1 && parts[0]) ? (parts.length >= 4 ? parts.slice(0, 3).join('\t') : parts[0] + '\t\t') : '');
+        }
+        var i = 0;
+        while (i < messages.length) {
+            var trace = messages[i].indexOf('STACKTRACE #') !== -1;
+            if (!trace && messages[i].indexOf('EXCEPTION #') === -1) { i++; continue; }
+            var blockText = messages[i], j = i + 1, pre = trace ? pres[i] : '', endLine = trace ? 'STACKTRACE END' : 'EXCEPTION END';
+            for (; j < messages.length; j++) {
+                if (messages[j].indexOf('EXCEPTION #') !== -1 || messages[j].indexOf('STACKTRACE #') !== -1 || (pre && pres[j] && pres[j] !== pre)) { break; }
+                blockText += '\n' + messages[j];
+                if (messages[j].indexOf(endLine) !== -1) { j++; break; }
+            }
+            blocks.push(blockText);
+            i = j;
+        }
+        return blocks;
+    }
+
+    // A signature's crash site, as _fingerprint builds it: the message and the innermost CRASH_FRAMES frames. Frames hold
+    // no "|", so the message ends at the last one; a function named "<module>" holds a ">", so a piece without ":"
+    // belongs to the frame before it.
+    function crashOf(sig) {
+        var s = String(sig == null ? '' : sig), at = s.lastIndexOf('|'), frames = [];
+        if (at < 0) { return null; }
+        s.slice(at + 1).split('>').forEach(function (p) {
+            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }
+        });
+        if (frames.length < MIN_FRAMES) { return null; }
+        return s.slice(0, at) + '|' + frames.slice(-CRASH_FRAMES).join('>');
+    }
+
+    return {
+        MIN_FRAMES: MIN_FRAMES, CRASH_FRAMES: CRASH_FRAMES, TRACE: TRACE, OPEN_CUT: OPEN_CUT,
+        isTrace: isTrace, isCut: isCut, traceKey: traceKey, isUserError: isUserError,
+        splitBlocks: splitBlocks, fingerprint: fingerprint, logBlocks: logBlocks, crashOf: crashOf
+    };
+}
+var JITA_SH = jitaShared();
+
 /* ---- log signatures (Feature D): auto-mined exception fingerprints from defects ----
  * EVE defect descriptions paste exception dumps. Matching on the one-line "Formatted exception info:" message
  * alone is too weak: many UNRELATED defects share a generic message (e.g. "TypeNotFoundException: 'key not
@@ -3459,127 +3636,19 @@ JiTA.logsig = {
     _index: null,
     _building: null,
     _dirty: true,
-    MIN_FRAMES: 2,        // need at least this many stack frames to trust a stack signature (else too generic)
-    CRASH_FRAMES: 2,      // crash-site signature uses only the INNERMOST this-many frames (the throw location),
-                          // so the same bug reached via a different call path still matches as "possibly related"
-    TRACE: '[stacktrace] ',   // a stacktrace's signature starts with this, so it never matches an exception's. KEEP IN SYNC with LG_TRACE
-    OPEN_CUT: 300,        // characters kept of a stacktrace message that may run on (see _fingerprint). KEEP IN SYNC with LG_OPEN
+    MIN_FRAMES: JITA_SH.MIN_FRAMES, CRASH_FRAMES: JITA_SH.CRASH_FRAMES, TRACE: JITA_SH.TRACE, OPEN_CUT: JITA_SH.OPEN_CUT,   // jitaShared
 
-    // Whether a signature is a stacktrace's; and whether it is one the client cut off before its stack, which has no frames
-    // and is matched by its message alone. KEEP IN SYNC with lgIsTrace / lgIsCut in the worker.
-    isTrace: function (sig) { return String(sig == null ? '' : sig).indexOf(JiTA.logsig.TRACE) === 0; },
-    isCut: function (sig) { var s = String(sig == null ? '' : sig); return JiTA.logsig.isTrace(s) && s.charAt(s.length - 1) === '|'; },
-    // A stacktrace signature's message part, its tag kept: what a cut one is matched by. Frames hold no "|", so the
-    // message ends at the last.
-    _traceKey: function (sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); },
+    // Signature kinds and parts (jitaShared): a stacktrace's, one cut off before its stack, a stacktrace's message part,
+    // a UserError's.
+    isTrace: JITA_SH.isTrace,
+    isCut: JITA_SH.isCut,
+    _traceKey: JITA_SH.traceKey,
     // Any signature's message part, the whole of it when it has no "|": what the user ignores, at any stack (JiTA.excnoise).
     _msgKey: function (sig) { var s = String(sig == null ? '' : sig), at = s.lastIndexOf('|'); return at < 0 ? s : s.slice(0, at); },
-    // Whether a signature is a UserError's: an exception (a stacktrace's starts with its tag) of the class UserError, its
-    // module named or not (eveexceptions.UserError). The game raises one to tell the player something (ThrottleGeneric when
-    // clicking too fast, PerformSessionChangeInProgress during a session change): no bug, so it is not indexed and does not
-    // count (JiTA.excnoise). KEEP IN SYNC with lgIsUserError in the worker.
-    isUserError: function (sig) { return /^(?:[a-z_]\w*\.)*usererror\b/.test(String(sig == null ? '' : sig)); },
+    isUserError: JITA_SH.isUserError,
 
-    // Split a blob of text into individual EXCEPTION and STACKTRACE blocks: each from "EXCEPTION #" (or "STACKTRACE #")
-    // up to its "EXCEPTION END" (or "STACKTRACE END"), or up to the next block of either kind. Stored descriptions have
-    // newlines collapsed to spaces, but the markers survive as substrings, so this works on the (collapsed) defect
-    // description and on a (re-joined) log block. Ending at the END line matters: a STACKTRACE pasted after an exception
-    // used to be read as more frames of the exception, so the defect's signature matched neither the same exception in a
-    // parsed log (which the log side ends there) nor anything else. A raw log pasted in keeps its columns: a stacktrace is
-    // one log message, every line of it under the time, facility and type logged in front of its "STACKTRACE #", and the
-    // client cuts a long one before its END. So it also ends at the first line logged under other columns, as _logBlocks
-    // ends it: run on, it took that line's frames for its own, and matched the same stacktrace in no log. KEEP IN SYNC with
-    // lgSplit in the worker.
-    _splitBlocks: function (text) {
-        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\s\S]*?(?:\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m, c;
-        var col = /(^|\s)(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)/g;
-        while ((m = re.exec(text))) {
-            var b = m[0], pre = /^STACKTRACE/i.test(b) && /(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)\s*$/.exec(text.slice(Math.max(0, m.index - 200), m.index));
-            if (pre) {
-                col.lastIndex = 0;
-                while ((c = col.exec(b))) { if (c[2] !== pre[1]) { b = b.slice(0, c.index + c[1].length).replace(/\s+$/, ''); break; } }
-            }
-            blocks.push(b);
-            if (re.lastIndex === m.index) { re.lastIndex++; }
-        }
-        return blocks.length ? blocks : [text || ''];
-    },
-
-    // Fingerprint one exception or stacktrace block -> { sig, crashSig, msg, open }. `sig` is the lowercased
-    // "<message>|<frame>>...>frame>" built from the file:function chain (line numbers dropped for cross-build
-    // robustness), or null when there aren't enough frames to be distinctive; `msg` is the human text (used as a
-    // panel / cluster label): an exception's "Formatted exception info", a stacktrace's first line after "logged at
-    // ... :". (The "Stackhash: <n>" literal is per-user, so it is no longer extracted.)
-    // A stacktrace's signature starts with TRACE. The client logs a stacktrace as one message and cuts it at 6400
-    // characters, so a long dump ahead of "Traced at:" can take its whole stack: such a one keeps the signature
-    // "<TRACE message>|", with no frames (isCut), matched by its message alone. `open` says a stacktrace's message may
-    // run on past where it ends: in a description whose lines Jira joined, what followed its first line has become
-    // part of it, so only OPEN_CUT characters of it are kept.
-    _fingerprint: function (text) {
-        text = text || '';
-        var L = JiTA.logsig, si = text.search(/STACKTRACE #/i), ei = text.search(/EXCEPTION #/i), msg = '', open = false, mm;
-        // A stacktrace starts at "STACKTRACE #", or, pasted without its first line, has a "Traced at:" stack and none of an
-        // exception's markers.
-        var trace = si >= 0 ? (ei < 0 || si < ei)
-            : (ei < 0 && /\bTraced at\b/i.test(text) && !/\b(?:Formatted exception info|Caught at|Thrown at)\b/i.test(text));
-        if (trace && (mm = /STACKTRACE #\d*\s+logged at\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s*:[ \t]?/i.exec(text))) {
-            // Its message is the rest of its first line, read before the log columns are stripped below: in a pasted log
-            // whose lines were joined, the next line's columns are where the first one ended. With neither, it ends at
-            // what follows the message in a stacktrace, or the text's end, and may have run on.
-            var rest = text.slice(mm.index + mm[0].length);
-            var end = /\n|\s\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t|\b(?:Common path prefix|Traced at|Thread Locals|Stackhash|Reported from|STACKTRACE END)\b/i.exec(rest);
-            msg = rest.slice(0, end ? end.index : rest.length);
-            open = !(end && /[\n\t]/.test(end[0]));
-        }
-        // Strip the EVE log-line prefix ("HH:MM:SS<TAB>facility<TAB>type<TAB>") that a DEFECT DESCRIPTION
-        // carries when someone pastes the RAW log into it. Without this, the blank lines between "Formatted
-        // exception info:" and "Common path prefix" leak their "timestamp facility type" prefix into the
-        // captured message, so the defect's signature (e.g. "keyerror: 2 22:10:48 client::general error|…")
-        // no longer matches the SAME exception seen in the parsed log, whose rows are message-column only
-        // ("keyerror: 2|…"). Stripping here normalizes both sides. (Log-side block text has no such prefix,
-        // so this is a no-op there.) Not only at line starts: a stored description has its lines joined by spaces, so
-        // only the first prefix was stripped and the rest leaked into the message. KEEP IN SYNC with lgFp.
-        text = text.replace(/(^|\s)\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/g, '$1');
-        if (!trace && (mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text))) {
-            msg = mm[1] || '';
-        }
-        msg = msg.replace(/\s+/g, ' ').trim();
-        if (open) { msg = msg.slice(0, L.OPEN_CUT).trim(); }
-        var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.pyx?)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;   // .py OR .pyx (EVE's Cython frames)
-        while ((fm = fre.exec(text))) {
-            frames.push(fm[1].replace(/^.*[\/\\]/, '') + ':' + fm[3]);   // basename:function (no line number)
-        }
-        // The SAME bug at the SAME stack site is constantly reported with DIFFERENT volatile numbers baked into
-        // the exception MESSAGE, which would otherwise make every report's signature unique even though the
-        // frame chain is identical. We normalize ONLY the clearly-incidental numbers to '#' for the SIGNATURE
-        // (the RAW msg is kept for the human-readable label), and DELIBERATELY leave a bare scalar argument
-        // alone so it still distinguishes otherwise-identical exceptions:
-        //   - 0x hex addresses (object repr ids)                       e.g. "at 0x254ffd..."   -> "at 0x#"
-        //   - python longs (`<digits>L`) - always an id               "KeyError: 90022...218L" -> "KeyError: #"
-        //   - runs of 4+ digits - long item/type/char ids             "...(.., 1677)" -> "...(.., #)"
-        //   - numbers INSIDE a tuple/list/dict payload (bracket- or    "(12, 1677)" / "(13, 1)" -> "(#, #)"
-        //     comma-adjacent), since those are per-report args
-        // The bare-scalar exception, though, is preserved: "KeyError: 2" and "KeyError: 188" stay DISTINCT
-        // (1-3 digits, not bracketed), because for a KeyError/ValueError the scalar key IS the meaningful part.
-        // Identifiers/words (UserError, MISMATCH_COST, ...) are never touched, and the stack still gates every
-        // match on top of this.
-        var nmsg = msg
-            .replace(/0x[0-9a-fA-F]+/g, '0x#')        // memory addresses (e.g. object repr ids)
-            .replace(/\b\d+L\b/g, '#')                 // python long literals - always an id (item/type/char/...)
-            .replace(/([(\[{,]\s*)\d+/g, '$1#')        // tuple/list/dict element (leading edge: after ( [ { or ,)
-            .replace(/\d+(\s*[)\]},])/g, '#$1')        // ...and trailing edge (before ) ] } or ,)
-            .replace(/\b\d{4,}\b/g, '#');              // other long numeric ids (a bare scalar < 4 digits survives)
-        if (trace) { nmsg = L.TRACE + nmsg; }
-        // A stacktrace with too few frames to trust was cut off before its stack: it keeps its message, if it has one.
-        var deep = frames.length >= L.MIN_FRAMES;
-        var sig = deep ? (nmsg + '|' + frames.join('>')).toLowerCase() : ((trace && msg) ? (nmsg + '|').toLowerCase() : null);
-        // Crash-site signature: message + only the INNERMOST CRASH_FRAMES frames (where the exception was
-        // actually thrown). Two defects that crash at the SAME place with the SAME message but were reached by
-        // a DIFFERENT call path share this even though their full `sig` differs - it drives the looser
-        // "possibly related" hint (never an exact cluster). Needs >= MIN_FRAMES, as `sig` does.
-        var crashSig = deep ? (nmsg + '|' + frames.slice(-L.CRASH_FRAMES).join('>')).toLowerCase() : null;
-        return { sig: sig, crashSig: crashSig, msg: msg, open: open };
-    },
+    _splitBlocks: JITA_SH.splitBlocks,   // jitaShared
+    _fingerprint: JITA_SH.fingerprint,   // jitaShared
 
     // Build (and cache) the signature index from every stored defect. Every defect exhibiting a signature is
     // appended to that signature's cluster (NOT deduped to the first - the whole point is to group them);
@@ -3975,35 +4044,7 @@ JiTA.logsig = {
         if (JiTA.worker && JiTA.worker.usable()) { return JiTA.worker.call('logsig', { op: 'match', text: text }).catch(function () { return JiTA.logsig._matchTextLocal(text); }); }
         return JiTA.logsig._matchTextLocal(text);
     },
-    // A raw log's exception and stacktrace blocks, segmented as applyToTable segments the rendered rows: the MESSAGE
-    // column of every record (everything after the 3rd tab; prefix-less continuation lines as-is, as cellText() reads each
-    // rendered row), grouped from EXCEPTION # (or STACKTRACE #) to EXCEPTION END (or STACKTRACE END) inclusive, or the
-    // next block of either kind. A stacktrace is one log message, every line of it under the same time, facility and type,
-    // and the client cuts it at 6400 characters, END line and all: so one also ends at the first line logged under another.
-    // A line of fewer than four columns keeps the time it has, as the log parser shows it, and one with none goes with the
-    // line before. Shared by the matching below and the defect profile. KEEP IN SYNC with lgBlocks in the worker.
-    _logBlocks: function (text) {
-        var lines = String(text || '').replace(/\r/g, '').split('\n'), messages = [], pres = [], blocks = [];
-        for (var li = 0; li < lines.length; li++) {
-            var parts = lines[li].split('\t');
-            messages.push(parts.length >= 4 ? parts.slice(3).join('\t') : lines[li]);
-            pres.push((parts.length > 1 && parts[0]) ? (parts.length >= 4 ? parts.slice(0, 3).join('\t') : parts[0] + '\t\t') : '');
-        }
-        var i = 0;
-        while (i < messages.length) {
-            var trace = messages[i].indexOf('STACKTRACE #') !== -1;
-            if (!trace && messages[i].indexOf('EXCEPTION #') === -1) { i++; continue; }
-            var blockText = messages[i], j = i + 1, pre = trace ? pres[i] : '', endLine = trace ? 'STACKTRACE END' : 'EXCEPTION END';
-            for (; j < messages.length; j++) {
-                if (messages[j].indexOf('EXCEPTION #') !== -1 || messages[j].indexOf('STACKTRACE #') !== -1 || (pre && pres[j] && pres[j] !== pre)) { break; }
-                blockText += '\n' + messages[j];
-                if (messages[j].indexOf(endLine) !== -1) { j++; break; }
-            }
-            blocks.push(blockText);
-            i = j;
-        }
-        return blocks;
-    },
+    _logBlocks: JITA_SH.logBlocks,   // jitaShared
     // Each defect found also names the signatures that found it, with how often and whether only loosely ({ sig: { n, loose } }),
     // so what the user ignores can be left out where it is shown (JiTA.ui.renderLogLink). KEEP IN SYNC with lgMatch.
     _matchTextLocal: function (text) {
@@ -4081,18 +4122,7 @@ JiTA.logsig = {
             return { sigs: (idx && idx.keyToSigs[key]) || [], crashes: (idx && idx.keyToCrash[key]) || [], cuts: (idx && idx.keyToCut && idx.keyToCut[key]) || [] };
         });
     },
-    // A signature's crash site, as _fingerprint builds it: the message and the innermost CRASH_FRAMES frames. Frames hold
-    // no "|", so the message ends at the last one; a function named "<module>" holds a ">", so a piece without ":"
-    // belongs to the frame before it. KEEP IN SYNC with lgCrashOf in the worker.
-    _crashOf: function (sig) {
-        var s = String(sig == null ? '' : sig), at = s.lastIndexOf('|'), frames = [];
-        if (at < 0) { return null; }
-        s.slice(at + 1).split('>').forEach(function (p) {
-            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }
-        });
-        if (frames.length < JiTA.logsig.MIN_FRAMES) { return null; }
-        return s.slice(0, at) + '|' + frames.slice(-JiTA.logsig.CRASH_FRAMES).join('>');
-    },
+    _crashOf: JITA_SH.crashOf,   // jitaShared
     // The defects whose descriptions hold a stacktrace with this one's message where one of the two was cut off before its
     // stack, so only the message can be compared: for a cut one every stacktrace with its message, for one with a stack
     // the cut ones. Newest first; [] for an exception. KEEP IN SYNC with lgMates in the worker.
@@ -11454,11 +11484,11 @@ JiTA.credits = {
 // readable as it grows. It is serialized via toString() and blobbed into the worker, so it must be fully
 // self-contained (NO closures over page scope) - all config arrives through `cfg`. Uses dynamic import() so it
 // runs as-is in the worker. Never called in the page (references self/indexedDB/import only when run as a worker).
-function jitaWorkerBody(cfg) {
+function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiTA.worker._src)
     var pipe = null, backend = 'none', db = null, vecCache = null, kwCache = null, logsigCache = null, BATCH = 8, embedding = false;
     var pipeP = null, dbP = null, embedAgain = false;   // the model / DB being opened, and a pass asked for while one ran
-    var LG_MIN = 2, LG_CRASH = 2;   // logsig: min stack frames to trust a signature; innermost frames for the crash-site sig
-    var LG_TRACE = '[stacktrace] ', LG_OPEN = 300;   // logsig: a stacktrace signature's tag; what is kept of a message that may run on
+    var lgSplit = SH.splitBlocks, lgFp = SH.fingerprint, lgBlocks = SH.logBlocks, lgCrashOf = SH.crashOf;   // logsig, written once in jitaShared
+    var lgIsTrace = SH.isTrace, lgIsCut = SH.isCut, lgTraceKey = SH.traceKey, lgIsUserError = SH.isUserError;
     var K1 = 1.5, B = 0.75, STOP = {};
     ('the a an and or of to in for on with is are was were be been it this that these those as at by from we you they i he she his her its their our your not no but if then than so such can will would should could may might do does did has have had into over under out up down off about your yours').split(' ').forEach(function (w) { STOP[w] = true; });
     function tokenize(text) {
@@ -11491,45 +11521,6 @@ function jitaWorkerBody(cfg) {
     }
 
     // ---- logsig: exception-signature mining + queries (ported from JiTA.logsig so tabs hold no logsig index) --
-    function lgSplit(text) {   // KEEP IN SYNC with JiTA.logsig._splitBlocks
-        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\s\S]*?(?:\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m, c;
-        var col = /(^|\s)(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)/g;
-        while ((m = re.exec(text))) {
-            var b = m[0], pre = /^STACKTRACE/i.test(b) && /(\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t)\s*$/.exec(text.slice(Math.max(0, m.index - 200), m.index));
-            if (pre) {
-                col.lastIndex = 0;
-                while ((c = col.exec(b))) { if (c[2] !== pre[1]) { b = b.slice(0, c.index + c[1].length).replace(/\s+$/, ''); break; } }
-            }
-            blocks.push(b);
-            if (re.lastIndex === m.index) { re.lastIndex++; }
-        }
-        return blocks.length ? blocks : [text || ''];
-    }
-    function lgFp(text) {   // KEEP IN SYNC with JiTA.logsig._fingerprint
-        text = text || '';
-        var si = text.search(/STACKTRACE #/i), ei = text.search(/EXCEPTION #/i), msg = '', open = false, mm;
-        var trace = si >= 0 ? (ei < 0 || si < ei)
-            : (ei < 0 && /\bTraced at\b/i.test(text) && !/\b(?:Formatted exception info|Caught at|Thrown at)\b/i.test(text));
-        if (trace && (mm = /STACKTRACE #\d*\s+logged at\s+\S+\s+\d{1,2}:\d{2}:\d{2}\s*:[ \t]?/i.exec(text))) {
-            var rest = text.slice(mm.index + mm[0].length);
-            var end = /\n|\s\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t|\b(?:Common path prefix|Traced at|Thread Locals|Stackhash|Reported from|STACKTRACE END)\b/i.exec(rest);
-            msg = rest.slice(0, end ? end.index : rest.length);
-            open = !(end && /[\n\t]/.test(end[0]));
-        }
-        text = text.replace(/(^|\s)\d{1,2}:\d{2}:\d{2}\t[^\t\n]*\t[^\t\n]*\t/g, '$1');
-        if (!trace && (mm = /Formatted exception info\s*:?\s*([\s\S]*?)(?:\bCommon path prefix\b|\bCaught at\b|\bThrown at\b|\bReported from\b|\bThread Locals\b|\bStackhash\b|\bEXCEPTION END\b|$)/i.exec(text))) {
-            msg = mm[1] || '';
-        }
-        msg = msg.replace(/\s+/g, ' ').trim();
-        if (open) { msg = msg.slice(0, LG_OPEN).trim(); }
-        var frames = [], fre = /([A-Za-z0-9_.\/\\-]+\.pyx?)\((\d+)\)\s+([A-Za-z0-9_<>]+)/g, fm;   // .py OR .pyx (EVE's Cython frames)
-        while ((fm = fre.exec(text))) { frames.push(fm[1].replace(/^.*[\/\\]/, '') + ':' + fm[3]); }
-        var nmsg = (trace ? LG_TRACE : '') + msg.replace(/0x[0-9a-fA-F]+/g, '0x#').replace(/\b\d+L\b/g, '#').replace(/([(\[{,]\s*)\d+/g, '$1#').replace(/\d+(\s*[)\]},])/g, '#$1').replace(/\b\d{4,}\b/g, '#');
-        var deep = frames.length >= LG_MIN;
-        var sig = deep ? (nmsg + '|' + frames.join('>')).toLowerCase() : ((trace && msg) ? (nmsg + '|').toLowerCase() : null);
-        var crashSig = deep ? (nmsg + '|' + frames.slice(-LG_CRASH).join('>')).toLowerCase() : null;
-        return { sig: sig, crashSig: crashSig, msg: msg, open: open };
-    }
     function lgSiblings(key) {
         var idx = logsigCache; if (!idx) { return []; }
         var out = [], seen = {}; seen[key] = true;
@@ -11554,28 +11545,6 @@ function jitaWorkerBody(cfg) {
         out.sort(function (a, b) { if (a.newest !== b.newest) { return a.newest < b.newest ? 1 : -1; } return b.members.length - a.members.length || (a.label < b.label ? -1 : 1); });
         return out;
     }
-    function lgBlocks(text) {   // KEEP IN SYNC with JiTA.logsig._logBlocks
-        var lines = String(text || '').replace(/\r/g, '').split('\n'), messages = [], pres = [], blocks = [];
-        for (var li = 0; li < lines.length; li++) {
-            var parts = lines[li].split('\t');
-            messages.push(parts.length >= 4 ? parts.slice(3).join('\t') : lines[li]);
-            pres.push((parts.length > 1 && parts[0]) ? (parts.length >= 4 ? parts.slice(0, 3).join('\t') : parts[0] + '\t\t') : '');
-        }
-        var i = 0;
-        while (i < messages.length) {
-            var trace = messages[i].indexOf('STACKTRACE #') !== -1;
-            if (!trace && messages[i].indexOf('EXCEPTION #') === -1) { i++; continue; }
-            var blockText = messages[i], j = i + 1, pre = trace ? pres[i] : '', endLine = trace ? 'STACKTRACE END' : 'EXCEPTION END';
-            for (; j < messages.length; j++) {
-                if (messages[j].indexOf('EXCEPTION #') !== -1 || messages[j].indexOf('STACKTRACE #') !== -1 || (pre && pres[j] && pres[j] !== pre)) { break; }
-                blockText += '\n' + messages[j];
-                if (messages[j].indexOf(endLine) !== -1) { j++; break; }
-            }
-            blocks.push(blockText);
-            i = j;
-        }
-        return blocks;
-    }
     function lgMatch(text) {   // KEEP IN SYNC with JiTA.logsig._matchTextLocal
         var idx = logsigCache, found = {}; if (!idx || !text) { return found; }
         lgBlocks(text).forEach(function (blockText) {
@@ -11589,23 +11558,6 @@ function jitaWorkerBody(cfg) {
         });
         return found;
     }
-    // A signature's crash site, from the signature alone. KEEP IN SYNC with JiTA.logsig._crashOf.
-    function lgCrashOf(sig) {
-        var s = String(sig == null ? '' : sig), at = s.lastIndexOf('|'), frames = [];
-        if (at < 0) { return null; }
-        s.slice(at + 1).split('>').forEach(function (p) {
-            if (frames.length && p.indexOf(':') < 0) { frames[frames.length - 1] += '>' + p; } else if (p) { frames.push(p); }
-        });
-        if (frames.length < LG_MIN) { return null; }
-        return s.slice(0, at) + '|' + frames.slice(-LG_CRASH).join('>');
-    }
-    // A stacktrace's signature, one cut off before its stack, and its message part. KEEP IN SYNC with JiTA.logsig.isTrace,
-    // isCut and _traceKey.
-    function lgIsTrace(sig) { return String(sig == null ? '' : sig).indexOf(LG_TRACE) === 0; }
-    function lgIsCut(sig) { var s = String(sig == null ? '' : sig); return lgIsTrace(s) && s.charAt(s.length - 1) === '|'; }
-    function lgTraceKey(sig) { var s = String(sig == null ? '' : sig); return s.slice(0, s.lastIndexOf('|')); }
-    // A UserError's signature: a message the game shows the player, not indexed. KEEP IN SYNC with JiTA.logsig.isUserError.
-    function lgIsUserError(sig) { return /^(?:[a-z_]\w*\.)*usererror\b/.test(String(sig == null ? '' : sig)); }
     // The defects with a stacktrace of this one's message where one of the two was cut off before its stack. KEEP IN SYNC
     // with JiTA.logsig._traceMates.
     function lgMates(idx, sig) {
@@ -24802,7 +24754,8 @@ JiTA.worker = {
                 RATE_LIMITS: C.RATE_LIMITS, RATE_SAFETY: C.RATE_SAFETY
             }
         };
-        return '(' + jitaWorkerBody.toString() + ')(' + JSON.stringify(cfg) + ');';
+        // jitaShared goes along as source and runs in the worker: the code both sides use, written once.
+        return '(' + jitaWorkerBody.toString() + ')(' + JSON.stringify(cfg) + ', (' + jitaShared.toString() + ')());';
     }
 };
 

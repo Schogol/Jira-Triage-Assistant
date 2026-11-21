@@ -107,9 +107,9 @@ Object.assign(JiTA.util, eval(S.members(src, 'JiTA.util', ['toPlainText', 'isClo
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 JiTA.util.delay = (ms) => new Promise((r) => setTimeout(r, ms));
 let crashCalls = 0;
-Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['MIN_FRAMES', 'CRASH_FRAMES', 'TRACE', 'OPEN_CUT', 'isTrace', 'isCut', '_traceKey', '_splitBlocks', '_fingerprint', '_crashOf'])));
+Object.assign(JiTA.logsig, S.logsigShared(src));   // jitaShared
 // What counts (JiTA.excnoise), the real one over the stubs above (excnoise-check.js covers it).
-Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['isUserError', '_msgKey'])));
+Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['_msgKey'])));
 eval(S.top(src, 'JiTA.excnoise'));
 const realCrash = JiTA.logsig._crashOf;
 JiTA.logsig._crashOf = function (s) { crashCalls++; return realCrash.call(this, s); };

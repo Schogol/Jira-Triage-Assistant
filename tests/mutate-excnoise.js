@@ -10,11 +10,10 @@ const EXCN = ['\nJiTA.excnoise = {', '\n};\n'], REPEXC = ['\nJiTA.repexc = {', '
 const TMATCH = ['    _matchTextLocal: function (text) {', '\n    },'], WMATCH = ['    function lgMatch(text) {', '\n    }\n'];
 const muts = [
     // ---- which are UserErrors, and a signature's message part ----
-    [N, 'no UserError told apart', "isUserError: function (sig) { return /^(?:[a-z_]\\w*\\.)*usererror\\b/.test(", "isUserError: function (sig) { return /^$/.test("],
-    [N, 'a class that only starts as UserError taken for one', "*usererror\\b/.test(String(sig == null ? '' : sig)); },", "*usererror/.test(String(sig == null ? '' : sig)); },"],
-    [N, 'a UserError named anywhere in the message', "isUserError: function (sig) { return /^(?:", "isUserError: function (sig) { return /(?:"],
-    [N, 'a UserError with its module named not taken for one', "isUserError: function (sig) { return /^(?:[a-z_]\\w*\\.)*usererror", "isUserError: function (sig) { return /^usererror"],
-    [N, 'the worker tells no UserError apart', "function lgIsUserError(sig) { return /^(?:[a-z_]\\w*\\.)*usererror\\b/.test(", "function lgIsUserError(sig) { return /^$/.test("],
+    [N, 'no UserError told apart', "function isUserError(sig) { return /^(?:[a-z_]\\w*\\.)*usererror\\b/.test(", "function isUserError(sig) { return /^$/.test("],
+    [N, 'a class that only starts as UserError taken for one', "*usererror\\b/.test(String(sig == null ? '' : sig)); }", "*usererror/.test(String(sig == null ? '' : sig)); }"],
+    [N, 'a UserError named anywhere in the message', "function isUserError(sig) { return /^(?:", "function isUserError(sig) { return /(?:"],
+    [N, 'a UserError with its module named not taken for one', "function isUserError(sig) { return /^(?:[a-z_]\\w*\\.)*usererror", "function isUserError(sig) { return /^usererror"],
     [N, 'a message key that is the whole signature', "_msgKey: function (sig) { var s = String(sig == null ? '' : sig), at = s.lastIndexOf('|'); return at < 0 ? s : s.slice(0, at); },",
         "_msgKey: function (sig) { return String(sig == null ? '' : sig); },"],
     [N, 'a message key cut at its first bar', "_msgKey: function (sig) { var s = String(sig == null ? '' : sig), at = s.lastIndexOf('|');", "_msgKey: function (sig) { var s = String(sig == null ? '' : sig), at = s.indexOf('|');"],
