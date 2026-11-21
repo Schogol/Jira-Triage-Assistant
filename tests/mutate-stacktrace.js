@@ -160,7 +160,15 @@ const muts = [
     [XB, 'a match by message\'s badge says nothing of the cut', "where the client cut one of the two off before its stack']", "']"],
     // ---- reading the open reports again ----
     [XB, 'a pass by an older reader trusted', 'mark && mark.at && mark.lv === JiTA.profile.LOG_V)', 'mark && mark.at)'],
-    [XB, 'a complete pass marked without its reader', '{ at: began, lv: JiTA.profile.LOG_V }', '{ at: began }']
+    [XB, 'a complete pass marked without its reader', '{ at: began, lv: JiTA.profile.LOG_V }', '{ at: began }'],
+    [T, "the tab: a cut stacktrace in a pasted raw log runs on into the next facility", "        while ((c = col.exec(b))) { if (c[2] !== pre[1]) { b = b.slice(0, c.index + c[1].length).replace(/\\s+$/, ''); break; } }", "", TSPLIT],
+    [T, "the tab: the columns before a stacktrace are never read", "pre = /^STACKTRACE/i.test(b) && /(\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t)\\s*$/.exec(text.slice(Math.max(0, m.index - 200), m.index));", "pre = null;", TSPLIT],
+    [T, "the tab: a stacktrace ends at the first line logged at all", "if (c[2] !== pre[1]) {", "if (c[2]) {", TSPLIT],
+    [T, "the worker: a cut stacktrace in a pasted raw log runs on into the next facility", "        while ((c = col.exec(b))) { if (c[2] !== pre[1]) { b = b.slice(0, c.index + c[1].length).replace(/\\s+$/, ''); break; } }", "", WSPLIT],
+    [T, "the worker: the columns before a stacktrace are never read", "pre = /^STACKTRACE/i.test(b) && /(\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t)\\s*$/.exec(text.slice(Math.max(0, m.index - 200), m.index));", "pre = null;", WSPLIT],
+    [T, "the worker: a stacktrace ends at the first line logged at all", "if (c[2] !== pre[1]) {", "if (c[2]) {", WSPLIT],
+    [T, "a second pass forgets the message the first one read", "tally(lk ? marked.slice(1) : marked, tr, tr.getAttribute('data-jita-sig-msg'), lk);", "tally(lk ? marked.slice(1) : marked, tr, null, lk);"],
+    [T, "the message is never kept on the row", "                    if (fp.msg) { tr.setAttribute('data-jita-sig-msg', fp.msg); }   // for a later pass, which reads no block\n", ""]
 ];
 // Where an anchor is looked for: the whole file, or the one function named.
 function within(fn) {
