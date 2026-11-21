@@ -12,6 +12,7 @@ process.env.TZ = 'UTC';
 const S = require('./source');
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it (JiTA.leadduty._handles is its handles)
 const cs = src.indexOf('JiTA.conf = {'), ce = src.indexOf('/* ---- ISD Lead duties', cs);
 const em = '\n    _noop: null\n};';
 const ls = src.indexOf('JiTA.leadduty = {'), le = src.indexOf(em, ls);

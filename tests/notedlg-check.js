@@ -7,6 +7,7 @@
 // JiTA.leadduty.ui against a fake DOM just big enough for the dialog.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it (JiTA.leadduty._handles is its handles)
 const ls = src.indexOf('JiTA.leadduty = {'), em = '\n    _noop: null\n};', le = src.indexOf(em, ls);
 const us = src.indexOf('JiTA.leadduty.ui = {'), ue = src.indexOf('\n};', src.indexOf('_injectCss: function ()', us)) + 3;
 if (ls < 0 || le < 0 || us < 0 || ue < 3) { throw new Error('could not slice JiTA.leadduty / JiTA.leadduty.ui'); }

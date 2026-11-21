@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.35 (2026-11-21)
+
+### Fixed issues
+
+- Small improvements behind the scenes.
+
 ## 3.53.34 (2026-11-21)
 
 ### Fixed issues

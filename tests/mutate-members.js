@@ -39,12 +39,12 @@ const muts = [
         '(r.attached || 0) + (r.trashed || 0) + (r.reassigned || 0) + (r.created || 0) + (r.resolved || 0));'],
     [MB, 'a name with no account is listed', '            if (!acc) { return; }\n', '', FROM],
     // ---- roles and states ----
-    [MB, 'a Lead\'s name gets Bug Hunter', "if (toks[i] && own.call(leads, toks[i]) && leads[toks[i]]) { return 'Lead'; }", "if (toks[i] && own.call(leads, toks[i]) && leads[toks[i]]) { return 'Bug Hunter'; }"],
-    [MB, 'a hyphenated Lead name is missed', "String(name || '').toLowerCase().replace(/-/g, ' ')", "String(name || '').toLowerCase()", DEF],
-    [MB, 'a word every object has makes a Lead', 'own.call(leads, toks[i]) && leads[toks[i]]', 'leads[toks[i]]', DEF],
-    [MB, 'the rank is not the default role', "return rank || 'Bug Hunter';", "return 'Bug Hunter';", DEF],
-    [MB, 'the rank wins over a Lead\'s name', "        for (var i = 0; i < toks.length; i++) { if (toks[i] && own.call(leads, toks[i]) && leads[toks[i]]) { return 'Lead'; } }\n",
-        "        if (rank) { return rank; }\n        for (var i = 0; i < toks.length; i++) { if (toks[i] && own.call(leads, toks[i]) && leads[toks[i]]) { return 'Lead'; } }\n", DEF],
+    // defaultRole goes by jitaShared's leadWords (the credits' Lead bonus rule), whose words come from nameWords
+    [MB, 'a Lead\'s name gets Bug Hunter', "JiTA.credits.LEADS || {}) ? 'Lead' : (rank || 'Bug Hunter');", "JiTA.credits.LEADS || {}) ? 'Bug Hunter' : (rank || 'Bug Hunter');", DEF],
+    [MB, 'a hyphenated Lead name is missed', "String(name || '').toLowerCase().replace(/-/g, ' ')", "String(name || '').toLowerCase()", ['\n    function nameWords(name) {', '\n    }\n']],
+    [MB, 'the rank is not the default role', "? 'Lead' : (rank || 'Bug Hunter');", "? 'Lead' : 'Bug Hunter';", DEF],
+    [MB, 'the rank wins over a Lead\'s name', "        return JITA_SH.leadWords(name, JiTA.credits.LEADS || {}) ? 'Lead' : (rank || 'Bug Hunter');",
+        "        return rank || (JITA_SH.leadWords(name, JiTA.credits.LEADS || {}) ? 'Lead' : 'Bug Hunter');", DEF],
     [MB, 'an average of 40 is below the minimum', "return a.sum >= M.MIN_ACTIONED * a.n ? 'meets' : 'below';", "return a.sum > M.MIN_ACTIONED * a.n ? 'meets' : 'below';"],
     [MB, 'the state is judged on last month alone', '        a = M.average(months);\n', '        a = M.average(months.slice(0, 1));\n', STATE],
     [MB, 'a good average hides three empty months', "        if (empty === M.INACTIVE_MONTHS) { return 'inactive'; }\n", '', STATE],

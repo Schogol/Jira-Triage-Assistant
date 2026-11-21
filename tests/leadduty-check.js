@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = (process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'));
 const src = fs.readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it (JiTA.leadduty._handles is its handles)
 
 const start = src.indexOf('JiTA.leadduty = {');
 const endMark = '\n    _noop: null\n};';

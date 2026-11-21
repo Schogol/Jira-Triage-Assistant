@@ -19,7 +19,8 @@ ok('the shared copy is plain code: nothing of the page, which the worker does no
 const SH = S.shared(src);
 const PIECES = ['MIN_FRAMES', 'CRASH_FRAMES', 'TRACE', 'OPEN_CUT', 'isTrace', 'isCut', 'traceKey', 'isUserError', 'splitBlocks', 'fingerprint', 'logBlocks', 'crashOf',
     'buildIndex', 'traceMates', 'pointAt', 'matchText', 'defects', 'holding', 'sigsOf', 'siblings', 'related', 'clusters',
-    'isClosedStatus', 'isLeftOut', 'cleanForCompare', 'effectiveText', 'K1', 'B', 'STOP', 'tokenize', 'matchTerms', 'keywordIndex', 'passesGate', 'bm25Score'];
+    'isClosedStatus', 'isLeftOut', 'cleanForCompare', 'effectiveText', 'K1', 'B', 'STOP', 'tokenize', 'matchTerms', 'keywordIndex', 'passesGate', 'bm25Score',
+    'normMsg', 'dbSchema', 'handles', 'nameWords', 'leadWords'];
 ok('...and it runs on its own, handing out every piece', PIECES.every((p) => p in SH) && typeof SH.fingerprint === 'function', PIECES.filter((p) => !(p in SH)).join());
 // A worker asked before its index is built has none: every lookup answers nothing rather than throwing.
 let none = null;
@@ -142,6 +143,56 @@ const J = (x) => JSON.stringify(x);
         /^    _matchTerms: JITA_SH\.matchTerms\s*(\/\/.*)?$/.test(S.member(src, 'JiTA.rank', '_matchTerms')) && /^JiTA\.rank\._buildKeywordIndex = JITA_SH\.keywordIndex;/m.test(src));
     ok('...and the session filter, judged by the shared gate', /passesFilter: function \(doc\) \{ return JITA_SH\.passesGate\(doc, JiTA\.ui\._gateSpec\(\)\); \}/.test(S.member(src, 'JiTA.ui', 'passesFilter')));
     ok('...nor does the tab keep a tokenizer\'s word list or BM25 constants of its own', !/\n    (STOP|K1|B): /.test(S.top(src, 'JiTA.rank')));
+
+    // ---- the number rules, the local copy's schema, a member's handles and the Lead rule (refactor 1 PR 4) ----
+    const NUMS = [['KeyError: 2', 'KeyError: 2'], ['TypeError: x (12, 1677)', 'TypeError: x (#, #)'], ['at 0x254ffd0 here', 'at 0x# here'], ['KeyError: 90022218L', 'KeyError: #'],
+        ['item 123456 gone', 'item # gone'], ['type 1677 missing', 'type # missing'], ['code 999 kept', 'code 999 kept'], ['[3, 4]', '[#, #]'], [null, '']];
+    const offNums = NUMS.filter(([a, b]) => SH.normMsg(a) !== b).map(([a]) => a + ' -> ' + SH.normMsg(a));
+    ok('the message number rules turn the volatile numbers into #, a bare short one kept', !offNums.length, offNums.join(' | '));
+    ok('...the exception signatures turn them so', /\n        var nmsg = normMsg\(msg\);\n/.test(S.fn(src, 'fingerprint', sharedSrc)));
+    ok('...and so does the exception search, for an edited message', /^    _normMsg: JITA_SH\.normMsg\s*(\/\/.*)?$/.test(S.member(src, 'JiTA.excfind', '_normMsg')));
+    // The schema, made on a stand-in database: both stores with their indexes, and nothing made twice.
+    const made = [];
+    const fakeDb = (has) => ({
+        objectStoreNames: { contains: (n) => has.indexOf(n) >= 0 },
+        createObjectStore: (n, o) => { made.push(n + ':' + o.keyPath); return { createIndex: (i, k, io) => made.push(n + '.' + i + ':' + k + ':' + io.unique) }; }
+    });
+    SH.dbSchema(fakeDb([]));
+    const want = 'defects:key,defects.by_updated:updated:false,defects.by_project:project:false,defects.by_modelVersion:embeddingModelVersion:false,meta:k';
+    const first = made.join();
+    made.length = 0;
+    SH.dbSchema(fakeDb(['defects', 'meta']));
+    ok('the local copy\'s schema makes both stores and their indexes, and nothing that is there', first === want && !made.length, first + ' / ' + made.join());
+    ok('...the page making them with it', /req\.onupgradeneeded = function \(e\) \{ JITA_SH\.dbSchema\(e\.target\.result\); \};/.test(S.member(src, 'JiTA.db', 'open')));
+    ok('...and the worker, whichever opens a new version first', /req\.onupgradeneeded = function \(e\) \{ SH\.dbSchema\(e\.target\.result\); \};/.test(S.fn(src, 'openDb', body)) &&
+        !/createObjectStore/.test(body) && (src.match(/createObjectStore\(/g) || []).length === 2);
+    // Who a member is: the worker's crawl and Lead duties read the same handles, and the Lead bonus and the default role
+    // go by the same Lead names.
+    const LEADS = eval('(' + /\n    LEADS: (\{[^\n}]*\}),/.exec(src)[1] + ')'), BONUS = Number(/\n    LEAD_BONUS: (\d+),/.exec(src)[1]);
+    const WC = new Function('SH', 'crc', S.fn(src, 'crHandles', body) + '\n' + S.fn(src, 'crComputeExtra', body) + '\nreturn { handles: crHandles, extra: crComputeExtra };')(S.shared(src), { LEADS: LEADS, LEAD_BONUS: BONUS });
+    JiTA.leadduty = eval(S.members(src, 'JiTA.leadduty', ['_handles']));
+    JiTA.credits = { LEADS: LEADS };
+    JiTA.leadduty.members = eval(S.members(src, 'JiTA.leadduty.members', ['defaultRole']));
+    const PEOPLE = [['ISD BH Schogol', 'schogol@ccp.is'], ['ISD Solnichka', ''], ['ISD Lookup Table', 'lt@x.is'], ['Jane Doe', 'jane.doe@x.is'], ['ISD Schogol-Alt', null],
+        ['isd  Pilot  Zero ', 'pz@x'], ['ISD Schogol Solnichka', ''], ['', ''], ['ISD BH Lookuptable', 'a@b']];
+    const offWho = [];
+    PEOPLE.forEach(([dn, em]) => {
+        const w = WC.handles({ displayName: dn, emailAddress: em }), p = JiTA.leadduty._handles(dn, em), x = WC.extra([dn])[dn] || 0;
+        const lead = JiTA.leadduty.members.defaultRole(dn, null) === 'Lead';
+        if (J(w) !== J(p)) { offWho.push('handles ' + dn + ': ' + J(w) + ' vs ' + J(p)); }
+        if (lead !== (x >= BONUS)) { offWho.push('lead ' + dn + ': role ' + lead + ', bonus ' + x); }
+    });
+    ok('the credits crawl and Lead duties read a member\'s handles alike, and the Lead bonus and default role go by the same names', !offWho.length, offWho.join(' | '));
+    ok('...the bonus given once for each Lead\'s handle in the name, a hyphen read as a space', (WC.extra(['ISD Schogol Solnichka'])['ISD Schogol Solnichka'] || 0) === 2 * BONUS &&
+        (WC.extra(['ISD Schogol-Alt'])['ISD Schogol-Alt'] || 0) === BONUS && JiTA.leadduty.members.defaultRole('Jane Doe', 'Senior') === 'Senior');
+    ok('...a handle listed as false being no Lead\'s, and a word every object has no handle', SH.leadWords('ISD Alpha Beta', { alpha: true, beta: false }) === 1 &&
+        SH.leadWords('ISD constructor toString', LEADS) === 0);
+    ok('...through the shared pieces', /^    _handles: JITA_SH\.handles\s*(\/\/.*)?$/.test(S.member(src, 'JiTA.leadduty', '_handles')) &&
+        /function crHandles\(member\) \{ return SH\.handles\(member\.displayName, member\.emailAddress\); \}/.test(body) &&
+        /JITA_SH\.leadWords\(name, JiTA\.credits\.LEADS \|\| \{\}\)/.test(S.member(src, 'JiTA.leadduty.members', 'defaultRole')) &&
+        /var e = SH\.leadWords\(n, crc\.LEADS\) \* crc\.LEAD_BONUS;/.test(S.fn(src, 'crComputeExtra', body)));
+    const notes = (src.match(/.*(KEEP IN SYNC|[Kk]eep the two in sync|mirroring the worker's).*/g) || []).filter((l) => !/^ \* code both sides need was kept twice, marked KEEP IN SYNC/.test(l));
+    ok('no KEEP IN SYNC note is left anywhere', !notes.length, notes.map((l) => l.trim().slice(0, 80)).join(' | '));
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'shared code checks passed.'));
     process.exit(fail ? 1 : 0);

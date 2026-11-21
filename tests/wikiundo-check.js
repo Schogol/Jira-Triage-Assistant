@@ -5,6 +5,7 @@
 // Evals the real JiTA.conf + JiTA.leadduty against a stubbed Confluence property store and meta store.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it (JiTA.leadduty._handles is its handles)
 const cs = src.indexOf('JiTA.conf = {'), ce = src.indexOf('/* ---- ISD Lead duties', cs);
 const ls = src.indexOf('JiTA.leadduty = {'), em = '\n    _noop: null\n};', le = src.indexOf(em, ls);
 if (cs < 0 || ce < 0 || ls < 0 || le < 0) { throw new Error('could not slice JiTA.conf / JiTA.leadduty'); }
