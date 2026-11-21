@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.36
+// @version     3.53.37
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.36
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.37
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -100,20 +100,6 @@ function waitForKeyElements(selectorTxt, actionFunction, bWaitOnce, iframeSelect
     }
     waitForKeyElements.controlObj = controlObj;
 }
-
-
-// Shared globals for the log-file parser flow: the detection / click handlers and the deferred Parse* pass run
-// on separate ticks (setTimeout), so these carry state across that gap. `rows` = the raw file text;
-// `oc`/`lc`/`pdm`/`dx` = which igbr.zip attachment was opened. (pdmdata / today / driverAge are now locals - the
-// driver age is written straight into #driverAge by renderRequirements; menu_settings was an unused handle.)
-var rows, jitaIgbrFile = null;   // the header-less igbr.zip file a click just opened ('oc', 'lc', 'pdm', 'dx'); SwapUI takes it
-
-// The EVE client log header row. Used both to DETECT a logs.txt (its content has this line) and to LOCATE the
-// right CodeMirror editor to swap. Kept in ONE place so if CCP ever changes the header, it's a one-line edit
-// instead of a hunt across every selector. NB: the parsers still index columns positionally (Type=[2],
-// Message=[3], etc.), so a column *rename/reorder* would still need parser changes - this only centralizes the
-// detection string.
-var LOG_HDR = "Time\tFacility\tType\tMessage";
 
 
 // True when this script instance is running INSIDE the Zendesk Support Forge panel's cross-origin iframe
@@ -1326,964 +1312,6 @@ function addButtons() {
 };
 
 
-// When we detect the "title row" of a log parser file then we swap out the content of the log file with a parsed, more readable version of it with some extra features like buttons which allow you to toggle the visibility of certain types of events
-var selector = SELECTORS.CODE_BLOCK + ":contains(" + LOG_HDR + ")";
-waitForKeyElements(selector, SwapUI);
-
-
-// When we detect the "title row" of a processHealth file then we swap out the content of the log file with a parsed, more readable version of it with some extra features
-var phSelector = SELECTORS.CODE_BLOCK + ":contains(dateTime	pyDateTime	procCpu	threadCpu	pyMem	virtualMem	taskletsProcessed	taskletsQueued	watchdog time	spf	serviceCalls	callsFromClient	bytesReceived	bytesSent	packetsReceived	packetsSent	sessionCount	tidiFactor)";
-waitForKeyElements(phSelector, SwapUI);
-
-
-// When we detect the "title row" of a methodCalls file then we swap out the content of the log file with a parsed, more readable version of it with some extra features
-var McSelector = SELECTORS.CODE_BLOCK + ":contains(Time	Method	Duration [ms])";
-waitForKeyElements(McSelector, SwapUI);
-
-
-// The logs.txt attached directly to a report (as opposed to the one inside the igbr.zip) is now rendered
-// by CodeMirror, which wraps every line in a <div class="cm-line"> instead of a <span data-testid="code-block">.
-// CodeMirror only keeps the visible lines in the DOM, so we detect the file by its (always-present) header
-// row and let SwapUI pull the full text out of CodeMirror's in-memory state. (processHealth / methodCalls
-// only ever appear inside the igbr.zip, which still uses the <span> layout, so they need no CodeMirror path.)
-var cmSelector = SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")";
-waitForKeyElements(cmSelector, SwapUI);
-
-
-// ---- suppress the raw-log flash --------------------------------------------------------------------------
-// The parser is poll-driven (waitForKeyElements / a 100ms content poll), so a log's raw text renders and PAINTS
-// before SwapUI swaps in the parsed view - a visible flash. This synchronous observer hides a log container the
-// instant its header row appears (a MutationObserver callback is a microtask, so it runs BEFORE the next paint);
-// SwapUI removes the hide once it has mounted the parsed view. Only header-based logs (log / processHealth /
-// methodCalls, in the <span>/<code> OR CodeMirror layout) are hidden - matched by the header text - so ordinary
-// code-blocks and the comment editor are never touched, and a per-element fallback timer reveals anything that
-// somehow never gets parsed, so content can't get stuck invisible.
-(function () {
-    if (JITA_NO_JIRA_UI || !window.MutationObserver) { return; }
-    try { GM_addStyle('.jita-log-hiding { visibility: hidden !important; }'); } catch (e) { /* ignore */ }
-    var HIDE_SIG = new RegExp(LOG_HDR + '|dateTime\tpyDateTime\tprocCpu|Time\tMethod\tDuration');
-    function hideLogs() {
-        if (!flagOn('parser') || document.getElementById('tableContent')) { return; }   // feature off, or already parsed
-        var nodes = document.querySelectorAll(SELECTORS.CODE_BLOCK + ', .cm-content');
-        for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            if (el.classList.contains('jita-log-hiding')) { continue; }
-            if (el.querySelector && (el.querySelector('#gpanel') || el.querySelector('#tableContent'))) { continue; }   // already our parsed UI
-            if (jitaInEditable(el)) { continue; }   // a draft in the comment box, never a log viewer: it used to blink out for 2.5 s per line
-            var t = el.textContent || '';
-            // Hide header-based logs (any layout, matched by header text) OR, while a header-less igbr.zip file is
-            // being loaded by a click (jitaParserPending === the current click generation), the code-block it lands
-            // in - so its raw text can't flash before SwapUI parses it, even if Jira swaps in a fresh code-block.
-            var isCode = el.getAttribute && el.getAttribute('data-testid') === 'code-block';
-            if ((t && HIDE_SIG.test(t)) || (jitaParserPending && jitaParserPending === jitaParserGen && isCode)) {
-                el.classList.add('jita-log-hiding');
-                (function (node) { setTimeout(function () { node.classList.remove('jita-log-hiding'); }, 2500); })(el);   // safety net
-            }
-        }
-    }
-    try {
-        new MutationObserver(function (records) {
-            // Cheap gate before the full-document scan: a comment-typing keystroke is a characterData-only mutation
-            // with no parse pending - skip those. Scan only when a node was actually added (a log may have mounted)
-            // or a header-less parse is pending (its raw text streams in via characterData).
-            if (!jitaParserPending) {
-                var added = false;
-                for (var i = 0; i < records.length; i++) { if (records[i].addedNodes && records[i].addedNodes.length) { added = true; break; } }
-                if (!added) { return; }
-            }
-            hideLogs();
-        }).observe(document.body, { childList: true, subtree: true, characterData: true });
-    } catch (e) { /* ignore */ }
-})();
-
-
-// outstandingcalls.txt / lastcrashes.txt / PDMData.txt / dxdiag.txt live inside the igbr.zip and - unlike the log /
-// processHealth / methodCalls files - have NO header row in their content to detect them by. So the only way to
-// tell them apart is WHICH file button was clicked: watch for each file's entry in the attachment list, and when
-// its button is clicked, poll for the freshly-loaded text (jitaRunParserWhenLoaded) and set the matching parser
-// flag that SwapUI dispatches on.
-// The click binding is namespaced and .off()'d first so re-firing can never stack duplicate handlers: the SPA
-// re-rendering the attachment list makes waitForKeyElements match a fresh span and re-run this callback.
-var IGBR_FILES = [
-    { name: 'outstandingcalls.txt', setFlag: function () { jitaIgbrFile = 'oc'; } },
-    { name: 'lastcrashes.txt',      setFlag: function () { jitaIgbrFile = 'lc'; } },
-    { name: 'PDMData.txt',          setFlag: function () { jitaIgbrFile = 'pdm'; } },
-    { name: 'dxdiag.txt',           setFlag: function () { jitaIgbrFile = 'dx'; } }
-];
-IGBR_FILES.forEach(function (f) {
-    waitForKeyElements('span[data-item-title="true"]:contains(' + f.name + ')', function () {
-        $("button:contains('" + f.name + "')")
-            .off('click.jita').on('click.jita', function () { jitaRunParserWhenLoaded(f.setFlag); });
-    });
-});
-
-
-// outstandingcalls.txt / lastcrashes.txt / PDMData.txt load their text ASYNCHRONOUSLY into the
-// <span data-testid="code-block"> after the file button is clicked. The old code just waited a fixed 750ms and
-// hoped the content had arrived - if the load was slower, SwapUI parsed empty/stale content and you were out
-// of luck. Instead, poll for THIS file's raw text to appear in the code-block and only then set the parser flag
-// + run SwapUI. A naive "content changed -> fire" poll corrupts, so it's guarded on five fronts:
-//   1. Generation token - a NEWER click (incl. a double-click of the same file) supersedes an earlier poller,
-//      so stale pollers can't fire.
-//   2. Empty file - if the clicked file is empty its content never arrives, so we time out at MAX and give up
-//      rather than polling forever.
-//   3. #tableContent present - our (or another file's) parser markup is currently mounted, so the raw file text
-//      isn't showing; keep waiting for the viewer to swap it back in.
-//   4. HEADER_SIG - a header-based file (log / processHealth / methodCalls) loaded instead; those are handled
-//      by waitForKeyElements+SwapUI, so we must not grab them as our oc/lc/pdm/dx file.
-//   5. Cancel-on-navigate (the jitaParserGen bump below) - the poller watches a SHARED code-block, so if you open
-//      an EMPTY tracked file (its poller keeps waiting - no content ever arrives) and then click ANOTHER file
-//      before MAX, that file's content lands in the same span and would trip the stale poller, parsing it into
-//      the wrong table (the reported bug: empty outstandingcalls -> click fitting.txt -> fitting in the OC table).
-//      Guards #1/#2 don't catch this: an UNtracked file (fitting.txt / prefs.ini / ...) has no click handler to
-//      bump the generation, and its content arrives well before the #2 timeout. So we bump the generation on
-//      EVERY file-entry click, which kills any pending poller the moment you navigate away.
-// `setFlag` marks which parser branch SwapUI takes (oc / lc / pdm / dx).
-var jitaParserGen = 0;
-var jitaParserPending = 0;   // generation of an in-flight header-less (igbr.zip file-button) parse, or 0; drives the observer's pending-hide
-function jitaRevealLogs() {   // reveal every container the flash suppressor hid (shared by SwapUI + the poller)
-    try {
-        var hid = document.querySelectorAll('.jita-log-hiding');
-        for (var i = 0; i < hid.length; i++) { hid[i].classList.remove('jita-log-hiding'); }
-    } catch (e) { /* ignore */ }
-}
-// Guard #5: clicking any file entry in the igbr.zip viewer cancels a pending poller. Capture phase, so it runs
-// BEFORE the tracked button's bubble handler - a tracked file then starts a fresh poller with the newer (winning)
-// generation, while an untracked file just leaves every poller cancelled. File entries are <button>s containing a
-// [data-item-title] element (the same markers waitForKeyElements uses above); other buttons (download, toggles)
-// have no such child and are ignored.
-if (!JITA_NO_JIRA_UI) {
-    document.addEventListener('click', function (e) {
-        var btn = e.target && e.target.closest ? e.target.closest('button') : null;
-        if (btn && btn.querySelector('[data-item-title]')) { jitaParserGen++; }
-    }, true);
-}
-function jitaRunParserWhenLoaded(setFlag) {
-    if (!flagOn('parser')) { return; }   // a click while the parser is off must leave nothing pending for later
-    var myGen = ++jitaParserGen;
-    var CB = SELECTORS.CODE_BLOCK;
-    // These igbr.zip files have no header row, so the signature observer can't catch them. Instead mark a parse as
-    // PENDING for this click's generation: the observer then hides the code-block the instant the header-less raw
-    // text lands - even if Jira swaps in a FRESH code-block element - and we hide the current one now too. Cleared
-    // + revealed on parse (SwapUI), give-up (timeout), or the safety timer; gen-scoped so a later click (tracked or
-    // not) can never leave the viewer stuck blank.
-    jitaParserPending = myGen;
-    $(CB).addClass('jita-log-hiding');
-    setTimeout(function () { if (jitaParserPending === myGen) { jitaParserPending = 0; } jitaRevealLogs(); }, 2500);
-    var HEADER_SIG = new RegExp(LOG_HDR + '|dateTime\tpyDateTime\tprocCpu|Time\tMethod\tDuration');
-    var before = ($(CB).text() || '').trim();
-    var start = Date.now(), MAX = 8000, POLL = 100;
-    (function poll() {
-        if (myGen !== jitaParserGen) { return; }                 // superseded by a newer click (its poller / the safety timer owns the reveal)
-        if (Date.now() - start > MAX) { if (jitaParserPending === myGen) { jitaParserPending = 0; } jitaRevealLogs(); return; }   // empty / never-loaded file -> reveal + don't parse
-        var $cb = $(CB), now = ($cb.text() || '').trim();
-        var ready = !document.getElementById('tableContent')    // no parser markup currently mounted
-            && $cb.length && now && now !== before              // new, non-empty raw content
-            && !HEADER_SIG.test(now);                           // ...and not a header-based file (not ours)
-        if (ready) { setFlag(); SwapUI(); return; }
-        setTimeout(poll, POLL);
-    })();
-}
-
-// Reads the complete text of a file rendered by the new CodeMirror-based viewer.
-// CodeMirror only keeps the lines currently in view inside the DOM, but it holds the whole document
-// in its in-memory editor state. The userscript sandbox can't reach CodeMirror's internal DOM property,
-// so we run the read in the page context via an injected <script> and hand the text back through a
-// shared, hidden DOM node (which both contexts can see).
-function getCmDocText() {
-    var NODE_ID = 'JITA_cmdoc_transfer';
-
-    var transfer = document.getElementById(NODE_ID);
-    if (!transfer) {
-        transfer = document.createElement('div');
-        transfer.id = NODE_ID;
-        transfer.style.display = 'none';
-        document.documentElement.appendChild(transfer);
-    }
-    transfer.textContent = '';
-
-    var pageCode =
-        '(function(){var out=document.getElementById(' + JSON.stringify(NODE_ID) + ');try{' +
-        'var c=document.querySelector(".cm-content[data-jita-cmsrc]")||document.querySelector(".cm-content");' +
-        'var dv=c&&c.cmView;' +
-        'var v=dv&&(dv.view||(dv.rootView&&dv.rootView.view)||dv.editorView);' +
-        'out.textContent=(v&&v.state)?v.state.doc.toString():"";' +
-        '}catch(e){out.textContent="";}})();';
-
-    var s = document.createElement('script');
-    s.textContent = pageCode;
-    (document.head || document.documentElement).appendChild(s);
-    if (s.parentNode) { s.parentNode.removeChild(s); }
-
-    // The injected script runs synchronously the moment it is inserted, so the text is ready now.
-    var text = transfer.textContent || '';
-    transfer.textContent = '';
-    return text;
-}
-
-
-// Shared code-block prep for the igbr.zip (<span data-testid="code-block">) parser branches: drop empty spans
-// + inline comment spans, then read the raw file text into the module-level `rows`. Returns `rows`.
-function readCodeBlock() {
-    $('code > span:empty').remove();
-    $(SELECTORS.CODE_BLOCK).find('span > span.comment').remove();
-    rows = $(SELECTORS.CODE_BLOCK).text();
-    return rows;
-}
-
-// Prep the code-block, replace it with `viewHtml`, then draw the file as a `type` table (JiTA.logparser.TYPES) once the
-// parser markup has mounted. Used by the log / processHealth / methodCalls / outstandingCalls / lastCrashes branches of
-// SwapUI.
-function mountParser(viewHtml, type) {
-    readCodeBlock();
-    $(SELECTORS.CODE_BLOCK).html(viewHtml);
-    setTimeout(function () { jitaRunParse(function () { JiTA.logparser.draw(type, rows); }); }, 250);
-}
-
-// Run a parser; if it throws, end the spinner with a message instead of leaving it going over a page whose raw
-// text is already gone.
-function jitaRunParse(parseFn) {
-    try { parseFn(); } catch (e) {
-        JiTA.log('[JiTA] log parser failed:', e);
-        var l = document.getElementById('loader');
-        if (l) { l.style.display = 'none'; }
-        var tc = document.getElementById('tableContent');
-        if (tc && tc.tBodies && tc.tBodies[0]) {
-            var tr = document.createElement('tr'), td = tr.insertCell(0);
-            td.colSpan = 20;
-            td.textContent = 'This file could not be parsed (' + (e && e.message || e) + '). Open raw to read it.';
-            tc.tBodies[0].appendChild(tr);
-            tc.style.display = 'table';
-        }
-    }
-}
-
-// True for a log container inside a rich-text editor the user is typing in (a ``` block in the comment box or the
-// description), as against the attachment viewer. Judged by the HOST, not by CodeMirror's own contenteditable:
-// an editable-but-read-only viewer carries contenteditable="true" too.
-function jitaInEditable(el) {
-    var ed = el && el.closest ? (el.closest('.cm-editor') || el) : null;
-    var host = ed && ed.parentElement;
-    return !!(host && host.closest && host.closest('[contenteditable="true"], .ProseMirror'));
-}
-
-
-// Swap out the UI when looking at a log file and add the buttons to toggle message types at the top of the page
-function SwapUI() {
-    // --- New CodeMirror-based viewer (files attached directly to the report) ---
-    // Detect the file type from its (always-rendered) header row, pull the complete text straight out of
-    // CodeMirror's state, drop our parser UI into the editor container, then reuse the existing parsers.
-    // Files inside the igbr.zip still use the old <span> layout and are handled by the original code below.
-    // Scope everything to the ONE editor that holds the log header row: the page can contain OTHER CodeMirror
-    // editors (a ``` code block in the comment box is also a .cm-editor / .cm-content), and operating on all of
-    // them read the wrong (comment) text into `rows` AND injected the "Logfile Parser" UI into the comment box.
-    // The header-less igbr.zip file a click asked for, taken once whichever branch runs: a flag left set by a click
-    // while the parser was off used to pick the wrong parser for the next file.
-    var igbr = jitaIgbrFile;
-    jitaIgbrFile = null;
-    // Never the comment box: a ``` block there is a CodeMirror editor too, and a log header pasted into it turned the
-    // box being typed in into the parser's chrome.
-    var $logEd = $(SELECTORS.CM_LINE + ":contains(" + LOG_HDR + ")").filter(function () { return !jitaInEditable(this); }).first().closest('.cm-editor');
-    if ($logEd.length && !$(SELECTORS.CODE_BLOCK).length && flagOn('parser')) {
-        var $cm = $logEd.find('.cm-content').first().attr('data-jita-cmsrc', '1');   // mark the exact source editor
-        rows = getCmDocText();                                                       // reads the marked .cm-content
-        $cm.removeAttr('data-jita-cmsrc');
-        // A read that came back without the log (CodeMirror's internals moved) replaced the readable raw log with an
-        // empty table, and said nothing. Leave the viewer as it is.
-        if (!rows || rows.indexOf(LOG_HDR) === -1) {
-            JiTA.warn('[JiTA] could not read the log text from the viewer, so it was left as it is');
-            jitaParserPending = 0;
-            jitaRevealLogs();
-            return;
-        }
-        $logEd.html(html);
-        // The parser's scrollable #table is position:absolute (top:85px; bottom:0), so it sizes itself
-        // against the nearest positioned ancestor. In the old <span> viewer that ancestor filled the screen;
-        // CodeMirror's .cm-editor is position:relative but only a sliver tall, which collapses #table and
-        // clips every row. Pin #table to the viewport instead (the media viewer is full-screen) so all rows
-        // are visible and scrollable.
-        $('#table').css({ position: 'fixed', top: '95px', bottom: '0', left: '0', width: '100%' });
-        setTimeout(function () { jitaRunParse(function () { JiTA.logparser.draw('log', rows); }); }, 250);
-        // NB: no early return here. The <span> checks below are no-ops on this layout (no code-block span),
-        // but we must fall through to the "$('#gpanel a').click(...)" handler at the end of SwapUI so the
-        // Toggle Notice / Warnings / Errors / Exceptions filter buttons get wired up.
-    }
-
-    else if ($(SELECTORS.CODE_BLOCK + ":contains(" + LOG_HDR + ")")[0] && flagOn('parser')) {
-        mountParser(html, 'log');
-    }
-
-    else if ($(SELECTORS.CODE_BLOCK + ":contains(dateTime	pyDateTime	procCpu	threadCpu	pyMem	virtualMem	taskletsProcessed	taskletsQueued	watchdog time	spf	serviceCalls	callsFromClient	bytesReceived	bytesSent	packetsReceived	packetsSent	sessionCount	tidiFactor)")[0] && flagOn('parser')) {
-        mountParser(phHtml, 'ph');
-    }
-
-    else if ($(SELECTORS.CODE_BLOCK + ":contains(Time	Method	Duration [ms])")[0] && flagOn('parser')) {
-        mountParser(McHtml, 'mc');
-    }
-
-    else if (igbr === 'oc' && flagOn('parser')) {
-        mountParser(ocHtml, 'oc');
-    }
-
-    else if (igbr === 'lc' && flagOn('parser')) {
-        mountParser(lcHtml, 'oc');   // Last Crashes reads as Outstanding Calls do
-    }
-
-    else if (igbr === 'dx' && flagOn('parser')) {
-        readCodeBlock();
-        $(SELECTORS.CODE_BLOCK).append(dxdiagHtml);
-        // Parse the raw dxdiag text into a triage summary (crash history + GPU driver recency + system). Guarded.
-        try { renderDxdiag(rows); } catch (e) { $('#dxdiag').text('Could not evaluate dxdiag.'); }
-    }
-
-    else if (igbr === 'pdm' && flagOn('parser')) {
-        readCodeBlock();
-        $(SELECTORS.CODE_BLOCK).append(pdmHtml);
-        // Judge the machine against EVE's system requirements and render a per-component breakdown into the
-        // Quick Info box (verdict + OS/CPU/RAM/GPU/DirectX rows + driver age). Guarded end-to-end, the reading of
-        // the file included: malformed PDM text used to throw before the view was revealed.
-        try { renderRequirements(convertTextToObject(rows)); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
-    };
-
-    // The parsed view is now mounted (or this wasn't a parse branch) - clear any pending non-header parse and
-    // reveal every container the flash suppressor hid, so the parsed UI shows instead of staying invisible.
-    jitaParserPending = 0;
-    jitaRevealLogs();
-
-
-    // Wire the gpanel toggle buttons + search box on the freshly-mounted chrome.
-    jitaWireLogControls();
-};
-
-// Wire the parser chrome's controls: the gpanel type-toggle buttons and the live search box. Bind once per
-// fresh mount - the chrome is rebuilt on every mount, so handlers never stack.
-function jitaWireLogControls() {
-    // The gpanel buttons only keep their .toggle state (a type toggle carries it while its rows are hidden, Group
-    // Repeats while grouping is off); jitaApplyLogFilter then recomputes the parsed table's rows from it. There used
-    // to be a second handler that hid rows by class across the whole PAGE: Only Exceptions hid the table header (the
-    // ':not(#fixedHead)' matched nothing - it is a class) and any Jira table behind the viewer, Show All forced every
-    // <tr> on the page visible, and the filter pass after it only ever recomputed the table body.
-    $("#gpanel a").click(function (ev) {
-        if (ev && ev.preventDefault) { ev.preventDefault(); }
-        var id = $(this).attr('id');
-        if (id === 'onlyexception') {
-            $('#gnav a#notice, #gnav a#error, #gnav a#warning').addClass('toggle');
-            $('#gnav a#exception').removeClass('toggle');
-        } else if (id === 'showAll') {
-            $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');
-        } else {
-            $(this).toggleClass('toggle');
-        }
-        jitaApplyLogFilter();
-    });
-
-    // Live search box (Feature D): filter rows by text, composing with the type toggles above.
-    if ($('#jita-log-search').length) {
-        var jitaSearchTimer = null;
-        $('#jita-log-search').on('input', function () {
-            if (jitaSearchTimer) { clearTimeout(jitaSearchTimer); }
-            jitaSearchTimer = setTimeout(jitaApplyLogFilter, 120);   // debounce for large logs
-        });
-    }
-}
-
-// Recompute the parsed table's rows from the toggle state and the search box. A row is shown iff it matches the
-// (case-insensitive) query AND its message type is not toggled off; the "Only Exceptions" combination hides info
-// rows too. Only #tableContent's body is touched.
-function jitaApplyLogFilter() {
-    if (!document.getElementById('tableContent')) { return; }
-    // Drop the previous Nx badges before measuring row text, so a stale "52×" can't pollute the search
-    // match; jitaRegroupLog() re-adds them from the new visibility at the end of this pass.
-    var pb = document.querySelectorAll('#tableContent .jita-rep-badge');
-    for (var pi = 0; pi < pb.length; pi++) { if (pb[pi].parentNode) { pb[pi].parentNode.removeChild(pb[pi]); } }
-    var q = ($('#jita-log-search').val() || '').toLowerCase();
-    var off = {};
-    $('#gnav a.toggle').each(function () { off[$(this).attr('id')] = true; });
-    var onlyExc = off.notice && off.warning && off.error && !off.exception;   // the "Only Exceptions" state
-    $('#tableContent tbody tr').each(function () {
-        var cls = this.className || '';
-        var hiddenByToggle = onlyExc
-            ? !/\bexception\b/.test(cls)
-            : ((off.notice && /\bnotice\b/.test(cls)) ||
-               (off.warning && /\bwarning\b/.test(cls)) ||
-               (off.error && /\berror\b/.test(cls)) ||
-               (off.exception && /\bexception\b/.test(cls)));
-        var matches = !q || (this.textContent || '').toLowerCase().indexOf(q) >= 0;
-        this.style.display = (!hiddenByToggle && matches) ? 'table-row' : 'none';
-    });
-    // Re-collapse identical runs against the visibility we just computed (hiding a type can make
-    // previously-separated duplicates adjacent, so the "Nx" grouping must be recalculated here).
-    jitaRegroupLog();
-}
-
-
-/* ---- "Group Repeats": collapse consecutive identical log lines / exception blocks (main Log Parser) ----
- * A run of consecutive IDENTICAL events - either a single line, or a whole EXCEPTION #…EXCEPTION END block -
- * is collapsed to its first occurrence with an "Nx" count badge. "Identical" compares facility + type +
- * message with the TIMESTAMP column excluded, so the same thing logged repeatedly (each with a different
- * time) still groups.
- *
- * Crucially the collapse is recomputed by jitaRegroupLog() AFTER every filter / toggle pass, not once at parse
- * time: hiding a message type (e.g. Notices) can make two identical errors - previously separated by a notice
- * - become visually adjacent and therefore groupable. So jitaBuildLogGroups() runs ONCE (stamping each row with
- * a unit id + a timestamp-free signature), and jitaRegroupLog() re-derives the badges from the CURRENT
- * visibility on demand. A hidden unit between two duplicates is skipped (it doesn't break the run), which is
- * exactly what makes "hide notices -> the errors around them batch together" work.
- *
- * The collapsed follower rows stay hidden - the "Nx" badge is an informational count only, not a toggle.
- * (The "Group Repeats" nav button is the way to see every raw line again.)
- */
-
-// Segment the rendered rows into "units" (a single line, or a full exception block) and stamp each row with
-// its unit id (data-jita-grp) + the unit's timestamp-free signature (data-jita-gsig on the unit's first row).
-// Runs once, right after the table is filled and BEFORE applyToTable rewrites any message cell, so the
-// signature is computed from the pristine message text.
-function jitaBuildLogGroups() {
-    var tbody = document.querySelector('#tableContent tbody');
-    if (!tbody) { return; }
-    var rows = tbody.rows, i = 0, unit = 0;
-    function cellText(tr, idx) { var c = tr.cells[idx]; return c ? (c.textContent || '') : ''; }
-    // Normalize the volatile bits that differ between repeats of the SAME exception so they still group. The
-    // header line ("EXCEPTION #5 logged at 03/12/2025 15:23:55") carries a per-instance counter AND a date/
-    // time INSIDE the message column, so without this every block's signature is unique and identical
-    // exceptions never batch. We also collapse the STACKTRACE counter, the per-instance Stackhash, and
-    // object-repr hex addresses (0x…), all of which vary between otherwise-identical dumps. (The row's own
-    // Time column is already excluded from the signature.)
-    function normSig(msg) {
-        return msg
-            .replace(/(EXCEPTION|STACKTRACE)\s+#\d+/gi, '$1 #')   // per-instance exception / stacktrace counter
-            .replace(/\d{1,2}\/\d{1,2}\/\d{2,4}/g, '#')           // dates (DD/MM/YYYY or MM/DD/YYYY)
-            .replace(/\d{1,2}:\d{2}:\d{2}/g, '#')                 // times (HH:MM:SS)
-            .replace(/Stackhash\s*:\s*-?\d+/gi, 'Stackhash: #')   // per-instance stack hash
-            .replace(/0x[0-9a-fA-F]+/gi, '0x#');                  // object-repr / memory addresses
-    }
-    function sigOf(tr) { return cellText(tr, 1) + '\x1f' + cellText(tr, 2) + '\x1f' + normSig(cellText(tr, 3)); }   // facility|type|normalized message (time excluded)
-    while (i < rows.length) {
-        var start = i, sig;
-        if (cellText(rows[i], 3).indexOf('EXCEPTION #') !== -1) {
-            // Exception BLOCK: gather rows until EXCEPTION END (inclusive) or the next EXCEPTION # - the same
-            // segmentation JiTA.logsig uses - so a whole repeated dump collapses as one unit.
-            var parts = [sigOf(rows[i])];
-            i++;
-            for (; i < rows.length; i++) {
-                var mt = cellText(rows[i], 3);
-                if (mt.indexOf('EXCEPTION #') !== -1) { break; }
-                parts.push(sigOf(rows[i]));
-                if (mt.indexOf('EXCEPTION END') !== -1) { i++; break; }
-            }
-            // EVE emits an empty error line after every EXCEPTION END. Absorb that trailing blank line (or
-            // several) into THIS block's ROW RANGE - but deliberately NOT into its signature `parts` - so it
-            // doesn't sit between two identical blocks as its own unit and break the run (which is what stops
-            // consecutive repeated exceptions from grouping). Keeping it out of the signature also means a
-            // stray trailing space can't make two otherwise-identical blocks look different.
-            while (i < rows.length && cellText(rows[i], 3).trim() === '') { i++; }
-            sig = 'B:' + parts.join('\x1e');
-        } else {
-            sig = 'L:' + sigOf(rows[i]);          // single LINE
-            i++;
-        }
-        for (var r = start; r < i; r++) { rows[r].setAttribute('data-jita-grp', unit); }
-        rows[start].setAttribute('data-jita-gsig', sig);
-        unit++;
-    }
-}
-
-// Re-derive the "Nx" badges from the CURRENT row visibility. Walks units in order, skipping any whose rows
-// are all hidden (so a filtered-out unit does NOT break a run of duplicates around it), and collapses
-// consecutive units that share a signature: the followers are hidden and the leader gets a count badge.
-// Called at the end of jitaApplyLogFilter (after every toggle / search) and once when the game log is drawn.
-function jitaRegroupLog() {
-    var tbody = document.querySelector('#tableContent tbody');
-    if (!tbody) { return; }
-    // Clear our previous badges idempotently (never touch applyToTable's [EDR-x] link - only our own spans).
-    var oldBadges = tbody.querySelectorAll('.jita-rep-badge');
-    for (var b = 0; b < oldBadges.length; b++) { if (oldBadges[b].parentNode) { oldBadges[b].parentNode.removeChild(oldBadges[b]); } }
-    // Grouping disabled: the "Group Repeats" nav toggle carries .toggle when OFF. The rows already hold the
-    // filter's base visibility (jitaApplyLogFilter reset every row before calling us), so just leave them.
-    var btn = document.getElementById('jita-group-toggle');
-    if (btn && btn.classList.contains('toggle')) { return; }
-
-    var rows = tbody.rows;
-    var runSig = null, runLeaderRow = null, runCount = 0, runFirstTime = '', runLastTime = '';
-
-    function timeOf(tr) { var c = tr.cells[0]; return (c && c.textContent) || ''; }
-    function stamp() {
-        if (runCount <= 1 || !runLeaderRow) { return; }
-        var msg = runLeaderRow.cells[runLeaderRow.cells.length - 1];
-        if (!msg) { return; }
-        var badge = document.createElement('span');
-        badge.className = 'jita-rep-badge';
-        badge.textContent = runCount + '×';   // informational count only (not a toggle)
-        var span = (runFirstTime && runLastTime && runFirstTime !== runLastTime) ? (runFirstTime + ' → ' + runLastTime) : (runFirstTime || '');
-        badge.title = runCount + ' identical in a row' + (span ? ' · ' + span : '');
-        msg.insertBefore(badge, msg.firstChild);
-    }
-
-    var i = 0;
-    while (i < rows.length) {
-        // Collect this unit's rows (the consecutive run sharing one data-jita-grp); its signature lives on the
-        // first row.
-        var g = rows[i].getAttribute('data-jita-grp'), unitRows = [], sig = null;
-        while (i < rows.length && rows[i].getAttribute('data-jita-grp') === g) {
-            if (sig === null) { sig = rows[i].getAttribute('data-jita-gsig'); }
-            unitRows.push(rows[i]);
-            i++;
-        }
-        // Rows of this unit that the current filter/toggle state leaves visible.
-        var visible = [];
-        for (var v = 0; v < unitRows.length; v++) { if (unitRows[v].style.display !== 'none') { visible.push(unitRows[v]); } }
-        if (!visible.length) { continue; }   // whole unit filtered out -> skip; do NOT break the current run
-
-        if (sig !== null && sig === runSig) {
-            // A duplicate of the current run's leader -> hide it (stays hidden; the badge is just a count).
-            runCount++;
-            runLastTime = timeOf(visible[visible.length - 1]) || runLastTime;
-            for (var h = 0; h < unitRows.length; h++) { unitRows[h].style.display = 'none'; }
-        } else {
-            stamp();   // close the previous run
-            runSig = sig;
-            runLeaderRow = visible[0];
-            runCount = 1;
-            runFirstTime = timeOf(visible[0]);
-            runLastTime = timeOf(visible[visible.length - 1]);
-        }
-    }
-    stamp();   // close the final run
-}
-
-
-// CSS for all parsed Logs
-var css = `
-    * {
-    color: #e6e6e6;
-    }
-
-	.pointer {
-      cursor: pointer;
-    }
-
-    .peakMachoCell {
-      border: solid thin;
-      border-color: red;
-    }
-
-    #peakMacho {
-      cursor: pointer;
-      text-align: right;
-      color: #e6e6e6;
-    }
-
-    #averageMacho {
-      text-align: right;
-      color: #e6e6e6;
-    }
-
-    #gpanel {
-      position: fixed;
-      top: 75px;
-      left: 520px;
-      box-sizing: border-box;
-      width: auto;
-      height: 43px;
-      padding: 0 5px;
-      overflow: visible;
-    }
-
-    #gheader {
-      white-space: normal;
-      z-index: 522;
-    }
-
-    #gpanel ul {
-      list-style: none;
-      margin: 0;
-      padding: 0;
-    }
-
-    #gpanel li {
-      float: left;
-      overflow: hidden;
-      margin-top: 0px;
-    }
-
-    #gnav {
-      float: left;
-      overflow: hidden;
-    }
-
-    .red {
-      background: #531a1a;
-    }
-
-    .yellow {
-      background: #67670b;
-    }
-
-    td:first-child, th:first-child {
-       padding: 4px 8px;
-    }
-
-    th {
-      vertical-align: top;
-      text-align: left;
-      font-weight: bold;
-      color: aliceblue;
-      background-color: #282d33;
-    }
-
-    td {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      font-family: Courier New;
-      font-size: 11px;
-      font-weight: normal;
-      border-right: 1.5px solid #aaaaaa;
-    }
-
-    #body {
-      margin-top: -12px;
-      overflow: auto;
-      white-space: normal;
-    }
-
-    #body h1 {
-      margin: 0;
-      padding: 10px 20px 5px;
-      border-bottom: 1px solid #CCC;
-      color: #848589;
-      font: 400 30px 'Segoe UI',Arial,Helvetica,sans-serif;
-      height: 41px;
-    }
-
-    #table {
-      position: absolute;
-      top: 85px;
-      bottom: 0;
-      width: 100%;
-      -webkit-transition: .3s linear;
-      -moz-transition: .3s linear;
-      transition: .3s linear;
-      overflow-y: scroll;
-      margin-top: 28px;
-      background-color: #1D2125;
-    }
-
-    /* selector literal - keep in sync with SELECTORS.CODE_BLOCK (this is CSS, not a query, so it stays inline) */
-    [data-testid="code-block"] {
-    background-color: #1d2125d6;
-    }
-
-    #table table {
-      width: max-content;
-      border-collapse: collapse;
-      border-spacing: 0;
-      -webkit-box-sizing: content-box;
-      -moz-box-sizing: content-box;
-      box-sizing: content-box;
-      color: #e6e6e6;
-    }
-
-    #loader {
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      z-index: 1;
-      margin: -75px 0 0 -75px;
-      border: 16px solid #f3f3f3;
-      border-radius: 50%;
-      border-top: 16px solid #3498db;
-      width: 120px;
-      height: 120px;
-      -webkit-animation: spin 2s linear infinite;
-      animation: spin 2s linear infinite;
-    }
-
-    @-webkit-keyframes spin {
-      0% { -webkit-transform: rotate(0deg); }
-      100% { -webkit-transform: rotate(360deg); }
-    }
-
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-
-    .fixedHead {
-      overflow: auto;
-      height: 100px;
-    }
-
-    .fixedHead thead th {
-      position: sticky;
-      top: 0;
-      z-index: 1;
-    }
-
-    .floating-div {
-      background-color: #333;
-      padding: 10px 50px;
-      color: #EEE;
-      margin-top: 10px;
-      position: fixed;
-      top: 75px;
-      right: 18px;
-      width: calc(33.33% - 25px);
-      white-space: normal;
-      }
-`
-
-// Additional CSS only for the LogParser
-var cssLogParser = `
-    td {
-      vertical-align: top;
-      text-align: left;
-    }
-
-    .row {
-      background: #FFF;
-    }
-
-    .notice {
-      background: #296429;
-    }
-
-    .warning {
-      background: #67670b;
-    }
-
-    .error {
-      background: #531a1a;
-    }
-
-    .info {
-      background: #1f313d;
-    }
-
-    #gpanel {
-      position: fixed;
-      top: 15px;
-      left: 175px;
-      box-sizing: border-box;
-      width: auto;
-      height: 43px;
-      padding: 0 5px;
-      line-height: 46px;
-      overflow: visible;
-    }
-
-	#gpanel a {
-      display: block;
-      padding: 0 10px;
-      color: #FFF;
-      font-weight: 700;
-      text-decoration: none;
-      white-space: nowrap;
-      cursor: pointer;
-      -webkit-transition: .1s ease-in-out;
-      -moz-transition: .1s ease-in-out;
-      -o-transition: 0.1s ease-in-out;
-      transition: .1s ease-in-out;
-    }
-
-    #gpanel li a  {
-      color: #FFF;
-      background-color: #7B4;
-      border: 1px solid black;
-    }
-
-	.toggle {
-      color: #FFF;
-      background-color: #8b8e89 !important;
-      border: 1px solid black;
-    }
-
-    #button a  {
-      color: #FFF;
-      background-color: #7B4;
-      border: 1px solid black;
-    }
-
-    #button a:hover {
-      background-color: rgba(204,204,204,.4);
-      color: #FFF;
-    }
-
-    .bordertop {
-        border-top: 2px solid #aaaaaa;
-    }
-
-    .borderbot {
-        border-bottom: 2px solid #aaaaaa;
-    }
-
-    #searchli {
-      float: left;
-      margin-left: 10px;
-    }
-
-    #jita-log-search {
-      height: 26px;
-      padding: 0 8px;
-      border: 1px solid #555;
-      border-radius: 4px;
-      background: #1d2125;
-      color: #e6e6e6;
-      font-size: 12px;
-      outline: none;
-    }
-
-    #jita-log-search:focus {
-      border-color: #4c9aff;
-    }
-
-    .sig-hit {
-      box-shadow: inset 4px 0 0 #ffb547 !important;
-    }
-
-    .sig-hit-loose {
-      box-shadow: inset 4px 0 0 #6b7785 !important;
-    }
-
-    .jita-rep-badge {
-      display: inline-block;
-      margin-right: 6px;
-      padding: 0 6px;
-      border-radius: 8px;
-      background: #3a434d;
-      color: #ffd479;
-      font-size: 10px;
-      font-weight: 700;
-      line-height: 16px;
-      vertical-align: middle;
-      user-select: none;
-    }
-`
-
-
-// FontAwesome stylesheet, shared by every parser view.
-var FA_LINK = '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">';
-
-// Build a log-parser view: the shared <style> + FontAwesome + #body/#table/#tableContent/#loader shell around
-// a given <h1> `title` and <thead> `columns` (raw <th> markup). opts.extraCss is appended after the base css
-// (the main Log Parser layers cssLogParser on top); opts.header is HTML injected above #body (the filter nav
-// on the main parser, the macho stats on Method Calls). One shell for all five, so the table structure and the
-// FontAwesome link are single-sourced.
-function parserShell(title, columns, opts) {
-    opts = opts || {};
-    return `
-<style>
-`+ css + (opts.extraCss || '') +`
-</style>
-
-`+ FA_LINK +`
-<body>
-`+ (opts.header || '') +`
-   <div id="body">
-      <header>
-         <h1>`+ title +`</h1>
-      </header>
-      <div id="table" tabindex="0">
-         <table id="tableContent" style="display:none;" class="fixedHead">
-            <div id="loader"></div>
-            <thead>
-               <tr>
-`+ columns +`
-            </thead>
-            <tbody></tbody>
-         </table>
-      </div>
-   </div>
-`;
-}
-
-
-// Variable which contains the UI of the Log Parser
-var html = parserShell('Logfile Parser', `
-                  <th scope="col">Time
-                  <th scope="col">Facility
-                  <th scope="col">Type
-                  <th scope="col">Message`, {
-    extraCss: cssLogParser,
-    header: `
-   <header id="gheader">
-      <nav id="gpanel">
-         <ul id="gnav">
-            <li>
-               <a href="#" id = "notice" class="">Toggle Notice</a>
-            <li>
-               <a href="#" id = "warning" class="">Toggle Warnings</a>
-            <li>
-               <a href="#" id = "error" class="">Toggle Errors</a>
-            <li>
-               <a href="#" id = "exception" class="">Toggle Exceptions</a>
-            <li id="button">
-               <a href="#" id = "onlyexception" class="">Only Exceptions</a>
-            <li id="button">
-               <a href="#" id = "showAll">Show All</a>
-            <li id="button">
-               <a href="#" id = "jita-group-toggle" class="" title="Collapse consecutive identical lines / exceptions into one row with an Nx count. Recomputed as you filter, so hiding a message type re-batches whatever becomes adjacent.">Group Repeats</a>
-            <li id="searchli">
-               <input id="jita-log-search" type="text" placeholder="Filter…" autocomplete="off">
-         </ul>
-      </nav>
-   </header>`
-});
-
-
-
-// Variable which contains the UI of the Process Health parser
-var phHtml = parserShell('Process Health', `
-                  <th scope="col">dateTime <i class="fa-regular fa-circle-question" title="System date / time converted into UTC"></i>
-                  <th scope="col">pyDateTime
-                  <th scope="col">procCpu <i class="fa-regular fa-circle-question" title="CPU usage in % of one CPU core"></i>
-                  <th scope="col">threadCpu <i class="fa-regular fa-circle-question" title="CPU usage in % for the python thread"></i>
-                  <th scope="col">pyMem <i class="fa-regular fa-circle-question" title="Memory usage for the python part of the client in MB"></i>
-                  <th scope="col">virtualMem <i class="fa-regular fa-circle-question" title="Total memory usage of the client in MB"></i>
-                  <th scope="col">taskletsProcessed <i class="fa-regular fa-circle-question" title="How many python threads have been run"></i>
-                  <th scope="col">taskletsQueued <i class="fa-regular fa-circle-question" title="How many python threads are waiting to be run"></i>
-                  <th scope="col">watchdog time <i class="fa-regular fa-circle-question" title="Time spent for watchdog in ms"></i>
-                  <th scope="col" class="pointer">FPS <i class="fa-regular fa-circle-question" title="Frames per second"></i></th>
-                  <th scope="col">serviceCalls
-                  <th scope="col">callsFromClient
-                  <th scope="col">bytesReceived <i class="fa-regular fa-circle-question" title="Bytes recieved from the EVE Server (Not including chat, imageserver and other services)"></i>
-                  <th scope="col">bytesSent <i class="fa-regular fa-circle-question" title="Bytes sent to the EVE Server (Not including chat, imageserver and other services)"></i>
-                  <th scope="col">packetsReceived <i class="fa-regular fa-circle-question" title="Packets recieved from the EVE Server (Not including chat, imageserver and other services)"></i>
-                  <th scope="col">packetsSent <i class="fa-regular fa-circle-question" title="Bytes sent to the EVE Server (Not including chat, imageserver and other services)"></i>
-                  <th scope="col">sessionCount <i class="fa-regular fa-circle-question" title="Should always be 1"></i>
-                  <th scope="col">tidiFactor <i class="fa-regular fa-circle-question" title="Time Dilation - 1.0 = No TiDi"></i>`);
-
-
-// Variable which contains the UI of the Method Calls parser
-var McHtml = parserShell('Method Calls', `
-                  <th scope="col">Time <i class="fa-regular fa-circle-question" title="System date / time converted into UTC"></i>
-                  <th scope="col">Method <i class="fa-regular fa-circle-question" title="Python method which was called"></i>
-                  <th scope="col">Duration in ms <i class="fa-regular fa-circle-question" title="How long it took to complete the method call"></i>`, {
-    header: `
-  <header id="gheader">
-      <nav id="gpanel">
-         <ul id="gnav">
-            <li>
-               <div id="averageMacho"> Average machoNet::GetTime duration:</div>
-               <div id="peakMacho"> Peak machoNet::GetTime duration:</div>
-         </ul>
-      </nav>
-   </header>`
-});
-
-
-// Variable which contains the UI of the Outstanding Calls parser
-var ocHtml = parserShell('Outstanding Calls', `
-                  <th scope="col">Time <i class="fa-regular fa-circle-question" title="System date / time converted into UTC"></i>
-                  <th scope="col">Method <i class="fa-regular fa-circle-question" title="Python method which was called but is not yet finished"></i>`);
-
-
-// Variable which contains the UI of the Last Crashes parser
-var lcHtml = parserShell('Last Crashes', `
-                  <th scope="col">Time <i class="fa-regular fa-circle-question" title="System date / time converted into UTC"></i>
-                  <th scope="col">Crash ID`);
-
-
 /* ---- EVE system-requirements check (Quick Info on PDMData.txt) ----
  * Data-driven replacement for the old hardcoded min/rec objects + the 8-case switch(true). The floors are
  * transcribed from the official article (bump `verified` when you refresh them). Each component is judged
@@ -2551,19 +1579,6 @@ function convertTextToObject(text) {
 
     return result;
 }
-
-
-// Floating Div for the PDMData.txt file which contains our "Quick Info" about the specs of the players PC
-var pdmHtml = `
-<style>
-`+ css +`
-</style>
-<div class="floating-div">
-  <div><h2>Quick Info:</h2></div>
-  <div id="driverAge"></div>
-  <div id="Requirements"></div>
-</div>
-`
 
 
 /* ---- dxdiag.txt triage summary (Quick Info) ----
@@ -2837,18 +1852,6 @@ function renderDxdiag(text) {
     $('#dxdiag').html(html);
 }
 
-// Floating Div for the dxdiag.txt file: the triage summary overlay (crash history / GPU driver recency / system).
-var dxdiagHtml = `
-<style>
-`+ css +`
-</style>
-<div class="floating-div">
-  <div><h2>Quick Info:</h2></div>
-  <div id="dxdiag"></div>
-</div>
-`
-
-
 /* =========================================================================================
  * Triage Assistant core (local DB + sync + ranking + suggestions UI)
  *
@@ -3003,14 +2006,525 @@ var JiTA = {
 };
 
 
-/* ---- the log parser: the table a parsed file is drawn as ----
- * A game log, processHealth, methodCalls, outstandingcalls or lastcrashes file (SwapUI tells which and mounts its
- * chrome) is drawn into #tableContent by one builder, draw(type, text). The text becomes lines (lines()); the file's type
- * (TYPES) says from which line its rows start, what one line draws (its row's class and its cells, each a cell's HTML,
- * or { html, cls }), what it reads from the whole file first, and what follows once the table is drawn.
+/* ---- the log parser: a log file Jira shows raw, shown as a table ----
+ * A game log (logs.txt), processHealth, methodCalls, outstandingcalls or lastcrashes file is swapped for its parsed view:
+ * a chrome (a title, the column headings, a panel above the table) in place of the raw text, and its rows drawn into the
+ * chrome's #tableContent by one builder, draw(type, text). Each file's type (TYPES) says what its chrome shows, from which
+ * line its rows start, what one line draws (its row's class and its cells, each a cell's HTML, or { html, cls }), what it
+ * reads from the whole file first, and what follows once the table is drawn. PDMData.txt and dxdiag.txt get a Quick Info
+ * box beside the raw text instead (info()).
+ * A file with a header row is found by it (start(), at load); one inside the igbr.zip that has none, by the button clicked
+ * (whenLoaded()). Either way swap() mounts the view. A file's raw text is hidden from the moment it lands until it is
+ * parsed (hide()), so it never flashes up first.
  * tests/logtables-check.js holds the drawings as they were before this module, and the builder draws exactly those.
  */
 JiTA.logparser = {
+    // ---- what a file's parse carries across ticks: the detection or the click, the mount and the draw run apart ----
+    text: '',       // the raw text of the file being parsed, read when its view was mounted
+    igbr: null,     // the header-less igbr.zip file a click just opened ('oc', 'lc', 'pdm' or 'dx'): swap() takes it, once
+    gen: 0,         // file-entry clicks in the igbr.zip viewer so far: a newer click cancels an older click's poll
+    pending: 0,     // the click generation of a header-less file being loaded, or 0: hide() hides its code-block meanwhile
+
+    // The header rows a file is told by. HDR, the game log's, also finds the CodeMirror editor that shows one. The tables
+    // still read their columns by position (Type is [2], Message [3]), so a renamed or reordered column needs TYPES
+    // changed too.
+    HDR: 'Time\tFacility\tType\tMessage',
+    PH_HDR: 'dateTime\tpyDateTime\tprocCpu\tthreadCpu\tpyMem\tvirtualMem\ttaskletsProcessed\ttaskletsQueued\twatchdog time\tspf\tserviceCalls\tcallsFromClient\tbytesReceived\tbytesSent\tpacketsReceived\tpacketsSent\tsessionCount\ttidiFactor',
+    MC_HDR: 'Time\tMethod\tDuration [ms]',
+    // The igbr.zip files with no header row, told apart by the button clicked: which view each opens in (swap()).
+    IGBR: { 'outstandingcalls.txt': 'oc', 'lastcrashes.txt': 'lc', 'PDMData.txt': 'pdm', 'dxdiag.txt': 'dx' },
+
+    // At load: watch for a file to parse. One with a header row is found by it, in Jira's code-block or in the CodeMirror
+    // viewer a logs.txt attached to the report opens in (it keeps only the lines in view in the page, so swap() reads the
+    // whole text out of the editor). A header-less file inside the igbr.zip is found by the button clicked: each file's
+    // button starts a poll for its text (whenLoaded). waitForKeyElements does nothing off a Jira page, and handles a file
+    // already on the page at once.
+    start: function () {
+        var P = JiTA.logparser, CB = SELECTORS.CODE_BLOCK;
+        [CB + ':contains(' + P.HDR + ')', CB + ':contains(' + P.PH_HDR + ')', CB + ':contains(' + P.MC_HDR + ')', SELECTORS.CM_LINE + ':contains(' + P.HDR + ')']
+            .forEach(function (sel) { waitForKeyElements(sel, P.swap); });
+        // A file's raw text renders, and paints, before swap() runs: the detection polls. This observer hides a log
+        // container the moment its header lands (an observer runs before the next paint) and swap() shows it again once
+        // the view is mounted. A timer per container shows anything never parsed again, so nothing stays hidden.
+        if (!JITA_NO_JIRA_UI && window.MutationObserver) {
+            try { GM_addStyle('.jita-log-hiding { visibility: hidden !important; }'); } catch (e) { /* ignore */ }
+            try {
+                new MutationObserver(function (records) {
+                    // Cheap first: a keystroke in the comment box changes characters only, with no parse pending. Look
+                    // only when a node was added (a log may have mounted), or while a header-less file loads (its raw
+                    // text streams in as characters).
+                    if (!P.pending) {
+                        var added = false;
+                        for (var i = 0; i < records.length; i++) { if (records[i].addedNodes && records[i].addedNodes.length) { added = true; break; } }
+                        if (!added) { return; }
+                    }
+                    P.hide();
+                }).observe(document.body, { childList: true, subtree: true, characterData: true });
+            } catch (e) { /* ignore */ }
+        }
+        // The buttons are bound once per element (.off first), since the attachment list is drawn again and again.
+        Object.keys(P.IGBR).forEach(function (name) {
+            waitForKeyElements('span[data-item-title="true"]:contains(' + name + ')', function () {
+                $("button:contains('" + name + "')").off('click.jita').on('click.jita', function () { P.whenLoaded(P.IGBR[name]); });
+            });
+        });
+        // Any file entry clicked in the igbr.zip viewer cancels a poll still waiting (see whenLoaded): in the capture
+        // phase, so ahead of a tracked button's own handler, which then starts a newer poll. File entries are buttons
+        // holding a [data-item-title] element; the viewer's other buttons hold none.
+        if (!JITA_NO_JIRA_UI) {
+            document.addEventListener('click', function (e) {
+                var btn = e.target && e.target.closest ? e.target.closest('button') : null;
+                if (btn && btn.querySelector('[data-item-title]')) { P.gen++; }
+            }, true);
+        }
+    },
+
+    // Hide every log container whose header has landed, and while a header-less file loads (pending is the newest click),
+    // the code-block it lands in, even a fresh one Jira swapped in. Never a draft in the comment box, nor a view already
+    // parsed.
+    hide: function () {
+        var P = JiTA.logparser;
+        if (!flagOn('parser') || document.getElementById('tableContent')) { return; }   // the parser off, or already parsed
+        var nodes = document.querySelectorAll(SELECTORS.CODE_BLOCK + ', .cm-content');
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            if (el.classList.contains('jita-log-hiding')) { continue; }
+            if (el.querySelector && (el.querySelector('#gpanel') || el.querySelector('#tableContent'))) { continue; }   // already our parsed view
+            if (P.inEditable(el)) { continue; }   // a draft in the comment box, never a log viewer: it used to blink out for 2.5 s per line
+            var t = el.textContent || '';
+            var isCode = el.getAttribute && el.getAttribute('data-testid') === 'code-block';
+            if ((t && P.headed(t)) || (P.pending && P.pending === P.gen && isCode)) {
+                el.classList.add('jita-log-hiding');
+                (function (node) { setTimeout(function () { node.classList.remove('jita-log-hiding'); }, 2500); })(el);   // safety net
+            }
+        }
+    },
+
+    // A header-less igbr.zip file (outstandingcalls.txt, lastcrashes.txt, PDMData.txt, dxdiag.txt) loads its text into the
+    // code-block a moment after its button is clicked: poll for that text, then open it as `file` (IGBR). A plain "the
+    // text changed" poll goes wrong, so it is guarded five ways:
+    //   1. A newer click (the same file clicked twice too) bumps gen, and an older poll gives up.
+    //   2. An empty file never loads any text: the poll gives up after MAX.
+    //   3. While a parsed view (#tableContent) is mounted the raw text is not on screen: it waits for the viewer.
+    //   4. A file with a header row loaded instead: start() takes those, never this poll.
+    //   5. Any file entry clicked cancels a waiting poll (start(), in the capture phase). The code-block is shared: after an
+    //      empty tracked file, an untracked one (fitting.txt) clicked before MAX landed in the same code-block and was
+    //      parsed into the wrong table. An untracked file has no handler of its own to bump gen.
+    // Meanwhile the code-block is hidden (pending), and shown again once the file is parsed, the poll gives up, or after
+    // 2.5 s whatever happens; scoped to this click, so a later one can never leave the viewer blank.
+    whenLoaded: function (file) {
+        var P = JiTA.logparser;
+        if (!flagOn('parser')) { return; }   // a click while the parser is off must leave nothing pending for later
+        var myGen = ++P.gen;
+        var CB = SELECTORS.CODE_BLOCK;
+        P.pending = myGen;
+        $(CB).addClass('jita-log-hiding');
+        setTimeout(function () { if (P.pending === myGen) { P.pending = 0; } P.reveal(); }, 2500);
+        var before = ($(CB).text() || '').trim();
+        var start = Date.now(), MAX = 8000, POLL = 100;
+        (function poll() {
+            if (myGen !== P.gen) { return; }                 // superseded by a newer click (its poller / the safety timer owns the reveal)
+            if (Date.now() - start > MAX) { if (P.pending === myGen) { P.pending = 0; } P.reveal(); return; }   // empty / never-loaded file -> reveal + don't parse
+            var $cb = $(CB), now = ($cb.text() || '').trim();
+            var ready = !document.getElementById('tableContent')    // no parser markup currently mounted
+                && $cb.length && now && now !== before              // new, non-empty raw content
+                && !P.headed(now);                                  // ...and not a header-based file (not ours)
+            if (ready) { P.igbr = file; P.swap(); return; }
+            setTimeout(poll, POLL);
+        })();
+    },
+
+    // Swap the file on screen for its parsed view, then wire the panel's controls. A logs.txt attached to the report shows in
+    // a CodeMirror editor: its whole text is read out of the editor, the editor holding the header row and nothing else, as
+    // a ``` block in the comment box is a CodeMirror editor too (a log header pasted there turned the box into the parser's
+    // chrome). A file inside the igbr.zip shows in Jira's code-block: a header row tells which, else the button that was
+    // clicked (igbr, taken once whichever branch runs: a click while the parser was off picked the parser for the next file).
+    swap: function () {
+        var P = JiTA.logparser, CB = SELECTORS.CODE_BLOCK;
+        var igbr = P.igbr;
+        P.igbr = null;
+        var $logEd = $(SELECTORS.CM_LINE + ':contains(' + P.HDR + ')').filter(function () { return !P.inEditable(this); }).first().closest('.cm-editor');
+        if ($logEd.length && !$(CB).length && flagOn('parser')) {
+            var $cm = $logEd.find('.cm-content').first().attr('data-jita-cmsrc', '1');   // mark the exact source editor
+            P.text = P.cmText();                                                         // reads the marked .cm-content
+            $cm.removeAttr('data-jita-cmsrc');
+            // A read that came back without the log (CodeMirror's internals moved) replaced the readable raw log with an
+            // empty table, and said nothing. Leave the viewer as it is.
+            if (!P.text || P.text.indexOf(P.HDR) === -1) {
+                JiTA.warn('[JiTA] could not read the log text from the viewer, so it was left as it is');
+                P.pending = 0;
+                P.reveal();
+                return;
+            }
+            $logEd.html(P.view('log'));
+            // The table is position:absolute against its nearest positioned ancestor. In the code-block that fills the
+            // screen; CodeMirror's .cm-editor is a sliver, which collapsed the table. Pinned to the full-screen viewer.
+            $('#table').css({ position: 'fixed', top: '95px', bottom: '0', left: '0', width: '100%' });
+            setTimeout(function () { P.run(function () { P.draw('log', P.text); }); }, 250);
+        }
+        else if ($(CB + ':contains(' + P.HDR + ')')[0] && flagOn('parser')) { P.mount('log'); }
+        else if ($(CB + ':contains(' + P.PH_HDR + ')')[0] && flagOn('parser')) { P.mount('ph'); }
+        else if ($(CB + ':contains(' + P.MC_HDR + ')')[0] && flagOn('parser')) { P.mount('mc'); }
+        else if ((igbr === 'oc' || igbr === 'lc') && flagOn('parser')) { P.mount(igbr); }
+        else if (igbr === 'dx' && flagOn('parser')) {
+            P.readBlock();
+            $(CB).append(P.info('dx'));
+            // A triage summary of the raw dxdiag text: crash history, GPU driver age, the system. Guarded.
+            try { renderDxdiag(P.text); } catch (e) { $('#dxdiag').text('Could not evaluate dxdiag.'); }
+        }
+        else if (igbr === 'pdm' && flagOn('parser')) {
+            P.readBlock();
+            $(CB).append(P.info('pdm'));
+            // The machine against EVE's system requirements, a row per component, and the driver's age. Guarded end to end,
+            // the reading of the file included: malformed PDM text used to throw before the view was revealed.
+            try { renderRequirements(convertTextToObject(P.text)); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
+        }
+        // The view is mounted, or this was no file to parse: nothing is pending any more, and what was hidden shows again.
+        P.pending = 0;
+        P.reveal();
+        P.wire();
+    },
+
+    // Read the code-block's raw text, mount the `type` view in its place, then draw the text as that type once the view has
+    // mounted, guarded (run).
+    mount: function (type) {
+        var P = JiTA.logparser;
+        P.readBlock();
+        $(SELECTORS.CODE_BLOCK).html(P.view(type));
+        setTimeout(function () { P.run(function () { P.draw(type, P.text); }); }, 250);
+    },
+
+    // The code-block's raw text, kept as `text`: its empty spans and inline comment spans dropped first.
+    readBlock: function () {
+        $('code > span:empty').remove();
+        $(SELECTORS.CODE_BLOCK).find('span > span.comment').remove();
+        JiTA.logparser.text = $(SELECTORS.CODE_BLOCK).text();
+        return JiTA.logparser.text;
+    },
+
+    // Reads the complete text of a file rendered by the new CodeMirror-based viewer.
+    // CodeMirror only keeps the lines currently in view inside the DOM, but it holds the whole document
+    // in its in-memory editor state. The userscript sandbox can't reach CodeMirror's internal DOM property,
+    // so we run the read in the page context via an injected <script> and hand the text back through a
+    // shared, hidden DOM node (which both contexts can see).
+    cmText: function () {
+        var NODE_ID = 'JITA_cmdoc_transfer';
+
+        var transfer = document.getElementById(NODE_ID);
+        if (!transfer) {
+            transfer = document.createElement('div');
+            transfer.id = NODE_ID;
+            transfer.style.display = 'none';
+            document.documentElement.appendChild(transfer);
+        }
+        transfer.textContent = '';
+
+        var pageCode =
+            '(function(){var out=document.getElementById(' + JSON.stringify(NODE_ID) + ');try{' +
+            'var c=document.querySelector(".cm-content[data-jita-cmsrc]")||document.querySelector(".cm-content");' +
+            'var dv=c&&c.cmView;' +
+            'var v=dv&&(dv.view||(dv.rootView&&dv.rootView.view)||dv.editorView);' +
+            'out.textContent=(v&&v.state)?v.state.doc.toString():"";' +
+            '}catch(e){out.textContent="";}})();';
+
+        var s = document.createElement('script');
+        s.textContent = pageCode;
+        (document.head || document.documentElement).appendChild(s);
+        if (s.parentNode) { s.parentNode.removeChild(s); }
+
+        // The injected script runs synchronously the moment it is inserted, so the text is ready now.
+        var text = transfer.textContent || '';
+        transfer.textContent = '';
+        return text;
+    },
+
+    // True for a log container inside a rich-text editor the user is typing in (a ``` block in the comment box or the
+    // description), as against the attachment viewer. Judged by the HOST, not by CodeMirror's own contenteditable:
+    // an editable-but-read-only viewer carries contenteditable="true" too.
+    inEditable: function (el) {
+        var ed = el && el.closest ? (el.closest('.cm-editor') || el) : null;
+        var host = ed && ed.parentElement;
+        return !!(host && host.closest && host.closest('[contenteditable="true"], .ProseMirror'));
+    },
+
+    // Show every container hide() hid.
+    reveal: function () {
+        try {
+            var hid = document.querySelectorAll('.jita-log-hiding');
+            for (var i = 0; i < hid.length; i++) { hid[i].classList.remove('jita-log-hiding'); }
+        } catch (e) { /* ignore */ }
+    },
+
+    // Run a parser; if it throws, end the spinner with a message instead of leaving it going over a page whose raw
+    // text is already gone.
+    run: function (parseFn) {
+        try { parseFn(); } catch (e) {
+            JiTA.log('[JiTA] log parser failed:', e);
+            var l = document.getElementById('loader');
+            if (l) { l.style.display = 'none'; }
+            var tc = document.getElementById('tableContent');
+            if (tc && tc.tBodies && tc.tBodies[0]) {
+                var tr = document.createElement('tr'), td = tr.insertCell(0);
+                td.colSpan = 20;
+                td.textContent = 'This file could not be parsed (' + (e && e.message || e) + '). Open raw to read it.';
+                tc.tBodies[0].appendChild(tr);
+                tc.style.display = 'table';
+            }
+        }
+    },
+
+    // Whether text is a file with a header row (a game log, processHealth, methodCalls), by how its header starts.
+    headed: function (text) {
+        var t = String(text == null ? '' : text);
+        return t.indexOf(JiTA.logparser.HDR) >= 0 || t.indexOf('dateTime\tpyDateTime\tprocCpu') >= 0 || t.indexOf('Time\tMethod\tDuration') >= 0;
+    },
+
+    // The view a `type` table is drawn into: its chrome (TYPES), in the shell every view shares.
+    view: function (type) {
+        var T = JiTA.logparser.TYPES[type];
+        return JiTA.logparser.shell(T.title, T.columns, { extraCss: T.css, header: T.header });
+    },
+
+    // A parsed view: the shared <style> and FontAwesome, and the #body / #table / #tableContent / #loader shell around a
+    // given <h1> `title` and <thead> `columns` (raw <th> markup). opts.extraCss goes after the shared CSS; opts.header is
+    // HTML above #body (the game log's panel, Method Calls' GetTime figures).
+    shell: function (title, columns, opts) {
+        opts = opts || {};
+        return `
+<style>
+`+ JiTA.logparser.CSS + (opts.extraCss || '') +`
+</style>
+
+`+ JiTA.logparser.FA +`
+<body>
+`+ (opts.header || '') +`
+   <div id="body">
+      <header>
+         <h1>`+ title +`</h1>
+      </header>
+      <div id="table" tabindex="0">
+         <table id="tableContent" style="display:none;" class="fixedHead">
+            <div id="loader"></div>
+            <thead>
+               <tr>
+`+ columns +`
+            </thead>
+            <tbody></tbody>
+         </table>
+      </div>
+   </div>
+`;
+    },
+
+    // The FontAwesome stylesheet, shared by every parsed view.
+    FA: '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">',
+
+    // The Quick Info box beside a PDMData.txt (the machine against EVE's requirements, and the driver's age) or a
+    // dxdiag.txt (crash history, GPU driver age, the system): what each holds below its heading.
+    INFO: {
+        pdm: '  <div id="driverAge"></div>\n  <div id="Requirements"></div>\n',
+        dx: '  <div id="dxdiag"></div>\n'
+    },
+    info: function (kind) {
+        return '\n<style>\n' + JiTA.logparser.CSS + '\n</style>\n<div class="floating-div">\n  <div><h2>Quick Info:</h2></div>\n' + JiTA.logparser.INFO[kind] + '</div>\n';
+    },
+
+    // Wire the parser chrome's controls: the gpanel type-toggle buttons and the live search box. Bind once per
+    // fresh mount - the chrome is rebuilt on every mount, so handlers never stack.
+    wire: function () {
+        // The gpanel buttons only keep their .toggle state (a type toggle carries it while its rows are hidden, Group
+        // Repeats while grouping is off); JiTA.logparser.filter then recomputes the parsed table's rows from it. There used
+        // to be a second handler that hid rows by class across the whole PAGE: Only Exceptions hid the table header (the
+        // ':not(#fixedHead)' matched nothing - it is a class) and any Jira table behind the viewer, Show All forced every
+        // <tr> on the page visible, and the filter pass after it only ever recomputed the table body.
+        $("#gpanel a").click(function (ev) {
+            if (ev && ev.preventDefault) { ev.preventDefault(); }
+            var id = $(this).attr('id');
+            if (id === 'onlyexception') {
+                $('#gnav a#notice, #gnav a#error, #gnav a#warning').addClass('toggle');
+                $('#gnav a#exception').removeClass('toggle');
+            } else if (id === 'showAll') {
+                $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');
+            } else {
+                $(this).toggleClass('toggle');
+            }
+            JiTA.logparser.filter();
+        });
+
+        // Live search box (Feature D): filter rows by text, composing with the type toggles above.
+        if ($('#jita-log-search').length) {
+            var jitaSearchTimer = null;
+            $('#jita-log-search').on('input', function () {
+                if (jitaSearchTimer) { clearTimeout(jitaSearchTimer); }
+                jitaSearchTimer = setTimeout(JiTA.logparser.filter, 120);   // debounce for large logs
+            });
+        }
+    },
+
+    // Recompute the parsed table's rows from the toggle state and the search box. A row is shown iff it matches the
+    // (case-insensitive) query AND its message type is not toggled off; the "Only Exceptions" combination hides info
+    // rows too. Only #tableContent's body is touched.
+    filter: function () {
+        if (!document.getElementById('tableContent')) { return; }
+        // Drop the previous Nx badges before measuring row text, so a stale "52×" can't pollute the search
+        // match; JiTA.logparser.regroup() re-adds them from the new visibility at the end of this pass.
+        var pb = document.querySelectorAll('#tableContent .jita-rep-badge');
+        for (var pi = 0; pi < pb.length; pi++) { if (pb[pi].parentNode) { pb[pi].parentNode.removeChild(pb[pi]); } }
+        var q = ($('#jita-log-search').val() || '').toLowerCase();
+        var off = {};
+        $('#gnav a.toggle').each(function () { off[$(this).attr('id')] = true; });
+        var onlyExc = off.notice && off.warning && off.error && !off.exception;   // the "Only Exceptions" state
+        $('#tableContent tbody tr').each(function () {
+            var cls = this.className || '';
+            var hiddenByToggle = onlyExc
+                ? !/\bexception\b/.test(cls)
+                : ((off.notice && /\bnotice\b/.test(cls)) ||
+                   (off.warning && /\bwarning\b/.test(cls)) ||
+                   (off.error && /\berror\b/.test(cls)) ||
+                   (off.exception && /\bexception\b/.test(cls)));
+            var matches = !q || (this.textContent || '').toLowerCase().indexOf(q) >= 0;
+            this.style.display = (!hiddenByToggle && matches) ? 'table-row' : 'none';
+        });
+        // Re-collapse identical runs against the visibility we just computed (hiding a type can make
+        // previously-separated duplicates adjacent, so the "Nx" grouping must be recalculated here).
+        JiTA.logparser.regroup();
+    },
+
+    /* ---- "Group Repeats": collapse consecutive identical log lines / exception blocks (main Log Parser) ----
+     * A run of consecutive IDENTICAL events - either a single line, or a whole EXCEPTION #…EXCEPTION END block -
+     * is collapsed to its first occurrence with an "Nx" count badge. "Identical" compares facility + type +
+     * message with the TIMESTAMP column excluded, so the same thing logged repeatedly (each with a different
+     * time) still groups.
+     *
+     * Crucially the collapse is recomputed by JiTA.logparser.regroup() AFTER every filter / toggle pass, not once at parse
+     * time: hiding a message type (e.g. Notices) can make two identical errors - previously separated by a notice
+     * - become visually adjacent and therefore groupable. So JiTA.logparser.buildGroups() runs ONCE (stamping each row with
+     * a unit id + a timestamp-free signature), and JiTA.logparser.regroup() re-derives the badges from the CURRENT
+     * visibility on demand. A hidden unit between two duplicates is skipped (it doesn't break the run), which is
+     * exactly what makes "hide notices -> the errors around them batch together" work.
+     *
+     * The collapsed follower rows stay hidden - the "Nx" badge is an informational count only, not a toggle.
+     * (The "Group Repeats" nav button is the way to see every raw line again.)
+     */
+
+
+    // Segment the rendered rows into "units" (a single line, or a full exception block) and stamp each row with
+    // its unit id (data-jita-grp) + the unit's timestamp-free signature (data-jita-gsig on the unit's first row).
+    // Runs once, right after the table is filled and BEFORE applyToTable rewrites any message cell, so the
+    // signature is computed from the pristine message text.
+    buildGroups: function () {
+        var tbody = document.querySelector('#tableContent tbody');
+        if (!tbody) { return; }
+        var rows = tbody.rows, i = 0, unit = 0;
+        function cellText(tr, idx) { var c = tr.cells[idx]; return c ? (c.textContent || '') : ''; }
+        // Normalize the volatile bits that differ between repeats of the SAME exception so they still group. The
+        // header line ("EXCEPTION #5 logged at 03/12/2025 15:23:55") carries a per-instance counter AND a date/
+        // time INSIDE the message column, so without this every block's signature is unique and identical
+        // exceptions never batch. We also collapse the STACKTRACE counter, the per-instance Stackhash, and
+        // object-repr hex addresses (0x…), all of which vary between otherwise-identical dumps. (The row's own
+        // Time column is already excluded from the signature.)
+        function normSig(msg) {
+            return msg
+                .replace(/(EXCEPTION|STACKTRACE)\s+#\d+/gi, '$1 #')   // per-instance exception / stacktrace counter
+                .replace(/\d{1,2}\/\d{1,2}\/\d{2,4}/g, '#')           // dates (DD/MM/YYYY or MM/DD/YYYY)
+                .replace(/\d{1,2}:\d{2}:\d{2}/g, '#')                 // times (HH:MM:SS)
+                .replace(/Stackhash\s*:\s*-?\d+/gi, 'Stackhash: #')   // per-instance stack hash
+                .replace(/0x[0-9a-fA-F]+/gi, '0x#');                  // object-repr / memory addresses
+        }
+        function sigOf(tr) { return cellText(tr, 1) + '\x1f' + cellText(tr, 2) + '\x1f' + normSig(cellText(tr, 3)); }   // facility|type|normalized message (time excluded)
+        while (i < rows.length) {
+            var start = i, sig;
+            if (cellText(rows[i], 3).indexOf('EXCEPTION #') !== -1) {
+                // Exception BLOCK: gather rows until EXCEPTION END (inclusive) or the next EXCEPTION # - the same
+                // segmentation JiTA.logsig uses - so a whole repeated dump collapses as one unit.
+                var parts = [sigOf(rows[i])];
+                i++;
+                for (; i < rows.length; i++) {
+                    var mt = cellText(rows[i], 3);
+                    if (mt.indexOf('EXCEPTION #') !== -1) { break; }
+                    parts.push(sigOf(rows[i]));
+                    if (mt.indexOf('EXCEPTION END') !== -1) { i++; break; }
+                }
+                // EVE emits an empty error line after every EXCEPTION END. Absorb that trailing blank line (or
+                // several) into THIS block's ROW RANGE - but deliberately NOT into its signature `parts` - so it
+                // doesn't sit between two identical blocks as its own unit and break the run (which is what stops
+                // consecutive repeated exceptions from grouping). Keeping it out of the signature also means a
+                // stray trailing space can't make two otherwise-identical blocks look different.
+                while (i < rows.length && cellText(rows[i], 3).trim() === '') { i++; }
+                sig = 'B:' + parts.join('\x1e');
+            } else {
+                sig = 'L:' + sigOf(rows[i]);          // single LINE
+                i++;
+            }
+            for (var r = start; r < i; r++) { rows[r].setAttribute('data-jita-grp', unit); }
+            rows[start].setAttribute('data-jita-gsig', sig);
+            unit++;
+        }
+    },
+
+    // Re-derive the "Nx" badges from the CURRENT row visibility. Walks units in order, skipping any whose rows
+    // are all hidden (so a filtered-out unit does NOT break a run of duplicates around it), and collapses
+    // consecutive units that share a signature: the followers are hidden and the leader gets a count badge.
+    // Called at the end of JiTA.logparser.filter (after every toggle / search) and once when the game log is drawn.
+    regroup: function () {
+        var tbody = document.querySelector('#tableContent tbody');
+        if (!tbody) { return; }
+        // Clear our previous badges idempotently (never touch applyToTable's [EDR-x] link - only our own spans).
+        var oldBadges = tbody.querySelectorAll('.jita-rep-badge');
+        for (var b = 0; b < oldBadges.length; b++) { if (oldBadges[b].parentNode) { oldBadges[b].parentNode.removeChild(oldBadges[b]); } }
+        // Grouping disabled: the "Group Repeats" nav toggle carries .toggle when OFF. The rows already hold the
+        // filter's base visibility (JiTA.logparser.filter reset every row before calling us), so just leave them.
+        var btn = document.getElementById('jita-group-toggle');
+        if (btn && btn.classList.contains('toggle')) { return; }
+
+        var rows = tbody.rows;
+        var runSig = null, runLeaderRow = null, runCount = 0, runFirstTime = '', runLastTime = '';
+
+        function timeOf(tr) { var c = tr.cells[0]; return (c && c.textContent) || ''; }
+        function stamp() {
+            if (runCount <= 1 || !runLeaderRow) { return; }
+            var msg = runLeaderRow.cells[runLeaderRow.cells.length - 1];
+            if (!msg) { return; }
+            var badge = document.createElement('span');
+            badge.className = 'jita-rep-badge';
+            badge.textContent = runCount + '×';   // informational count only (not a toggle)
+            var span = (runFirstTime && runLastTime && runFirstTime !== runLastTime) ? (runFirstTime + ' → ' + runLastTime) : (runFirstTime || '');
+            badge.title = runCount + ' identical in a row' + (span ? ' · ' + span : '');
+            msg.insertBefore(badge, msg.firstChild);
+        }
+
+        var i = 0;
+        while (i < rows.length) {
+            // Collect this unit's rows (the consecutive run sharing one data-jita-grp); its signature lives on the
+            // first row.
+            var g = rows[i].getAttribute('data-jita-grp'), unitRows = [], sig = null;
+            while (i < rows.length && rows[i].getAttribute('data-jita-grp') === g) {
+                if (sig === null) { sig = rows[i].getAttribute('data-jita-gsig'); }
+                unitRows.push(rows[i]);
+                i++;
+            }
+            // Rows of this unit that the current filter/toggle state leaves visible.
+            var visible = [];
+            for (var v = 0; v < unitRows.length; v++) { if (unitRows[v].style.display !== 'none') { visible.push(unitRows[v]); } }
+            if (!visible.length) { continue; }   // whole unit filtered out -> skip; do NOT break the current run
+
+            if (sig !== null && sig === runSig) {
+                // A duplicate of the current run's leader -> hide it (stays hidden; the badge is just a count).
+                runCount++;
+                runLastTime = timeOf(visible[visible.length - 1]) || runLastTime;
+                for (var h = 0; h < unitRows.length; h++) { unitRows[h].style.display = 'none'; }
+            } else {
+                stamp();   // close the previous run
+                runSig = sig;
+                runLeaderRow = visible[0];
+                runCount = 1;
+                runFirstTime = timeOf(visible[0]);
+                runLastTime = timeOf(visible[visible.length - 1]);
+            }
+        }
+        stamp();   // close the final run
+    },
+
     // The file's text as lines: runs of tabs and of line breaks collapsed (so an empty line is gone), a "***...***" logging
     // error turned into a line of its own, and < escaped, since a cell takes its text as HTML. A line keeps its \r.
     lines: function (text) {
@@ -3040,12 +2554,347 @@ JiTA.logparser = {
         if (T.after) { T.after(st); }
     },
 
+    // The CSS of every parsed view; the game log adds its own (TYPES.log.css).
+    CSS: `
+    * {
+    color: #e6e6e6;
+    }
+
+	.pointer {
+      cursor: pointer;
+    }
+
+    .peakMachoCell {
+      border: solid thin;
+      border-color: red;
+    }
+
+    #peakMacho {
+      cursor: pointer;
+      text-align: right;
+      color: #e6e6e6;
+    }
+
+    #averageMacho {
+      text-align: right;
+      color: #e6e6e6;
+    }
+
+    #gpanel {
+      position: fixed;
+      top: 75px;
+      left: 520px;
+      box-sizing: border-box;
+      width: auto;
+      height: 43px;
+      padding: 0 5px;
+      overflow: visible;
+    }
+
+    #gheader {
+      white-space: normal;
+      z-index: 522;
+    }
+
+    #gpanel ul {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    #gpanel li {
+      float: left;
+      overflow: hidden;
+      margin-top: 0px;
+    }
+
+    #gnav {
+      float: left;
+      overflow: hidden;
+    }
+
+    .red {
+      background: #531a1a;
+    }
+
+    .yellow {
+      background: #67670b;
+    }
+
+    td:first-child, th:first-child {
+       padding: 4px 8px;
+    }
+
+    th {
+      vertical-align: top;
+      text-align: left;
+      font-weight: bold;
+      color: aliceblue;
+      background-color: #282d33;
+    }
+
+    td {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-family: Courier New;
+      font-size: 11px;
+      font-weight: normal;
+      border-right: 1.5px solid #aaaaaa;
+    }
+
+    #body {
+      margin-top: -12px;
+      overflow: auto;
+      white-space: normal;
+    }
+
+    #body h1 {
+      margin: 0;
+      padding: 10px 20px 5px;
+      border-bottom: 1px solid #CCC;
+      color: #848589;
+      font: 400 30px 'Segoe UI',Arial,Helvetica,sans-serif;
+      height: 41px;
+    }
+
+    #table {
+      position: absolute;
+      top: 85px;
+      bottom: 0;
+      width: 100%;
+      -webkit-transition: .3s linear;
+      -moz-transition: .3s linear;
+      transition: .3s linear;
+      overflow-y: scroll;
+      margin-top: 28px;
+      background-color: #1D2125;
+    }
+
+    /* selector literal - keep in sync with SELECTORS.CODE_BLOCK (this is CSS, not a query, so it stays inline) */
+    [data-testid="code-block"] {
+    background-color: #1d2125d6;
+    }
+
+    #table table {
+      width: max-content;
+      border-collapse: collapse;
+      border-spacing: 0;
+      -webkit-box-sizing: content-box;
+      -moz-box-sizing: content-box;
+      box-sizing: content-box;
+      color: #e6e6e6;
+    }
+
+    #loader {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      z-index: 1;
+      margin: -75px 0 0 -75px;
+      border: 16px solid #f3f3f3;
+      border-radius: 50%;
+      border-top: 16px solid #3498db;
+      width: 120px;
+      height: 120px;
+      -webkit-animation: spin 2s linear infinite;
+      animation: spin 2s linear infinite;
+    }
+
+    @-webkit-keyframes spin {
+      0% { -webkit-transform: rotate(0deg); }
+      100% { -webkit-transform: rotate(360deg); }
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .fixedHead {
+      overflow: auto;
+      height: 100px;
+    }
+
+    .fixedHead thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    .floating-div {
+      background-color: #333;
+      padding: 10px 50px;
+      color: #EEE;
+      margin-top: 10px;
+      position: fixed;
+      top: 75px;
+      right: 18px;
+      width: calc(33.33% - 25px);
+      white-space: normal;
+      }
+`,
+
     TYPES: {
         // The game log (logs.txt): Time, Facility, Type, Message, after its header. A row takes its type's class (any
         // other type is info). An exception or a stacktrace block gets a border above and below; an exception's rows, the
         // ones logged in its second, are marked as the exception, and a row of the next second closes the block.
         // Then Group Repeats batches the repeats, and the known exceptions are marked (JiTA.logsig.applyToTable).
         log: {
+            title: 'Logfile Parser',
+            columns: `
+                  <th scope="col">Time
+                  <th scope="col">Facility
+                  <th scope="col">Type
+                  <th scope="col">Message`,
+            css: `
+    td {
+      vertical-align: top;
+      text-align: left;
+    }
+
+    .row {
+      background: #FFF;
+    }
+
+    .notice {
+      background: #296429;
+    }
+
+    .warning {
+      background: #67670b;
+    }
+
+    .error {
+      background: #531a1a;
+    }
+
+    .info {
+      background: #1f313d;
+    }
+
+    #gpanel {
+      position: fixed;
+      top: 15px;
+      left: 175px;
+      box-sizing: border-box;
+      width: auto;
+      height: 43px;
+      padding: 0 5px;
+      line-height: 46px;
+      overflow: visible;
+    }
+
+	#gpanel a {
+      display: block;
+      padding: 0 10px;
+      color: #FFF;
+      font-weight: 700;
+      text-decoration: none;
+      white-space: nowrap;
+      cursor: pointer;
+      -webkit-transition: .1s ease-in-out;
+      -moz-transition: .1s ease-in-out;
+      -o-transition: 0.1s ease-in-out;
+      transition: .1s ease-in-out;
+    }
+
+    #gpanel li a  {
+      color: #FFF;
+      background-color: #7B4;
+      border: 1px solid black;
+    }
+
+	.toggle {
+      color: #FFF;
+      background-color: #8b8e89 !important;
+      border: 1px solid black;
+    }
+
+    #button a  {
+      color: #FFF;
+      background-color: #7B4;
+      border: 1px solid black;
+    }
+
+    #button a:hover {
+      background-color: rgba(204,204,204,.4);
+      color: #FFF;
+    }
+
+    .bordertop {
+        border-top: 2px solid #aaaaaa;
+    }
+
+    .borderbot {
+        border-bottom: 2px solid #aaaaaa;
+    }
+
+    #searchli {
+      float: left;
+      margin-left: 10px;
+    }
+
+    #jita-log-search {
+      height: 26px;
+      padding: 0 8px;
+      border: 1px solid #555;
+      border-radius: 4px;
+      background: #1d2125;
+      color: #e6e6e6;
+      font-size: 12px;
+      outline: none;
+    }
+
+    #jita-log-search:focus {
+      border-color: #4c9aff;
+    }
+
+    .sig-hit {
+      box-shadow: inset 4px 0 0 #ffb547 !important;
+    }
+
+    .sig-hit-loose {
+      box-shadow: inset 4px 0 0 #6b7785 !important;
+    }
+
+    .jita-rep-badge {
+      display: inline-block;
+      margin-right: 6px;
+      padding: 0 6px;
+      border-radius: 8px;
+      background: #3a434d;
+      color: #ffd479;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 16px;
+      vertical-align: middle;
+      user-select: none;
+    }
+`,
+            header: `
+   <header id="gheader">
+      <nav id="gpanel">
+         <ul id="gnav">
+            <li>
+               <a href="#" id = "notice" class="">Toggle Notice</a>
+            <li>
+               <a href="#" id = "warning" class="">Toggle Warnings</a>
+            <li>
+               <a href="#" id = "error" class="">Toggle Errors</a>
+            <li>
+               <a href="#" id = "exception" class="">Toggle Exceptions</a>
+            <li id="button">
+               <a href="#" id = "onlyexception" class="">Only Exceptions</a>
+            <li id="button">
+               <a href="#" id = "showAll">Show All</a>
+            <li id="button">
+               <a href="#" id = "jita-group-toggle" class="" title="Collapse consecutive identical lines / exceptions into one row with an Nx count. Recomputed as you filter, so hiding a message type re-batches whatever becomes adjacent.">Group Repeats</a>
+            <li id="searchli">
+               <input id="jita-log-search" type="text" placeholder="Filter…" autocomplete="off">
+         </ul>
+      </nav>
+   </header>`,
             from: 1,
             start: function () { return { exc: '', stt: '' }; },   // the second an open exception / stacktrace began in
             row: function (line, st) {
@@ -3067,8 +2916,8 @@ JiTA.logparser = {
             },
             after: function () {
                 // Group Repeats, built before the known-exception pass, so signatures are read from the message as written.
-                jitaBuildLogGroups();
-                jitaRegroupLog();
+                JiTA.logparser.buildGroups();
+                JiTA.logparser.regroup();
                 if (JiTA.logsig) { JiTA.logsig.applyToTable(); }
             }
         },
@@ -3076,6 +2925,21 @@ JiTA.logparser = {
         // yellow, of 1500 or more red. machoNet::GetTime is much like the ping to the EVE proxy: its average and peak go
         // above the table, and the last call at the peak is marked, for a click on the peak line to scroll to.
         mc: {
+            title: 'Method Calls',
+            columns: `
+                  <th scope="col">Time <i class="fa-regular fa-circle-question" title="System date / time converted into UTC"></i>
+                  <th scope="col">Method <i class="fa-regular fa-circle-question" title="Python method which was called"></i>
+                  <th scope="col">Duration in ms <i class="fa-regular fa-circle-question" title="How long it took to complete the method call"></i>`,
+            header: `
+  <header id="gheader">
+      <nav id="gpanel">
+         <ul id="gnav">
+            <li>
+               <div id="averageMacho"> Average machoNet::GetTime duration:</div>
+               <div id="peakMacho"> Peak machoNet::GetTime duration:</div>
+         </ul>
+      </nav>
+   </header>`,
             from: 1,
             GETTIME: 'machoNet::GetTime (RemoteServiceCall)',
             start: function (lines) {
@@ -3105,9 +2969,13 @@ JiTA.logparser = {
                 return { cls: cls, cells: [cols[0], cols[1], cols[2]] };
             }
         },
-        // Outstanding Calls (outstandingcalls.txt), and Last Crashes (lastcrashes.txt), read the same way: the time, and
-        // the method (the crash id) after " - ". No header; the list ends at the first line with no time.
+        // Outstanding Calls (outstandingcalls.txt): the time, and the method after " - ". No header; the list ends at the
+        // first line with no time.
         oc: {
+            title: 'Outstanding Calls',
+            columns: `
+                  <th scope="col">Time <i class="fa-regular fa-circle-question" title="System date / time converted into UTC"></i>
+                  <th scope="col">Method <i class="fa-regular fa-circle-question" title="Python method which was called but is not yet finished"></i>`,
             from: 0,
             row: function (line) {
                 var cols = line.split(' - ');
@@ -3115,11 +2983,40 @@ JiTA.logparser = {
                 return { cls: 'row', cells: [cols[0], cols[1]] };
             }
         },
+        // Last Crashes (lastcrashes.txt): its rows read as Outstanding Calls' do.
+        lc: {
+            title: 'Last Crashes',
+            columns: `
+                  <th scope="col">Time <i class="fa-regular fa-circle-question" title="System date / time converted into UTC"></i>
+                  <th scope="col">Crash ID`,
+            from: 0,
+            row: function (line) { return JiTA.logparser.TYPES.oc.row(line); }
+        },
         // Process Health (processHealth.txt): a sample a row, after its header. CPU and memory are rounded; the frame time
         // is shown as frames a second (red at 15 or fewer, yellow at 30 or fewer; a click on the header switches it to
         // seconds a frame and back); two sessions or more are red; time dilation is red at 0.2 or less and at 1.05 or more,
         // yellow at 0.8 or less.
         ph: {
+            title: 'Process Health',
+            columns: `
+                  <th scope="col">dateTime <i class="fa-regular fa-circle-question" title="System date / time converted into UTC"></i>
+                  <th scope="col">pyDateTime
+                  <th scope="col">procCpu <i class="fa-regular fa-circle-question" title="CPU usage in % of one CPU core"></i>
+                  <th scope="col">threadCpu <i class="fa-regular fa-circle-question" title="CPU usage in % for the python thread"></i>
+                  <th scope="col">pyMem <i class="fa-regular fa-circle-question" title="Memory usage for the python part of the client in MB"></i>
+                  <th scope="col">virtualMem <i class="fa-regular fa-circle-question" title="Total memory usage of the client in MB"></i>
+                  <th scope="col">taskletsProcessed <i class="fa-regular fa-circle-question" title="How many python threads have been run"></i>
+                  <th scope="col">taskletsQueued <i class="fa-regular fa-circle-question" title="How many python threads are waiting to be run"></i>
+                  <th scope="col">watchdog time <i class="fa-regular fa-circle-question" title="Time spent for watchdog in ms"></i>
+                  <th scope="col" class="pointer">FPS <i class="fa-regular fa-circle-question" title="Frames per second"></i></th>
+                  <th scope="col">serviceCalls
+                  <th scope="col">callsFromClient
+                  <th scope="col">bytesReceived <i class="fa-regular fa-circle-question" title="Bytes recieved from the EVE Server (Not including chat, imageserver and other services)"></i>
+                  <th scope="col">bytesSent <i class="fa-regular fa-circle-question" title="Bytes sent to the EVE Server (Not including chat, imageserver and other services)"></i>
+                  <th scope="col">packetsReceived <i class="fa-regular fa-circle-question" title="Packets recieved from the EVE Server (Not including chat, imageserver and other services)"></i>
+                  <th scope="col">packetsSent <i class="fa-regular fa-circle-question" title="Bytes sent to the EVE Server (Not including chat, imageserver and other services)"></i>
+                  <th scope="col">sessionCount <i class="fa-regular fa-circle-question" title="Should always be 1"></i>
+                  <th scope="col">tidiFactor <i class="fa-regular fa-circle-question" title="Time Dilation - 1.0 = No TiDi"></i>`,
             from: 1,
             row: function (line) {
                 if (!line.trim()) { return null; }   // a blank line is not a sample
@@ -3149,6 +3046,9 @@ JiTA.logparser = {
         }
     }
 };
+
+// The parser watches for files to parse from here on: it needs the module above.
+JiTA.logparser.start();
 
 /* ---- Shared with the worker: written once, run by the page and by the worker ------------------------------------------
  * The shared worker (jitaWorkerBody) runs from its own source text (JiTA.worker._src) and sees nothing of the page, so

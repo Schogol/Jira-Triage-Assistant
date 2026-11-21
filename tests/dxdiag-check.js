@@ -1,5 +1,5 @@
 // dxdiag-check.js - the dxdiag and PDM Quick Info (v3.38.18). Evals the real requirements / dxdiag block (from
-// "var _MiB" to the dxdiag overlay markup) against sample files:
+// "var _MiB" to the Triage Assistant core after it) against sample files:
 //  - WER entries are classified by event name: a RADAR_PRE_LEAK report or a hang of exefile.exe is not an EVE
 //    client crash, a hang gets its own amber line, a BEX crash shows its exception code from P8
 //  - a dxdiag without a WER section says the crash history is unknown instead of a green all-clear
@@ -7,9 +7,8 @@
 //  - a PDM without an OS block "could not be evaluated" instead of failing the minimum requirements
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
-const from = src.indexOf('\nvar _MiB = 1048576'), to = src.indexOf('\n// Floating Div for the dxdiag.txt file');
+const from = src.indexOf('\nvar _MiB = 1048576'), to = src.indexOf('\n/* =========================================================================================\n * Triage Assistant core');
 if (from < 0 || to < from) { throw new Error('could not slice the requirements / dxdiag block'); }
-global.css = '';
 let out = null;
 global.$ = (sel) => ({ html: (h) => { if (sel === '#dxdiag') { out = h; } }, text: () => {} });
 (0, eval)(src.slice(from + 1, to));
