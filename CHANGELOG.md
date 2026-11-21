@@ -14,6 +14,18 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.20 (2026-11-21)
+
+### Fixed issues
+
+- Exception search: the defect's description is read as it is now, so an exception you just pasted into it is offered.
+- Exception search: a description, attached reports or a list of open reports that could not be read is said, instead of nothing to look for or none found.
+- Exception search: \# after 0x stands for an address, letters and all.
+- Exception search: editing a message cut short inside a number still finds the reports that hold it.
+- Exception search: a click on a box, edit or reset while editing an exception is no longer lost.
+- Exception search: a bug report whose description holds a stacktrace with a message over several lines is found, and each stack of a shared exception is looked for with its own message.
+- Exception search: with hundreds of matches the list fills without freezing the page, and no row loses its Attach.
+
 ## 3.53.19 (2026-11-21)
 
 ### Fixed issues

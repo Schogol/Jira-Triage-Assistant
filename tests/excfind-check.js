@@ -15,6 +15,7 @@ let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
 const flush = async (n) => { for (let i = 0; i < (n || 30); i++) { await new Promise((r) => setImmediate(r)); } };
 const settle = async () => { await new Promise((r) => setTimeout(r, 20)); await flush(); };
+const painted = async () => { await new Promise((r) => setTimeout(r, JiTA.excfind.PAINT_MS + 10)); await flush(); };   // results are drawn at most every PAINT_MS
 const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.resolve = a; d.reject = b; }); return d; };
 
 // ---- a small DOM, and a jQuery stand-in over it ----
@@ -461,7 +462,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     X._retarget(st);
     ok('...once only, and what was ticked stays ticked as the profile counts more', sweeps === 1 && st.on[A.sig] === true && st.on[B.sig] === true);
     st.reports = [X._entry(item('EBR-6'), { exc: [{ sig: B.sig }] }, st.pool)];
-    st.on[B.sig] = true; st.tsig = null;
+    st.on[B.sig] = true; st.tsig = null; st.msig = null;   // matched again, as on opening
     X._retarget(st);
     ok('ticking matches what was read again', st.reports[0].m.length === 1 && st.reports[0].m[0].t.sig === B.sig);
     st.on[B.sig] = false; st.tsig = null;
@@ -521,12 +522,14 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     add('EBR-1', [{ sig: A2.sig }], '2026-10-05T00:00:00.000+0000');
     add('EBR-2', [{ sig: B.sig }], '2026-10-06T00:00:00.000+0000');
     add('EBR-3', [{ sig: A.sig }], '2026-10-01T00:00:00.000+0000');
+    await painted();
     const res = byId['jx-results'];
     const order = () => res.kids.map((n) => n.getAttribute('data-key')).join();
     ok('the reports holding a ticked exception are listed as they are read, exact first', order() === 'EBR-3,EBR-1', order());
     const row1 = res.kids.find((n) => n.getAttribute('data-key') === 'EBR-1');
     ok('...each says how it matched', /same stack/.test(res.kids[0].textContent) && /~ same crash site/.test(row1.textContent) && /KeyError: 2/.test(row1.textContent), row1.textContent);
     add('EBR-0', [], '2026-09-01T00:00:00.000+0000', [{ sig: A.sig, msg: 'KeyError: 2' }]);
+    await painted();
     const row0 = res.kids.find((n) => n.getAttribute('data-key') === 'EBR-0');
     ok('...or that it is in the report\'s description', !!row0 && /KeyError: 2 \(in its description\)/.test(row0.textContent), row0 && row0.textContent);
     X._gone(st, 'EBR-0');
@@ -756,6 +759,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     keyOn(ain, 'Enter');
     ok('the same message twice is added once', st.added.typed.length === 1 && st.targets.length === 2);
     X._add(st, item('EBR-60', null, [], '2026-10-08T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: fp(UE.replace('25', '40'), FA).sig }] }, cached: false });
+    await painted();
     ok('a report with that message at another stack is found, as the same message',
         !!hasRow('EBR-60') && /same messageIndustryError: Industry error, msg=IndustryValidationError\*/.test(hasRow('EBR-60').textContent), hasRow('EBR-60') && hasRow('EBR-60').textContent);
     ain.value = descBlock('ValueError: bad', FB);
@@ -826,6 +830,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     const ucb = find(apartRows()[0], (n) => n.getAttribute('type') === 'checkbox')[0];
     ucb.checked = true; click(ucb, 'change');
     X._add(st, item('EBR-70', null, [], '2026-10-09T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: UZ.sig }] }, cached: false });
+    await painted();
     ok('ticked, a folded one is looked for all the same', st.on[UZ.sig] === true && !!hasRow('EBR-70'));
     click(editsOf(rowOfSig(B.sig)).filter((n) => n.textContent === 'ignore')[0]);
     ok('ignore sets one apart at once', N.isIgnored(B.sig) && st.targets.filter((t) => t.sig === B.sig)[0].left === 'ignored' && apartRows().length === 2 &&
@@ -897,7 +902,15 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     const t78 = await X._defectText('EDR-78');
     ok('a defect not in the local copy is read from Jira', X._fps(t78)[0].sig === B.sig, t78);
     ajax = {};
-    ok('...and one Jira cannot give has no exceptions, without an error', (await X._defectText('EDR-79')) === '');
+    ok('...and one neither Jira nor the local copy can give is null, so the window says it could not be read', (await X._defectText('EDR-79')) === null);
+    // read as it is now (review 2026-11-20 excfind-logic-3): the local copy is brought up to date by the catch-up sync only
+    dbRec = { key: 'EDR-80', description: 'the old description' };
+    ajax = { 'EDR-80?fields=description': { ok: true, data: { fields: { description: descBlock('ValueError: bad', FB) } } } };
+    const t80 = await X._defectText('EDR-80');
+    ok('the description is read from Jira as it is now, though the local copy has one: an exception pasted a moment ago is offered', X._fps(t80).length === 1 && X._fps(t80)[0].sig === B.sig, t80);
+    ajax = {};
+    ok('...and from the local copy when Jira cannot be asked', (await X._defectText('EDR-80')) === 'the old description');
+    dbRec = null;
     // Which are common is read as the window opens, and may come after the description: what it sets apart is drawn so then.
     const freqD = deferred(), getMeta0 = JiTA.db.getMeta;
     JiTA.db.getMeta = (k) => (k === N.FREQ_KEY ? freqD.promise : getMeta0(k));
@@ -918,7 +931,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     X._sweep = realSweep;
 
     // ================= the Attach control's options (the real one) =================
-    Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['_assigneeCache', '_getAssignee', '_attachReportButton'])));
+    Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['_assigneeCache', 'ASSIGNEE_LANES', '_assigneeBusy', '_assigneeWait', '_getAssignee', '_attachReportButton'])));
     let attaches = [], assigned = [], dones = [], fades = 0, offList = [], live = {};
     Object.assign(JiTA.ui, { currentKey: null, _fadeOutAndReplace() { fades++; }, _takeOffList(keys, still) { offList.push(keys.join() + ':' + still()); return Promise.resolve(); },
         _liveStatus: (keys) => Promise.resolve(live), _isOpenStatus: (s) => !!s && !JiTA.util.isClosedStatus(s) });
@@ -990,6 +1003,124 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     click(b[0]);
     await flush();
     ok('without options it is the panel\'s, as before', attaches.pop() === 'EBR-9->EDR-5' && fades === 1, fades);
+
+    // ================= the review's lows (2026-11-20) =================
+    // A window with its own boxes: the list of exceptions, the results and the status line.
+    const win = () => { const s = fresh(); ['jx-targets', 'jx-results', 'jx-status'].forEach((id) => { const n = new Node('div'); n.setAttribute('id', id); s.node.appendChild(n); }); return s; };
+    // excfind-logic-2: after 0x, # takes hex digits
+    const addr = 'attributeerror: <foo.bar object at 0x000001f3a2b4c5d6> has no attribute x';
+    ok('after 0x a # takes the hex digits of an address, letters and all', X._rawPattern('AttributeError: <foo.Bar object at 0x#> has no attribute x').test(addr) &&
+        X._tokMatch(X._toks('AttributeError: <foo.Bar object at 0x#> has*'), addr.slice(0, 50), true), String(X._rawPattern('at 0x#>')));
+    ok('...while a # anywhere else is a number of digits only', !X._rawPattern('Bad item #').test('bad item 12ab') && X._rawPattern('Bad item #').test('bad item 1234') &&
+        !X._tokMatch(X._toks('Bad item #'), 'bad item 12ab', false) && X._tokMatch(X._toks('Bad item #'), 'bad item 1234', false));
+
+    // excfind-logic-5: a message cut inside a number gives up that piece of it
+    const head5 = 'Bad payload ' + 'x'.repeat(185), ts5 = 'x|a.py:f>b.py:g';
+    ok('an edit of a message cut inside a number starts without that piece, the * standing for it', X._editText({ sig: ts5, msg: head5 + ' 12' }) === head5 + ' *',
+        X._editText({ sig: ts5, msg: head5 + ' 12' }).slice(-8));
+    ok('...and so does one cut inside a word with a digit, while one cut inside a plain word keeps it, and one not cut is as it is',
+        X._editText({ sig: ts5, msg: head5 + ' id1' }) === head5 + ' *' && X._editText({ sig: ts5, msg: head5 + ' abc' }) === head5 + ' abc*' && X._editText({ sig: ts5, msg: 'Short 12' }) === 'Short 12');
+    const full5 = head5 + ' 12345 more', fp5 = fp(full5, FA), e5 = X._exc(fp5.sig, full5.slice(0, X.MSG_CUT));
+    const t5 = X._withPattern({ sig: fp5.sig, crash: JiTA.logsig._crashOf(fp5.sig) }, X._editText({ sig: fp5.sig, msg: full5.slice(0, X.MSG_CUT) }));
+    ok('...so the edit still finds the cut log entries, its own included', X._fits(t5, e5), t5.pat.slice(-10));
+
+    // excfind-logic-6: a description stacktrace whose message ran on
+    const stOk = JiTA.logsig._fingerprint(['STACKTRACE #1 logged at 04/12/2026 11:23:16 : Possible service deadlock detected!', 'Traced at:'].concat(frames(FA)).join('\n'));
+    const stRun = JiTA.logsig._fingerprint(['STACKTRACE #1 logged at 04/12/2026 11:23:16 : Possible service deadlock detected! Thread dump follows', 'Traced at:'].concat(frames(FA)).join('\n'));
+    const fields6 = { summary: 's', created: '2026-10-01T00:00:00.000+0000', status: { name: 'Open' } };
+    const target6 = [{ sig: stOk.sig, crash: JiTA.logsig._crashOf(stOk.sig), msg: stOk.msg }];
+    const m6 = X.match(X._entry({ key: 'EBR-91', desc: [{ sig: stRun.sig, msg: stRun.msg, open: true }], fields: fields6 }, null, {}), target6);
+    ok('a report whose description stacktrace ran on (Jira joined its lines) is found at its frames, the message compared as far as the shorter goes',
+        m6.length === 1 && m6[0].exact && m6[0].where === 'description', JSON.stringify(m6.map((h) => ({ exact: h.exact, where: h.where }))));
+    ok('...while one with that longer message as written, not run on, is no match', X.match(X._entry({ key: 'EBR-92', desc: [{ sig: stRun.sig, msg: stRun.msg }], fields: fields6 }, null, {}), target6).length === 0);
+    const both6 = X._entry({ key: 'EBR-93', desc: [{ sig: stRun.sig, msg: stRun.msg, open: true }, { sig: stRun.sig, msg: stRun.msg }], fields: fields6 }, null, {});
+    ok('...the two kept apart in the shared pool, only the run-on one marked', both6.desc[0].open === true && !both6.desc[1].open && both6.desc[0] !== both6.desc[1]);
+
+    // excfind-robust-1: each stack is looked for with its own message
+    const pa = fp('Invalid item 1234567', FA), pb = fp('Invalid item 7654321', FB);
+    const tsR = X.targets([], { withLog: 4, excGroups: [{ msg: 'Invalid item 1234567', paths: [{ sig: pa.sig, msg: 'Invalid item 1234567', count: 2 }, { sig: pb.sig, msg: 'Invalid item 7654321', count: 2 }] }] });
+    ok('each stack of a shared message is looked for with the message it was seen with', tsR.find((x) => x.sig === pb.sig).msg === 'Invalid item 7654321' &&
+        tsR.find((x) => x.sig === pa.sig).msg === 'Invalid item 1234567', JSON.stringify(tsR.map((x) => x.msg)));
+    const grp = P._groups([{ key: 'EBR-1', exc: [{ sig: pa.sig, msg: 'Invalid item 1234567' }] }, { key: 'EBR-2', exc: [{ sig: pa.sig, msg: 'Invalid item 1234567' }] },
+        { key: 'EBR-3', exc: [{ sig: pb.sig, msg: 'Invalid item 7654321' }] }], () => true);
+    ok('...the profile keeping each stack\'s own message', grp.length === 1 && grp[0].paths.find((p) => p.sig === pb.sig).msg === 'Invalid item 7654321' &&
+        grp[0].paths.find((p) => p.sig === pa.sig).msg === 'Invalid item 1234567', JSON.stringify(grp[0] && grp[0].paths));
+    ok('...and a summary from before that falls back to the message of its group', X.targets([], { withLog: 4, excGroups: [{ msg: 'M', paths: [{ sig: pb.sig, count: 2 }] }] })[0].msg === 'M');
+
+    // excfind-robust-3 and excfind-logic-8: what could not be read is said
+    st = win(); st.desc = []; st.descError = true; st.profileDone = true; st.profile = null; X._retarget(st);
+    ok('a description that could not be read is said, not taken for one without an exception', /^Nothing found to look for, but the description of EDR-77 could not be read./.test(byId['jx-targets'].textContent),
+        byId['jx-targets'].textContent);
+    st = win(); st.desc = [{ sig: A.sig, msg: 'KeyError: 2' }]; st.profileError = 'HTTP 400'; st.profileDone = true; X._retarget(st);
+    ok('...and attached reports that could not be read, under what could be offered', /Only what could be read is offered: its attached reports could not be read \(HTTP 400\)\./.test(byId['jx-targets'].textContent),
+        byId['jx-targets'].textContent);
+    const buildWas = P.build;
+    P.build = () => Promise.reject(new Error('HTTP 403'));
+    st = win(); ajax = {}; dbRec = null;
+    X._load(st);
+    await flush();
+    ok('a profile that could not be built is kept as the reason, and a description neither Jira nor the local copy gives too', st.profileError === 'HTTP 403' && st.profileDone === true && st.descError === true,
+        st.profileError + ' ' + st.descError);
+    P.build = buildWas;
+    st = win(); st.desc = [{ sig: A.sig, msg: 'KeyError: 2' }]; st.profileDone = true; st.on[A.sig] = true; st.started = true; X._retarget(st);
+    st.done = true; st.error = 'Could not list the open bug reports: HTTP 500'; st.read = 12; X._paintResults(st);
+    ok('a listing that failed says none were found in the reports read, not that none hold them', /^None found in the 12 open bug reports read before the listing failed\./.test(byId['jx-results'].textContent),
+        byId['jx-results'].textContent);
+
+    // excfind-logic-4: a press on the list while an exception is edited keeps the focus in the editor
+    st = win(); st.desc = [{ sig: A.sig, msg: 'KeyError: 2' }]; st.profileDone = true; X._retarget(st);
+    const tgtBox = byId['jx-targets'];
+    let prevented = 0;
+    const press = (target) => (tgtBox.handlers['mousedown.jxedit'] || []).forEach((h) => h.call(tgtBox, { target: target, preventDefault() { prevented++; } }));
+    press(tgtBox);
+    ok('a press on the list while nothing is edited is left alone', prevented === 0 && (tgtBox.handlers['mousedown.jxedit'] || []).length === 1);
+    X._startEdit(st, A.sig);
+    press(find(tgtBox, (n) => n.tag === 'input' && n.getAttribute('type') === 'checkbox')[0]);
+    ok('while an exception is edited, a press on the list\'s controls keeps the focus in the editor, so the click lands', prevented === 1, String(prevented));
+    press(st.editor);
+    ok('...one in the editor itself is left alone', prevented === 1);
+    X._endEdit(st, A.sig);
+    X._paintTargets(st);
+    ok('...and the list drawn again keeps one such handler, not one per drawing', (tgtBox.handlers['mousedown.jxedit'] || []).length === 1);
+
+    // excfind-robust-2: assignees asked a few at a time, and an Attach kept when one cannot be read
+    JiTA.ui._assigneeCache = {}; ajaxUrls.length = 0; ajax = {};
+    const asks = ['EBR-a1', 'EBR-a2', 'EBR-a3', 'EBR-a4', 'EBR-a5', 'EBR-a6'].map((k) => JiTA.ui._getAssignee(k).then(() => 'ok', () => 'failed'));
+    const assigneeAsks = () => ajaxUrls.filter((u) => /fields=assignee/.test(u)).length;
+    ok('assignees are asked ASSIGNEE_LANES at a time', JiTA.ui.ASSIGNEE_LANES === 4 && assigneeAsks() === 4, String(assigneeAsks()));
+    const got = await Promise.race([Promise.all(asks), new Promise((r) => setTimeout(() => r(['held']), 1000))]);   // a queue that stalls fails here, not hangs
+    ok('...the rest as each answers, a failed one too', assigneeAsks() === 6 && got.every((g) => g === 'failed') && JiTA.ui._assigneeBusy === 0 && JiTA.ui._assigneeWait.length === 0, JSON.stringify(got));
+    const $kept = JiTA.ui._attachReportButton('EBR-a7', { defect: 'EDR-77', anyAssignee: true });
+    await flush();
+    ok('an Attach whose assignee could not be read stays, saying it is checked when clicked', $kept[0].textContent === 'Attach' && !!$kept[0].parentNode === false &&
+        /could not be read: it is checked when you click/.test($kept[0].getAttribute('title')), $kept[0].textContent + ' / ' + $kept[0].getAttribute('title'));
+
+    // excfind-robust-4: hits drawn together, each row written once, and counts that change match nothing again
+    st = win(); st.desc = [{ sig: A.sig, msg: 'KeyError: 2' }]; st.profileDone = true; st.on[A.sig] = true; st.started = true; X._retarget(st);
+    let whys = 0;
+    const whyWas = X._why;
+    X._why = function () { whys++; return whyWas.apply(X, arguments); };
+    const rowsNow = () => byId['jx-results'].kids.filter((n) => n.getAttribute && n.getAttribute('data-key')).length;
+    ['EBR-81', 'EBR-82', 'EBR-83'].forEach((k) => X._add(st, item(k, null, [], '2026-10-0' + k.slice(-1) + 'T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: A.sig }] }, cached: false }));
+    ok('hits read in quick succession are not drawn one by one', rowsNow() === 0 && whys === 0, rowsNow() + ' ' + whys);
+    await painted();
+    ok('...but together, within PAINT_MS, each row written once', rowsNow() === 3 && whys === 3, rowsNow() + ' ' + whys);
+    X._add(st, item('EBR-84', null, [], '2026-10-04T00:00:00.000+0000'), { rec: { logs: true, exc: [{ sig: A.sig }] }, cached: false });
+    await painted();
+    ok('...and a later hit writes only its own row: the others\' matches are as they were', rowsNow() === 4 && whys === 4, String(whys));
+    X._why = whyWas;
+    let rematches = 0;
+    const rmWas = X._rematch;
+    X._rematch = function () { rematches++; return rmWas.apply(X, arguments); };
+    st.profile = { withLog: 4, excGroups: [{ msg: 'KeyError: 2', paths: [{ sig: A.sig, msg: 'KeyError: 2', count: 2 }] }] };
+    X._retarget(st);
+    ok('a profile that counted more logs redraws the exceptions, but matches no report again', rematches === 0 && /in 2 of 4 attached logs/.test(byId['jx-targets'].textContent),
+        rematches + ' ' + byId['jx-targets'].textContent);
+    st.on[A.sig] = false;
+    X._retarget(st);
+    ok('...while unticking one does', rematches === 1, String(rematches));
+    X._rematch = rmWas;
+
 
     // ================= the launcher =================
     let opened = 0, keydown = null, open = null;
