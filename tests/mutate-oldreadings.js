@@ -19,10 +19,10 @@ const muts = [
     [H, 'an empty reading stays', 'return !(r && r.v >= P.V);', 'return !!r && r.v < P.V;'],
     [H, 'every page load sweeps', ' || gmGet(P.SWEPT_KEY, 0) === P.V) { return Promise.resolve(0); }', ') { return Promise.resolve(0); }'],
     [H, 'the sweep is never noted', '            gmSet(P.SWEPT_KEY, P.V);\n', ''],
-    [H, 'a failed sweep is noted as done', "        }, function (e) { P._sweeping = false; JiTA.caught('profile.sweepOld', e); return 0; });", "        }, function (e) { P._sweeping = false; gmSet(P.SWEPT_KEY, P.V); JiTA.caught('profile.sweepOld', e); return 0; });"],
+    [H, 'a failed sweep is noted as done', '        }, function (e) {\n            P._sweeping = false;\n', '        }, function (e) {\n            P._sweeping = false;\n            gmSet(P.SWEPT_KEY, P.V);\n'],
     [H, 'two calls at once sweep twice', 'if (P._sweeping || gmGet(P.SWEPT_KEY, 0) === P.V)', 'if (gmGet(P.SWEPT_KEY, 0) === P.V)'],
-    [H, 'a failed sweep blocks the next', "        }, function (e) { P._sweeping = false; JiTA.caught('profile.sweepOld', e); return 0; });", "        }, function (e) { JiTA.caught('profile.sweepOld', e); return 0; });"],
-    [H, 'a failed sweep says nothing', "        }, function (e) { P._sweeping = false; JiTA.caught('profile.sweepOld', e); return 0; });", '        }, function () { P._sweeping = false; return 0; });'],
+    [H, 'a failed sweep blocks the next', '        }, function (e) {\n            P._sweeping = false;\n', '        }, function (e) {\n'],
+    [H, 'a failed sweep says nothing', "            JiTA.log('[JiTA] profile: could not delete the old stored log readings (tried again on the next page load):', e);\n", ''],
     [H, 'a sweep says nothing of what went', "            if (n) { JiTA.log('[JiTA] profile: deleted ' + n + ' stored log reading(s) of an older reader version'); }\n", ''],
     // when it runs
     [H, 'a Jira tab never sweeps', "    setTimeout(function () { try { JiTA.profile.sweepOld(); } catch (e) { JiTA.caught('profile.sweepOld', e); } }, JiTA.profile.SWEEP_DELAY_MS);", '    void 0;'],

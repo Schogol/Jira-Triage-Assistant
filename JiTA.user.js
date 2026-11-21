@@ -13992,7 +13992,11 @@ JiTA.profile = {
             gmSet(P.SWEPT_KEY, P.V);
             if (n) { JiTA.log('[JiTA] profile: deleted ' + n + ' stored log reading(s) of an older reader version'); }
             return n;
-        }, function (e) { P._sweeping = false; JiTA.caught('profile.sweepOld', e); return 0; });
+        }, function (e) {
+            P._sweeping = false;
+            JiTA.log('[JiTA] profile: could not delete the old stored log readings (tried again on the next page load):', e);
+            return 0;
+        });
     },
     // A reading of logs other than the report has now (a log added or replaced since: logSig) is read again too, as the
     // exception search reads it again (excfind._read).

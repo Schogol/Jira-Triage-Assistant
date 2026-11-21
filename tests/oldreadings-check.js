@@ -15,7 +15,7 @@ const J = JSON.stringify;
 let gm = {}, logged = [], caught = [];
 global.gmGet = (k, d) => (Object.prototype.hasOwnProperty.call(gm, k) ? gm[k] : d);
 global.gmSet = (k, v) => { gm[k] = v; };
-global.JiTA = { log: (m) => { logged.push(m); }, caught: (where, e) => { caught.push(where + ': ' + ((e && e.message) || e)); } };
+global.JiTA = { log: (...a) => { logged.push(a.map((x) => (x && x.message) || String(x)).join(' ')); }, caught: (where, e) => { caught.push(where + ': ' + ((e && e.message) || e)); } };
 eval(S.top(src, 'JiTA.db'));
 JiTA.profile = eval(S.members(src, 'JiTA.profile', ['V', 'CACHE_PREFIX', '_usable', 'SWEPT_KEY', 'SWEEP_DELAY_MS', '_sweeping', 'sweepOld']));
 const D = JiTA.db, P = JiTA.profile;
@@ -118,12 +118,12 @@ const left = () => Array.from(rows.keys()).sort().join(',');
     fill([reading('EBR-1', P.V)]);
     n = await P.sweepOld();
     ok('nothing to delete: noted as swept, said nowhere', n === 0 && gm[P.SWEPT_KEY] === P.V && !logged.length);
-    gm = {}; caught = [];
+    gm = {}; logged = [];
     fill([reading('EBR-1', P.V - 1)]);
     failNext = 'abort';
     n = await P.sweepOld();
-    ok('a sweep that fails says so in the diagnostics and is not noted, so the next page load tries again', n === 0 && !(P.SWEPT_KEY in gm) && caught.some((c) => /^profile\.sweepOld: QuotaExceededError/.test(c)) && P._sweeping === false,
-        J(caught) + ' ' + J(gm));
+    ok('a sweep that fails says so in the diagnostics and is not noted, so the next page load tries again', n === 0 && !(P.SWEPT_KEY in gm) &&
+        logged.some((m) => /could not delete the old stored log readings \(tried again on the next page load\): QuotaExceededError$/.test(m)) && P._sweeping === false, J(logged) + ' ' + J(gm));
     n = await P.sweepOld();
     ok('...and the next one does it', n === 1 && gm[P.SWEPT_KEY] === P.V);
 
