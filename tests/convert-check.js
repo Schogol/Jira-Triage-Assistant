@@ -38,6 +38,8 @@ $.ajax = (o) => { const d = Deferred(); gets.push({ url: o.url, type: o.type, da
 // The Defect checklist's switch, and who is converting (an unassigned report is taken first while the checklist is on).
 let checklistOn = false, meAnswer = 'acc-me';
 global.flagOn = (name) => (name === 'defectChecklist' ? checklistOn : true);
+let storedOn = true;   // the checklist switch as stored now: false when it was turned off in another tab since this one loaded
+global.flagStillOn = (name) => global.flagOn(name) && (name !== 'defectChecklist' || storedOn);   // census-check.js covers the real one
 global.JiTA = { link: { currentUser: () => (meAnswer instanceof Error ? Promise.reject(meAnswer) : Promise.resolve(meAnswer)) } };
 global.jitaCurrentKey = () => current;
 global.jitaLinkedKeys = (links) => (links || []).map((l) => l.key);
@@ -260,6 +262,10 @@ ok('...with one, the automation is called', invoked === 1);
     checklistOn = false;
     await convertOf('EBR-23', null);
     ok('with the checklist switched off, an unassigned report is converted as it is', gets.length === 1 && rules.length === 1);
+    checklistOn = true; storedOn = false;   // switched off in another tab since this one loaded
+    await convertOf('EBR-26', null);
+    ok('...or switched off in another tab since this one loaded', gets.length === 1 && rules.length === 1);
+    storedOn = true;
     checklistOn = true; meAnswer = null;
     await convertOf('EBR-24', null);
     ok('...and when who is converting cannot be told', gets.length === 1 && rules.length === 1);

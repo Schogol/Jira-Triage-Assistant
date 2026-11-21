@@ -101,8 +101,8 @@ const mine = () => server.props[KEY] && server.props[KEY].value;
     ok('...each switch as it is set', J(e.f) === J({ parser: true, scrollbar: false, buttons: true, similarDefects: true, defectProfile: true, igbrZip: true, defectChecklist: true, credits: false, detailView: true, dvTake: false, screenOcr: false }), J(e.f));
     // A switch turned in another tab: this tab's own copy (savedVariables, read at load) still has it on.
     const top = (head) => { const s = src.indexOf('\n' + head); return src.slice(s + 1, src.indexOf('\n', s + 1)); };
-    const real = new Function('gmGet', [top('var savedVariables = '), top('var FLAG = '), top('function flagOn(name) '), top('function flagStored(name) ')].join('\n') +
-        '\nreturn { saved: savedVariables, flagOn: flagOn, flagStored: flagStored };')(global.gmGet);
+    const real = new Function('gmGet', [top('var savedVariables = '), top('var FLAG = '), top('function flagOn(name) '), top('function flagStored(name) '),
+        top('function flagStillOn(name) ')].join('\n') + '\nreturn { saved: savedVariables, flagOn: flagOn, flagStored: flagStored, flagStillOn: flagStillOn };')(global.gmGet);
     const stubs = [global.flagOn, global.flagStored];
     real.saved.forEach((v) => { v[1] = true; });   // every switch on when this tab loaded
     gm.credits = false; gm.screenOcr = false;     // since turned off in another tab of this browser
@@ -110,6 +110,10 @@ const mine = () => server.props[KEY] && server.props[KEY].value;
     const ef = C.entry().f;
     ok('a switch turned off in another tab is sent as off, as every tab of the browser has it now', ef.credits === false && ef.screenOcr === false && real.flagOn('credits') === true, J(ef));
     ok('...one never stored is on, as a new install has it', ef.parser === true && ef.buttons === true, J(ef));
+    ok('a switch turned off in another tab is no longer on for a feature that writes (flagStillOn)', real.flagStillOn('credits') === false && real.flagStillOn('parser') === true);
+    real.saved[FLAG.parser][1] = false; gm.parser = true;
+    ok('...nor is one this tab loaded off and another turned on: that starts on a reload', real.flagStillOn('parser') === false);
+    real.saved[FLAG.parser][1] = true; delete gm.parser;
     delete gm.credits; delete gm.screenOcr;
     [global.flagOn, global.flagStored] = stubs;
     take = 'throw';

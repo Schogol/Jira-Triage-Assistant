@@ -140,6 +140,8 @@ global.gmSet = (k, v) => { gmStore[k] = JSON.parse(J(v)); };
 global.jitaCurrentKey = () => onScreen;
 let onScreen = '', checklistOn = true;
 global.flagOn = (name) => (name === 'defectChecklist' ? checklistOn : true);
+let storedOn = true;   // the checklist switch as stored now: false when it was turned off in another tab since this one loaded
+global.flagStillOn = (name) => global.flagOn(name) && (name !== 'defectChecklist' || storedOn);   // census-check.js covers the real one
 global.JiTA = {
     HOST: 'https://x.atlassian.net', dlog: () => {},
     util: { fmtDate: (iso) => String(iso).slice(0, 10), copy: (t, h) => { copied.push(t); copiedHtml.push(h); return copyAnswer ? Promise.resolve() : Promise.reject(new Error('no')); } },
@@ -1387,6 +1389,16 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     C._guard('EDR-1', offState);
     await settle();
     ok('...which, switched on, it would be (control)', puts().length === 1);
+    // Switched off in another tab since this one loaded: this tab's own copy still says on.
+    storedOn = false; ajaxLog = []; toasts = [];
+    delete C._reverted['EDR-1'];   // put back once just now: this one would be again
+    C._guard('EDR-1', offState);
+    await settle();
+    ok('switched off in another tab, no unassign is put back here either', !puts().length);
+    ok('...nothing is refused', !pick('Unassigned') && !toasts.length);
+    C.ensure();
+    ok('...and the card goes at the next look', !document.getElementById(C.GROUP_ID));
+    storedOn = true;
     C._key = null;
     const lineOf = (head) => { const i = src.indexOf(head); return src.slice(i, src.indexOf('\n', i) + 1); };
     const flags = eval('(function () { ' + lineOf('var savedVariables = ') + lineOf('var FLAG = ') + ' return { savedVariables: savedVariables, FLAG: FLAG }; })()');

@@ -150,10 +150,10 @@ const muts = [
     [CK, 'a suggested label is added unasked', "        if (!window.confirm('Add the label ' + label + ' to ' + key + '?')) { return Promise.resolve(); }\n", ''],
     [CK, 'a suggested label replaces the others', "{ update: { labels: [{ add: label }] } }", '{ fields: { labels: [label] } }'],
     // ---- the Settings switch ----
-    [CK, 'the card ignores its switch', "        if (!flagOn('defectChecklist') || !/^(EDR|EO|PLAT)-\\d+$/.test(key || '')) {", "        if (!/^(EDR|EO|PLAT)-\\d+$/.test(key || '')) {"],
-    [CK, 'a switched-off card is drawn all the same', "if (C._key !== key || !flagOn('defectChecklist')) { return; }", 'if (C._key !== key) { return; }'],
-    [CK, 'switched off, Unassigned is refused all the same', "if (!s || !s.sees || !s.open || !s.held || !flagOn('defectChecklist')) { return; }", 'if (!s || !s.sees || !s.open || !s.held) { return; }'],
-    [CK, 'switched off, an unassign is put back all the same', "if (!s || !s.sees || s.assignee || !s.open || !flagOn('defectChecklist')) { return; }", 'if (!s || !s.sees || s.assignee || !s.open) { return; }'],
+    [CK, 'the card ignores its switch', "        if (!flagStillOn('defectChecklist') || !/^(EDR|EO|PLAT)-\\d+$/.test(key || '')) {", "        if (!/^(EDR|EO|PLAT)-\\d+$/.test(key || '')) {"],
+    [CK, 'a switched-off card is drawn all the same', "if (C._key !== key || !flagStillOn('defectChecklist')) { return; }", 'if (C._key !== key) { return; }'],
+    [CK, 'switched off, Unassigned is refused all the same', "if (!s || !s.sees || !s.open || !s.held || !flagStillOn('defectChecklist')) { return; }", 'if (!s || !s.sees || !s.open || !s.held) { return; }'],
+    [CK, 'switched off, an unassign is put back all the same', "if (!s || !s.sees || s.assignee || !s.open || !flagStillOn('defectChecklist')) { return; }", 'if (!s || !s.sees || s.assignee || !s.open) { return; }'],
     [CK, 'no switch of its own', ', ["defectChecklist", ""]];', '];', ['var savedVariables = ', '\n']],
     [CK, 'the switch on the wrong slot', 'defectProfile: 8, defectChecklist: 9 };', 'defectProfile: 8, defectChecklist: 8 };', ['var FLAG = ', '\n']],
     [CK, 'the switch missing from Settings', '        $feat.append($cl);\n', '', ['        // ---- Features ----', "pane('features').append($feat);"]],
@@ -220,15 +220,15 @@ const muts = [
     [CK, 'the defect itself listed as holding its exception', 'return k !== key && held[k].hits.some(function (h) { return h.sig === e.sig; });', 'return held[k].hits.some(function (h) { return h.sig === e.sig; });'],
     [CK, 'the report\'s build is lost', '            src.build = rec.build || null;\n', ''],
     // ---- nobody unassigns an unfinished defect ----
-    [CK, 'a finished defect\'s Unassigned is refused', "if (!s || !s.sees || !s.open || !s.held || !flagOn('defectChecklist')) { return; }", "if (!s || !s.sees || !s.held || !flagOn('defectChecklist')) { return; }"],
-    [CK, 'a defect nobody holds is refused all the same', "if (!s || !s.sees || !s.open || !s.held || !flagOn('defectChecklist')) { return; }", "if (!s || !s.sees || !s.open || !flagOn('defectChecklist')) { return; }"],
+    [CK, 'a finished defect\'s Unassigned is refused', "if (!s || !s.sees || !s.open || !s.held || !flagStillOn('defectChecklist')) { return; }", "if (!s || !s.sees || !s.held || !flagStillOn('defectChecklist')) { return; }"],
+    [CK, 'a defect nobody holds is refused all the same', "if (!s || !s.sees || !s.open || !s.held || !flagStillOn('defectChecklist')) { return; }", "if (!s || !s.sees || !s.open || !flagStillOn('defectChecklist')) { return; }"],
     [CK, 'a developer\'s defect is held by its reporter', 'held: !!d.assignee && d.assignee === d.reporter,', 'held: !!d.assignee,'],
     [CK, 'a developer\'s defect offers the hand-off', "        if (!s.held) {\n            $('<span class=\"jcl-handed\"></span>')", "        if (false) {\n            $('<span class=\"jcl-handed\"></span>')"],
     [CK, 'the refusal lets the picker hear of it', "        e.stopPropagation();\n        if (e.stopImmediatePropagation) { e.stopImmediatePropagation(); }\n", ''],
     [CK, 'the refusal says nothing', "        if (e.type === 'click') { JiTA.ui.toast(C._refusal(s)); }\n", ''],
     [CK, 'the refusal says it twice, on mousedown too', "if (e.type === 'click') { JiTA.ui.toast(C._refusal(s)); }", 'JiTA.ui.toast(C._refusal(s));'],
     [CK, 'the guard hears clicks after the picker', "document.addEventListener('click', C._onPick, true);", "document.addEventListener('click', C._onPick, false);"],
-    [CK, 'a finished defect\'s unassign is put back', "if (!s || !s.sees || s.assignee || !s.open || !flagOn('defectChecklist')) { return; }", "if (!s || !s.sees || s.assignee || !flagOn('defectChecklist')) { return; }"],
+    [CK, 'a finished defect\'s unassign is put back', "if (!s || !s.sees || s.assignee || !s.open || !flagStillOn('defectChecklist')) { return; }", "if (!s || !s.sees || s.assignee || !flagStillOn('defectChecklist')) { return; }"],
     [CK, 'an unassign put back again and again', 'if (!back || back.from !== s.d.reporter || C._reverted[key] === back.at) { return; }', 'if (!back || back.from !== s.d.reporter) { return; }'],
     [CK, 'a developer\'s defect put back to them', 'if (!back || back.from !== s.d.reporter || C._reverted[key] === back.at) { return; }', 'if (!back || C._reverted[key] === back.at) { return; }'],
     [CK, 'the put-back says nothing', "            JiTA.ui.toast(C._refusal(s) + ' It was put back to its assignee.');\n", ''],
@@ -349,7 +349,10 @@ const muts = [
     [CK, 'the old way says it copied when refused', "                document.body.removeChild(box);\n                if (ok) { resolve(); } else { reject(new Error('copy refused')); }", '                document.body.removeChild(box);\n                resolve();', UTIL],
     // ---- the page observer ----
     [CK, 'a wiped card waits for the observer\'s pause', "        try { JiTA.checklist.reensure(); } catch (eCl0) { JiTA.caught('checklist.reensure', eCl0); }   // the Defect checklist card, if Jira wiped it\n", '', BOOT],
-    [CK, 'the card never follows the defect on screen', "            try { JiTA.checklist.ensure(); } catch (e7) { JiTA.caught('checklist.ensure', e7); }   // the Defect checklist: follow the defect on screen, judge it again after an edit\n", '', BOOT]
+    [CK, 'the card never follows the defect on screen', "            try { JiTA.checklist.ensure(); } catch (e7) { JiTA.caught('checklist.ensure', e7); }   // the Defect checklist: follow the defect on screen, judge it again after an edit\n", '', BOOT],
+    [CK, "an unassign is put back though the checklist was turned off in another tab", "if (!s || !s.sees || s.assignee || !s.open || !flagStillOn('defectChecklist')) { return; }", "if (!s || !s.sees || s.assignee || !s.open || !flagOn('defectChecklist')) { return; }"],
+    [CK, "Unassigned is refused though the checklist was turned off in another tab", "if (!s || !s.sees || !s.open || !s.held || !flagStillOn('defectChecklist')) { return; }", "if (!s || !s.sees || !s.open || !s.held || !flagOn('defectChecklist')) { return; }"],
+    [CK, "the card stays though the checklist was turned off in another tab", "        if (!flagStillOn('defectChecklist') || !/^(EDR|EO|PLAT)-\\d+$/.test(key || '')) {", "        if (!flagOn('defectChecklist') || !/^(EDR|EO|PLAT)-\\d+$/.test(key || '')) {"]
 ];
 // Where an anchor is looked for: the part named (the checklist's block by default), between its first line and its end.
 function within(fn) {

@@ -32,5 +32,11 @@ ok('...nor the duplicate finder, or the shared worker', /var D = JiTA\.dupfind;\
 ok('the canned-response dropdown still looks in every frame: it is the one thing the Zendesk panel runs',
     near('/* ---- canned responses: inject the dropdown', /\(function \(\) \{\n\s+if \(JITA_IS_WIKI\) \{ return; \}/));
 
+// Tampermonkey lists every frame's menu commands: one registered in a frame was a second Settings entry, opening there.
+const cmds = [...src.matchAll(/GM_registerMenuCommand\(/g)].map((m) => m.index);
+const guardOf = (i) => { const s = src.lastIndexOf('\nif (', i); return src.slice(s + 1, src.indexOf('\n', s + 1)); };
+ok('the menu commands are registered in the page only, never in a frame it embeds', cmds.length === 2 && cmds.every((i) => guardOf(i) === 'if (!JITA_IS_SUBFRAME) {'),
+    cmds.map(guardOf).join(' | '));
+
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'frame checks passed.'));
 process.exit(fail ? 1 : 0);

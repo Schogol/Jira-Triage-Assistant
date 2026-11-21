@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.24
+// @version     3.53.25
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.24
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.25
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -179,6 +179,10 @@ function flagOn(name) { var i = FLAG[name]; return i != null && !!savedVariables
 // A switch as the browser has it now, for every tab: flagOn is what this tab read at load, and a switch turned in another
 // tab reaches it only for 'buttons'. A stored value is never "" after the load above, which stores true for a new one.
 function flagStored(name) { var i = FLAG[name]; return i != null && !!gmGet(savedVariables[i][0], true); }
+// On when this tab loaded and not turned off since, here or in another tab: what a feature that writes to Jira asks
+// before it does. The Defect checklist turned off in one tab still took, refused and put back assignees in the others.
+// One turned on elsewhere starts on a reload, as every switch does.
+function flagStillOn(name) { return flagOn(name) && flagStored(name); }
 function setFlag(name, val) {
     var i = FLAG[name];
     if (i == null) { return; }
@@ -283,7 +287,9 @@ if (!JITA_NO_JIRA_UI && flagOn('scrollbar')) {
 // Single Tampermonkey menu entry. All feature toggles and Triage Assistant actions (sync / rebuild /
 // embedding backend) live in an in-page settings overlay (JiTA.menu) instead of a long flat list of GM
 // menu commands. The callback references JiTA lazily, so it's fine that the namespace is defined later.
-if (!JITA_IS_FORGE_FRAME) {
+// Not from a frame on the page (JITA_IS_SUBFRAME, which takes in the Forge frame): Tampermonkey lists every frame's
+// commands, so a database embedded in a wiki page added a second Settings entry that opened inside the frame.
+if (!JITA_IS_SUBFRAME) {
     // Available on Confluence too: the Lead-duties diagnostics (Test Confluence access, Show ledger) are
     // exactly what you want to hand a Lead who is standing on the wiki wondering why nothing happened.
     // render() hides the Jira-only sections there.
@@ -1171,7 +1177,7 @@ function jitaConvertClick() {
 // checklist switched off, with the report assigned already, or when taking it fails. It is told whether the report was
 // taken (true only once Jira took the change), so a conversion that does not start can give it back.
 function jitaTakeToConvert(key, d, then) {
-    if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }
+    if (!flagStillOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }
     JiTA.link.currentUser().then(function (me) {
         if (!me) { then(false); return; }
         $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/3/issue/' + key + '/assignee', type: 'PUT', contentType: 'application/json',
@@ -8264,6 +8270,9 @@ JiTA.ui = {
     // (the inner HTML) and o.collapseKey (the GM flag that remembers it collapsed). Not inserted - the caller places it.
     // Shared by the Triage Assistant and the Defect Profile cards.
     _buildSideGroup: function (o) {
+        // Its collapse and card rules are in JiTA.ui.css, which the panel injects: the Defect checklist builds one with the
+        // panel switched off, and its card would not collapse.
+        JiTA.ui.injectCss();
         var collapsed = !!gmGet(o.collapseKey, false);
 
         var group = null, headerClickTarget = null;
@@ -9298,7 +9307,10 @@ JiTA.ui = {
         JiTA.ui._renderTimer = setTimeout(function () {
             JiTA.ui._renderTimer = null;
             var k = JiTA.ui.currentKey;
-            if (!k) { return; }
+            // Only while that issue is on screen: ensure() keeps the key when Jira moves on to a page that is no issue (a
+            // dashboard, a board), and a redraw asked from another tab (an exception ignored, a log pass done) then put a
+            // floating panel for it there.
+            if (!k || jitaCurrentKey() !== k) { return; }
             if (/^EBR-/.test(k)) { JiTA.ui.render(k, true); }               // background: don't blank the list first
             else if (JiTA.ui._isReportsKey(k)) { JiTA.ui.renderReports(k, true); }
         }, 600);
@@ -15144,7 +15156,7 @@ JiTA.checklist = {
     ensure: function () {
         var C = JiTA.checklist, key = (typeof jitaCurrentKey === 'function') ? jitaCurrentKey() : '';
         C._bind();
-        if (!flagOn('defectChecklist') || !/^(EDR|EO|PLAT)-\d+$/.test(key || '')) {
+        if (!flagStillOn('defectChecklist') || !/^(EDR|EO|PLAT)-\d+$/.test(key || '')) {
             if (C._key) { C._key = null; C.clear(); }
             return;
         }
@@ -15232,7 +15244,7 @@ JiTA.checklist = {
     // hears of it. Whatever gets past this (a keyboard shortcut) is put back once the card reads the defect again (_guard).
     _onPick: function (e) {
         var C = JiTA.checklist, s = C._key && C._state[C._key];
-        if (!s || !s.sees || !s.open || !s.held || !flagOn('defectChecklist')) { return; }
+        if (!s || !s.sees || !s.open || !s.held || !flagStillOn('defectChecklist')) { return; }
         var t = e.target, opt = t && t.closest && t.closest('[role="option"], [id*="-option-"]');
         if (!opt || !/^\s*(unassigned\s*)+$/i.test(opt.textContent || '')) { return; }
         if (!C._ownPick(opt)) { return; }
@@ -15267,7 +15279,7 @@ JiTA.checklist = {
     _guard: function (key, s) {
         var C = JiTA.checklist;
         if (s && s.assignee) { delete C._handed[key]; }   // assigned again, here or in Jira: a later unassign is not the card's
-        if (!s || !s.sees || s.assignee || !s.open || !flagOn('defectChecklist')) { return; }
+        if (!s || !s.sees || s.assignee || !s.open || !flagStillOn('defectChecklist')) { return; }
         var back = C._revertTo(s.hist, s.me, Date.now());
         if (!back || back.from !== s.d.reporter || C._reverted[key] === back.at) { return; }
         // The card's own hand-off stays, though a later read finds an item open again (logs that failed to read before,
@@ -15489,7 +15501,7 @@ JiTA.checklist = {
 
     _draw: function (key, s) {
         var C = JiTA.checklist;
-        if (C._key !== key || !flagOn('defectChecklist')) { return; }
+        if (C._key !== key || !flagStillOn('defectChecklist')) { return; }
         if (!s || !s.sees) { C.clear(); return; }
         var $b = C._card(true);
         if (!$b.length) { return; }
