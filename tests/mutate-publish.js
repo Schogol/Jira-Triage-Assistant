@@ -17,6 +17,14 @@ const muts = [
         "                [R._txt('Page tree last scanned'), R._when(pool.fetchedAt ? new Date(pool.fetchedAt).toISOString() : null)]\n            ]);"],
     [P, 'the stamp leaves the scan time out', "' UTC' + scanned + '. Anything typed on this page by '", "' UTC. Anything typed on this page by '"],
     [P, 'the published stamp is not given the tree', "return R._write(R._stamp(pool) + '\\n' + body)", "return R._write(R._stamp() + '\\n' + body)"],
+    // ---- two Leads publishing at once (review 2026-11-20 leadduty-logic-3) ----
+    [P, "the hash alone says unchanged", "return R._unchanged(wiki[R.PUB_KEY]).then(function (same) { return same ? { skipped: 'unchanged' } : R._publish(wiki, body, hash, pool, qc); });", "return { skipped: 'unchanged' };"],
+    [P, "the page version written is not noted", "at: new Date().toISOString(), page: res.version };", "at: new Date().toISOString() };"],
+    [P, "the page version is not compared", "return page.version === pub.page; }, function () { return true; });", "return true; }, function () { return true; });"],
+    [P, "a pub with no page version rewrites every time", "            if (!pub || !pub.page) { return Promise.resolve(true); }\n", "            if (!pub || !pub.page) { return Promise.resolve(false); }\n"],
+    [P, "a ledger moved on meanwhile asks for nothing", "                    if (JiTA.util.hash(R._content(v, qc, pool)) !== hash) { R._again = true; }\n", ""],
+    [P, "every publish asks for another", "                    if (JiTA.util.hash(R._content(v, qc, pool)) !== hash) { R._again = true; }\n", "                    R._again = true;\n"],
+    [P, "the page's month table shows the issue's first follow-up", "R._lines(R._reason(d, JiTA.leadduty.qc.flagFor(flags, key, pym), pym))", "R._lines(R._reason(d, flags[key], pym))"],
     // ---- the QC back-off ----
     [S, 'a failing QC sample reruns the refresh every poll', '            if (!ready && !S._elapsed(S.QC_FAIL_KEY, S.FAIL_MS)) { return; }\n', ''],
     [S, 'a QC failure is not remembered', '                gmSet(S.QC_FAIL_KEY, Date.now());\n', ''],
