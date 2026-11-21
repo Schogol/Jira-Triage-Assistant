@@ -11,10 +11,8 @@ const TFP = ['    function fingerprint(text) {', '\n    }\n'];   // jitaShared: 
 const TSPLIT = ['    function splitBlocks(text) {', '\n    }\n'];
 const TLB = ['    function logBlocks(text) {', '\n    }\n'];
 const APPLY = ['    applyToTable: function () {', '\n    },'];
-const TIDX = ['    // A stacktrace also files its defect under its message (traceMsg)', '\n    },'], WIDX = ['    function buildIndexes(recs) {', '\n    }\n'];
-const TPT = ['    _pointAt: function (idx, sig, crashSig) {', '\n    },'], WPT = ['    function lgPoint(idx, sig, crashSig) {', '\n    }\n'];
-const TMATES = ['    _traceMates: function (idx, sig) {', '\n    },'], WMATES = ['    function lgMates(idx, sig) {', '\n    }\n'];
-const THOLD = ['    _holdingLocal: function (sigs) {', '\n    },'], WHOLD = ['    function lgHolding(sigs) {', '\n    }\n'];
+const SIDX = ['    function buildIndex(recs) {', '\n    }\n'], SPT = ['    function pointAt(idx, sig, crashSig) {', '\n    }\n'];   // jitaShared
+const SMATES = ['    function traceMates(idx, sig) {', '\n    }\n'], SHOLD = ['    function holding(idx, sigs) {', '\n    }\n'];
 const muts = [
     // ---- the tag, the cut, the message part ----
     [T, 'stacktraces share the exceptions\' signatures', "    var TRACE = '[stacktrace] ';", "    var TRACE = '';"],
@@ -51,34 +49,25 @@ const muts = [
     [T, 'a stacktrace waits for an exception\'s END line', "endLine = trace ? 'STACKTRACE END' : 'EXCEPTION END';", "endLine = 'EXCEPTION END';", TLB],
     [T, 'every line of a stacktrace a record of its own', "pre = trace ? pres[i] : ''", "pre = trace ? 'x' : ''", TLB],
     // ---- what a block points at ----
-    [T, 'a log\'s loose matches counted exact', "loose = !!hit && hit.by !== 'stack';\n                if (!defect) { return; }", 'loose = false;\n                if (!defect) { return; }'],
-    [T, 'the worker counts a log\'s loose matches exact', "var defect = hit.key, loose = hit.by !== 'stack';", 'var defect = hit.key, loose = false;'],
-    [T, 'a stacktrace never found by its message', "        if ((mates = L._traceMates(idx, sig)).length) { return { key: mates[0].key, by: 'message' }; }\n", '', TPT],
-    [T, 'a match by message said to be the stack', "by: 'message' }", "by: 'stack' }", TPT],
-    [T, 'the worker never finds one by its message', "        if ((mates = lgMates(idx, sig)).length) { return { key: mates[0].key, by: 'message' }; }\n", '', WPT],
-    [T, 'a whole one matched by any of its message', 'var map = L.isCut(sig) ? idx.traceMsg : idx.traceCut;', 'var map = idx.traceMsg;', TMATES],
-    [T, 'a cut one matched only by cut ones', 'var map = L.isCut(sig) ? idx.traceMsg : idx.traceCut;', 'var map = idx.traceCut;', TMATES],
-    [T, 'the worker matches a whole one by any of its message', 'var map = lgIsCut(sig) ? idx.traceMsg : idx.traceCut;', 'var map = idx.traceMsg;', WMATES],
+    [T, "a log's loose matches counted exact", "var defect = hit.key, loose = hit.by !== 'stack';", "var defect = hit.key, loose = false;"],
+    [T, "a stacktrace never found by its message", "        if ((mates = traceMates(idx, sig)).length) { return { key: mates[0].key, by: 'message' }; }\n", "", SPT],
+    [T, "a match by message said to be the stack", "by: 'message' }", "by: 'stack' }", SPT],
+    [T, "a whole one matched by any of its message", "var map = isCut(sig) ? idx.traceMsg : idx.traceCut;", "var map = idx.traceMsg;", SMATES],
+    [T, "a cut one matched only by cut ones", "var map = isCut(sig) ? idx.traceMsg : idx.traceCut;", "var map = idx.traceCut;", SMATES],
     // ---- the index ----
-    [T, 'a description of stacktraces alone not mined', "(desc.indexOf('EXCEPTION #') === -1 && desc.indexOf('STACKTRACE #') === -1)", "desc.indexOf('EXCEPTION #') === -1", TIDX],
-    [T, 'stacktraces not filed by their message', '                    if (L.isTrace(fp.sig)) { file(traceMsg, L._traceKey(fp.sig), member); }\n', '', TIDX],
-    [T, 'cut ones not filed among the cut', '                        file(traceCut, L._traceKey(fp.sig), member);\n', '', TIDX],
-    [T, 'a defect\'s cut ones not kept for it', '                        if (keyToCut[key].indexOf(fp.sig) === -1) { keyToCut[key].push(fp.sig); }\n', '', TIDX],
-    [T, 'a cut one clustered by an empty stack', '                        continue;\n', '', TIDX],
-    [T, 'a defect filed twice under one message', 'if (list.indexOf(member) === -1) { list.push(member); }', 'list.push(member);', TIDX],
-    [T, 'a message\'s defects not newest first', '            Object.keys(traceMsg).forEach(function (s) { traceMsg[s].sort(memberSort); });\n', '', TIDX],
-    [T, 'the worker files no stacktrace by its message', '                    if (lgIsTrace(fp.sig)) { lgFile(traceMsg, lgTraceKey(fp.sig), lmember); }\n', '', WIDX],
-    [T, 'the worker clusters cut ones', '                        continue;\n', '', WIDX],
-    [T, 'the worker mines no description of stacktraces alone', " || r.description.indexOf('STACKTRACE #') !== -1)", ')', WIDX],
+    [T, "a description of stacktraces alone not mined", "(desc.indexOf('EXCEPTION #') === -1 && desc.indexOf('STACKTRACE #') === -1)", "desc.indexOf('EXCEPTION #') === -1", SIDX],
+    [T, "stacktraces not filed by their message", "                if (isTrace(fp.sig)) { file(traceMsg, traceKey(fp.sig), member); }\n", "", SIDX],
+    [T, "cut ones not filed among the cut", "file(traceCut, traceKey(fp.sig), member); ", "", SIDX],
+    [T, "a defect's cut ones not kept for it", "own(keyToCut, key, fp.sig); ", "", SIDX],
+    [T, "a cut one clustered by an empty stack", "own(keyToCut, key, fp.sig); continue; }", "own(keyToCut, key, fp.sig); }", SIDX],
+    [T, "a defect filed twice under one message", "if (list.indexOf(member) === -1) { list.push(member); }", "list.push(member);", SIDX],
+    [T, "a message's defects not newest first", "        Object.keys(traceMsg).forEach(function (s) { traceMsg[s].sort(newestFirst); });\n", "", SIDX],
     // ---- which defects hold one ----
-    [T, 'a stacktrace held as an exception', "put(c.members, L.isTrace(sig) ? 'st-exact' : 'exact', sig);", "put(c.members, 'exact', sig);", THOLD],
-    [T, 'a stacktrace\'s site held as a crash site', "put(cc.members, L.isTrace(sig) ? 'st-site' : 'site', sig);", "put(cc.members, 'site', sig);", THOLD],
-    [T, 'no defect held by a stacktrace\'s message', "            list.forEach(function (sig) { put(L._traceMates(idx, sig), 'st-msg', sig); });\n", '', THOLD],
-    [T, 'a stacktrace before an exception at the same level', 'var list = (sigs || []).filter(function (s) { return !L.isTrace(s); }).concat((sigs || []).filter(L.isTrace));', 'var list = sigs || [];', THOLD],
-    [T, 'the worker holds a stacktrace as an exception', "put(c.members, lgIsTrace(sig) ? 'st-exact' : 'exact', sig);", "put(c.members, 'exact', sig);", WHOLD],
-    [T, 'the worker holds none by its message', "        list.forEach(function (sig) { put(lgMates(idx, sig), 'st-msg', sig); });\n", '', WHOLD],
-    [T, 'a defect\'s cut ones not handed on', 'cuts: (idx && idx.keyToCut && idx.keyToCut[key]) || [] };\n        });', 'cuts: [] };\n        });'],
-    [T, 'the worker hands on no cut ones', 'cuts: (idx && idx.keyToCut && idx.keyToCut[key]) || [] };\n    }', 'cuts: [] };\n    }'],
+    [T, "a stacktrace held as an exception", "put(c.members, isTrace(sig) ? 'st-exact' : 'exact', sig);", "put(c.members, 'exact', sig);", SHOLD],
+    [T, "a stacktrace's site held as a crash site", "put(cc.members, isTrace(sig) ? 'st-site' : 'site', sig);", "put(cc.members, 'site', sig);", SHOLD],
+    [T, "no defect held by a stacktrace's message", "        list.forEach(function (sig) { put(traceMates(idx, sig), 'st-msg', sig); });\n", "", SHOLD],
+    [T, "a stacktrace before an exception at the same level", "var list = (sigs || []).filter(function (s) { return !isTrace(s); }).concat((sigs || []).filter(isTrace));", "var list = sigs || [];", SHOLD],
+    [T, "a defect's cut ones not handed on", "cuts: (idx && idx.keyToCut && idx.keyToCut[key]) || [] };\n    }", "cuts: [] };\n    }"],
     // ---- the log parser ----
     [T, 'the parser skips stacktraces', "trace = head.indexOf('STACKTRACE #') !== -1;", 'trace = false;', APPLY],
     [T, 'the parser lets a cut stacktrace run on', '(p2 && p2 !== pre)', 'false', APPLY],

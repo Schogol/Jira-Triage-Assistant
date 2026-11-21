@@ -30,8 +30,8 @@ global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, syn
 Object.assign(JiTA.util, eval(S.members(src, 'JiTA.util', ['toPlainText', 'isResolved'])));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 Object.assign(JiTA.logsig, S.logsigShared(src));   // jitaShared
-Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', [
-    'defectsForSigs', '_defectsLocal', '_traceMates', '_pointAt'])));
+global.JITA_SH = S.shared(src);   // the page's run of it, which its lookups call
+Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['defectsForSigs', '_defectsLocal', '_traceMates', '_pointAt'])));
 JiTA.hidden = { keys: {}, isHidden: (k) => !!JiTA.hidden.keys[k] };
 // What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
 Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['_msgKey'])));
@@ -729,10 +729,9 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const sigIdx = { sigMap: {}, crashMap: {} };
     sigIdx.sigMap[fA.sig] = { members: [{ key: 'EDR-2' }, { key: 'EDR-1' }] };
     sigIdx.crashMap[fA.crashSig] = { members: [{ key: 'EDR-3' }] };
-    const wStart = once("    // The defects with a stacktrace of this one's message");
-    const W = new Function('SH', 'logsigCache', line('    var lgSplit = SH.') + line('    var lgIsTrace = SH.') + src.slice(wStart, src.indexOf('\n    // One load at a time', wStart)) +
-        '\nreturn { lgCrashOf: lgCrashOf, lgDefects: lgDefects };')(require('./source').shared(src), sigIdx);
-    ok('...and so does the worker\'s copy', [fA, fB, fC].every((f) => W.lgCrashOf(f.sig) === f.crashSig));
+    const WL = S.workerLogsig(src, sigIdx);   // the worker's side, on its own run of jitaShared
+    const W = { lgCrashOf: WL.SH.crashOf, lgDefects: (s) => WL.op({ op: 'defects', sigs: s }) };
+    ok('...and so does the worker\'s run of it', [fA, fB, fC].every((f) => W.lgCrashOf(f.sig) === f.crashSig));
     JiTA.logsig.ensure = () => Promise.resolve(sigIdx);
     JiTA.worker = { usable: () => false };
     let sd = await JiTA.logsig.defectsForSigs([fA.sig, fB.sig, fC.sig]);
@@ -745,8 +744,8 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     JiTA.worker.call = () => Promise.reject(new Error('unknown logsig op: defects'));
     sd = await JiTA.logsig.defectsForSigs([fA.sig]);
     ok('...and reads the index itself when the worker cannot answer (an older worker, say)', sd[fA.sig] === 'EDR-2', JSON.stringify(sd));
-    const workerSrc = S.fn(src, 'jitaWorkerBody');
-    ok('the worker answers the lookup', /else if \(op === 'defects'\) \{ result = lgDefects\(payload\.sigs\); \}/.test(workerSrc));
+    const workerSrc = S.fn(src, 'logsigOp', S.fn(src, 'jitaWorkerBody'));
+    ok('the worker answers the lookup', /if \(op === 'defects'\) \{ return SH\.defects\(idx, payload\.sigs\); \}/.test(workerSrc));
 
     // ---- the profile ----
     const H1 = { sig: fA.sig, msg: 'KeyError: 2' }, H2 = { sig: fB.sig, msg: 'KeyError: 2' }, V1 = { sig: fC.sig, msg: 'ValueError: bad' };

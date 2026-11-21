@@ -7,7 +7,7 @@ const { execSync } = require('child_process');
 const src = fs.readFileSync((process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js')), 'utf8').replace(/\r\n/g, '\n');
 const N = 'excnoise-check.js', XF = 'excfind-check.js', PC = 'profile-check.js';
 const EXCN = ['\nJiTA.excnoise = {', '\n};\n'], REPEXC = ['\nJiTA.repexc = {', '\n    _noop: null\n};\n'], LOGREAD = ['\nJiTA.logread = {', '\n    _noop: null\n};\n'];
-const TMATCH = ['    _matchTextLocal: function (text) {', '\n    },'], WMATCH = ['    function lgMatch(text) {', '\n    }\n'];
+const SMATCH = ['    function matchText(idx, text) {', '\n    }\n'];   // jitaShared: the tab's and the worker's
 const muts = [
     // ---- which are UserErrors, and a signature's message part ----
     [N, 'no UserError told apart', "function isUserError(sig) { return /^(?:[a-z_]\\w*\\.)*usererror\\b/.test(", "function isUserError(sig) { return /^$/.test("],
@@ -18,12 +18,10 @@ const muts = [
         "_msgKey: function (sig) { return String(sig == null ? '' : sig); },"],
     [N, 'a message key cut at its first bar', "_msgKey: function (sig) { var s = String(sig == null ? '' : sig), at = s.lastIndexOf('|');", "_msgKey: function (sig) { var s = String(sig == null ? '' : sig), at = s.indexOf('|');"],
     // ---- the index ----
-    [N, 'a defect\'s UserErrors indexed', "                    if (L.isUserError(fp.sig)) { continue; }   // a message the game shows the player, no bug\n", ''],
-    [N, 'the worker indexes UserErrors', "                    if (lgIsUserError(fp.sig)) { continue; }   // a message the game shows the player, no bug\n", ''],
+    [N, "a defect's UserErrors indexed", "if (!fp.sig || isUserError(fp.sig)) { continue; }", "if (!fp.sig) { continue; }"],
     // ---- Known defects in attached log, and the parser's marks ----
-    [N, 'a log\'s defects name no signatures', "                var by = found[defect].sigs[fp.sig] || (found[defect].sigs[fp.sig] = { n: 0, loose: loose });\n                by.n++;\n", '', TMATCH],
-    [N, 'a signature counted once however often', '                by.n++;\n', '', TMATCH],
-    [N, 'the worker\'s defects name no signatures', '            by.n++;\n', '', WMATCH],
+    [N, "a log's defects name no signatures", "            var by = found[defect].sigs[fp.sig] || (found[defect].sigs[fp.sig] = { n: 0, loose: loose });\n            by.n++;\n", "", SMATCH],
+    [N, "a signature counted once however often", "            by.n++;\n", "", SMATCH],
     [N, 'two logs\' counts of a signature not added up', '} else { a.n += b.n; if (!b.loose) { a.loose = false; } }', '} else { if (!b.loose) { a.loose = false; } }'],
     [N, 'a signature found loosely in one log kept loose though exact in another', '} else { a.n += b.n; if (!b.loose) { a.loose = false; } }', '} else { a.n += b.n; }'],
     [N, 'a log whose result names no signatures leaves the entry filterable', '                            if (!found[k].sigs) { merged[k].sigs = null; }\n                            else if (merged[k].sigs) {',

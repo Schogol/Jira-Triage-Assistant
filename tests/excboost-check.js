@@ -61,9 +61,8 @@ Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, r
 JiTA.util.fmtDate = (s) => (s ? String(s).slice(0, 10) : '');
 let delays = [];
 JiTA.util.delay = (ms) => { delays.push(ms); return Promise.resolve(); };
-Object.assign(JiTA.logsig, eval('({' +
-    member('    _traceMates: function (idx, sig) {') +
-    member('    holding: function (sigs) {') + member('    _holdingLocal: function (sigs) {') + member('    sigsOf: function (key) {') + member('    _sigsOfLocal: function (key) {') + '})'));
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it, which its lookups call
+Object.assign(JiTA.logsig, eval(require('./source').members(src, 'JiTA.logsig', ['holding', '_holdingLocal', 'sigsOf', '_sigsOfLocal'])));
 Object.assign(JiTA.profile, eval('({' + line('    LOG_V: ') + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') +
     member('    _sigParts: function (sig) {') + member('    _sigTip: function (sigs, msg) {') + '})'));
 Object.assign(JiTA.profile, eval(require('./source').members(src, 'JiTA.profile', ['_logSig', '_zipLog', '_logsCurrent', '_otherLogs', '_current'])));   // whether a reading is current
@@ -214,19 +213,19 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('a defect\'s own exceptions: its stacks and its crash sites', so.sigs.join() === B && so.crashes.join() === crash(B), JSON.stringify(so));
     const none = await JiTA.logsig.sigsOf('EDR-9');
     ok('...none for a defect with no pasted exception', none.sigs.length === 0 && none.crashes.length === 0);
-    // The worker's twins, from jitaWorkerBody itself: same index, same answers.
-    const wfn = (name) => { const s = once('    function ' + name + '('); return src.slice(s, src.indexOf('\n    }\n', s) + 7); };
-    // The helpers lgHolding reads with come from jitaShared, as the worker takes them.
-    const wsh = (idx) => new Function('idx', 'SH', 'var logsigCache = idx;\n' + line('    var lgSplit = SH.') + line('    var lgIsTrace = SH.') + wfn('lgMates') + wfn('lgHolding') +
-        wfn('lgSigsOf') + '\nreturn { lgHolding: lgHolding, lgSigsOf: lgSigsOf };')(idx, require('./source').shared(src));
+    // The worker's side, from jitaWorkerBody itself (its logsig requests, on its own run of jitaShared): same index, same answers.
+    const wsh = (idx) => {
+        const w = require('./source').workerLogsig(src, idx);
+        return { lgHolding: (s) => w.op({ op: 'holding', sigs: s }), lgSigsOf: (k) => w.op({ op: 'sigsOf', key: k }) };
+    };
     const W = wsh(IDX);
     ok('the worker\'s holding agrees with the tab\'s', JSON.stringify(W.lgHolding([A, B2])) === JSON.stringify(await JiTA.logsig._holdingLocal([A, B2])) &&
         JSON.stringify(W.lgHolding([B2, B])) === JSON.stringify(await JiTA.logsig._holdingLocal([B2, B])), JSON.stringify(W.lgHolding([B2, B])));
     ok('...and its sigsOf too', JSON.stringify(W.lgSigsOf('EDR-3')) === JSON.stringify(await JiTA.logsig._sigsOfLocal('EDR-3')) && W.lgSigsOf('EDR-9').sigs.length === 0);
     const W0 = wsh(null);
     ok('...a worker with no index yet answers nothing rather than throwing', !Object.keys(W0.lgHolding([A])).length && W0.lgSigsOf('EDR-3').sigs.length === 0);
-    const opSrc = src.slice(once("            else if (type === 'logsig') {"), once("            else if (type === 'embedPass') {"));
-    ok('the worker answers both ops', /op === 'holding'\) \{ result = lgHolding\(payload\.sigs\); \}/.test(opSrc) && /op === 'sigsOf'\) \{ result = lgSigsOf\(payload\.key\); \}/.test(opSrc));
+    const opSrc = require('./source').fn(src, 'logsigOp', require('./source').fn(src, 'jitaWorkerBody'));
+    ok('the worker answers both ops', /op === 'holding'\) \{ return SH\.holding\(idx, payload\.sigs\); \}/.test(opSrc) && /op === 'sigsOf'\) \{ return SH\.sigsOf\(idx, payload\.key\); \}/.test(opSrc));
     let wcall = null;
     JiTA.worker.call = (type, p) => { wcall = [type, p]; return Promise.resolve({ 'EDR-1': 'exact' }); };
     h = await JiTA.logsig.holding([A]);
