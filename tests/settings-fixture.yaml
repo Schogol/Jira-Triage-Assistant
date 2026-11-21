@@ -75,6 +75,7 @@ user:
     - !!python/tuple [1, radioboxOption2Selected]
     suppress.AskQuitGame: !!python/tuple [134393820644998315, 6]
     suppress.SomethingUnknownXyz: !!python/tuple [134393820644998315, 7]
+    suppress.MultiplePilotTraining: !!python/tuple [134284305588957300, null]
   ui:
     bigNumber: !!python/tuple [134394214740687666, !!python/long '1234567890123456789']
     cameraShakeEnabled: !!python/tuple [134394214740687666, 1]

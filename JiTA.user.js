@@ -3604,8 +3604,10 @@ JiTA.settingsview = {
         if (!keys || !keys.length) { return JiTA.settingsview.table().shortcuts.none; }
         return keys.map(function (k) { return typeof k === 'string' ? k : (vk[String(k)] || 'KEY ' + k); }).join('-');
     },
-    // The warnings the player switched off (user.suppress): { key, title, answer }, by title. The game names each by its
-    // message's title, and the stored value is the answer it now gives by itself.
+    // The warnings in user.suppress: { key, title, answer, off }, by title. The game names each by its message's title, and
+    // the stored value is the answer it now gives by itself. One stored as None is not switched off (off: false): the client
+    // reads None as no answer and shows the warning again, and writes it to switch a warning back on rather than remove the
+    // entry. The game's own list shows those rows as well.
     suppressed: function (doc) {
         var SV = JiTA.settingsview, T = SV.table(), g = doc && doc.user && doc.user.suppress, tab = T.tabs.filter(function (t) { return t.k === 'suppress'; })[0];
         var titles = (tab && tab.titles) || {};
@@ -3615,7 +3617,8 @@ JiTA.settingsview = {
             // A dialog with choices stores its answer with the choice: (1, 'radioboxOption2Selected') is OK, option 2.
             if (answer && Array.isArray(v) && typeof v[1] === 'string') { answer += ' (' + v[1].replace(/^radiobox/, '').replace(/Selected$/, '').replace(/^Option(\d+)$/, 'option $1') + ')'; }
             if (v === true) { answer = 'Not shown'; }   // a message with no buttons to answer, only hidden
-            return { key: key, title: titles[msg] || msg, answer: answer || SV.valueText(v) };
+            if (v === null || v === undefined) { return { key: key, title: titles[msg] || msg, answer: 'Shows again', off: false }; }
+            return { key: key, title: titles[msg] || msg, answer: answer || SV.valueText(v), off: true };
         }).sort(function (a, b) { return a.title.toLowerCase() < b.title.toLowerCase() ? -1 : a.title.toLowerCase() > b.title.toLowerCase() ? 1 : 0; });
     },
     // Everything the window does not show, by section and group: [{ id: 'user.overview', rows: [[key, value]] }], less what
@@ -3667,7 +3670,7 @@ JiTA.settingsview = {
                 if (tab.k === 'suppress') {
                     var sup = SV.suppressed(doc);
                     body = SV._suppress(tab.sections[0] && tab.sections[0].h, sup);
-                    count = sup.length;
+                    count = sup.filter(function (r) { return r.off; }).length;
                 } else {
                     tab.sections.forEach(function (sec) {
                         var out = SV._section(doc, sec);
@@ -3778,7 +3781,8 @@ JiTA.settingsview = {
         return '<div class="jsv-sec"><div class="jsv-h">' + H(title || '') + '</div>' +
             (rows.length ? '<div class="jsv-text">Warnings the player switched off ("don\'t show again"), with the answer the game now gives by itself.</div>' +
                 rows.map(function (r) {
-                    return '<div class="jsv-row jsv-vrow jsv-chg" data-q="' + H((r.title + ' ' + r.key).toLowerCase()) + '" title="' + H(r.key) + '">' +
+                    var hint = r.key + (r.off ? '' : '\n\nNo answer is stored, so the game shows this warning again. The client stores this when a warning is set to show again, instead of removing it.');
+                    return '<div class="jsv-row jsv-vrow' + (r.off ? ' jsv-chg' : ' jsv-again') + '" data-q="' + H((r.title + ' ' + r.key).toLowerCase()) + '" title="' + H(hint) + '">' +
                         '<span class="jsv-l">' + H(r.title) + '</span><span class="jsv-ans">' + H(r.answer) + '</span></div>';
                 }).join('') : '<div class="jsv-text">No warning is switched off.</div>') + '</div>';
     },
@@ -3898,6 +3902,7 @@ JiTA.settingsview = {
 #jita-setv .jsv-text { color: #7f8a90; margin: 0 0 8px; white-space: pre-wrap; }
 #jita-setv .jsv-row { display: flex; align-items: center; min-height: 26px; padding: 2px 26px 2px 8px; position: relative; }
 #jita-setv .jsv-ans { color: #e6e6e6; }
+#jita-setv .jsv-again .jsv-l, #jita-setv .jsv-again .jsv-ans { color: #7f8a90; }
 #jita-setv .jsv-row:hover { background: #12171a; }
 #jita-setv .jsv-vrow .jsv-l { width: 45%; flex: none; padding-right: 10px; }
 #jita-setv .jsv-combo { flex: 1; background: #15191c; border: 1px solid #2a3136; padding: 3px 26px 3px 8px; color: #e6e6e6; position: relative; min-height: 22px; }
