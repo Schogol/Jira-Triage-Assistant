@@ -467,12 +467,13 @@ function ldTabsChecks(m) {
 
 // ================= 6. settings.yaml as the in-game Settings window =================
 // The igbr.zip viewer's code-block holding a settings.yaml (tests/settings-fixture.yaml), swapped for the window as the log
-// parser does it (JiTA.settingsview.mount). Then every tab clicked, the filter on and off, a search, Everything else's
-// groups opened (one holds a value with an <img> tag in it), Show raw and back, and Copy.
+// parser does it (JiTA.settingsview.mount). Its host is only as wide as what it holds, as Jira's viewer is. Then every tab
+// clicked, the filter on and off, a search, Everything else's groups opened (one holds a value with an <img> tag in it),
+// Show raw and back, and Copy. Last, the host moved right, leaving the window little room on the screen.
 async function setvView(fixture) {
     const { box } = window.__lc, wait = (ms) => new Promise((r) => setTimeout(r, ms));
     const host = document.createElement('div'), cb = document.createElement('code');
-    host.style.cssText = 'position: relative; margin: 60px 16px 0;';
+    host.style.cssText = 'position: relative; display: inline-block; margin: 60px 16px 0;';
     cb.setAttribute('data-testid', 'code-block');
     cb.style.cssText = 'display: block; white-space: pre; font-family: monospace;';
     cb.textContent = fixture;
@@ -489,7 +490,8 @@ async function setvView(fixture) {
     const total = all('.jsv-panel .jsv-row').length;
     const opened = tabs.map((t) => {
         t.click();
-        return { tab: t.getAttribute('data-tab'), panels: all('.jsv-panel').filter(shown).map((p) => p.getAttribute('data-panel')), on: all('.jsv-tab.jsv-on').map((x) => x.getAttribute('data-tab')) };
+        return { tab: t.getAttribute('data-tab'), panels: all('.jsv-panel').filter(shown).map((p) => p.getAttribute('data-panel')), on: all('.jsv-tab.jsv-on').map((x) => x.getAttribute('data-tab')),
+            w: el.getBoundingClientRect().width };
     });
     tabs[0].click();
     const sizes = { el: box(el), nav: box(el.querySelector('.jsv-nav')), main: box(el.querySelector('.jsv-main')), vh: window.innerHeight, overX: el.scrollWidth - el.clientWidth,
@@ -523,7 +525,10 @@ async function setvView(fixture) {
     const rawShut = { hidden: !shown(raw), bodyShown: shown(el.querySelector('.jsv-body')), label: rawBtn.textContent };
     el.querySelector('.jsv-copy').click();
     await wait(50);
-    return { mounted: true, total: total, opened: opened, sizes: sizes, filtered: filtered, unfiltered: unfiltered, searched: searched, restHits: restHits, groups: groups, imgs: imgs,
+    host.style.marginLeft = (window.innerWidth - 600) + 'px';
+    window.dispatchEvent(new Event('resize'));
+    const narrow = { w: el.getBoundingClientRect().width, room: window.innerWidth - el.getBoundingClientRect().left - 12, overX: el.scrollWidth - el.clientWidth };
+    return { mounted: true, narrow: narrow, total: total, opened: opened, sizes: sizes, filtered: filtered, unfiltered: unfiltered, searched: searched, restHits: restHits, groups: groups, imgs: imgs,
         rawOpen: rawOpen, rawShut: rawShut, copiedSame: copied === fixture, status: el.querySelector('.jsv-status').textContent };
 }
 function setvChecks(m) {
@@ -533,6 +538,10 @@ function setvChecks(m) {
     ok('Settings window: it fills the screen below its top, the left list 230 px wide, the controls beside it scrolling on their own',
         s.el.b <= s.vh + PX && s.el.h >= 320 && near(s.nav.w, 230) && s.main.l >= s.nav.r - PX && s.mainScrolls === 'auto', JSON.stringify(s));
     ok('Settings window: nothing reaches past its right edge', s.overX <= 0, s.overX + ' px over');
+    const widths = m.opened.map((o) => r1(o.w));
+    ok('Settings window: 950 px wide on every tab, in a code-block only as wide as what it holds', widths.every((w) => near(w, 950)), JSON.stringify(widths));
+    ok('Settings window: with less room on the screen, it stops 12 px short of the right edge, and nothing reaches past its own',
+        near(m.narrow.w, m.narrow.room) && m.narrow.overX <= 0, JSON.stringify(m.narrow));
     const bad = m.opened.filter((o) => o.panels.length !== 1 || o.panels[0] !== o.tab || o.on.length !== 1 || o.on[0] !== o.tab);
     ok('Settings window: every entry on the left shows its own tab, and only it, highlighted', m.opened.length >= 18 && !bad.length, JSON.stringify(bad.slice(0, 3)));
     ok('Settings window: "Only changed from default" leaves the changed rows only, and dims what has none (Camera)', m.filtered.rows > 5 && m.filtered.rows === m.filtered.changed &&

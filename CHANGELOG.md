@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.54.1 (2026-11-21)
+
+### Fixed issues
+
+- The Settings window of a settings.yaml is wider, and keeps one width on every tab instead of changing with what the tab shows.
+
 ## 3.54.0 (2026-11-21)
 
 ### New features
