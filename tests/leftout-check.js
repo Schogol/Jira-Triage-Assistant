@@ -1,6 +1,6 @@
 // leftout-check.js - Matching bug reports (on a defect) and Similar open reports (on a report) leave out the Vanguard and
 // Launcher bug reports, as the bug hunters' backlog filter does, and no longer leave out the EO - GameMasters team's
-// (v3.52.0). Evals the real JiTA.util.isLeftOut, the worker's leftOut, JiTA.sync._mapIssue, the tab's bug report index,
+// (v3.52.0). Evals the real JiTA.util.isLeftOut and the worker's leftOut (both jitaShared's isLeftOut), JiTA.sync._mapIssue, the tab's bug report index,
 // JiTA.rank._gateScored, and the worker's index build and embed pass against stubs:
 //  - labelled Vanguard or Launcher, or in the Launcher component, whatever the case, is left out; another label or
 //    component, a label that only starts the same, and a report with neither are not; the tab and the worker agree
@@ -29,8 +29,10 @@ const keys = (list) => list.map((r) => r.key).join(',');
     const lo = /\n    LEFT_OUT: (\{[^\n]*\}),\n/.exec(src);
     const LEFT_OUT = eval('(' + lo[1] + ')');
     global.JiTA = { LEFT_OUT: LEFT_OUT, util: {}, rank: {}, sync: {}, hidden: { isHidden: () => false }, ui: { passesFilter: () => true } };
-    Object.assign(JiTA.util, eval('({' + member('    isLeftOut: function (rec) {') + ',\n' + member('    isClosedStatus: function (status) {') + '})'));
-    const workerLeftOut = new Function('cfg', cut('    function leftOut(rec) {', '\n    }\n') + '\n    }\nreturn leftOut;')({ LEFT_OUT: LEFT_OUT });
+    const S = require('./source'), SH = S.shared(src), BODY = S.fn(src, 'jitaWorkerBody');
+    global.JITA_SH = SH;   // jitaShared, the page's run of it, which JiTA.util's isLeftOut and isClosedStatus are
+    Object.assign(JiTA.util, eval(S.members(src, 'JiTA.util', ['isLeftOut', 'isClosedStatus'])));
+    const workerLeftOut = new Function('cfg', 'SH', S.fn(src, 'leftOut', BODY) + '\nreturn leftOut;')({ LEFT_OUT: LEFT_OUT }, S.shared(src));
     const cases = [
         ['labelled Vanguard', { labels: ['Russian', 'Vanguard'], components: [] }, true],
         ['labelled Launcher', { labels: ['Launcher'] }, true],
@@ -90,15 +92,12 @@ const keys = (list) => list.map((r) => r.key).join(',');
     ok('the translate pass skips the reports left out, as it skips closed ones', /if \(JiTA\.util\.isClosedStatus\(r\.status\) \|\| JiTA\.util\.isLeftOut\(r\)\) \{ continue; \}/.test(tr.slice(0, tr.indexOf('\n};\n'))));
 
     // ================= the worker =================
-    const idx = new Function('allRecords', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'SH', 'cfg',
-        'var vecCache = null, kwCache = null, logsigCache = null, K1 = 1.5, B = 0.75;\n' +
-        cut('    var idxGen = 0, idxP = null;', '    // Cosine == dot product') + cut('    function bm25Score(idx, text, excludeKey, limit, filterTerms, gate) {', '\n    }\n') + '\n    }\n' +
+    const idx = new Function('allRecords', 'leftOut', 'SH', 'cfg',
+        'var vecCache = null, kwCache = null, logsigCache = null;\n' +
+        cut('    var idxGen = 0, idxP = null;', '    // Cosine == dot product') +
         cut('    async function rankKeyword(payload) {', '\n    }\n') + '\n    }\n' +
         '\nreturn { ensureIndexes: ensureIndexes, rankKeyword: rankKeyword, kw: function () { return kwCache; }, vec: function () { return vecCache; } };')(
-        () => Promise.resolve(RECS.slice()), JiTA.util.isClosedStatus, workerLeftOut,
-        (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
-        (r) => (r.summary || '') + ' ' + (r.description || ''),
-        require('./source').shared(src), { MODEL_VERSION: 'm1' });
+        () => Promise.resolve(RECS.slice()), workerLeftOut, S.shared(src), { MODEL_VERSION: 'm1' });
     await idx.ensureIndexes();
     ok('the worker\'s keyword index of bug reports leaves them out, keeps the GM team\'s', keys(idx.kw().ebr.docs) === 'EBR-1,EBR-4', keys(idx.kw().ebr.docs));
     ok('...and so does its vector index, though the Vanguard one was embedded before', keys(idx.vec().ebr) === 'EBR-4', keys(idx.vec().ebr));
@@ -129,10 +128,10 @@ const keys = (list) => list.map((r) => r.key).join(',');
     ok('...and so does the line after Attach slides the next report in', /function refreshCount\(\) \{\s*JiTA\.rank\.ebrPool\(\)\.then\(function \(n\) \{/.test(ui));
 
     const embedded = [];
-    const ep = new Function('loadModel', 'allRecords', 'isClosedStatus', 'leftOut', 'cfg', 'effectiveText', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'dropPipe', 'self', 'setTimeout', 'clearTimeout', 'console',
+    const ep = new Function('loadModel', 'allRecords', 'SH', 'leftOut', 'cfg', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'dropPipe', 'self', 'setTimeout', 'clearTimeout', 'console',
         'var embedding = false, embedAgain = false, BATCH = 8;\n' + cut('    async function embedPass() {', '\n    function openDb() {') + '\nreturn embedPass;')(
-        () => Promise.resolve(), () => Promise.resolve(RECS.map((r) => Object.assign({}, r, { embedding: null }))), JiTA.util.isClosedStatus, workerLeftOut,
-        { MODEL_VERSION: 'm1' }, (r) => r.summary, (texts) => Promise.resolve(texts.map(() => new Float32Array([0.5]))),
+        () => Promise.resolve(), () => Promise.resolve(RECS.map((r) => Object.assign({}, r, { embedding: null }))), S.shared(src), workerLeftOut,
+        { MODEL_VERSION: 'm1' }, (texts) => Promise.resolve(texts.map(() => new Float32Array([0.5]))),
         (slice) => { slice.forEach((r) => embedded.push(r.key)); return Promise.resolve(); }, () => {}, () => {}, { postMessage() {} },
         () => 1, () => {}, { warn() {} });
     await ep();

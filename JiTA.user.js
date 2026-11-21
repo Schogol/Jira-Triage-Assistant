@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.33
+// @version     3.53.34
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.33
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.34
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -3782,12 +3782,147 @@ function jitaShared() {
         return out;
     }
 
+    // ---- the text the ranking compares, and the keyword ranking ----
+    // True when a BUG REPORT is closed or handled, judged by its STATUS NAME ONLY (open / closed / attached) - deliberately
+    // NOT the resolution field. A REOPENED bug report typically keeps its old Resolution (the reopen transition doesn't
+    // clear it), so a resolution-based check (JiTA.util.isResolved) would treat a reopened, open report as closed and hide
+    // it from the "matching reports" view. The status is the open/closed signal for bug reports, so the indexes, the
+    // embed skip and the sync's prune all gate on this.
+    function isClosedStatus(status) {
+        return /closed|done|resolved|rejected|cancel|attached/i.test(status || '');
+    }
+    // True for a stored bug report the matching lists leave out, `names` saying which (JiTA.LEFT_OUT: { labels,
+    // components }): one of those labels or components, whatever the case. A record from before labels were kept goes by
+    // its components alone until JiTA.migrate has fetched the bug reports again.
+    function isLeftOut(rec, names) {
+        function has(list, wanted) {
+            for (var i = 0; i < (list || []).length; i++) {
+                for (var j = 0; j < wanted.length; j++) { if (String(list[i]).toLowerCase() === wanted[j].toLowerCase()) { return true; } }
+            }
+            return false;
+        }
+        return !!rec && (has(rec.labels, names.labels) || has(rec.components, names.components));
+    }
+    // Reduce an issue to just the comparable SIGNAL: its summary (weighted, since the one-line problem statement is the
+    // densest signal) + the human-written part of the description, with the EVE in-game bug-reporter boilerplate removed.
+    // That reporter dumps "Session Info" (character / solar system) and "Computer Info" (OS / GPU / CPU / memory spec)
+    // straight into the description; that text is near-identical across every report, so leaving it in makes every
+    // defect embed to nearly the same vector (and BM25 match on shared template words) - which is exactly why obvious
+    // duplicates were not surfacing. We also unwrap EVE <url=showinfo:ID>name</url> link markup, keeping the visible name
+    // AND the numeric IDs (a shared ship/type/message ID between two reports is a very strong duplicate signal). Used by
+    // both the stored-defect indexing and the live query, so the two are always normalized the same.
+    function cleanForCompare(summary, description) {
+        var s = (summary || '').replace(/\s+/g, ' ').trim();
+        var d = ' ' + (description || '') + ' ';
+        d = d.replace(/<url=[^>]*>/gi, ' ').replace(/<\/url>/gi, ' ');                          // unwrap in-game links
+        d = d.replace(/Session Info\s*:[\s\S]*?(?=Reproduction Steps|Computer Info|$)/i, ' ');  // drop char / solar system
+        d = d.replace(/Computer Info[\s\S]*$/i, ' ');                                            // drop the hardware dump (runs to the end)
+        d = d.replace(/\b(Reproduction Steps|Description)\b\s*:?/ig, ' ');                       // drop leftover section labels
+        d = d.replace(/\bNone\b/g, ' ');
+        d = d.replace(/\s+/g, ' ').trim();
+        // Weight the summary by repeating it twice so it dominates the pooled embedding / keyword stats.
+        return (s ? (s + '. ' + s + '. ') : '') + d;
+    }
+    // Which text to index or query for a record: the stored English translation for a foreign report, else the cleaned
+    // original. enText is ALREADY the cleanForCompare output, so this is a drop-in at every corpus site and the query
+    // path (no double-cleaning). A foreign report with no translation yet falls back to the original.
+    function effectiveText(rec) {
+        return (rec && rec.enText) ? rec.enText : cleanForCompare(rec.summary, rec.description);
+    }
+
+    var K1 = 1.5, B = 0.75, STOP = {};   // BM25's term-frequency saturation and length normalization; the words left out
+    ('the a an and or of to in for on with is are was were be been it this that these those as at by from we you they i he she his her its their our your not no but if then than so such can will would should could may might do does did has have had into over under out up down off about your yours')
+        .split(' ').forEach(function (w) { STOP[w] = true; });
+    function tokenize(text) {
+        var raw = (text || '').toLowerCase().replace(/[^a-z0-9\s]+/g, ' ').split(/\s+/), out = [];
+        for (var i = 0; i < raw.length; i++) { var t = raw[i]; if (t.length >= 2 && !STOP[t]) { out.push(t); } }
+        return out;
+    }
+    // True when `hay` (a doc's lowercased key+summary+description) contains EVERY term. Drives the filter box, which
+    // restricts the ranked corpus to issues matching the typed text before the top N is taken.
+    function matchTerms(hay, terms) {
+        if (!terms || !terms.length) { return true; }
+        if (!hay) { return false; }
+        for (var i = 0; i < terms.length; i++) { if (hay.indexOf(terms[i]) === -1) { return false; } }
+        return true;
+    }
+    // A keyword (BM25) index of the records `keep(rec)` takes (the defects, or the open bug reports ranked):
+    // { N, avgdl, df, docs }, each doc with the fields a result carries, its term frequencies, length and filter-box text.
+    function keywordIndex(records, keep) {
+        var df = {}, docs = [], totalLen = 0;
+        for (var i = 0; i < (records || []).length; i++) {
+            var rec = records[i];
+            if (!keep(rec)) { continue; }
+            var toks = tokenize(effectiveText(rec)), tf = {}, seen = {};   // English translation for foreign reports, else cleaned original
+            for (var j = 0; j < toks.length; j++) {
+                var tk = toks[j];
+                tf[tk] = (tf[tk] || 0) + 1;
+                if (!seen[tk]) { df[tk] = (df[tk] || 0) + 1; seen[tk] = true; }
+            }
+            totalLen += toks.length;
+            docs.push({ key: rec.key, project: rec.project, summary: rec.summary, status: rec.status, resolution: rec.resolution, resolutiondate: rec.resolutiondate, created: rec.created,
+                tf: tf, len: toks.length, hay: ((rec.key || '') + ' ' + (rec.summary || '') + ' ' + (rec.description || '') + ' ' + (rec.enText || '')).toLowerCase() });
+        }
+        return { N: docs.length, avgdl: docs.length ? (totalLen / docs.length) : 0, df: df, docs: docs };
+    }
+    // The session filters (Status, Created within) a ranking applies BEFORE its top-N cut, as JiTA.ui._gateSpec gives them:
+    // { status: 'all' | 'open' | 'fixed', createdDays, now, cats } (cats: the cards' status categories, JiTA.ui.STATUS_CAT).
+    // A status the cards know is judged by its category, whatever resolution it kept, so a reopened defect is open; any
+    // other as JiTA.util.isResolved judges it (a resolution, or a closed status name). Status applies to defects only: open
+    // bug reports are open by definition. No gate: everything passes.
+    function passesGate(doc, gate) {
+        if (!gate) { return true; }
+        if (gate.status && gate.status !== 'all' && doc.project !== 'EBR') {
+            var sk = String(doc.status || '').toLowerCase().trim(), cats = gate.cats || {};
+            var resolved = Object.prototype.hasOwnProperty.call(cats, sk) ? cats[sk] === 'done' : (!!doc.resolution || isClosedStatus(doc.status));
+            if (gate.status === 'open' && resolved) { return false; }
+            if (gate.status === 'fixed' && !resolved) { return false; }
+        }
+        if (gate.createdDays > 0) {
+            var t = doc.created ? Date.parse(doc.created) : NaN;
+            if (isNaN(t) || (gate.now - t) > gate.createdDays * 86400000) { return false; }   // unknown or too old
+        }
+        return true;
+    }
+    // BM25 of `text` over a keywordIndex: up to `limit` docs (50 when none is given), best first, each { key, project,
+    // summary, status, resolution, resolutiondate, created, score }. A doc is passed over when it is `excludeKey`, when
+    // the filter box has terms its text lacks, or when `keep(doc)`, if given, says so (the page's hidden suggestions and
+    // session filters, the worker's gate). A filter-box match with no query-term overlap is kept as a score-0 candidate.
+    function bm25Score(idx, text, excludeKey, limit, filterTerms, keep) {
+        if (!idx || !idx.N) { return []; }
+        var q = tokenize(text), qSet = {}, i;
+        for (i = 0; i < q.length; i++) { qSet[q[i]] = true; }
+        var terms = Object.keys(qSet);
+        if (!terms.length) { return []; }
+        var avgdl = idx.avgdl || 1, idf = {}, hasTerms = !!(filterTerms && filterTerms.length);
+        for (i = 0; i < terms.length; i++) { var n = idx.df[terms[i]] || 0; idf[terms[i]] = Math.log(1 + (idx.N - n + 0.5) / (n + 0.5)); }
+        var scored = [];
+        for (var d = 0; d < idx.docs.length; d++) {
+            var doc = idx.docs[d];
+            if (excludeKey && doc.key === excludeKey) { continue; }
+            if (hasTerms && !matchTerms(doc.hay, filterTerms)) { continue; }
+            if (keep && !keep(doc)) { continue; }
+            var score = 0;
+            for (var t = 0; t < terms.length; t++) {
+                var tf = doc.tf[terms[t]];
+                if (!tf) { continue; }
+                var denom = tf + K1 * (1 - B + B * (doc.len / avgdl));
+                score += idf[terms[t]] * (tf * (K1 + 1)) / denom;
+            }
+            if (score > 0 || hasTerms) { scored.push({ key: doc.key, project: doc.project, summary: doc.summary, status: doc.status, resolution: doc.resolution, resolutiondate: doc.resolutiondate, created: doc.created, score: score }); }
+        }
+        scored.sort(function (a, b) { return b.score - a.score; });
+        return scored.slice(0, limit || 50);
+    }
+
     return {
         MIN_FRAMES: MIN_FRAMES, CRASH_FRAMES: CRASH_FRAMES, TRACE: TRACE, OPEN_CUT: OPEN_CUT,
         isTrace: isTrace, isCut: isCut, traceKey: traceKey, isUserError: isUserError,
         splitBlocks: splitBlocks, fingerprint: fingerprint, logBlocks: logBlocks, crashOf: crashOf,
         buildIndex: buildIndex, traceMates: traceMates, pointAt: pointAt, matchText: matchText, defects: defects, holding: holding,
-        sigsOf: sigsOf, siblings: siblings, related: related, clusters: clusters
+        sigsOf: sigsOf, siblings: siblings, related: related, clusters: clusters,
+        isClosedStatus: isClosedStatus, isLeftOut: isLeftOut, cleanForCompare: cleanForCompare, effectiveText: effectiveText,
+        K1: K1, B: B, STOP: STOP, tokenize: tokenize, matchTerms: matchTerms, keywordIndex: keywordIndex, passesGate: passesGate, bm25Score: bm25Score
     };
 }
 var JITA_SH = jitaShared();
@@ -4494,34 +4629,11 @@ JiTA.util = {
         return out.join(' ');
     },
 
-    // Reduce an issue to just the comparable SIGNAL: its summary (weighted, since the one-line problem
-    // statement is the densest signal) + the human-written part of the description, with the EVE in-game
-    // bug-reporter boilerplate removed. That reporter dumps "Session Info" (character / solar system) and
-    // "Computer Info" (OS / GPU / CPU / memory spec) straight into the description; that text is near-identical
-    // across every report, so leaving it in makes every defect embed to nearly the same vector (and BM25 match
-    // on shared template words) - which is exactly why obvious duplicates were not surfacing. We also unwrap
-    // EVE <url=showinfo:ID>name</url> link markup, keeping the visible name AND the numeric IDs (a shared
-    // ship/type/message ID between two reports is a very strong duplicate signal).
-    // Used by BOTH the stored-defect indexing and the live query, so the two are always normalized the same.
-    cleanForCompare: function (summary, description) {
-        var s = (summary || '').replace(/\s+/g, ' ').trim();
-        var d = ' ' + (description || '') + ' ';
-        d = d.replace(/<url=[^>]*>/gi, ' ').replace(/<\/url>/gi, ' ');                          // unwrap in-game links
-        d = d.replace(/Session Info\s*:[\s\S]*?(?=Reproduction Steps|Computer Info|$)/i, ' ');  // drop char / solar system
-        d = d.replace(/Computer Info[\s\S]*$/i, ' ');                                            // drop the hardware dump (runs to the end)
-        d = d.replace(/\b(Reproduction Steps|Description)\b\s*:?/ig, ' ');                       // drop leftover section labels
-        d = d.replace(/\bNone\b/g, ' ');
-        d = d.replace(/\s+/g, ' ').trim();
-        // Weight the summary by repeating it twice so it dominates the pooled embedding / keyword stats.
-        return (s ? (s + '. ' + s + '. ') : '') + d;
-    },
-
-    // Which text to index/query for a record: the stored English translation for a foreign report, else the
-    // cleaned original. enText is ALREADY the cleanForCompare output, so this is a drop-in at every corpus site
-    // and the query path (no double-cleaning). Foreign reports with no translation yet fall back to the original.
-    effectiveText: function (rec) {
-        return (rec && rec.enText) ? rec.enText : JiTA.util.cleanForCompare(rec.summary, rec.description);
-    },
+    // The comparable text of an issue (the EVE bug-reporter boilerplate removed, the summary weighted), and which text to
+    // index or query for a record (the English translation of a foreign report). Written once in jitaShared for the page and
+    // the worker; see there.
+    cleanForCompare: JITA_SH.cleanForCompare,   // jitaShared
+    effectiveText: JITA_SH.effectiveText,   // jitaShared
 
     // English-DISTINCTIVE function words, used by detectLang's stopword-ratio test. Deliberately EXCLUDES words that are also common in the main non-English
     // languages in the corpus (Spanish/Portuguese/German/French) - a, no, me, as, do, so, in, on, an, i, if - so a
@@ -4629,28 +4741,13 @@ JiTA.util = {
         return /closed|done|resolved|rejected|cancel|attached/i.test(status || '');
     },
 
-    // True when a BUG REPORT is closed/handled, judged by its STATUS NAME ONLY (open / closed / attached, the
-    // same closed-status vocabulary as isResolved) - deliberately NOT the resolution field. A REOPENED bug
-    // report typically keeps its old Resolution (the reopen transition doesn't clear it), so a resolution-based
-    // check (isResolved) would wrongly treat a reopened-and-open report as closed and hide it from the EDR
-    // "matching reports" view. The status is the authoritative open/closed signal for EBRs, so the EBR index /
-    // vector index / embed-skip / incremental-sync prune all gate on this.
-    isClosedStatus: function (status) {
-        return /closed|done|resolved|rejected|cancel|attached/i.test(status || '');
-    },
+    // True when a BUG REPORT is closed or handled, by its status name only (a reopened report keeps its old resolution);
+    // the EBR side gates on this, the defect side on isResolved. Written once in jitaShared; see there.
+    isClosedStatus: JITA_SH.isClosedStatus,   // jitaShared
 
-    // True for a stored bug report the matching lists leave out (JiTA.LEFT_OUT): labelled Vanguard or Launcher, or in
-    // the Launcher component, whatever the case. A record from before labels were kept goes by its components alone
-    // until JiTA.migrate has fetched the bug reports again. KEEP IN SYNC with leftOut in the worker.
-    isLeftOut: function (rec) {
-        function has(list, names) {
-            for (var i = 0; i < (list || []).length; i++) {
-                for (var j = 0; j < names.length; j++) { if (String(list[i]).toLowerCase() === names[j].toLowerCase()) { return true; } }
-            }
-            return false;
-        }
-        return !!rec && (has(rec.labels, JiTA.LEFT_OUT.labels) || has(rec.components, JiTA.LEFT_OUT.components));
-    },
+    // True for a stored bug report the matching lists leave out (JiTA.LEFT_OUT: labelled Vanguard or Launcher, or in the
+    // Launcher component, whatever the case). The worker asks the same with its cfg.LEFT_OUT.
+    isLeftOut: function (rec) { return JITA_SH.isLeftOut(rec, JiTA.LEFT_OUT); },   // jitaShared
 
     // Stale-match demotion factor. A defect that was FIXED long before this bug report was even filed is
     // very unlikely to be the report's real duplicate, so we gently scale its score down with that gap.
@@ -6493,32 +6590,10 @@ JiTA.rank = {
     _ebrIndex: null,    // same shape, built over OPEN EBRs only (for the EDR "matching reports" view)
     _dirtyEbr: true,    // set true whenever the EBR sync writes; triggers an EBR index rebuild on next query
     _buildingEbr: null,
-    K1: 1.5,
-    B: 0.75,
-    STOP: (function () {
-        var s = {}, w = ('the a an and or of to in for on with is are was were be been it this that these those as at by from we you they i he she his her its their our your not no but if then than so such can will would should could may might do does did has have had into over under out up down off about your yours'.split(' '));
-        for (var i = 0; i < w.length; i++) { s[w[i]] = true; }
-        return s;
-    })(),
-
-    _tokenize: function (text) {
-        var raw = (text || '').toLowerCase().replace(/[^a-z0-9\s]+/g, ' ').split(/\s+/);
-        var out = [];
-        for (var i = 0; i < raw.length; i++) {
-            var t = raw[i];
-            if (t.length >= 2 && !JiTA.rank.STOP[t]) { out.push(t); }
-        }
-        return out;
-    },
-
-    // True when `hay` (a doc's lowercased key+summary+description) contains EVERY term. Drives the filter box,
-    // which restricts the ranked corpus to issues matching the typed text before TOP_N is taken.
-    _matchTerms: function (hay, terms) {
-        if (!terms || !terms.length) { return true; }
-        if (!hay) { return false; }
-        for (var i = 0; i < terms.length; i++) { if (hay.indexOf(terms[i]) === -1) { return false; } }
-        return true;
-    },
+    // The tokenizer (lowercase words of two letters or more, the common English words left out) and the filter-box test
+    // (every typed term in a doc's text). Written once in jitaShared for the page and the worker; see there.
+    _tokenize: JITA_SH.tokenize,   // jitaShared
+    _matchTerms: JITA_SH.matchTerms,   // jitaShared
 
     // Single-flight cache wrapper shared by all four index builders: return the cached index when present and
     // not dirty; coalesce concurrent builds onto one in-flight promise; otherwise rebuild from allDefects() via
@@ -6617,63 +6692,18 @@ JiTA.rank = {
     }
 };
 
-// Shared body of the two keyword indexes (_ensureIndex / _ensureEbrIndex). `keep(rec)` selects which records
-// go in (defects = non-EBR; open reports = EBR & not closed). Returns { N, avgdl, df, docs } - identical shape
-// and tokenizer for both, so BM25 ranks the same over either corpus.
-JiTA.rank._buildKeywordIndex = function (records, keep) {
-    var df = {}, docs = [], totalLen = 0;
-    for (var i = 0; i < records.length; i++) {
-        var rec = records[i];
-        if (!keep(rec)) { continue; }
-        var toks = JiTA.rank._tokenize(JiTA.util.effectiveText(rec));   // English translation for foreign reports, else cleaned original
-        var tf = {}, seen = {};
-        for (var j = 0; j < toks.length; j++) {
-            var tk = toks[j];
-            tf[tk] = (tf[tk] || 0) + 1;
-            if (!seen[tk]) { df[tk] = (df[tk] || 0) + 1; seen[tk] = true; }
-        }
-        totalLen += toks.length;
-        docs.push({ key: rec.key, project: rec.project, summary: rec.summary, status: rec.status, resolution: rec.resolution, resolutiondate: rec.resolutiondate, created: rec.created, tf: tf, len: toks.length, hay: ((rec.key || '') + ' ' + (rec.summary || '') + ' ' + (rec.description || '') + ' ' + (rec.enText || '')).toLowerCase() });
-    }
-    return { N: docs.length, avgdl: docs.length ? (totalLen / docs.length) : 0, df: df, docs: docs };
-};
+// The keyword index of the two local fallbacks (_ensureIndex / _ensureEbrIndex). `keep(rec)` selects which records go in
+// (defects = non-EBR; open reports = EBR, not closed, not left out). The worker builds its two with the same function.
+JiTA.rank._buildKeywordIndex = JITA_SH.keywordIndex;   // jitaShared
 
-// Shared BM25 scoring loop for suggest / suggestEbr. Tokenizes the query, computes idf over `idx`, then scores
-// every doc that passes the exclude-key / hidden / filter-box / session-filter gates. Returns up to `limit`
-// results sorted best-first (no display pct - suggestEbr layers its own top-relative pct on the result). A
-// filter-box match with no query-term overlap is still kept as a score-0 candidate (matches the original).
+// BM25 for the local suggest / suggestEbr: the shared scoring loop, passing over the user-hidden suggestions and what the
+// session filters (status / recency) leave out, before the cut. Up to `limit` results (JiTA.TOP_N), best first, with no
+// display pct (suggestEbr adds its own). A filter-box match with no query-term overlap is kept as a score-0 candidate.
 JiTA.rank._bm25Score = function (idx, text, excludeKey, limit, filterTerms) {
-    if (!idx || !idx.N) { return []; }
-    var qTokens = JiTA.rank._tokenize(text);
-    var qSet = {};
-    for (var i = 0; i < qTokens.length; i++) { qSet[qTokens[i]] = true; }
-    var terms = Object.keys(qSet);
-    if (!terms.length) { return []; }
-    var k1 = JiTA.rank.K1, b = JiTA.rank.B, avgdl = idx.avgdl || 1;
-    var idf = {};
-    for (var t = 0; t < terms.length; t++) {
-        var n = idx.df[terms[t]] || 0;
-        idf[terms[t]] = Math.log(1 + (idx.N - n + 0.5) / (n + 0.5));
-    }
-    var scored = [];
-    for (var d = 0; d < idx.docs.length; d++) {
-        var doc = idx.docs[d];
-        if (excludeKey && doc.key === excludeKey) { continue; }
-        if (JiTA.hidden.isHidden(doc.key)) { continue; }   // user-hidden suggestion (temporary, persisted across updates)
-        if (filterTerms && filterTerms.length && !JiTA.rank._matchTerms(doc.hay, filterTerms)) { continue; }   // filter box: restrict the whole corpus
-        if (!JiTA.ui.passesFilter(doc)) { continue; }   // session filters (status / recency)
-        var score = 0;
-        for (var q = 0; q < terms.length; q++) {
-            var tf = doc.tf[terms[q]];
-            if (!tf) { continue; }
-            var denom = tf + k1 * (1 - b + b * (doc.len / avgdl));
-            score += idf[terms[q]] * (tf * (k1 + 1)) / denom;
-        }
-        if (score > 0) { scored.push({ key: doc.key, project: doc.project, summary: doc.summary, status: doc.status, resolution: doc.resolution, resolutiondate: doc.resolutiondate, score: score }); }
-        else if (filterTerms && filterTerms.length) { scored.push({ key: doc.key, project: doc.project, summary: doc.summary, status: doc.status, resolution: doc.resolution, resolutiondate: doc.resolutiondate, score: 0 }); }   // filter match with no issue-text overlap - still a candidate
-    }
-    scored.sort(function (a, c) { return c.score - a.score; });
-    return scored.slice(0, limit || JiTA.TOP_N);
+    var gate = JiTA.ui._gateSpec();
+    return JITA_SH.bm25Score(idx, text, excludeKey, limit || JiTA.TOP_N, filterTerms, function (doc) {
+        return !JiTA.hidden.isHidden(doc.key) && JITA_SH.passesGate(doc, gate);
+    });
 };
 
 
@@ -7585,9 +7615,6 @@ JiTA.ui = {
     // applies the same rule before its cut (passesGate); this predicate still runs on what comes back.
     filters: { status: 'all', createdDays: 0 },   // status: 'all'|'open'|'fixed'; createdDays: 0 = off
 
-    // True iff a candidate passes the current session filters. Status applies to DEFECT candidates only (open
-    // bug reports are open by definition, so it's a no-op on the reports view even if 'fixed' is left set).
-    // Created-within applies to any candidate carrying a `created` date.
     // The session filters as a ranking call carries them to the worker, or null when none is set.
     _gateSpec: function () {
         var f = JiTA.ui.filters;
@@ -7596,21 +7623,11 @@ JiTA.ui = {
         return { status: f.status || 'all', createdDays: f.createdDays || 0, now: Date.now(), cats: JiTA.ui.STATUS_CAT };
     },
 
-    passesFilter: function (doc) {
-        var f = JiTA.ui.filters;
-        if (!f) { return true; }
-        if (f.status && f.status !== 'all' && doc.project !== 'EBR') {
-            // As the card shows it (_statusCat): a reopened defect that kept its resolution is open, and listed under Open.
-            var resolved = JiTA.ui._statusCat(doc) === 'done';
-            if (f.status === 'open' && resolved) { return false; }
-            if (f.status === 'fixed' && !resolved) { return false; }
-        }
-        if (f.createdDays > 0) {
-            var t = doc.created ? Date.parse(doc.created) : NaN;
-            if (isNaN(t) || (Date.now() - t) > f.createdDays * 86400000) { return false; }   // unknown/too-old age
-        }
-        return true;
-    },
+    // True iff a candidate passes the current session filters, judged as the worker judges them (jitaShared passesGate).
+    // Status applies to DEFECT candidates only (open bug reports are open by definition, so it's a no-op on the reports
+    // view even if 'fixed' is left set), and as the card shows it (_statusCat): a reopened defect that kept its resolution
+    // is open. Created-within applies to any candidate carrying a `created` date.
+    passesFilter: function (doc) { return JITA_SH.passesGate(doc, JiTA.ui._gateSpec()); },
 
     // Whether any filter that AFFECTS the current view is active (drives the funnel's active dot). Status only
     // counts where the candidates are DEFECTS (the similar-defects view); Created counts everywhere.
@@ -11445,36 +11462,8 @@ JiTA.credits = {
 function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiTA.worker._src)
     var pipe = null, backend = 'none', db = null, vecCache = null, kwCache = null, logsigCache = null, BATCH = 8, embedding = false;
     var pipeP = null, dbP = null, embedAgain = false;   // the model / DB being opened, and a pass asked for while one ran
-    var K1 = 1.5, B = 0.75, STOP = {};
-    ('the a an and or of to in for on with is are was were be been it this that these those as at by from we you they i he she his her its their our your not no but if then than so such can will would should could may might do does did has have had into over under out up down off about your yours').split(' ').forEach(function (w) { STOP[w] = true; });
-    function tokenize(text) {
-        var raw = (text || '').toLowerCase().replace(/[^a-z0-9\s]+/g, ' ').split(/\s+/), out = [];
-        for (var i = 0; i < raw.length; i++) { var t = raw[i]; if (t.length >= 2 && !STOP[t]) { out.push(t); } }
-        return out;
-    }
-    // BM25 over a { N, avgdl, df, docs } index. Applies only the excludeKey + filter-box gates (hidden / session
-    // filters stay in the tab); a filter-box match with no query-term overlap is kept as a score-0 candidate.
-    function bm25Score(idx, text, excludeKey, limit, filterTerms, gate) {
-        if (!idx || !idx.N) { return []; }
-        var q = tokenize(text), qSet = {}, i;
-        for (i = 0; i < q.length; i++) { qSet[q[i]] = true; }
-        var terms = Object.keys(qSet);
-        if (!terms.length) { return []; }
-        var avgdl = idx.avgdl || 1, idf = {}, hasTerms = filterTerms && filterTerms.length;
-        for (i = 0; i < terms.length; i++) { var n = idx.df[terms[i]] || 0; idf[terms[i]] = Math.log(1 + (idx.N - n + 0.5) / (n + 0.5)); }
-        var scored = [];
-        for (var d = 0; d < idx.docs.length; d++) {
-            var doc = idx.docs[d];
-            if (excludeKey && doc.key === excludeKey) { continue; }
-            if (hasTerms && !matchTerms(doc.hay, filterTerms)) { continue; }
-            if (!passesGate(doc, gate)) { continue; }
-            var score = 0;
-            for (var t = 0; t < terms.length; t++) { var tf = doc.tf[terms[t]]; if (!tf) { continue; } var denom = tf + K1 * (1 - B + B * (doc.len / avgdl)); score += idf[terms[t]] * (tf * (K1 + 1)) / denom; }
-            if (score > 0 || hasTerms) { scored.push({ key: doc.key, project: doc.project, summary: doc.summary, status: doc.status, resolution: doc.resolution, resolutiondate: doc.resolutiondate, created: doc.created, score: score }); }
-        }
-        scored.sort(function (a, b) { return b.score - a.score; });
-        return scored.slice(0, limit || 50);
-    }
+    // The text the ranking compares (SH.effectiveText), its tokenizer and the BM25 scoring (SH.bm25Score), the filter-box
+    // test (SH.matchTerms) and the session filters (SH.passesGate) are written once in jitaShared, as the tab runs them.
 
     // ---- logsig: the defects' exception index and what is looked up in it, written once in jitaShared ----
     // The worker holds the index for every tab (logsigCache, built in buildIndexes), so a tab asks it here.
@@ -11541,27 +11530,6 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         if (qText === text && qVec) { return qVec; }
         qVec = await embed(text); qText = text; return qVec;
     }
-    function matchTerms(hay, terms) { for (var i = 0; i < terms.length; i++) { if (hay.indexOf(terms[i]) === -1) { return false; } } return true; }
-    // The session filters (Status, Created within) a ranking call carries, applied BEFORE the top-N cut. Applied after
-    // it, in the tab, a strict filter left a handful of the top 200 and the panel said nothing matched while real
-    // matches sat just below the cut. The same rule as JiTA.ui.passesFilter: a status the cards know (gate.cats, their
-    // STATUS_CAT) by its category, whatever resolution it kept; any other as JiTA.util.isResolved does (a resolution, or a
-    // closed status name). The tab still applies that too, as a backstop. No gate: everything passes.
-    function passesGate(doc, gate) {
-        if (!gate) { return true; }
-        if (gate.status && gate.status !== 'all' && doc.project !== 'EBR') {   // open bug reports are open by definition
-            var sk = String(doc.status || '').toLowerCase().trim(), cats = gate.cats || {};
-            var resolved = Object.prototype.hasOwnProperty.call(cats, sk) ? cats[sk] === 'done' : (!!doc.resolution || isClosedStatus(doc.status));
-            if (gate.status === 'open' && resolved) { return false; }
-            if (gate.status === 'fixed' && !resolved) { return false; }
-        }
-        if (gate.createdDays > 0) {
-            var t = doc.created ? Date.parse(doc.created) : NaN;
-            if (isNaN(t) || (gate.now - t) > gate.createdDays * 86400000) { return false; }
-        }
-        return true;
-    }
-
     // ---- embed pass (runs HERE now, so no tab ever loads a model) --------------------------------------
     async function embedBatch(texts) {
         var p = await loadModel();
@@ -11572,33 +11540,8 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         for (var i = 0; i < inputs.length; i++) { vecs.push(new Float32Array(out.data.subarray(i * dim, (i + 1) * dim))); }
         return vecs;
     }
-    // Ported verbatim from JiTA.util so the worker prepares the same embedding text the tab used to.
-    function cleanForCompare(summary, description) {
-        var s = (summary || '').replace(/\s+/g, ' ').trim();
-        var d = ' ' + (description || '') + ' ';
-        d = d.replace(/<url=[^>]*>/gi, ' ').replace(/<\/url>/gi, ' ');
-        d = d.replace(/Session Info\s*:[\s\S]*?(?=Reproduction Steps|Computer Info|$)/i, ' ');
-        d = d.replace(/Computer Info[\s\S]*$/i, ' ');
-        d = d.replace(/\b(Reproduction Steps|Description)\b\s*:?/ig, ' ');
-        d = d.replace(/\bNone\b/g, ' ');
-        d = d.replace(/\s+/g, ' ').trim();
-        return (s ? (s + '. ' + s + '. ') : '') + d;
-    }
-    // Mirror of JiTA.util.effectiveText: index the stored English translation for a foreign report, else the
-    // cleaned original. The worker only READS the stored enText field; it never translates (no GM_xmlhttpRequest).
-    function effectiveText(rec) { return (rec && rec.enText) ? rec.enText : cleanForCompare(rec.summary, rec.description); }
-    function isClosedStatus(status) { return /closed|done|resolved|rejected|cancel|attached/i.test(status || ''); }
-    // Mirror of JiTA.util.isLeftOut: a bug report the matching lists leave out (cfg.LEFT_OUT = JiTA.LEFT_OUT), so it is
-    // neither indexed nor embedded. KEEP IN SYNC.
-    function leftOut(rec) {
-        function has(list, names) {
-            for (var i = 0; i < (list || []).length; i++) {
-                for (var j = 0; j < names.length; j++) { if (String(list[i]).toLowerCase() === names[j].toLowerCase()) { return true; } }
-            }
-            return false;
-        }
-        return !!rec && (has(rec.labels, cfg.LEFT_OUT.labels) || has(rec.components, cfg.LEFT_OUT.components));
-    }
+    // A bug report the matching lists leave out (cfg.LEFT_OUT = JiTA.LEFT_OUT), so it is neither indexed nor embedded.
+    function leftOut(rec) { return SH.isLeftOut(rec, cfg.LEFT_OUT); }
     // The Team field's id, and whether it is the GM team: for the Members tab's count of GM handoffs made the old way (crSetGm).
     function teamId(v) { if (v == null) { return ''; } if (typeof v === 'string' || typeof v === 'number') { return String(v); } if (typeof v === 'object') { return String(v.id || v.value || v.teamId || v.name || ''); } return ''; }
     function isGmTeam(v) { var id = teamId(v); if (!id) { return false; } var short = String(cfg.GM_TEAM_ID).split('-').pop(); return id === cfg.GM_TEAM_ID || id === short || id.split('-').pop() === short; }
@@ -11658,7 +11601,7 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         var todo = [];
         for (var i = 0; i < recs.length; i++) {
             var r = recs[i];
-            if (r.project === 'EBR' && (isClosedStatus(r.status) || leftOut(r))) { continue; }   // not ranked -> don't embed
+            if (r.project === 'EBR' && (SH.isClosedStatus(r.status) || leftOut(r))) { continue; }   // not ranked -> don't embed
             if (r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION) { continue; }
             todo.push(r);
         }
@@ -11670,7 +11613,7 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         postProgress();   // 0 / total up front so the pass is visible immediately
         while (idx < todo.length) {
             var slice = todo.slice(idx, idx + BATCH);
-            var texts = slice.map(function (x) { return effectiveText(x); });   // English translation for foreign reports, else cleaned original
+            var texts = slice.map(function (x) { return SH.effectiveText(x); });   // English translation for foreign reports, else cleaned original
             var wd = null;
             try {
                 var vecs = await Promise.race([
@@ -11773,25 +11716,18 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         return idxP;
     }
     function buildIndexes(recs) {
-        var vD = [], vE = [], kD = [], kE = [], dfD = {}, dfE = {}, lenD = 0, lenE = 0;
+        function ranked(r) { return r.project !== 'EBR' || !(SH.isClosedStatus(r.status) || leftOut(r)); }   // a closed or left out bug report is not ranked
+        var vD = [], vE = [];
         for (var i = 0; i < recs.length; i++) {
-            var r = recs[i], isEbr = r.project === 'EBR';
-            if (isEbr && (isClosedStatus(r.status) || leftOut(r))) { continue; }   // not ranked in the reports view
-            var hay = ((r.key || '') + ' ' + (r.summary || '') + ' ' + (r.description || '') + ' ' + (r.enText || '')).toLowerCase();
-            var meta = { key: r.key, project: r.project, summary: r.summary, status: r.status, resolution: r.resolution, resolutiondate: r.resolutiondate, created: r.created };
-            if (r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION) {
-                var ve = { key: meta.key, project: meta.project, summary: meta.summary, status: meta.status, resolution: meta.resolution, resolutiondate: meta.resolutiondate, created: meta.created, vec: r.embedding, hay: hay };
-                (isEbr ? vE : vD).push(ve);
-            }
-            var toks = tokenize(effectiveText(r)), tf = {}, seen = {}, df = isEbr ? dfE : dfD;
-            for (var j = 0; j < toks.length; j++) { var tk = toks[j]; tf[tk] = (tf[tk] || 0) + 1; if (!seen[tk]) { df[tk] = (df[tk] || 0) + 1; seen[tk] = true; } }
-            var kd = { key: meta.key, project: meta.project, summary: meta.summary, status: meta.status, resolution: meta.resolution, resolutiondate: meta.resolutiondate, created: meta.created, tf: tf, len: toks.length, hay: hay };
-            if (isEbr) { kE.push(kd); lenE += toks.length; } else { kD.push(kd); lenD += toks.length; }
+            var r = recs[i];
+            if (!ranked(r) || !(r.embedding && r.embeddingModelVersion === cfg.MODEL_VERSION)) { continue; }
+            (r.project === 'EBR' ? vE : vD).push({ key: r.key, project: r.project, summary: r.summary, status: r.status, resolution: r.resolution, resolutiondate: r.resolutiondate, created: r.created, vec: r.embedding,
+                hay: ((r.key || '') + ' ' + (r.summary || '') + ' ' + (r.description || '') + ' ' + (r.enText || '')).toLowerCase() });
         }
         vecCache = { defects: vD, ebr: vE };
-        kwCache = {
-            defects: { N: kD.length, avgdl: kD.length ? lenD / kD.length : 0, df: dfD, docs: kD },
-            ebr: { N: kE.length, avgdl: kE.length ? lenE / kE.length : 0, df: dfE, docs: kE }
+        kwCache = {   // the BM25 keyword indexes, built as the tab's fallback builds its own (jitaShared)
+            defects: SH.keywordIndex(recs, function (r) { return r.project !== 'EBR'; }),
+            ebr: SH.keywordIndex(recs, function (r) { return r.project === 'EBR' && ranked(r); })
         };
         logsigCache = SH.buildIndex(recs);   // the defects' exceptions and stacktraces (jitaShared)
     }
@@ -11802,8 +11738,8 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         for (var i = 0; i < entries.length; i++) {
             var e = entries[i];
             if (excludeKey && e.key === excludeKey) { continue; }
-            if (hasTerms && !matchTerms(e.hay, filterTerms)) { continue; }   // filter-box narrowing
-            if (!passesGate(e, gate)) { continue; }                          // session filters; hidden keys and the UI gates stay in the tab
+            if (hasTerms && !SH.matchTerms(e.hay, filterTerms)) { continue; }   // filter-box narrowing
+            if (!SH.passesGate(e, gate)) { continue; }                          // session filters; hidden keys and the UI gates stay in the tab
             var v = e.vec, s = 0, n = q.length;
             for (var j = 0; j < n; j++) { s += q[j] * v[j]; }
             scored.push({ key: e.key, project: e.project, summary: e.summary, status: e.status, resolution: e.resolution, resolutiondate: e.resolutiondate, created: e.created, score: s });
@@ -11830,7 +11766,7 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         var all = vecCache.defects, open = [];
         for (var i = 0; i < all.length; i++) {
             var e = all[i];
-            if (e.resolution || isClosedStatus(e.status)) { continue; }   // merge suggestions only make sense among OPEN defects
+            if (e.resolution || SH.isClosedStatus(e.status)) { continue; }   // merge suggestions only make sense among OPEN defects
             open.push(e);
         }
         var pairs = [], CHUNK = 100;
@@ -11858,7 +11794,8 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         payload = payload || {};
         await ensureIndexes();
         var idx = payload.scope === 'ebr' ? kwCache.ebr : kwCache.defects;
-        return { indexed: idx.N, results: bm25Score(idx, payload.text || '', payload.excludeKey, payload.topN || 200, payload.filterTerms, payload.gate) };
+        var gate = payload.gate;   // the session filters, applied before the cut
+        return { indexed: idx.N, results: SH.bm25Score(idx, payload.text || '', payload.excludeKey, payload.topN || 200, payload.filterTerms, gate ? function (doc) { return SH.passesGate(doc, gate); } : null) };
     }
 
     // ---- ISD credits: the monthly leaderboard crawl runs HERE now, so its fetches + politeness sleeps live off

@@ -141,15 +141,14 @@ function logsigShared(src) {
 }
 // The worker's logsig side, from jitaWorkerBody itself: its index build (buildIndexes, whose logsig part is jitaShared's
 // buildIndex) and its request dispatcher (logsigOp), on its own run of jitaShared, as the worker has it. The rest of
-// buildIndexes runs on stubs. `idx`, when given, is the index it holds to begin with (none: it has none yet).
-// { SH, build(recs): the index it holds then, op(payload): the answer to a logsig request }.
+// buildIndexes builds its keyword and vector indexes too, nothing left out. `idx`, when given, is the index it holds to
+// begin with (none: it has none yet). { SH, build(recs): the index it holds then, op(payload): the answer to a logsig request }.
 function workerLogsig(src, idx) {
     const body = fn(src, 'jitaWorkerBody'), SH = shared(src);
-    const w = new Function('SH', 'cfg', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'idx0',
+    const w = new Function('SH', 'cfg', 'leftOut', 'idx0',
         'var vecCache = null, kwCache = null, logsigCache = idx0 || null;\n' + fn(src, 'buildIndexes', body) + '\n' + fn(src, 'logsigOp', body) +
         '\nreturn { build: function (r) { buildIndexes(r); return logsigCache; }, op: logsigOp };')(
-        SH, { MODEL_VERSION: 'm' }, () => false, () => false, (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
-        (r) => (r.summary || '') + ' ' + (r.description || ''), idx);
+        SH, { MODEL_VERSION: 'm' }, () => false, idx);
     return { SH: SH, build: w.build, op: w.op };
 }
 

@@ -7,6 +7,8 @@
 require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const shu = (name) => '\n' + require('./source').member(src, 'JiTA.util', name) + '\n,';   // a JiTA.util member that is a piece of jitaShared
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it, which JiTA.util's text helpers are
 
 let fail = 0;
 // Straight to stdout: the reader's tests silence console.log, which it logs through.
@@ -56,12 +58,11 @@ global.JiTA = {
 };
 require('./logstub')(JiTA);
 Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    staleFactor: function (brCreatedIso, resolutionDateIso) {') +
-    member('    humanizeAge: function (days) {') + member('    isClosedStatus: function (status) {') +
-    member('    isLeftOut: function (rec) {') + member('    jqlSince: function (iso, now) {') + '})'));
+    member('    humanizeAge: function (days) {') + shu('isClosedStatus') +
+    shu('isLeftOut') + member('    jqlSince: function (iso, now) {') + '})'));
 JiTA.util.fmtDate = (s) => (s ? String(s).slice(0, 10) : '');
 let delays = [];
 JiTA.util.delay = (ms) => { delays.push(ms); return Promise.resolve(); };
-global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it, which its lookups call
 Object.assign(JiTA.logsig, eval(require('./source').members(src, 'JiTA.logsig', ['holding', '_holdingLocal', 'sigsOf', '_sigsOfLocal'])));
 Object.assign(JiTA.profile, eval('({' + line('    LOG_V: ') + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') +
     member('    _sigParts: function (sig) {') + member('    _sigTip: function (sigs, msg) {') + '})'));

@@ -5,6 +5,8 @@
 //  - the panel's reporter list flags its closed reports, and its stylesheet dims that flag
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const shu = (name) => '\n' + require('./source').member(src, 'JiTA.util', name) + '\n,';   // a JiTA.util member that is a piece of jitaShared
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it, which JiTA.util's text helpers are
 const cut = (from, to) => {
     const s = src.indexOf(from), e = src.indexOf(to, s);
     if (s < 0 || e < 0 || src.indexOf(from, s + 1) >= 0) { throw new Error('could not slice from ' + from.trim().slice(0, 60)); }
@@ -39,7 +41,7 @@ global.JiTA = {
     ui: { _showTip: () => {}, _hideTip: () => {} },
     util: {}
 };
-Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    isClosedStatus: function (status) {') +
+Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + shu('isClosedStatus') +
     member('    staleFactor: function (brCreatedIso, resolutionDateIso) {') + member('    humanizeAge: function (days) {') +
     cut('    fmtDate: function (iso) {', '\n    }\n};') + '\n    }' + '})'));   // fmtDate and shortDate, the last member: no comma after it
 (0, eval)(cut('JiTA.rank._pickMode = function (', '\n};\n') + '\n};');

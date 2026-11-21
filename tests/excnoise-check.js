@@ -6,6 +6,8 @@
 // background reader's count, against stubs.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const shu = (name) => '\n' + require('./source').member(src, 'JiTA.util', name) + '\n,';   // a JiTA.util member that is a piece of jitaShared
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it, which JiTA.util's text helpers are
 const once = (head) => {
     const s = src.indexOf(head);
     if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + head.trim().slice(0, 60)); }
@@ -36,14 +38,13 @@ global.JiTA = { HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCatego
 require('./logstub')(JiTA);
 JiTA.db.getMeta = (k) => { metaReads++; return Promise.resolve(Object.prototype.hasOwnProperty.call(meta, k) ? meta[k] : null); };
 JiTA.db.setMeta = (k, v) => { meta[k] = v; metaSets.push(k); return Promise.resolve(); };
-Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isResolved: function (status, resolution) {') + member('    isClosedStatus: function (status) {') + member('    hash: function (str) {') +
-    member('    isLeftOut: function (rec) {') + member('    jqlSince: function (iso, now) {') + '})'));
+Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isResolved: function (status, resolution) {') + shu('isClosedStatus') + member('    hash: function (str) {') +
+    shu('isLeftOut') + member('    jqlSince: function (iso, now) {') + '})'));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 JiTA.util.delay = () => Promise.resolve();
 JiTA.ocr._langFromLabels = () => null;
 const L = JiTA.logsig;
 Object.assign(L, require('./source').logsigShared(src));   // jitaShared
-global.JITA_SH = require('./source').shared(src);   // the page's run of it, which its lookups call
 Object.assign(L, eval(require('./source').members(src, 'JiTA.logsig', ['_msgKey', 'ensure', 'applyToTable', 'rematch', '_matchTextLocal', '_defectsLocal',
     '_holdingLocal', '_sigsOfLocal', 'defectsForSigs', 'holding', 'sigsOf'])));
 L._index = null; L._dirty = true; L._building = null;

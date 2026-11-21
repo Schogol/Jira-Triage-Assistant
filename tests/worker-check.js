@@ -20,14 +20,11 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
 
 // ---- the worker's index builds ----
 const reads = [];
-const idx = new Function('allRecords', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'SH', 'cfg',
+const idx = new Function('allRecords', 'leftOut', 'SH', 'cfg',
     'var vecCache = null, kwCache = null, logsigCache = null;\n' +
     cut('    var idxGen = 0, idxP = null;', '    // Cosine == dot product') +
     '\nreturn { ensureIndexes: ensureIndexes, dropIndexes: dropIndexes, kw: function () { return kwCache; } };')(
-    () => { const d = deferred(); reads.push(d); return d.promise; },
-    (s) => /closed|attached/i.test(s || ''), () => false,
-    (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
-    (r) => (r.summary || '') + ' ' + (r.description || ''),
+    () => { const d = deferred(); reads.push(d); return d.promise; }, () => false,
     require('./source').shared(src), { MODEL_VERSION: 'm1' });
 const ebrKeys = () => (idx.kw() ? idx.kw().ebr.docs.map((d) => d.key).join(',') : 'none');
 const OPEN = [{ key: 'EBR-1', project: 'EBR', status: 'Open', summary: 'crash on undock' }, { key: 'EBR-2', project: 'EBR', status: 'Open', summary: 'warp bug' }];
@@ -35,11 +32,11 @@ const ONE_ATTACHED = [{ key: 'EBR-1', project: 'EBR', status: 'Attached', summar
 
 // ---- the worker's embedPass ----
 let dropped = 0, loadFails = false;
-const ep = new Function('loadModel', 'allRecords', 'isClosedStatus', 'leftOut', 'cfg', 'effectiveText', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'self',
+const ep = new Function('loadModel', 'allRecords', 'SH', 'leftOut', 'cfg', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'self',
     'var embedding = false, pipe = null, BATCH = 8;\n' + cut('    async function embedPass() {', '\n    function openDb() {') + '\nreturn embedPass;')(
     () => (loadFails ? Promise.reject(new Error('no model')) : Promise.resolve()),
     () => Promise.resolve([{ key: 'EDR-1', project: 'EDR', status: 'Open', embedding: [1], embeddingModelVersion: 'm1' }]),
-    () => false, () => false, { MODEL_VERSION: 'm1' }, () => '', () => Promise.resolve([]), () => Promise.resolve(),
+    { isClosedStatus: () => false, effectiveText: () => '' }, () => false, { MODEL_VERSION: 'm1' }, () => Promise.resolve([]), () => Promise.resolve(),
     () => { dropped++; }, { postMessage() {} });
 
 // ---- JiTA: the tab's sync run and the worker election ----
