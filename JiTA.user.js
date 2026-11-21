@@ -21940,9 +21940,14 @@ JiTA.leadduty.ui = {
             if (!U.isOpen() || U._tab !== 'members') { return; }
             st.team = r[1];
             st.inotes = r[2].value;
+            // A role or a note saved while this load was out is newer than what the load read (a Count reloads after each
+            // month): what the save brought stays, as _adopt keeps it, and the versions only go up.
+            var memV = st.memVersion || 0, inV = r[2].version || 0, was = U._mem;
+            if (was && U._memVer && U._memVer.ledgerVersion > memV) { st.mem = was.mem; memV = U._memVer.ledgerVersion; }
+            if (was && U._inVer && U._inVer.ledgerVersion > inV) { st.inotes = was.inotes; inV = U._inVer.ledgerVersion; }
             U._mem = st;
-            U._memVer = { ledgerVersion: st.memVersion || 0 };
-            U._inVer = { ledgerVersion: r[2].version || 0 };
+            U._memVer = { ledgerVersion: memV };
+            U._inVer = { ledgerVersion: inV };
             U._renderMembers(!force);
         }, function (e) {
             if (!U.isOpen() || U._tab !== 'members') { return; }
@@ -22059,8 +22064,9 @@ JiTA.leadduty.ui = {
             U._renderMembers(true);
         };
         var failed = function (e) { U._renderMembers(true); U._status('Not saved - ' + (e && e.message || e)); };
+        var unread = !!(U._mem && U._mem.team && U._mem.team.error);   // the team page could not be read: its rank is not known
         var tabOnly = function (why) {
-            return M.setRole(r.acc, role, r.name, r.rank).then(function (w) { drawn(w); if (why) { U._status('Saved in the tab only: ' + why); } });
+            return M.setRole(r.acc, role, r.name, r.rank, unread).then(function (w) { drawn(w); if (why) { U._status('Saved in the tab only: ' + why); } });
         };
         if (!ch.ask || !confirm(ch.ask)) { tabOnly(ch.why || '').catch(failed); return; }
         M.setRank(r.acc, role, r.name).then(function () {
@@ -22068,7 +22074,7 @@ JiTA.leadduty.ui = {
             return M.team(true).then(function (t) {
                 if (U._mem) { U._mem.team = t; }
                 return M.setRole(r.acc, role, r.name, M._rankOf(t, r.acc, r.name));
-            }, function () { return M.setRole(r.acc, role, r.name, r.rank); }).then(drawn);
+            }, function () { return M.setRole(r.acc, role, r.name, r.rank, true); }).then(drawn);
         }, function (e) {
             return tabOnly('the ECAID - Team Members page was not changed (' + (e && e.message || e) + ')');
         }).catch(failed);
@@ -22082,16 +22088,20 @@ JiTA.leadduty.ui = {
             'rank, with their @mention and rank. Its other columns are left empty, to fill in on the page.')) { return; }
         M.model(U._mem.act, U._mem.mem, U._mem.live, U._mem.cur).forEach(function (x) { names[x.acc] = x.name; });
         U._status('Adding ' + r.name + ' to the ECAID - Team Members page…');
-        M.addToTeam(r.acc, r.role, r.name, function (acc) { return names[acc] || ''; }).then(function () {
+        M.addToTeam(r.acc, r.role, r.name, function (acc) { return names[acc] || ''; }).then(function (res) {
+            // Someone added them already (another Lead, or by hand, since this tab read the page): their rank there stands,
+            // and the role this tab showed for them is not stored over it.
+            var already = !!(res && res.skipped === 'already on it');
             // the page says their rank now: read it again, and a role set to the same goes
             return M.team(true).then(function (t) {
                 if (U._mem) { U._mem.team = t; }
-                return M.setRole(r.acc, r.role, r.name, M._rankOf(t, r.acc, r.name));
-            }, function () { return null; });
-        }).then(function (w) {
-            var v = w && U._adopt(U._memVer, w);
+                return already ? null : M.setRole(r.acc, r.role, r.name, M._rankOf(t, r.acc, r.name));
+            }, function () { return null; }).then(function (w) { return { w: w, already: already }; });
+        }).then(function (o) {
+            var v = o.w && U._adopt(U._memVer, o.w);
             if (v && U._mem) { U._mem.mem = v; }
             U._renderMembers(true);
+            if (o.already) { U._status(r.name + ' is on the ECAID - Team Members page already: their rank there is shown now.'); }
         }, function (e) {
             U._renderMembers(true);
             U._status('Not added to the ECAID - Team Members page: ' + (e && e.message || e));
@@ -22927,6 +22937,8 @@ JiTA.leadduty.members = {
     _count: null,
     _team: null,                  // the team page's ranks as last read: { at, value }
     _teamP: null,                 // ...and a read of it in flight
+    _teamGen: 0,                  // how many times this tab wrote the team page: a read begun before the last one is stale
+    _teamPGen: 0,                 // ...the count when the read in flight began
     _pubBusy: false,
     _pubAt: 0,
     _pubAgain: false,
@@ -23040,17 +23052,21 @@ JiTA.leadduty.members = {
         if (!L.isLead()) { return Promise.reject(M._notLead()); }
         if (!page) { return Promise.resolve(null); }
         if (!force && M._team && Date.now() - M._team.at < M.TEAM_TTL_MS) { return Promise.resolve(M._team.value); }
-        if (M._teamP) { return M._teamP; }
+        // A read begun before the tab last wrote the page (_teamGen) may hold the page as it was: it is not handed out
+        // again, and what it brings is not kept, so the read after a write is the page as it is now.
+        if (M._teamP && M._teamPGen === M._teamGen) { return M._teamP; }
+        var gen = M._teamGen;
         var p = M._teamP = JiTA.conf.getPage(page, true).then(function (pg) {
             var t = M._parseTeam(pg.body);
             if (!t.tables) { throw new Error('The ECAID - Team Members page has no table with a Name and a Rank column'); }
             if (!t.n) { throw new Error('The ECAID - Team Members page names nobody in its Name column'); }
             t.version = pg.version;
-            M._team = { at: Date.now(), value: t };
+            if (gen === M._teamGen) { M._team = { at: Date.now(), value: t }; }
             return t;
         }, function (e) {
             throw new Error('Could not read the ECAID - Team Members page (' + (e && e.message || e) + ')');
         });
+        M._teamPGen = gen;
         var clear = function () { if (M._teamP === p) { M._teamP = null; } };
         p.then(clear, clear);
         return p;
@@ -23244,6 +23260,12 @@ JiTA.leadduty.members = {
                 return JiTA.conf.savePageBody(pg, body, message).then(function (res) { return { written: true, version: res.version }; });
             }).then(function (res) {
                 M._team = null;   // read again on the next look
+                if (res && res.written) {
+                    M._teamGen++;   // and a read begun before this write is not taken for it (team)
+                    // The Members page shows the team page's ranks and notes: a change made there from the tab brings it in
+                    // step, though the tab then stores nothing (the page says it now), and so would not publish.
+                    M._tap(res);
+                }
                 return res;
             }, function (e) {
                 if (again && JiTA.conf.isConflict(e)) { return attempt(false); }
@@ -23393,7 +23415,7 @@ JiTA.leadduty.members = {
             var now = lv ? (lv.counts[acc] != null ? lv.counts[acc] : null) : undefined, last = now > 0 ? cur : '';
             for (var i = 0; !last && i < wins.length; i++) { if (months[i] > 0) { last = wins[i]; } }
             return { acc: acc, name: name, role: role, roleSet: set, rank: rank, onTeam: tm ? rank !== undefined : null,
-                note: p.note || pageNote || '', noteSet: !!p.note, pageNote: pageNote, noteBy: p.by || '', noteAt: p.at || '',
+                note: p.note || pageNote || '', noteSet: !!p.note, pageNote: pageNote, noteBy: p.noteBy || p.by || '', noteAt: p.noteAt || p.at || '',
                 months: months, gm: gm, cur: now, last: last, state: M.state(role, months) };
         });
         var key = function (r) { return r.name.replace(/^isd\s+/i, '').toLowerCase(); };
@@ -23576,16 +23598,18 @@ JiTA.leadduty.members = {
     // the team page) is stored, so picking the page's rank follows the page again; likewise a note is stored only when it
     // is not the one their row on the team page has (pageNote), and an empty note deletes it; an entry with nothing left
     // goes. Resolve the mutate result; a real change republishes the page. Leads only.
-    setRole: function (acc, role, name, rank) {
+    // `asIs`: the team page could not be read, so the default its rank gives is not known; the role is stored as picked,
+    // as a default worked out without the rank could drop a role the Lead chose (or store one the page already says).
+    setRole: function (acc, role, name, rank, asIs) {
         var L = JiTA.leadduty, M = L.members;
         if (!L.isLead()) { return Promise.reject(M._notLead()); }
         if (M.ROLES.indexOf(role) < 0) { return Promise.reject(new Error('Unknown role: ' + role)); }
-        var want = role === M.defaultRole(name, rank) ? '' : role;
+        var want = (!asIs && role === M.defaultRole(name, rank)) ? '' : role;
         return M._person(acc, function (e) {
             if ((e.role || '') === want) { return false; }
             if (want) { e.role = want; } else { delete e.role; }
             return true;
-        });
+        }, 'role');
     },
     setNote: function (acc, note, pageNote) {
         var L = JiTA.leadduty, M = L.members;
@@ -23596,7 +23620,7 @@ JiTA.leadduty.members = {
             if ((e.note || '') === want) { return false; }
             if (want) { e.note = want; } else { delete e.note; }
             return true;
-        });
+        }, 'note');
     },
     // The notes only Leads see (INOTES_KEY): { value: { m: { accountId: { t, by, at } } } or null, version }. Only the tab
     // reads them - neither publishing nor the scheduler does - so no page can ever be built from them. Leads only.
@@ -23620,7 +23644,10 @@ JiTA.leadduty.members = {
         });
     },
     // Change one member's entry: change(e) edits it and says whether anything changed.
-    _person: function (acc, change) {
+    // `kind` ('role' or 'note') says what the change is to, and only its own stamp (roleBy, roleAt or noteBy, noteAt) is
+    // set: one stamp for both credited a note to the Lead who later changed only the role, on that day. An entry stored
+    // before kept one (by, at), still read for its note until the note is written again.
+    _person: function (acc, change, kind) {
         var L = JiTA.leadduty, M = L.members;
         return L.ledger.mutate(L.MEMBERS_KEY, function (v) {
             v = v || { v: 1 };
@@ -23628,8 +23655,8 @@ JiTA.leadduty.members = {
             var e = v.m[acc] || {};
             if (!change(e)) { return null; }
             if (!e.role && !e.note) { delete v.m[acc]; return v; }
-            e.by = M._meName();
-            e.at = M._today();
+            if (kind === 'note') { delete e.by; delete e.at; }
+            if (e[kind]) { e[kind + 'By'] = M._meName(); e[kind + 'At'] = M._today(); } else { delete e[kind + 'By']; delete e[kind + 'At']; }
             v.m[acc] = e;
             return v;
         }).then(M._tap);
