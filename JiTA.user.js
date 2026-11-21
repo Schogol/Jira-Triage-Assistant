@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.26
+// @version     3.53.27
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.26
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.27
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -12738,7 +12738,10 @@ JiTA.dupfind = {
     PCT_OPTIONS: [95, 93, 90, 88, 85, 82, 80],
     LINK_CONCURRENCY: 5,
     _last: null,      // { computedAt, pairs: [{a,b,cos}], meta: {key:{summary,...}}, scanned }
-    _links: {},       // key -> { otherKey: true } - live issuelink cache (session)
+    _links: {},       // key -> { otherKey: true }: issue links read since the view opened or the last Recompute (_fresh)
+    _missing: {},     // keys Jira answered 404 for (deleted, or out of this user's sight): never suggested
+    _renderGen: 0,    // render()s and compute()s in turn: an older one never paints over a newer one
+    _hovered: null,   // the row the mouse is on: a hover card that comes after it left is not shown
     _moved: {},       // oldKey -> currentKey: MOVED issues (Jira resolves the alias; detected free in _fetchLinks).
                       // A moved key's local record is a GHOST (pre-move copy the sync can never refresh or prune) -
                       // it pairs at ~100% with its own current-key twin. Pairs touching one are dropped and the
@@ -12776,6 +12779,7 @@ JiTA.dupfind = {
             return;
         }
         D._injectCss();
+        D._fresh();
         var ov = JiTA.menu._openOverlay({ title: 'Duplicate defects - unlinked look-alikes (text + shared exception)', wide: false });
         ov.$menu.addClass('jita-dup-view');
         $('<div class="jd-scroll" id="jd-body"></div>').appendTo(ov.$menu);
@@ -12805,12 +12809,23 @@ JiTA.dupfind = {
         var el = document.getElementById('jd-status');
         if (el) { el.textContent = msg || ''; }
     },
+    // Links are read again on opening the view and on Recompute: kept for the tab's life, a pair linked in Jira since
+    // (the point of the tool) stayed a suggestion until reload.
+    _fresh: function () { JiTA.dupfind._links = {}; JiTA.dupfind._missing = {}; },
+    // When the scan ran, in the user's own time (computedAt is UTC).
+    _scannedAt: function (iso) {
+        var t = new Date(iso || ''), p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+        if (isNaN(t.getTime())) { return ''; }
+        return t.getFullYear() + '-' + p2(t.getMonth() + 1) + '-' + p2(t.getDate()) + ' ' + p2(t.getHours()) + ':' + p2(t.getMinutes());
+    },
 
     compute: function () {
         var D = JiTA.dupfind;
         if (D._running) { return; }
         if (!(JiTA.worker && JiTA.worker.usable())) { D._status('Ranking worker unavailable - reload the tab and retry.'); return; }
         D._running = true;
+        D._renderGen++;   // a render still checking links would paint the old scan over "Scanning"
+        D._fresh();
         $('#jd-recompute').prop('disabled', true);
         $('#jd-body').empty().append($('<div class="jd-empty"></div>').text('Scanning all open defects pairwise - this can take a little while on the first run…'));
         D._status('Scanning…');
@@ -12848,7 +12863,9 @@ JiTA.dupfind = {
                         D._links[key] = map;
                         resolve();
                     })
-                    .fail(function () { D._links[key] = {}; resolve(); });   // treat as unlinked; worst case we suggest a known pair
+                    // A key Jira does not have (404) is never suggested. Any other failure keeps nothing, so the next render asks
+                    // again: kept as "no links", a pair linked already was suggested for the rest of the tab's life.
+                    .fail(function (xhr) { if (xhr && xhr.status === 404) { D._missing[key] = true; } resolve(); });
             }).then(worker);
         }
         var lanes = [];
@@ -12906,11 +12923,13 @@ JiTA.dupfind = {
         var D = JiTA.dupfind;
         var $body = $('#jd-body');
         if (!$body.length || !D._last) { return; }
+        var gen = ++D._renderGen, last = D._last;
+        var cur = function () { return gen === D._renderGen && D._last === last && !!document.getElementById('jd-body'); };
         var floor = D.minPct() / 100;
-        var when = String(D._last.computedAt || '').replace('T', ' ').slice(0, 16);
+        var when = D._scannedAt(D._last.computedAt);
         $body.empty().append($('<div class="jd-empty"></div>').text('Gathering candidates…'));
         D._excPairs().then(function (excPairs) {
-            if (!document.getElementById('jd-body')) { return; }
+            if (!cur()) { return; }   // closed, or a newer render or scan since
             // Merge the two channels on the unordered pair key: text pairs above the display floor, plus
             // every open exception pair (discrete evidence - not subject to the cosine threshold).
             var byPair = {};
@@ -12943,13 +12962,15 @@ JiTA.dupfind = {
                     }, function () { /* leave missing */ });
                 }))
             ]).then(function () {
-                if (!document.getElementById('jd-body')) { return; }   // closed meanwhile
-                var fresh = [], known = 0, ghosts = 0, ignoredPairs = [], ignMap = D._ignored();
+                if (!cur()) { return; }   // closed, or a newer render or scan since
+                var fresh = [], known = 0, ghosts = 0, missing = 0, unread = 0, ignoredPairs = [], ignMap = D._ignored();
                 for (var j = 0; j < pool.length; j++) {
                     var p = pool[j];
                     // MOVED-key ghosts: the old key redirects to the current one - the pair is the same issue
                     // (or a duplicate of the twin's own pair), never a real finding.
                     if (D._moved[p.a] || D._moved[p.b]) { ghosts++; continue; }
+                    if (D._missing[p.a] || D._missing[p.b]) { missing++; continue; }   // deleted in Jira, or out of sight
+                    if (!D._links[p.a] || !D._links[p.b]) { unread++; }   // shown, but its links could not be read
                     var linked = (D._links[p.a] && D._links[p.a][p.b]) || (D._links[p.b] && D._links[p.b][p.a]);
                     if (linked) { known++; continue; }
                     if (ignMap[D._pk(p.a, p.b)]) { ignoredPairs.push(p); } else { fresh.push(p); }
@@ -13011,12 +13032,14 @@ JiTA.dupfind = {
                         // Feature C hover preview (full description from the local DB, fetched lazily per hover).
                         $row.on('mouseenter', function () {
                             var self = this;
+                            D._hovered = self;
                             JiTA.db.getDefect(k).then(function (rec) {
+                                if (D._hovered !== self) { return; }   // the mouse left before the read came back: the card would stay
                                 var r = { key: k, summary: m.summary || (rec && rec.summary) || '', description: (rec && rec.description) || '', created: (rec && rec.created) || null };
                                 JiTA.ui._showTip(r, self, st);
                             }).catch(function () { /* no tip */ });
                         });
-                        $row.on('mouseleave', function () { JiTA.ui._hideTip(); });
+                        $row.on('mouseleave', function () { if (D._hovered === this) { D._hovered = null; } JiTA.ui._hideTip(); });
                         $card.append($row);
                     });
                     if (cl.keys.length > 2) {
@@ -13030,7 +13053,8 @@ JiTA.dupfind = {
                     var ignClusters = D._clusters(ignoredPairs);
                     for (var g = 0; g < ignClusters.length; g++) { card(ignClusters[g], true); }
                 }
-                D._status('Scanned ' + D._last.scanned + ' open defects · ' + clusters.length + ' suggestion(s), ' + known + ' already linked, ' + ignoredPairs.length + ' ignored' + (ghosts ? ', ' + ghosts + ' moved-key ghost(s) dropped' : '') + ' · ' + when);
+                D._status('Scanned ' + D._last.scanned + ' open defects · ' + clusters.length + ' suggestion(s), ' + known + ' already linked, ' + ignoredPairs.length + ' ignored' + (ghosts ? ', ' + ghosts + ' moved-key ghost(s) dropped' : '') +
+                    (missing ? ', ' + missing + ' with a defect Jira no longer has' : '') + (unread ? ', ' + unread + ' whose links could not be checked (Recompute to try again)' : '') + ' · ' + when);
             });
         });
     },

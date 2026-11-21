@@ -14,6 +14,15 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.27 (2026-11-21)
+
+### Fixed issues
+
+- Duplicate finder: Recompute and reopening it check the links again, so two defects you have linked in Jira since are no longer suggested, and a link check that failed is tried again instead of counting as no links.
+- Duplicate finder: a defect Jira no longer has is not suggested any more.
+- Duplicate finder: changing the threshold or pressing Recompute while the list is still loading no longer shows an older list over the new one.
+- Duplicate finder: a preview no longer stays on screen after the mouse has left the row, and the scan time is shown in your own time.
+
 ## 3.53.26 (2026-11-21)
 
 ### Fixed issues
