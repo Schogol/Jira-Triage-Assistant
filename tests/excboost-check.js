@@ -68,6 +68,8 @@ Object.assign(JiTA.profile, eval('({' + line('    LOG_V: ') + member('    _usabl
     member('    _sigParts: function (sig) {') + member('    _sigTip: function (sigs, msg) {') + '})'));
 Object.assign(JiTA.profile, eval(require('./source').members(src, 'JiTA.profile', ['_logSig', '_zipLog', '_logsCurrent', '_otherLogs', '_current'])));   // whether a reading is current
 Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + '})'));   // the cards' symbols: the badge is ≡ or ≈
+// A card's status category (cardfoot-check.js covers it): the stale demote reads it.
+Object.assign(JiTA.ui, eval(require('./source').members(src, 'JiTA.ui', ['PROGRESS_RE', 'STATUS_CAT', '_statusCat'])));
 // What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
 Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
 Object.assign(JiTA.util, eval('({' + member('    hash: function (str) {') + '})'));

@@ -65,6 +65,12 @@ const flagged = (r) => ['stale', 'closed'].filter((k) => k in r);
     ok('...and still says how long before the report it was fixed', /^fixed 2y before report$/.test(old.staleNote || ''), old.staleNote);
     ok('...but is not flagged to be greyed', flagged(old).length === 0, flagged(old).join());
     ok('an open defect is left alone (control)', !cur.staleNote && flagged(cur).length === 0 && cur.pct === 100);
+    // Reopened, it kept its resolution and its date: open as its card shows it, so not "fixed before the report".
+    const reopened = () => Object.assign(fixedLongAgo(), { key: 'EDR-3', status: 'Open', summary: 'reopened' });
+    JiTA.rank.suggest = () => Promise.resolve([Object.assign(reopened(), { score: 10 }), Object.assign(open(), { score: 8 })]);
+    out = await JiTA.rank.suggestBest('text', 'EBR-9', REPORT, 'Keyword', []);
+    const re = out.results.filter((r) => r.key === 'EDR-3')[0];
+    ok('a reopened defect that kept its old resolution date is not demoted', out.results[0].key === 'EDR-3' && re.pct === 100 && !re.staleNote, out.results.map((r) => r.key + ' ' + r.pct + ' ' + (r.staleNote || '')).join(', '));
 
     // ================= Hybrid =================
     JiTA.rank._hybridResults = (text, key, terms, scope, bmFn, keywordOnly, demote) => {

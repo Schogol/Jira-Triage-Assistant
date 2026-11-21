@@ -82,5 +82,25 @@ JiTA.rank._workerSemantic('warp', 'defects', null, null);
 ok('both ranking calls carry it', calls.length === 2 && calls.every((c) => c.payload.gate && c.payload.gate.status === 'open' && c.payload.gate.createdDays === 14),
     JSON.stringify(calls.map((c) => c.type + ':' + JSON.stringify(c.payload.gate))));
 
+// ---- a reopened defect that kept its resolution: open, as its card shows it ----
+const S = require('./source');
+const UI = eval(S.members(S.load(), 'JiTA.ui', ['PROGRESS_RE', 'STATUS_CAT', '_statusCat', 'passesFilter']));
+const CATS = UI.STATUS_CAT, gated = (g) => Object.assign({ cats: CATS }, g);
+const reopened = { project: 'EDR', key: 'EDR-42', status: 'Open', resolution: 'Fixed' }, shut = { project: 'EDR', key: 'EDR-43', status: 'Closed', resolution: 'Fixed' };
+ok('the worker, told the statuses\' categories, keeps a reopened defect that kept its resolution under Status open',
+    W.passesGate(reopened, gated(OPEN)) && !W.passesGate(reopened, gated(FIXED)));
+ok('...still drops a closed one there and keeps it under Status fixed', !W.passesGate(shut, gated(OPEN)) && W.passesGate(shut, gated(FIXED)));
+ok('...a status it does not list goes by the older rule (status name or resolution)',
+    !W.passesGate({ project: 'EDR', status: 'Won\'t Do', resolution: 'Won\'t Do' }, gated(OPEN)) && W.passesGate({ project: 'EDR', status: 'Triage' }, gated(OPEN)) &&
+    !W.passesGate({ project: 'EDR', status: 'Triage', resolution: 'Duplicate' }, gated(OPEN)));
+ok('...as statuses are written in Jira (case and spaces)', W.passesGate({ project: 'EDR', status: ' OPEN ', resolution: 'Fixed' }, gated(OPEN)));
+JiTA.util = eval('({' + member('    isResolved: function (status, resolution) {') + member('    isClosedStatus: function (status) {') + '})');
+Object.assign(JiTA.ui, UI);
+JiTA.ui.filters = { status: 'open', createdDays: 0 };
+ok('the tab\'s own filter keeps the reopened defect under Open', JiTA.ui.passesFilter(reopened) && !JiTA.ui.passesFilter(shut));
+JiTA.ui.filters = { status: 'fixed', createdDays: 0 };
+ok('...and leaves it out under Fixed, where its card showed an open dot', !JiTA.ui.passesFilter(reopened) && JiTA.ui.passesFilter(shut));
+ok('the tab sends the worker those categories with the gate', JiTA.ui._gateSpec().cats === JiTA.ui.STATUS_CAT);
+
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'session filter checks passed.'));
 process.exit(fail ? 1 : 0);

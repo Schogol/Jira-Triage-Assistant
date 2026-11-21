@@ -14,6 +14,17 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.22 (2026-11-21)
+
+### Fixed issues
+
+- Attach on a bug report: a report attached or closed in Jira since the page was drawn is no longer linked a second time, and once it is linked the other rows stop offering Attach for it.
+- Attach on a defect: a report attached in Jira seconds before is no longer linked again; the check now asks the report itself, which is always up to date.
+- Status filter: a reopened defect that kept its old resolution is listed under Open, as its card shows it, and is no longer ranked lower as fixed long before the report.
+- A report someone had once and has given up since can be attached again within a couple of minutes, without a reload.
+- Reporter's other reports and Similar open reports: a late error or empty state no longer shows up on the next issue you opened.
+- A report taken off the list, reopened and then attached again in Jira leaves the list again instead of lingering until the next sync.
+
 ## 3.53.21 (2026-11-21)
 
 ### Fixed issues

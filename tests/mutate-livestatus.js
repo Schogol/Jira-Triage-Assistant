@@ -22,6 +22,8 @@ const muts = [
     [H, 'a closed report stays in the local copy when the list was left', '        if (!fresh.length) { return Promise.resolve(); }\n        return JiTA.db.deleteDefects(fresh)', '        if (!fresh.length || !still()) { return Promise.resolve(); }\n        return JiTA.db.deleteDefects(fresh)'],
     [H, 'the list is redrawn even when the user left it', '            if (still()) { U.scheduleRender(); }', '            U.scheduleRender();'],
     [H, 'Attach links a report already attached in Jira', "if (Object.prototype.hasOwnProperty.call(st, reportKey) && !JiTA.ui._isOpenStatus(st[reportKey])) {", 'if (false) {'],
+    [H, "Attach asks the lagging search", "JiTA.ui._getAssignee(reportKey), JiTA.ui._statusNow(reportKey)])", "JiTA.ui._getAssignee(reportKey), JiTA.ui._liveStatus([reportKey])])"],
+    [H, "a report taken off stays taken off when seen open", "U._openSeen[k] = t; delete U._liveGone[k]; }", "U._openSeen[k] = t; }"],
     [H, 'a collapsed row never hands on', "            if (done) { done(); }\n        }, 320);", '        }, 320);'],
     [H, '_ebrRemoved resolves before the worker dropped its indexes', "        return JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); });", "        JiTA.sync._invalidateWorker().then(function () { gmSet('sdEbrRemoved', note); }); return Promise.resolve();"],
     [H, 'a defect\'s Matching bug reports are never checked', '                        JiTA.ui._checkReportRows(function () { return !stale(); });   // one attached or closed in Jira itself leaves now, not at the next sync\n', ''],
