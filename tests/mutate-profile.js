@@ -205,6 +205,7 @@ const muts = [
     [H, 'an entry is unpacked without the cap', 'P._inflate(data, maxBytes)', 'P._inflate(data)'],
     [H, 'the cap is never checked while unpacking', '                if (maxBytes && size > maxBytes) {', '                if (false) {'],
     [H, 'an entry unpacked loses its pieces', '                parts.push(r.value);\n', ''],
+    [H, "the shared card leaves its stylesheet to the panel", "        JiTA.ui.injectCss();\n        var collapsed = !!gmGet(o.collapseKey, false);", "        var collapsed = !!gmGet(o.collapseKey, false);"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

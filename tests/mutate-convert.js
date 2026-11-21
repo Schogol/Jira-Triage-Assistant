@@ -43,9 +43,9 @@ const muts = [
     [H, 'the cloud id is not checked', "    if (!cloudId) { return $.Deferred().reject({ status: 0, jitaError: 'Could not read the Jira cloud id from the page - reload it and try again.' }).promise(); }\n", ''],
     [H, 'the button is not wired', "$(\"#convertToDefectButton\").off('click.jita').on('click.jita', jitaConvertClick);", "$(\"#convertToDefectButton\").off('click.jita');"],
     // ---- v3.51.0: an unassigned report is taken first, so its defect starts out with the one converting it ----
-    [H, 'an unassigned report is converted untaken', "if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }", 'if (true) { then(false); return; }'],
-    [H, 'a report someone has is taken', "if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }", "if (!flagOn('defectChecklist')) { then(false); return; }"],
-    [H, 'taken with the checklist switched off', "if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }", 'if ((d && d.fields && d.fields.assignee)) { then(false); return; }'],
+    [H, 'an unassigned report is converted untaken', "if (!flagStillOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }", 'if (true) { then(false); return; }'],
+    [H, 'a report someone has is taken', "if (!flagStillOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }", "if (!flagStillOn('defectChecklist')) { then(false); return; }"],
+    [H, 'taken with the checklist switched off', "if (!flagStillOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }", 'if ((d && d.fields && d.fields.assignee)) { then(false); return; }'],
     [H, 'the assignee never read', "'?fields=issuelinks,assignee'", "'?fields=issuelinks'"],
     [H, 'a refused take stops the conversion', '            .done(function () { then(true); }).fail(function () { then(false); });', '            .done(function () { then(true); });'],
     [H, 'converted before the take lands', '            .done(function () { then(true); }).fail(function () { then(false); });', '            ;\n        then(true);'],
@@ -62,7 +62,8 @@ const muts = [
     [H, 'a give-back Jira refuses says nothing', '                    jitaGiveBack(ebrKey).always(function () { fail(xhr); });', '                    jitaGiveBack(ebrKey).done(function () { fail(xhr); });'],
     [H, 'given back to someone', "data: JSON.stringify({ accountId: null }) });\n}", "data: JSON.stringify({}) });\n}"],
     [H, 'the give-back without the token Jira wants', "headers: { 'X-Atlassian-Token': 'no-check' }, data: JSON.stringify({ accountId: null }) });", 'data: JSON.stringify({ accountId: null }) });'],
-    [H, 'the give-back is a read', "    return $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/3/issue/' + key + '/assignee', type: 'PUT',", "    return $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/3/issue/' + key + '/assignee', type: 'GET',"]
+    [H, 'the give-back is a read', "    return $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/3/issue/' + key + '/assignee', type: 'PUT',", "    return $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/3/issue/' + key + '/assignee', type: 'GET',"],
+    [H, "a report is taken though the checklist was turned off in another tab", "if (!flagStillOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }", "if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

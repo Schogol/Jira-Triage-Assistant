@@ -56,7 +56,9 @@ const muts = [
     [H, 'the Confluence boot starts it again', "        // No census here: this browser's entry for Who runs what is written by the Jira tab that leads the worker.\n",
         "        try { JiTA.census.start(); } catch (e) { JiTA.caught('census.start', e); }   // this browser's entry for Who runs what\n"],
     [H, 'the button is there for everyone', "        if (JiTA.leadduty.OWNER === ((JiTA.leadduty.me() && JiTA.leadduty.me().handle) || '')) {\n            $('<button class=\"jita-btn\">Who runs what</button>')",
-        "        if (true) {\n            $('<button class=\"jita-btn\">Who runs what</button>')"]
+        "        if (true) {\n            $('<button class=\"jita-btn\">Who runs what</button>')"],
+    [H, "a feature that writes reads the switch as the tab loaded it", "function flagStillOn(name) { return flagOn(name) && flagStored(name); }", "function flagStillOn(name) { return flagOn(name); }"],
+    [H, "a switch turned on in another tab starts writing at once", "function flagStillOn(name) { return flagOn(name) && flagStored(name); }", "function flagStillOn(name) { return flagStored(name); }"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

@@ -14,6 +14,15 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.25 (2026-11-21)
+
+### Fixed issues
+
+- Defect checklist: switched off in one tab, it no longer takes, refuses or puts back assignees in your other open tabs.
+- Defect checklist: its card collapses again while the Triage Assistant is switched off.
+- The Triage Assistant panel no longer pops up on a dashboard or board after you have left an issue.
+- The Tampermonkey menu no longer lists Settings twice on a wiki page that embeds a database.
+
 ## 3.53.24 (2026-11-21)
 
 ### Fixed issues
