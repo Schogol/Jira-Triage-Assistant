@@ -1,6 +1,7 @@
-# Tags every release: a push to main that raises @version in JiTA.user.js gets the tag v<version> on its commit, so a
-# release can be found, linked and compared by its version (git diff v3.52.0 v3.52.2). A push that leaves the version
-# as it was (tests, CI) tags nothing, and a version that already has a tag keeps it.
+# Tags every release: each commit of a push to main that raises @version in JiTA.user.js gets the tag v<version>, so a
+# release can be found, linked and compared by its version (git diff v3.52.0 v3.52.2). A merged stack of pull requests
+# lands several releases in one push, and each gets its own tag on its own commit. A commit that leaves the version as
+# it was (tests, CI) tags nothing, and a version that already has a tag keeps it.
 name: tag
 
 on:
@@ -8,7 +9,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: write   # to push the tag
+  contents: write   # to push the tags
 
 concurrency:
   group: tag
@@ -22,27 +23,45 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0   # the tags, and the commit before the push
+          fetch-depth: 0   # the tags, and the commits before the push
 
       - uses: actions/setup-node@v5
         with:
           node-version: 24
 
-      - name: Tag a new version
+      - name: Tag each new version
         env:
           BEFORE: ${{ github.event.before }}
         run: |
-          v="$(node tests/release.js --current)"
-          was=""
-          if git show "$BEFORE:JiTA.user.js" > "$RUNNER_TEMP/before.user.js" 2>/dev/null; then
-            was="$(JITA_SRC="$RUNNER_TEMP/before.user.js" node tests/release.js --current || true)"
-          fi
-          if [ "$v" = "$was" ]; then
-            echo "The version stays $v: nothing to tag."
-          elif git rev-parse -q --verify "refs/tags/v$v" > /dev/null; then
-            echo "v$v is tagged already, at $(git rev-list -n 1 "v$v")."
+          # The @version of JiTA.user.js at a commit, or nothing when the file is not there.
+          version_at() {
+            if git show "$1:JiTA.user.js" > "$RUNNER_TEMP/at.user.js" 2>/dev/null; then
+              JITA_SRC="$RUNNER_TEMP/at.user.js" node tests/release.js --current || true
+            fi
+          }
+          # The commits of the push that changed the script, oldest first. A push that created main, or rewrote it, has
+          # no commit before it to go from: its head alone, as before.
+          if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            commits="$(git rev-list --reverse "$BEFORE..$GITHUB_SHA" -- JiTA.user.js)"
           else
-            git tag "v$v" "$GITHUB_SHA"
-            git push origin "refs/tags/v$v"
-            echo "Tagged v$v at $GITHUB_SHA."
+            commits="$GITHUB_SHA"
+          fi
+          tagged=0
+          for c in $commits; do
+            v="$(version_at "$c")"
+            was="$(version_at "$c^")"
+            if [ -z "$v" ] || [ "$v" = "$was" ]; then
+              continue
+            fi
+            if git rev-parse -q --verify "refs/tags/v$v" > /dev/null; then
+              echo "v$v is tagged already, at $(git rev-list -n 1 "v$v")."
+            else
+              git tag "v$v" "$c"
+              git push origin "refs/tags/v$v"
+              echo "Tagged v$v at $c."
+              tagged=$((tagged + 1))
+            fi
+          done
+          if [ "$tagged" -eq 0 ]; then
+            echo "No new version in this push: nothing to tag."
           fi
