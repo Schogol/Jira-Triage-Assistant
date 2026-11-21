@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.35
+// @version     3.53.36
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.35
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.36
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -1531,12 +1531,13 @@ function readCodeBlock() {
     return rows;
 }
 
-// Prep the code-block, replace it with `viewHtml`, then kick off `parseFn` once the parser markup has mounted.
-// Used by the log / processHealth / methodCalls / outstandingCalls / lastCrashes branches of SwapUI.
-function mountParser(viewHtml, parseFn) {
+// Prep the code-block, replace it with `viewHtml`, then draw the file as a `type` table (JiTA.logparser.TYPES) once the
+// parser markup has mounted. Used by the log / processHealth / methodCalls / outstandingCalls / lastCrashes branches of
+// SwapUI.
+function mountParser(viewHtml, type) {
     readCodeBlock();
     $(SELECTORS.CODE_BLOCK).html(viewHtml);
-    setTimeout(function () { jitaRunParse(parseFn); }, 250);
+    setTimeout(function () { jitaRunParse(function () { JiTA.logparser.draw(type, rows); }); }, 250);
 }
 
 // Run a parser; if it throws, end the spinner with a message instead of leaving it going over a page whose raw
@@ -1602,30 +1603,30 @@ function SwapUI() {
         // clips every row. Pin #table to the viewport instead (the media viewer is full-screen) so all rows
         // are visible and scrollable.
         $('#table').css({ position: 'fixed', top: '95px', bottom: '0', left: '0', width: '100%' });
-        setTimeout(function () { jitaRunParse(ParseLogs); }, 250);
+        setTimeout(function () { jitaRunParse(function () { JiTA.logparser.draw('log', rows); }); }, 250);
         // NB: no early return here. The <span> checks below are no-ops on this layout (no code-block span),
         // but we must fall through to the "$('#gpanel a').click(...)" handler at the end of SwapUI so the
         // Toggle Notice / Warnings / Errors / Exceptions filter buttons get wired up.
     }
 
     else if ($(SELECTORS.CODE_BLOCK + ":contains(" + LOG_HDR + ")")[0] && flagOn('parser')) {
-        mountParser(html, ParseLogs);
+        mountParser(html, 'log');
     }
 
     else if ($(SELECTORS.CODE_BLOCK + ":contains(dateTime	pyDateTime	procCpu	threadCpu	pyMem	virtualMem	taskletsProcessed	taskletsQueued	watchdog time	spf	serviceCalls	callsFromClient	bytesReceived	bytesSent	packetsReceived	packetsSent	sessionCount	tidiFactor)")[0] && flagOn('parser')) {
-        mountParser(phHtml, ParsePhLogs);
+        mountParser(phHtml, 'ph');
     }
 
     else if ($(SELECTORS.CODE_BLOCK + ":contains(Time	Method	Duration [ms])")[0] && flagOn('parser')) {
-        mountParser(McHtml, ParseMcLogs);
+        mountParser(McHtml, 'mc');
     }
 
     else if (igbr === 'oc' && flagOn('parser')) {
-        mountParser(ocHtml, ParseOcLogs);
+        mountParser(ocHtml, 'oc');
     }
 
     else if (igbr === 'lc' && flagOn('parser')) {
-        mountParser(lcHtml, ParseOcLogs);
+        mountParser(lcHtml, 'oc');   // Last Crashes reads as Outstanding Calls do
     }
 
     else if (igbr === 'dx' && flagOn('parser')) {
@@ -1716,455 +1717,6 @@ function jitaApplyLogFilter() {
 }
 
 
-// Normalize the raw log text (collapse tab runs + blank lines, flatten "***…***" logging errors, escape <)
-// and split into rows. Shared preamble of the four Parse* functions; assigns + returns the module `rows` array.
-function prepLogRows() {
-    rows = rows.replace(/(\t{2,})+/g, "\t").replace(/([\r\n]){2,}/g, "\r\n").replace(/([\r\n])[*]{3}(.*)(?=[*]{3})[*]{3}/g, "\r\n\t\t\tLogging error occurred").replace(/[\<]/g, function (c) { return "&lt;"; }).replace(/\n$/, "").split("\n");
-    return rows;
-}
-
-// Hide the loader and reveal the filled table. Shared epilogue of the four Parse* functions.
-function finishParserView() {
-    document.getElementById("loader").style.display = "none";
-    document.getElementById("tableContent").style.display = "table";
-}
-
-
-// Process the methodcalls logs and display them in a more readable state than the default
-function ParseMcLogs() {
-    var averageDuration = 0;
-    var count = 0;
-    var peak = 0;
-    prepLogRows();
-
- /**
- * Object to which we save the table
- */
-    var logs = {};
-    logs.tableInfo = [];
-
-
- /**
- * Adds each row from 'rows' to the 'tableContent' table.
- * rowQuantity: Quantity of rows which will be loaded
- */
-    logs.showRow = function(rowQuantity) {
-        var table = logs.tableInfo;
-        var tableContent = document.getElementById('tableContent');
-        var tableContentRowsLength = 0;
-        var toIndex = tableContentRowsLength + rowQuantity;
-        for (var i = tableContentRowsLength, row, cellIndex, dateTime, method, duration, macho; i < toIndex; ++i) {
-            row = document.createElement('tr');
-            row.className = 'row';
-            cellIndex = -1;
-            dateTime = row.insertCell(++cellIndex);
-            dateTime.innerHTML = table[i][0];
-            method = row.insertCell(++cellIndex);
-
-            if (table[i][1] == "machoNet::GetTime (RemoteServiceCall)") {
-                macho = true;
-            }
-            else {
-                macho = false;
-            }
-
-            method.innerHTML = table[i][1];
-            duration = row.insertCell(++cellIndex);
-
-            if (table[i][2] >= 1500) {
-                row.className = 'red';
-            }
-            else if (table[i][2] >= 500) {
-                row.className = 'yellow';
-            }
-
-            if (macho & table[i][2] >= Number(peak)) {
-                $('.peakMachoCell').each(function() {$(this).removeClass('peakMachoCell')})
-                row.className += ' peakMachoCell'
-            }
-
-            duration.innerHTML = table[i][2];
-
-            tableContent.tBodies[0].appendChild(row);
-        }
-    };
-
- /**
- * Fill the table with the log data
- */
-    for (var i = 1; i < rows.length; ++i) {
-        if (!rows[i].trim()) { continue; }   // a blank line is not a call
-        var cols = rows[i].split("\t");
-
-        if (cols[1] == "machoNet::GetTime (RemoteServiceCall)") {
-            averageDuration = averageDuration + Number(cols[2]);
-            count++;
-            if (Number(peak) < Number(cols[2])) {
-                peak = Number(cols[2]);   // the last column still carries the line's \r
-            }
-        }
-
-        logs.tableInfo.push([cols[0], cols[1], cols[2]]);
-    }
-    $('#averageMacho').html('Average machoNet::GetTime duration: ' + (count ? Math.round(averageDuration / count) + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue."></i>');
-    $('#peakMacho').html('Peak machoNet::GetTime duration: ' + (count ? peak + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="Clicking this row scrolls to the highest GetTime value withing this log file."></i>');
-    $('#peakMacho').on('click', function () { var p = $('.peakMachoCell')[0]; if (p) { p.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } });
-    logs.showRow(logs.tableInfo.length);   // every call read; rows.length - 2 dropped the last one
-
-
-
- /**
- * Remove the loader and show the content
- */
-    finishParserView();
-};
-
-
-// Process the outstandingcalls logs and display them in a more readable state than the default
-function ParseOcLogs() {
-    prepLogRows();
-
- /**
- * Object to which we save the table
- */
-    var logs = {};
-    logs.tableInfo = [];
-
-
- /**
- * Adds each row from 'rows' to the 'tableContent' table.
- * rowQuantity: Quantity of rows which will be loaded
- */
-    logs.showRow = function(rowQuantity) {
-        var table = logs.tableInfo;
-        var tableContent = document.getElementById('tableContent');
-        var tableContentRowsLength = 0;
-        var toIndex = tableContentRowsLength + rowQuantity;
-        for (var i = tableContentRowsLength, row, cellIndex, dateTime, method; i < toIndex; ++i) {
-            if (table[i][0] == "") {
-                break;
-            }
-            row = document.createElement('tr');
-            row.className = 'row';
-            cellIndex = -1;
-            dateTime = row.insertCell(++cellIndex);
-            dateTime.innerHTML = table[i][0];
-            method = row.insertCell(++cellIndex);
-            method.innerHTML = table[i][1];
-
-            tableContent.tBodies[0].appendChild(row);
-        }
-    };
-
- /**
- * Fill the table with the log data
- */
-    for (var i = 0; i < rows.length; ++i) {
-        var cols = rows[i].split(" - ");
-        logs.tableInfo.push([cols[0], cols[1]]);
-    }
-
-    logs.showRow((rows.length));
-
-
-
- /**
- * Remove the loader and show the content
- */
-    finishParserView();
-};
-
-
-// Process the processHealth logs and display them in a more readable state than the default
-function ParsePhLogs() {
-    prepLogRows();
-
- /**
- * Object to which we save the table
- */
-    var logs = {};
-    logs.tableInfo = [];
-
-
- /**
- * Adds each row from 'rows' to the 'tableContent' table.
- * rowQuantity: Quantity of rows which will be loaded
- */
-    logs.showRow = function(rowQuantity) {
-        var table = logs.tableInfo;
-        var tableContent = document.getElementById('tableContent');
-        var tableContentRowsLength = 0;
-        var toIndex = tableContentRowsLength + rowQuantity;
-        for (var i = tableContentRowsLength, row, cellIndex, dateTime, pyDateTime, procCpu, threadCpu, pyMem, virtualMem, taskletsProcessed, taskletsQueued, watchdogTime, spf, serviceCalls, callsFromClient, bytesReceived, bytesSent, packetsReceived, packetsSent, sessionCount, tidiFactor; i < toIndex; ++i) {
-            row = document.createElement('tr');
-            row.className = 'row';
-            cellIndex = -1;
-            dateTime = row.insertCell(++cellIndex);
-            dateTime.innerHTML = table[i][0];
-            pyDateTime = row.insertCell(++cellIndex);
-            pyDateTime.innerHTML = table[i][1];
-            procCpu = row.insertCell(++cellIndex);
-            procCpu.innerHTML = Math.round(Number(table[i][2]));
-            threadCpu = row.insertCell(++cellIndex);
-            threadCpu.innerHTML = Math.round(Number(table[i][3]));
-            pyMem = row.insertCell(++cellIndex);
-            pyMem.innerHTML = Math.round(Number(table[i][4]));;
-            virtualMem = row.insertCell(++cellIndex);
-            virtualMem.innerHTML = Math.round(Number(table[i][5]));
-            taskletsProcessed = row.insertCell(++cellIndex);
-            taskletsProcessed.innerHTML = table[i][6];
-            taskletsQueued = row.insertCell(++cellIndex);
-            taskletsQueued.innerHTML = table[i][7];
-            watchdogTime = row.insertCell(++cellIndex);
-            watchdogTime.innerHTML = Number(table[i][8]);
-            spf = row.insertCell(++cellIndex);
-
-            if (Number(table[i][9]) >= "0.0666666666666667") {
-                spf.className += 'red';
-            }
-            else if (Number(table[i][9]) >= "0.0333333333333333") {
-                spf.className += 'yellow';
-            }
-
-            spf.innerHTML = Math.round(1 / Number(table[i][9]) *10000) /10000;
-            serviceCalls = row.insertCell(++cellIndex);
-            serviceCalls.innerHTML = table[i][10];
-            callsFromClient = row.insertCell(++cellIndex);
-            callsFromClient.innerHTML = table[i][11];
-            bytesReceived = row.insertCell(++cellIndex);
-            bytesReceived.innerHTML = table[i][12];
-            bytesSent = row.insertCell(++cellIndex);
-            bytesSent.innerHTML = table[i][13];
-            packetsReceived = row.insertCell(++cellIndex);
-            packetsReceived.innerHTML = table[i][14];
-            packetsSent = row.insertCell(++cellIndex);
-            packetsSent.innerHTML = table[i][15];
-            sessionCount = row.insertCell(++cellIndex);
-
-            if (Number(table[i][16]) >= 2) {   // as numbers: '10' >= '2' is false as text
-                sessionCount.className += 'red';
-            }
-
-            sessionCount.innerHTML = table[i][16];
-            tidiFactor = row.insertCell(++cellIndex);
-
-            if (Number(table[i][17]) <= 0.2) {
-                tidiFactor.className += 'red';
-            }
-            else if (Number(table[i][17]) <= 0.8) {
-                tidiFactor.className += 'yellow';
-            }
-            else if (Number(table[i][17]) >= 1.05) {
-                tidiFactor.className += 'red';
-            }
-
-
-            tidiFactor.innerHTML = table[i][17];
-            tableContent.tBodies[0].appendChild(row);
-        }
-    };
-
- /**
- * Fill the table with the log data
- */
-    for (var i = 1; i < rows.length; ++i) {
-        if (!rows[i].trim()) { continue; }   // a blank line is not a sample
-        var cols = rows[i].split("\t");
-        logs.tableInfo.push([cols[0], cols[1], cols[2], cols[3], cols[4], cols[5], cols[6], cols[7], cols[8], cols[9], cols[10], cols[11], cols[12], cols[13], cols[14], cols[15], cols[16], cols[17]]);
-    }
-    logs.showRow(logs.tableInfo.length);   // every sample read; rows.length - 2 dropped the last one
-
- /**
- * Clickhandler for when the user clicks on the FPS /spf row. We toggle between spf and FPS on click
- */
-    var clickHandler = function() {
-        return function() {
-            var FPS = 'FPS <i class="fa-regular fa-circle-question" title="Frames per second"></i>'
-            var spf = 'spf <i class="fa-regular fa-circle-question" title="Seconds per frame"></i>'
-            $('#tableContent > thead > tr > th:nth-child(10)').html($(this).html() == FPS ? spf : FPS);
-            $('#tableContent > tbody > tr > td:nth-child(10)').each(function() {
-                $(this).text(Math.round(1 / $(this).text() *10000) /10000);
-            });
-        };
-    };
-    $('#tableContent > thead > tr > th:nth-child(10)').on('click', clickHandler());
-
-
- /**
- * Remove the loader and show the content
- */
-    finishParserView();
-};
-
-
-
-// Process the logs and display them in a more readable state than the default
-function ParseLogs() {
-    prepLogRows();
-
- /**
- * Object to which we save the table
- */
-    var logs = {};
-    logs.tableInfo = [];
-
- /**
- * Adds each row from 'rows' to the 'tableContent' table.
- * rowQuantity: Quantity of rows which will be loaded
- */
-    logs.showRow = function(rowQuantity) {
-        var excTime = "", sttTime = "";   // both start empty: an undefined excTime gave the first row a top border
-        var table = logs.tableInfo;
-        var tableContent = document.getElementById('tableContent');
-        var tableContentRowsLength = 0;
-        var toIndex = tableContentRowsLength + rowQuantity;
-        for (var i = tableContentRowsLength, row, cellIndex, timeCell, facilityCell, typeCell, messageCell; i < toIndex; ++i) {
-            row = document.createElement('tr');
-            row.className = 'row';
-            cellIndex = -1;
-            timeCell = row.insertCell(++cellIndex);
-            timeCell.innerHTML = table[i][0];
-            facilityCell = row.insertCell(++cellIndex);
-            facilityCell.innerHTML = table[i][1];
-            typeCell = row.insertCell(++cellIndex);
-
-
- /**
- * Switch for checking if the current row is a notice, warning, error or info message
- * and add the according class to the row
- */
-            switch (table[i][2]) {
-                case 'notice':
-                    row.className = 'notice';
-                    break;
-                case 'warning':
-                    row.className = 'warning';
-                    break;
-                case 'error':
-                    row.className = 'error';
-                    break;
-                default:
-                    row.className = 'info';
-                    break;
-            }
-
- /**
- * Check if the message contains the beginning of an exception and set excTime (Exception time) to the time of the current message
- * Also adds a border to the top of the row
- */
-            if (table[i][3].indexOf("EXCEPTION #") >= 0) {
-                excTime = table[i][0];
-                row.className += ' bordertop';
-            }
-
-
- /**
- * Check if the message contains the beginning of a stacktrace,
- * then set sttTime (Stacktrace time) to the time of the current message and add a border to the top of the row
- */
-            if (table[i][3].indexOf("STACKTRACE #") >= 0) {
-                sttTime = table[i][0];
-                row.className += ' bordertop';
-            }
-
-
- /**
- * If the time of the current message is the same time as it was when the exception started
- * then add the 'exception' class to the row
- */
-            if (excTime && table[i][0] == excTime) {   // outside a block excTime is '', and so is a logging-error row's time
-                row.className += ' exception';
-            }
-
-
- /**
- * If there is an "Exception End" message in the current log row,
- * then add the 'borderbot' class to the row and set excTime to its default value
- */
-            if (table[i][3].indexOf("EXCEPTION END") >= 0) {
-                row.className += ' borderbot';
-                excTime = "";
-            }
-
-
- /**
- * If excTime is not empty but it doesnt match the time of the current row (the block above has ended),
- * then add the 'bordertop' class to the row and set excTime to its default value
- */
-            if (excTime != "" && table[i][0] != excTime) {
-                row.className += ' bordertop';
-                excTime = "";
-            }
-
-
- /**
- * If there is an "Stacktrace End" message in the current log row,
- * then add the 'borderbot' class to the row and set sttTime to its default value
- */
-            if (table[i][3].indexOf("STACKTRACE END") >= 0) {
-                row.className += ' borderbot';
-                sttTime = "";
-            }
-
-
- /**
- * If sttTime is not empty but it doesnt match the time of the current row (the block above has ended),
- * then add the 'bordertop' class to the row and set sttTime to its default value
- */
-            if (sttTime != "" && table[i][0] != sttTime) {
-                row.className += ' bordertop';
-                sttTime = "";
-            }
-
-
-            typeCell.innerHTML = table[i][2];
-            messageCell = row.insertCell(++cellIndex);
-            messageCell.innerHTML = table[i][3];
-            // (Known-exception highlighting is applied as a post-render pass in ParseLogs via
-            //  JiTA.logsig.applyToTable(), since the signature index is built async from IndexedDB.)
-
-
-            tableContent.tBodies[0].appendChild(row);
-        }
-    };
-
-
- /**
- * Fill the table with the log data
- */
-    for (var i = 1; i < rows.length; ++i) {
-        var cols = rows[i].split("\t");
-        // Fewer than four columns (an empty Facility or Type collapses with its tab, or a line has no tabs at all) used
-        // to throw on the missing message and leave the spinner going: keep the time, if there is one, and the rest
-        // of the line as the message. A message with a tab of its own keeps its tail.
-        if (cols.length < 4) { cols = cols.length > 1 ? [cols[0], '', '', cols.slice(1).join(' ')] : ['', '', '', rows[i]]; }
-        logs.tableInfo.push([cols[0], cols[1], cols[2], cols.slice(3).join('\t')]);
-    }
-    logs.showRow(logs.tableInfo.length);
-
-
- /**
- * Remove the loader and show the content
- */
-    finishParserView();
-
- /**
- * "Group Repeats": segment the rendered rows into line / exception-block units and collapse consecutive
- * identical ones into a single row with an "Nx" badge. Built BEFORE the async signature pass (so signatures
- * are read from pristine message text) and grouped once for the initial (unfiltered) view; jitaApplyLogFilter
- * re-runs the collapse after every filter / toggle so the batching tracks what's currently visible.
- */
-    jitaBuildLogGroups();
-    jitaRegroupLog();
-
- /**
- * Feature D: flag log lines that match a known exception signature mined from the defect DB, linking each
- * back to its defect. Runs async (index is built from IndexedDB) and patches the rendered rows in place.
- */
-    if (typeof JiTA !== 'undefined' && JiTA.logsig) { JiTA.logsig.applyToTable(); }
-};
-
-
 /* ---- "Group Repeats": collapse consecutive identical log lines / exception blocks (main Log Parser) ----
  * A run of consecutive IDENTICAL events - either a single line, or a whole EXCEPTION #…EXCEPTION END block -
  * is collapsed to its first occurrence with an "Nx" count badge. "Identical" compares facility + type +
@@ -2239,7 +1791,7 @@ function jitaBuildLogGroups() {
 // Re-derive the "Nx" badges from the CURRENT row visibility. Walks units in order, skipping any whose rows
 // are all hidden (so a filtered-out unit does NOT break a run of duplicates around it), and collapses
 // consecutive units that share a signature: the followers are hidden and the leader gets a count badge.
-// Called at the end of jitaApplyLogFilter (after every toggle / search) and once from ParseLogs.
+// Called at the end of jitaApplyLogFilter (after every toggle / search) and once when the game log is drawn.
 function jitaRegroupLog() {
     var tbody = document.querySelector('#tableContent tbody');
     if (!tbody) { return; }
@@ -3451,6 +3003,153 @@ var JiTA = {
 };
 
 
+/* ---- the log parser: the table a parsed file is drawn as ----
+ * A game log, processHealth, methodCalls, outstandingcalls or lastcrashes file (SwapUI tells which and mounts its
+ * chrome) is drawn into #tableContent by one builder, draw(type, text). The text becomes lines (lines()); the file's type
+ * (TYPES) says from which line its rows start, what one line draws (its row's class and its cells, each a cell's HTML,
+ * or { html, cls }), what it reads from the whole file first, and what follows once the table is drawn.
+ * tests/logtables-check.js holds the drawings as they were before this module, and the builder draws exactly those.
+ */
+JiTA.logparser = {
+    // The file's text as lines: runs of tabs and of line breaks collapsed (so an empty line is gone), a "***...***" logging
+    // error turned into a line of its own, and < escaped, since a cell takes its text as HTML. A line keeps its \r.
+    lines: function (text) {
+        return String(text == null ? '' : text).replace(/(\t{2,})+/g, "\t").replace(/([\r\n]){2,}/g, "\r\n").replace(/([\r\n])[*]{3}(.*)(?=[*]{3})[*]{3}/g, "\r\n\t\t\tLogging error occurred").replace(/[\<]/g, function (c) { return "&lt;"; }).replace(/\n$/, "").split("\n");
+    },
+
+    // Draw `text` as a `type` table into #tableContent's body, then end the spinner and show the table.
+    draw: function (type, text) {
+        var P = JiTA.logparser, T = P.TYPES[type], lines = P.lines(text);
+        var body = document.getElementById('tableContent').tBodies[0];
+        var st = T.start ? T.start(lines) : {};
+        for (var i = T.from; i < lines.length; i++) {
+            var r = T.row(lines[i], st);
+            if (r === null) { continue; }   // a line that draws no row
+            if (r === false) { break; }     // the list ends here
+            var tr = document.createElement('tr');
+            tr.className = r.cls;
+            for (var k = 0; k < r.cells.length; k++) {
+                var c = r.cells[k], td = tr.insertCell(k), o = c !== null && typeof c === 'object';
+                td.innerHTML = o ? c.html : c;
+                if (o && c.cls) { td.className = c.cls; }
+            }
+            body.appendChild(tr);
+        }
+        document.getElementById('loader').style.display = 'none';
+        document.getElementById('tableContent').style.display = 'table';
+        if (T.after) { T.after(st); }
+    },
+
+    TYPES: {
+        // The game log (logs.txt): Time, Facility, Type, Message, after its header. A row takes its type's class (any
+        // other type is info). An exception or a stacktrace block gets a border above and below; an exception's rows, the
+        // ones logged in its second, are marked as the exception, and a row of the next second closes the block.
+        // Then Group Repeats batches the repeats, and the known exceptions are marked (JiTA.logsig.applyToTable).
+        log: {
+            from: 1,
+            start: function () { return { exc: '', stt: '' }; },   // the second an open exception / stacktrace began in
+            row: function (line, st) {
+                var cols = line.split('\t');
+                // Fewer than four columns (an empty Facility or Type collapses with its tab, or a line has no tabs at all) used
+                // to throw on the missing message and leave the spinner going: keep the time, if there is one, and the rest
+                // of the line as the message. A message with a tab of its own keeps its tail.
+                if (cols.length < 4) { cols = cols.length > 1 ? [cols[0], '', '', cols.slice(1).join(' ')] : ['', '', '', line]; }
+                var time = cols[0], type = cols[2], msg = cols.slice(3).join('\t');
+                var cls = (type === 'notice' || type === 'warning' || type === 'error') ? type : 'info';
+                if (msg.indexOf('EXCEPTION #') >= 0) { st.exc = time; cls += ' bordertop'; }
+                if (msg.indexOf('STACKTRACE #') >= 0) { st.stt = time; cls += ' bordertop'; }
+                if (st.exc && time === st.exc) { cls += ' exception'; }   // outside a block exc is '', and so is a logging-error row's time
+                if (msg.indexOf('EXCEPTION END') >= 0) { cls += ' borderbot'; st.exc = ''; }
+                if (st.exc !== '' && time !== st.exc) { cls += ' bordertop'; st.exc = ''; }   // the block above has ended
+                if (msg.indexOf('STACKTRACE END') >= 0) { cls += ' borderbot'; st.stt = ''; }
+                if (st.stt !== '' && time !== st.stt) { cls += ' bordertop'; st.stt = ''; }
+                return { cls: cls, cells: [time, cols[1], type, msg] };
+            },
+            after: function () {
+                // Group Repeats, built before the known-exception pass, so signatures are read from the message as written.
+                jitaBuildLogGroups();
+                jitaRegroupLog();
+                if (JiTA.logsig) { JiTA.logsig.applyToTable(); }
+            }
+        },
+        // Method Calls (methodCalls.txt): Time, Method, Duration in ms, after its header. A call of 500 ms or more is
+        // yellow, of 1500 or more red. machoNet::GetTime is much like the ping to the EVE proxy: its average and peak go
+        // above the table, and the last call at the peak is marked, for a click on the peak line to scroll to.
+        mc: {
+            from: 1,
+            GETTIME: 'machoNet::GetTime (RemoteServiceCall)',
+            start: function (lines) {
+                var averageDuration = 0, count = 0, peak = 0;
+                for (var i = 1; i < lines.length; i++) {
+                    if (!lines[i].trim()) { continue; }
+                    var cols = lines[i].split('\t');
+                    if (cols[1] === JiTA.logparser.TYPES.mc.GETTIME) {
+                        averageDuration = averageDuration + Number(cols[2]);
+                        count++;
+                        if (Number(peak) < Number(cols[2])) { peak = Number(cols[2]); }   // the last column still carries the line's \r
+                    }
+                }
+                $('#averageMacho').html('Average machoNet::GetTime duration: ' + (count ? Math.round(averageDuration / count) + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="machoNet::GetTime is similar to the ping between the client and the EVE proxy.\nIf GetTime is bad / spiky then there are likely internet or client computer/network issues present.\nIf GetTime is stable and low but other calls are spiking then you can assume that there was some sort of server issue."></i>');
+                $('#peakMacho').html('Peak machoNet::GetTime duration: ' + (count ? peak + 'ms' : 'n/a') + ' <i class="fa-regular fa-circle-question" title="Clicking this row scrolls to the highest GetTime value withing this log file."></i>');
+                $('#peakMacho').on('click', function () { var p = $('.peakMachoCell')[0]; if (p) { p.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' }); } });
+                return { peak: peak };
+            },
+            row: function (line, st) {
+                if (!line.trim()) { return null; }   // a blank line is not a call
+                var cols = line.split('\t'), cls = 'row';
+                if (cols[2] >= 1500) { cls = 'red'; } else if (cols[2] >= 500) { cls = 'yellow'; }
+                if (cols[1] === JiTA.logparser.TYPES.mc.GETTIME && cols[2] >= Number(st.peak)) {
+                    $('.peakMachoCell').each(function () { $(this).removeClass('peakMachoCell'); });   // a later call at the peak takes the mark
+                    cls += ' peakMachoCell';
+                }
+                return { cls: cls, cells: [cols[0], cols[1], cols[2]] };
+            }
+        },
+        // Outstanding Calls (outstandingcalls.txt), and Last Crashes (lastcrashes.txt), read the same way: the time, and
+        // the method (the crash id) after " - ". No header; the list ends at the first line with no time.
+        oc: {
+            from: 0,
+            row: function (line) {
+                var cols = line.split(' - ');
+                if (cols[0] === '') { return false; }
+                return { cls: 'row', cells: [cols[0], cols[1]] };
+            }
+        },
+        // Process Health (processHealth.txt): a sample a row, after its header. CPU and memory are rounded; the frame time
+        // is shown as frames a second (red at 15 or fewer, yellow at 30 or fewer; a click on the header switches it to
+        // seconds a frame and back); two sessions or more are red; time dilation is red at 0.2 or less and at 1.05 or more,
+        // yellow at 0.8 or less.
+        ph: {
+            from: 1,
+            row: function (line) {
+                if (!line.trim()) { return null; }   // a blank line is not a sample
+                var c = line.split('\t'), num = function (k) { return Number(c[k]); };
+                var spf = '', sessions = '', tidi = '';
+                if (num(9) >= 0.0666666666666667) { spf = 'red'; } else if (num(9) >= 0.0333333333333333) { spf = 'yellow'; }
+                if (num(16) >= 2) { sessions = 'red'; }   // as numbers: '10' >= '2' is false as text
+                if (num(17) <= 0.2) { tidi = 'red'; } else if (num(17) <= 0.8) { tidi = 'yellow'; } else if (num(17) >= 1.05) { tidi = 'red'; }
+                return { cls: 'row', cells: [c[0], c[1], Math.round(num(2)), Math.round(num(3)), Math.round(num(4)), Math.round(num(5)), c[6], c[7], num(8),
+                    { html: Math.round(1 / num(9) * 10000) / 10000, cls: spf }, c[10], c[11], c[12], c[13], c[14], c[15],
+                    { html: c[16], cls: sessions }, { html: c[17], cls: tidi }] };
+            },
+            after: function () {
+                // A click on the FPS / spf header switches the column between frames a second and seconds a frame.
+            var clickHandler = function() {
+                return function() {
+                    var FPS = 'FPS <i class="fa-regular fa-circle-question" title="Frames per second"></i>'
+                    var spf = 'spf <i class="fa-regular fa-circle-question" title="Seconds per frame"></i>'
+                    $('#tableContent > thead > tr > th:nth-child(10)').html($(this).html() == FPS ? spf : FPS);
+                    $('#tableContent > tbody > tr > td:nth-child(10)').each(function() {
+                        $(this).text(Math.round(1 / $(this).text() *10000) /10000);
+                    });
+                };
+            };
+                $('#tableContent > thead > tr > th:nth-child(10)').on('click', clickHandler());
+            }
+        }
+    }
+};
+
 /* ---- Shared with the worker: written once, run by the page and by the worker ------------------------------------------
  * The shared worker (jitaWorkerBody) runs from its own source text (JiTA.worker._src) and sees nothing of the page, so
  * code both sides need was kept twice, marked KEEP IN SYNC, and pairs of it drifted apart (review 2026-11-20). What is
@@ -4121,7 +3820,7 @@ JiTA.logsig = {
     // After the main log parser renders, group rows into EXCEPTION and STACKTRACE blocks, fingerprint each, and match it
     // to a defect by stack signature. The matched defect is flagged on the block's first (EXCEPTION # / STACKTRACE #) row -
     // amber accent + tooltip + [EDR-x] badge - and counted for the panel, which also lists the rest of that
-    // defect's cluster. Async (the index is built from IndexedDB); safe to call right after ParseLogs - it
+    // defect's cluster. Async (the index is built from IndexedDB); safe to call right after the log is drawn - it
     // patches the already-rendered rows.
     applyToTable: function () {
         return JiTA.logsig.ensure().then(function (idx) {

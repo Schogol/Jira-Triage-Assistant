@@ -8,33 +8,36 @@ const muts = [
     // ---- every parser ----
     [H, 'text is no longer escaped', '.replace(/[\\<]/g, function (c) { return "&lt;"; })', ''],
     [H, 'empty lines are kept', '.replace(/([\\r\\n]){2,}/g, "\\r\\n")', ''],
-    [H, 'the spinner never ends', '    document.getElementById("loader").style.display = "none";\n', ''],
+    [H, 'the spinner never ends', '        document.getElementById(\'loader\').style.display = \'none\';\n', ''],
     // ---- the game log ----
-    [H, 'a warning row is not marked as one', "                case 'warning':\n                    row.className = 'warning';\n", "                case 'warning':\n                    row.className = 'info';\n"],
-    [H, 'an exception has no border above', "                excTime = table[i][0];\n                row.className += ' bordertop';", '                excTime = table[i][0];'],
-    [H, 'an exception\'s rows are not marked', "                row.className += ' exception';", ''],
-    [H, 'a stacktrace has no border below', "            if (table[i][3].indexOf(\"STACKTRACE END\") >= 0) {\n                row.className += ' borderbot';", "            if (table[i][3].indexOf(\"STACKTRACE END\") >= 0) {"],
+    [H, 'a warning row is not marked as one', 'var cls = (type === \'notice\' || type === \'warning\' || type === \'error\') ? type : \'info\';', 'var cls = (type === \'notice\' || type === \'error\') ? type : \'info\';'],
+    [H, 'an exception has no border above', 'if (msg.indexOf(\'EXCEPTION #\') >= 0) { st.exc = time; cls += \' bordertop\'; }', 'if (msg.indexOf(\'EXCEPTION #\') >= 0) { st.exc = time; }'],
+    [H, 'an exception\'s rows are not marked', 'if (st.exc && time === st.exc) { cls += \' exception\'; }', 'if (st.exc && time === st.exc) { }'],
+    [H, 'a stacktrace has no border below', 'if (msg.indexOf(\'STACKTRACE END\') >= 0) { cls += \' borderbot\'; st.stt = \'\'; }', 'if (msg.indexOf(\'STACKTRACE END\') >= 0) { st.stt = \'\'; }'],
     [H, 'a short line loses its time', "cols = cols.length > 1 ? [cols[0], '', '', cols.slice(1).join(' ')]", "cols = cols.length > 1 ? ['', '', '', cols.slice(1).join(' ')]"],
-    [H, 'a message loses a tab of its own', "logs.tableInfo.push([cols[0], cols[1], cols[2], cols.slice(3).join('\\t')]);", 'logs.tableInfo.push([cols[0], cols[1], cols[2], cols[3]]);'],
-    [H, 'repeats are not grouped', '    jitaBuildLogGroups();\n    jitaRegroupLog();\n', '    jitaBuildLogGroups();\n'],
+    [H, 'a message loses a tab of its own', 'msg = cols.slice(3).join(\'\\t\');', 'msg = cols[3];'],
+    [H, 'repeats are not grouped', '                jitaBuildLogGroups();\n                jitaRegroupLog();\n', '                jitaBuildLogGroups();\n'],
     [H, 'a block keeps no blank line after it', "            while (i < rows.length && cellText(rows[i], 3).trim() === '') { i++; }\n", ''],
     [H, 'a repeat badge says no times', "badge.title = runCount + ' identical in a row' + (span ? ' · ' + span : '');", "badge.title = runCount + ' identical in a row';"],
     // ---- Method Calls ----
-    [H, 'a call of 500 ms is not yellow', '            else if (table[i][2] >= 500) {', '            else if (table[i][2] > 500) {'],
-    [H, 'a call of 1500 ms is not red', '            if (table[i][2] >= 1500) {', '            if (table[i][2] > 1500) {'],
+    [H, 'a call of 500 ms is not yellow', '} else if (cols[2] >= 500) { cls = \'yellow\'; }', '} else if (cols[2] > 500) { cls = \'yellow\'; }'],
+    [H, 'a call of 1500 ms is not red', 'if (cols[2] >= 1500) { cls = \'red\'; }', 'if (cols[2] > 1500) { cls = \'red\'; }'],
     [H, 'the average GetTime is not rounded', "(count ? Math.round(averageDuration / count) + 'ms' : 'n/a')", "(count ? (averageDuration / count) + 'ms' : 'n/a')"],
-    [H, 'the first of the peak calls is marked', '            if (macho & table[i][2] >= Number(peak)) {', '            if (macho & table[i][2] >= Number(peak) && !$(\'.peakMachoCell\').length) {'],
+    [H, 'the first of the peak calls is marked', 'cols[2] >= Number(st.peak)) {', 'cols[2] >= Number(st.peak) && !$(\'.peakMachoCell\').length) {'],
     // ---- Outstanding Calls / Last Crashes ----
-    [H, 'a call is split at a bare dash', '        var cols = rows[i].split(" - ");', '        var cols = rows[i].split("-");'],
-    [H, 'the first line is left out', '    for (var i = 0; i < rows.length; ++i) {\n        var cols = rows[i].split(" - ");', '    for (var i = 1; i < rows.length; ++i) {\n        var cols = rows[i].split(" - ");'],
+    [H, 'a call is split at a bare dash', '                var cols = line.split(\' - \');', '                var cols = line.split(\'-\');'],
+    [H, 'the first line is left out', '        oc: {\n            from: 0,', '        oc: {\n            from: 1,'],
     // ---- Process Health ----
-    [H, 'the CPU is not rounded', '            procCpu.innerHTML = Math.round(Number(table[i][2]));', '            procCpu.innerHTML = Number(table[i][2]);'],
-    [H, 'the frame time is shown as written', '            spf.innerHTML = Math.round(1 / Number(table[i][9]) *10000) /10000;', '            spf.innerHTML = table[i][9];'],
-    [H, '15 frames a second is not red', '            if (Number(table[i][9]) >= "0.0666666666666667") {', '            if (Number(table[i][9]) > "0.0666666666666667") {'],
-    [H, 'one session is red', '            if (Number(table[i][16]) >= 2) {', '            if (Number(table[i][16]) >= 1) {'],
-    [H, 'time dilation over 1.05 is fine', "            else if (Number(table[i][17]) >= 1.05) {\n                tidiFactor.className += 'red';\n            }", ''],
+    [H, 'the CPU is not rounded', 'Math.round(num(2)), Math.round(num(3))', 'num(2), Math.round(num(3))'],
+    [H, 'the frame time is shown as written', '{ html: Math.round(1 / num(9) * 10000) / 10000, cls: spf }', '{ html: c[9], cls: spf }'],
+    [H, '15 frames a second is not red', 'if (num(9) >= 0.0666666666666667) { spf = \'red\'; }', 'if (num(9) > 0.0666666666666667) { spf = \'red\'; }'],
+    [H, 'one session is red', 'if (num(16) >= 2) { sessions = \'red\'; }', 'if (num(16) >= 1) { sessions = \'red\'; }'],
+    [H, 'time dilation over 1.05 is fine', ' else if (num(17) >= 1.05) { tidi = \'red\'; }', ''],
     [H, 'the FPS header does not toggle', "    $('#tableContent > thead > tr > th:nth-child(10)').on('click', clickHandler());", ''],
-    [H, 'the toggle leaves the header as it was', "            $('#tableContent > thead > tr > th:nth-child(10)').html($(this).html() == FPS ? spf : FPS);\n", '']
+    [H, 'the toggle leaves the header as it was', "            $('#tableContent > thead > tr > th:nth-child(10)').html($(this).html() == FPS ? spf : FPS);\n", ''],
+    // ---- one builder for every file (refactor 2) ----
+    [H, 'Last Crashes is mounted as a type of its own', "        mountParser(lcHtml, 'oc');", "        mountParser(lcHtml, 'lc');"],
+    [H, 'the game log in the viewer is drawn some other way', "jitaRunParse(function () { JiTA.logparser.draw('log', rows); });", "jitaRunParse(function () { JiTA.logparser.draw('log', String(rows).trim()); });"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
