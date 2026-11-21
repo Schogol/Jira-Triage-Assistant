@@ -6,6 +6,7 @@
 //  - an engine start that goes quiet for ENGINE_STALL_MS is given up (progress keeps it alive); a failed warm-up
 //    resets the engine
 //  - the copy buttons say when the clipboard refused, through JiTA.util.copy
+//  - labels that could not be read are said so and never kept for the image; an engine start given up is closed, not kept
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const start = src.indexOf('\nJiTA.ocr = {');
@@ -81,6 +82,32 @@ const realRun = O._run;
     langD.resolve({ code: 'deu', why: 'label', label: 'German' });
     await flush();
     ok('...otherwise the label decides (control)', O._lang && O._lang.code === 'deu', JSON.stringify(O._lang));
+    // The labels could not be read (a 429, a lapsed session): read as English, but asked again for the next box.
+    const real = eval('({' + method('_resolveLang') + method('_cardLang') + '})');
+    Object.assign(O, { _issueKey: () => 'EBR-5', _langOverride: {}, _langFromLabels: (ls) => (ls.indexOf('Russian') >= 0 ? { code: 'rus', label: 'Russian' } : null) });
+    O._labels = () => Promise.reject(new Error('HTTP 429'));
+    let rl = await real._resolveLang.call(O);
+    ok('labels that could not be read are a result of their own, read as English', rl.code === 'eng' && rl.why === 'failed', JSON.stringify(rl));
+    O._labels = () => Promise.resolve([]);
+    rl = await real._resolveLang.call(O);
+    ok('...apart from no language label at all (control)', rl.why === 'none', JSON.stringify(rl));
+    O._labels = () => Promise.resolve(['Russian']);
+    rl = await real._resolveLang.call(O);
+    ok('...and from a label (control)', rl.code === 'rus' && rl.why === 'label', JSON.stringify(rl));
+    O._lang = null; langD = deferred();
+    O._run();
+    langD.resolve({ code: 'eng', why: 'failed' });
+    await flush();
+    ok('...one that failed is not kept for the image, so the next box asks again', O._lang === null, JSON.stringify(O._lang));
+    const why = { textContent: '' }, sel = { value: '' }, srcEl = { setAttribute() {} };
+    const keepCard = O._card, keepBy = O._langByCode;
+    O._card = { querySelector: (s) => (s === '.jo-why' ? why : s === '.jo-lang' ? sel : srcEl) };
+    O._langByCode = () => ({ bcp: 'en' });
+    real._cardLang.call(O, { code: 'eng', why: 'failed' });
+    ok('...and the card says the labels could not be read, not that there is none', /could not be read/.test(why.textContent) && !/no language label/.test(why.textContent), why.textContent);
+    real._cardLang.call(O, { code: 'eng', why: 'none' });
+    ok('...while with none it says so (control)', why.textContent === 'no language label - English', why.textContent);
+    O._card = keepCard; O._langByCode = keepBy;
 
     // ================= translations =================
     const tx = [];
@@ -137,6 +164,43 @@ const realRun = O._run;
     O._enter();
     await flush();
     ok('a warm-up whose engine fails to start leaves no half-started engine behind', resets === 1 && armed === 0, resets + ' resets, ' + armed + ' idle timers');
+    const codes = [];
+    Object.assign(O, { _lang: null, _q: null, _layer: null, _tgt: { img: {} }, _resolveLang: () => Promise.resolve({ code: 'eng', why: 'failed' }),
+        _engineTimed: (c) => { codes.push(c); return Promise.resolve(); } });
+    O._enter();
+    await flush();
+    ok('a warm-up whose labels could not be read starts the English engine, keeping no language for the image', codes.join() === 'eng' && O._lang === null, codes.join() + ' / ' + JSON.stringify(O._lang));
+
+    // ================= an engine start given up =================
+    {
+        const eng = eval('({' + method('_engine') + method('_engineTimed') + '})');
+        let made = [], terminated = [];
+        const W = (n) => ({ n, terminate() { terminated.push(n); }, setParameters: () => Promise.resolve(), reinitialize: () => Promise.resolve() });
+        Object.assign(O, { _engine: eng._engine, _engineTimed: eng._engineTimed, _engineGen: 0, _worker: null, _workerKey: '', _idleT: null,
+            _langList: (c) => (c === 'eng' ? ['eng'] : [c, 'eng']), _workerOpts: () => ({}),
+            _lib: () => Promise.resolve({ createWorker: () => { const d = deferred(); made.push(d); return d.promise; } }) });
+        global.$ = { extend: (a, b) => Object.assign({}, a, b) };
+        let t2 = 2000000, ticks2 = [];
+        const now0 = Date.now;
+        Date.now = () => t2;
+        global.setInterval = (fn) => { const h = { fn, on: true }; ticks2.push(h); return h; };
+        global.clearInterval = (h) => { if (h) { h.on = false; } };
+        let gaveUp = null;
+        O._engineTimed('deu').then(() => { gaveUp = 'ok'; }, (e) => { gaveUp = e.message; });
+        await flush();
+        t2 += O.ENGINE_STALL_MS + 1000; ticks2.filter((h) => h.on).forEach((h) => h.fn());
+        await flush();
+        ok('(a start that went quiet is given up)', /stopped responding/.test(gaveUp || ''), String(gaveUp));
+        O._engineTimed('deu').then(null, () => {});   // the next read starts a new one
+        await flush();
+        made[1].resolve(W('new'));
+        await flush();
+        made[0].resolve(W('abandoned'));   // the given-up start finishes after all
+        await flush();
+        ok('a start given up that finishes later is closed, not installed over the newer worker', O._worker && O._worker.n === 'new' && terminated.join() === 'abandoned' &&
+            O._workerKey === 'deu+eng', (O._worker && O._worker.n) + ' / closed: ' + terminated.join());
+        Date.now = now0; global.setInterval = realSetInterval; global.clearInterval = realClearInterval;
+    }
 
     // ================= copy =================
     const uSrc = src.slice(src.indexOf('\nJiTA.util = {'));

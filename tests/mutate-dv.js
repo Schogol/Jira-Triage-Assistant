@@ -11,7 +11,8 @@ const muts = [
   ['URL pulls the highlight back mid-step', "if (D._stepTimer) { return; }   // mid-step", "if (false) { return; }   // mid-step"],
   ['no in-flight guard', 'if (D._loading) { return D._loading; }', '/* mutated */'],
   ['no router fallback', 'location.assign(path);   // the router ignored us: an ordinary page load it is', '/* mutated */'],
-  ['arrows steal from inputs', "if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) { return false; }", '/* mutated */']
+  ['arrows steal from inputs', "if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) { return false; }", '/* mutated */'],
+  ["a collapse writes this tab's whole state", "if (stored && typeof stored === 'object' && typeof stored.jql === 'string') { stored.collapsed = s.collapsed; gmSet(D.STATE_KEY, stored); } else { D._save(); }", "D._save();"]
 ];
 const { execSync } = require('child_process');
 let allRed = true;
