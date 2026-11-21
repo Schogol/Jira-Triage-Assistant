@@ -29,8 +29,8 @@ const muts = [
     // ---- the months ----
     [MB, 'the window takes in the current month', 'for (var i = 0; i < L.members.MONTHS; i++) { cur = L._prevYm(cur); out.push(cur); }',
         'for (var i = 0; i < L.members.MONTHS; i++) { out.push(cur); cur = L._prevYm(cur); }'],
-    [MB, 'a count made inside its month reads as final', "String(res.computedAt || '') >= JiTA.leadduty._bounds(ym).end", "String(res.computedAt || '') >= JiTA.leadduty._bounds(ym).start"],
-    [MB, 'a cached count of another month reads as final', '!!(res && res.ym === ym && String(', '!!(res && String('],
+    [MB, 'a count made inside its month reads as final', 'JiTA.credits.countsAll(res, p.y, p.m));', 'JiTA.credits.countsAll(res, p.y, p.m - 1));'],
+    [MB, 'a cached count of another month reads as final', '!!(res && res.ym === ym && JiTA.credits.countsAll(', '!!(res && JiTA.credits.countsAll('],
     [MB, 'August is not cut at the switch', 'return b.end <= sw ? b.end : sw;', 'return b.end;'],
     [MB, 'a month after the switch gets a cut', '        if (b.start >= sw) { return null; }\n', ''],
     // ---- a credits result ----
@@ -236,7 +236,7 @@ const muts = [
     [MB, 'a month before the switch is recorded from the cache', 'if (ym && !M.gmCut(ym) && M.isFinal(res, ym))', 'if (ym && M.isFinal(res, ym))'],
     [MB, 'an unfinished month is recorded from the cache', 'if (ym && !M.gmCut(ym) && M.isFinal(res, ym))', 'if (ym && !M.gmCut(ym) && res && res.table)'],
     [MB, 'the roster comes from the oldest count', "String(res.computedAt || '') > String(newest.computedAt || '')", "String(res.computedAt || '') < String(newest.computedAt || '')"],
-    [MB, 'the months counted are still missing', 'missing: wins.filter(function (ym) { return !frozen[ym]; })', 'missing: wins.slice()'],
+    [MB, 'the months counted are still missing', 'missing: wins.filter(function (ym) { return !frozen[ym] && M.over(ym); })', 'missing: wins.slice()'],
     // ---- Count ----
     [MB, 'a non-Lead can count', '        if (!L.isLead()) { return Promise.reject(M._notLead()); }\n', '', COUNT],
     [MB, 'two Counts run twice', '        if (M._count) { return M._count; }\n', '', COUNT],
@@ -244,7 +244,7 @@ const muts = [
     [MB, 'the oldest month is counted first', 'var todo = M.window(L._ym()).filter(', 'var todo = M.window(L._ym()).reverse().filter('],
     [MB, 'a month another Lead is counting is counted too', '!(c && c.tab !== JiTA.sched.tabId && now - Date.parse(c.at) < M.CLAIM_MS)', 'true'],
     [MB, 'another Lead\'s stale claim still holds its month', 'now - Date.parse(c.at) < M.CLAIM_MS);', 'true);', COUNT],
-    [MB, 'a month is tried again in the same run', 'return !frozen[ym] && !tried[ym] && !(c', 'return !frozen[ym] && !(c'],
+    [MB, 'a month is tried again in the same run', 'return !frozen[ym] && !tried[ym] && M.over(ym) && !(c', 'return !frozen[ym] && M.over(ym) && !(c'],
     [MB, 'the progress is not heard', '        C.onProgress = say;\n', '', COUNT],
     [MB, 'the credits progress hook is not given back', 'var end = function () { C.onProgress = hook; if (M._count === p)', 'var end = function () { if (M._count === p)'],
     [MB, 'a month recorded is not told', 'if (recorded) { try { if (onMonth) { onMonth(todo[0]); } } catch (e) { /* ignore */ } }', ''],
@@ -473,7 +473,12 @@ const muts = [
     [MB, 'a long note will not shrink', NOTECSS, NOTECSS.replace(' min-width: 0;', '')],
     [MB, 'a long note spills over the next column', NOTECSS, NOTECSS.replace(' overflow: hidden;', '')],
     [MB, 'a long note is cut without a mark', NOTECSS, NOTECSS.replace(' text-overflow: ellipsis;', '')],
-    [MB, 'a long note wraps onto more lines', NOTECSS, NOTECSS.replace(' white-space: nowrap;', '')]
+    [MB, 'a long note wraps onto more lines', NOTECSS, NOTECSS.replace(' white-space: nowrap;', '')],
+    // ---- a month is over only once it is over here (review 2026-11-20 members-logic-3) ----
+    [MB, 'a count is final by UTC midnight', 'return !!(res && res.ym === ym && JiTA.credits.countsAll(res, p.y, p.m));', "return !!(res && res.ym === ym && String(res.computedAt || '') >= JiTA.leadduty._bounds(ym).end);"],
+    [MB, 'a month is over by UTC', 'return Date.now() >= JiTA.credits._endMs(p.y, p.m); },', 'return true; },'],
+    [MB, 'Count offers a month not over here yet', 'missing: wins.filter(function (ym) { return !frozen[ym] && M.over(ym); }) };', 'missing: wins.filter(function (ym) { return !frozen[ym]; }) };'],
+    [MB, 'Count counts a month not over here yet', '!frozen[ym] && !tried[ym] && M.over(ym) && !(c &&', '!frozen[ym] && !tried[ym] && !(c &&']
 ];
 function within(fn) {
     if (!fn) { return [0, src.length]; }

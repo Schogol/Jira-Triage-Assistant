@@ -7,6 +7,9 @@
 // big enough for the tab. Time is held at 1 Nov 2026, so the window (May to Oct 2026) and the GM switch (21 Aug 2026) stay
 // where the checks expect them.
 require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
+// Month ends are in the browser's own time zone: held at UTC, where CI runs, and moved for the checks of a Lead elsewhere.
+process.env.TZ = 'UTC';
+const S = require('./source');
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cs = src.indexOf('JiTA.conf = {'), ce = src.indexOf('/* ---- ISD Lead duties', cs);
@@ -123,6 +126,7 @@ global.JiTA = {
     }
 };
 Object.assign(JiTA.util, eval('({' + member('    hash: function (str) {') + '})'));
+Object.assign(JiTA.credits, eval(S.members(src, 'JiTA.credits', ['_endMs', 'countsAll'])));   // when a month ends here
 JiTA.worker._verCmp = eval('(' + member('    _verCmp: function (a, b) {').replace(/^\s*_verCmp: /, '').replace(/,\s*$/, '') + ')');
 eval(src.slice(cs, ce));
 eval(src.slice(ls, le + em.length));
@@ -1249,6 +1253,34 @@ const PEOPLE = (n) => [['ISD BH Schogol', 'acc-me', 12], ['ISD Distillery', 'acc
     ok('...with no publish asked for', pubs === 0 && pageWrites.length === 0, pubs + ' publishes');
     await M.publish(true);
     ok('no page ever shows an internal note', pageWrites.length === 1 && !/Asked for a break|Second one/.test(pageWrites[0].html), pageWrites.length + ' writes');
+
+    // ================= a Lead west of UTC (review 2026-11-20 members-logic-3, worker-logic-1) =================
+    // The months shown are UTC months; a Lead in New York counts them in New York time, where October goes on for four hours
+    // after UTC midnight. 31 October, 22:00 there is 1 November, 02:00 UTC.
+    const actWest = props[L.ACTIVITY_KEY], cachesWest = clone(caches);
+    process.env.TZ = 'America/New_York';
+    Date.now = () => Date.parse('2026-11-01T02:00:00Z');
+    ok('in New York, October is not over at 22:00 on its last day, though the UTC month is November', !M.over('2026-10') && M.over('2026-09') && L._ym() === '2026-11');
+    ok('...and a count of it made then is no final one', !M.isFinal({ ym: '2026-10', computedAt: '2026-11-01T01:59:00.000Z' }, '2026-10'));
+    props[L.ACTIVITY_KEY] = { id: L.ACTIVITY_KEY, key: L.ACTIVITY_KEY, value: { v: 1, frozen: {}, a: {}, g: {}, crawl: {} }, version: 1 };
+    caches['2026-10'] = result('2026-10', '2026-11-01T01:59:00.000Z', PEOPLE(23));   // counted in its last evening hours there
+    let gw = await M.gather();
+    ok('...gather records no October from it, and Count does not offer October yet', !props[L.ACTIVITY_KEY].value.frozen['2026-10'] && gw.missing.indexOf('2026-10') < 0 &&
+        gw.missing.indexOf('2026-09') >= 0, J(gw.missing));
+    refreshed = []; gmAsked = [];
+    await M.count().catch(() => null);
+    ok('...nor does Count count it', refreshed.length > 0 && refreshed.indexOf('2026-10') < 0, J(refreshed));
+    Date.now = () => Date.parse('2026-11-01T04:30:00Z');   // 00:30 on 1 November in New York
+    ok('once midnight has come there, October is over; a count made before it is still no final one, one made after is', M.over('2026-10') &&
+        !M.isFinal(caches['2026-10'], '2026-10') && M.isFinal({ ym: '2026-10', computedAt: '2026-11-01T04:10:00.000Z' }, '2026-10'));
+    gw = await M.gather();
+    ok('...so Count offers October now', gw.missing.indexOf('2026-10') >= 0 && !props[L.ACTIVITY_KEY].value.frozen['2026-10'], J(gw.missing));
+    process.env.TZ = 'Europe/Berlin';
+    ok('east of UTC a count made after midnight there is final, though UTC is still in October', M.isFinal({ ym: '2026-10', computedAt: '2026-10-31T23:30:00.000Z' }, '2026-10'));
+    process.env.TZ = 'UTC';
+    props[L.ACTIVITY_KEY] = actWest;
+    Object.keys(caches).forEach((k) => { delete caches[k]; });
+    Object.assign(caches, cachesWest);
 
     Date.now = realNow;
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'members checks passed.'));
