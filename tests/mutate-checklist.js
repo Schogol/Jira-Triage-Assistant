@@ -6,8 +6,38 @@ const fs = require('fs');
 const { execSync } = require('child_process');
 const src = fs.readFileSync((process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js')), 'utf8').replace(/\r\n/g, '\n');
 const CK = 'checklist-check.js';
+const PROF = ['\nJiTA.profile = {', '\n    _noop: null\n};'];
 const CL = ['\nJiTA.checklist = {', '\n    _noop: null\n};'], BOOT = ['// ---- Jira boot: watch the DOM', 'observer.observe(document.body'], UTIL = ['\nJiTA.util = {', '\n};\n'];
 const muts = [
+    // ---- a write for a defect since left (review 2026-11-20 checklist-logic-1) ----
+    [CK, 'a defect since left is read again, overtaking the one on screen', '        if (key !== C._key) { return Promise.resolve(); }\n', ''],
+    // ---- a viewer who cannot be told is tried again (checklist-logic-6) ----
+    [CK, 'a failed first read is final', "            if (!e || !e.sees) { C._state[key] = { key: key, sees: '', retry: true }; return; }", '            if (!e || !e.sees) { return; }'],
+    [CK, 'an unknown user is final', 'if (!me || sees === null) { none.retry = true; } ', ''],
+    [CK, 'anyone the card is not for is tried again', 'if (!me || sees === null) { none.retry = true; } ', 'none.retry = true; '],
+    [CK, 'a Lead not known yet is no Lead', '        if (!JiTA.leadduty.me()) { return Promise.resolve(null); }\n', ''],
+    [CK, 'a Lead\'s unread ISD group is final', "        }, function () { return null; });\n    },\n\n    // ---- reading", "        }, function () { return ''; });\n    },\n\n    // ---- reading"],
+    [CK, 'a click never tries again', '        if (s && s.retry) { C._retry(); return; }\n        if (!s || !s.sees) { return; }\n        C._inputT', '        if (!s || !s.sees) { return; }\n        C._inputT'],
+    [CK, 'the focus never tries again', '        if (s && s.retry) { C._retry(); return; }\n        if (!s || !s.sees) { return; }\n        if (!s.error)', '        if (!s || !s.sees) { return; }\n        if (!s.error)'],
+    [CK, 'tried again on every click', 'if (C._key && Date.now() - C._lastLoad > C.FOCUS_MS) { C.refresh(C._key); }', 'if (C._key) { C.refresh(C._key); }'],
+    // ---- only the defect's own assignee field (checklist-logic-2) ----
+    [CK, 'an Unassigned anywhere on the page is refused', '        if (!C._ownPick(opt)) { return; }\n', ''],
+    [CK, 'the field\'s focused picker is not looked at', 'els = [opt, document.activeElement];', 'els = [opt];'],
+    [CK, 'the combobox naming the list is not looked at', '        if (id) {\n            [].forEach.call(', '        if (false) {\n            [].forEach.call('],
+    [CK, 'any field\'s row will do', 'return /^assignee$/i.test(r.label); }).map(', 'return true; }).map('],
+    [CK, 'no Assignee row found refuses every Unassigned', '        if (!rows.length) { return false; }\n', '        if (!rows.length) { return true; }\n'],
+    // ---- marks saved one after another (checklist-logic-4) ----
+    [CK, 'marks saved side by side', 'var p = (C._keepQ[key] || Promise.resolve()).then(save);', 'var p = Promise.resolve().then(save);'],
+    [CK, 'a mark being saved is not waited for', '        C._keepQ[key] = p;\n', ''],
+    // ---- Add looks through the logs the reader read (checklist-logic-8) ----
+    [CK, 'Add downloads every log, in attachment order', 'logs = P._pickLogs(src.attachments), i = 0;', 'logs = P._logFiles(src.attachments), i = 0;'],
+    [CK, 'any number of logs is looked through', 'return logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); }).slice(0, P.MAX_LOGS);', 'return logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); });', PROF],
+    // ---- the card's own hand-off (checklist-robust-2) ----
+    [CK, 'the card\'s own hand-off is put back', '        if (h === back.at) { return; }\n', ''],
+    [CK, 'the hand-off is never noted', '            C._handed[key] = Date.now();   // so _guard never puts this one back\n', ''],
+    [CK, 'a hand-off stays noted once the defect is taken again', "        if (s && s.assignee) { delete C._handed[key]; }   // assigned again, here or in Jira: a later unassign is not the card's\n", ''],
+    [CK, 'a hand-off counts however long ago it was', "if (typeof h === 'number' && Date.now() - h < C.REVERT_MS) {", "if (typeof h === 'number') {"],
+    [CK, 'the hand-off\'s unassign is not noted', 'C._handed[key] = h = back.at;', 'h = back.at;'],
     // ---- a bug report that cannot be read (v3.53.8) ----
     [CK, 'a failed bug report read is judged as no report', 'var noSource = function (e) { if (e && e.status === 404) { return null; } throw e; };', 'var noSource = function () { return null; };'],
     [CK, 'a bug report that is not there fails the load', 'var noSource = function (e) { if (e && e.status === 404) { return null; } throw e; };', 'var noSource = function (e) { throw e; };'],
@@ -180,10 +210,10 @@ const muts = [
     [CK, 'finished while the logs are still read', 'complete: !open && !pending,', 'complete: !open,'],
     // ---- who sees it ----
     [CK, 'another hunter counts as the reporter', "if (me && rep.accountId === me) { return Promise.resolve('reporter'); }", "if (rep.accountId) { return Promise.resolve('reporter'); }"],
-    [CK, 'anyone counts as a Lead', "if (!JiTA.leadduty.isLead() || !rep.accountId) { return Promise.resolve(''); }", "if (!rep.accountId) { return Promise.resolve(''); }"],
+    [CK, 'anyone counts as a Lead', "        if (!JiTA.leadduty.isLead()) { return Promise.resolve(''); }\n", ''],
     [CK, 'an ISD name means nothing', "        if (/^ISD\\b/i.test(rep.displayName || '')) { return Promise.resolve('lead'); }\n", ''],
     [CK, 'the ISD group is never asked', "return (ms || []).some(function (m) { return m && m.accountId === rep.accountId; }) ? 'lead' : '';", "return '';"],
-    [CK, 'someone the card is not for is judged all the same', "                if (!sees) { var none = { key: key, sees: '' }; onState(none); return none; }\n", ''],
+    [CK, 'someone the card is not for is judged all the same', "                if (!sees) { var none = { key: key, sees: '' }; if (!me || sees === null) { none.retry = true; } onState(none); return none; }\n", ''],
     // ---- the report's logs ----
     [CK, 'a reading without logs counts as read', "if (!rec || !rec.logs) { throw new Error('the logs could not be read'); }", "if (!rec) { throw new Error('the logs could not be read'); }"],
     [CK, 'exceptions that do not count are listed', 'var exc = (rec.exc || []).filter(function (e) { return JiTA.excnoise.counts(e.sig); });', 'var exc = (rec.exc || []).slice();'],
@@ -257,7 +287,7 @@ const muts = [
     [CK, 'a failed check is checked again on every change', '            C._seen = C._pageSig();   // checked again once the page changes, not on every change of it\n', ''],
     [CK, 'a failure after a good card replaces it', "            if (shown && shown.sees && !shown.error) { JiTA.ui.toast('The Defect checklist could not read ' + key + ' again: ' + why); return; }\n", ''],
     [CK, 'a viewer\'s failure said only with debug logging on', "if (e && e.sees) { JiTA.log('[JiTA] checklist: could not check ' + key + ':', e); }", "if (e && e.sees) { JiTA.dlog('[JiTA] checklist: could not check ' + key + ':', e); }"],
-    [CK, 'a failure before the viewer is known keeps a state', '            if (!e || !e.sees) { return; }\n', ''],
+    [CK, 'a failure before the viewer is known keeps a state', "            if (!e || !e.sees) { C._state[key] = { key: key, sees: '', retry: true }; return; }\n", ''],
     [CK, 'the failed card says not why', "        $('<div class=\"jcl-line\"></div>').text(String(s.error).replace(/[.\\s]+$/, '') + '. Nothing is refused until it can be checked.').appendTo($b);\n", ''],
     [CK, 'the failed card gives no way to check again', "        $('<a class=\"jcl-again\" href=\"#\" title=\"Check again\">↻</a>').on('click', function (e) { e.preventDefault(); C.refresh(key); }).appendTo($h);\n        $('<div class=\"jcl-line\"></div>')", "        $('<div class=\"jcl-line\"></div>')"],
     [CK, 'the failed card\'s title unchanged', "        if (t) { t.textContent = C.TITLE + ' · could not check'; }\n", ''],

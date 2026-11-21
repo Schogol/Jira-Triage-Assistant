@@ -437,7 +437,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     const done32 = await Promise.race([scanFn('EBR-33').then(() => 'done'), new Promise((r) => setTimeout(() => r('hung'), 500))]);
     ok('...and one the fingerprinting throws on still finishes the scan', done32 === 'done' && JSON.stringify(JiTA.ui._logExc['EBR-33']) === '[]', done32);
     JiTA.ui = ui0; JiTA.profile.logExceptions = lp0; JiTA.logsig.matchText = mt0; console.log = log1;
-    const readFiles = member('    _readFiles: function (issue, rec, zip) {');
+    const readFiles = member('    _readNow: function (issue, rec, zip) {');
     ok('a new reading drops the ranking\'s copy once it is stored', /var stored = function \(\) \{ JiTA\.repexc\.readStored\(issue\.key\); return rec; \};/.test(readFiles) && /\.then\(stored, stored\)/.test(readFiles));
     const section = member('    renderSection: function (key, background) {');
     ok('a finished profile tells the boost', /if \(s\.done\) \{ JiTA\.repexc\.profileReady\(key\); \}/.test(section));

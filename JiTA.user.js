@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.13
+// @version     3.53.14
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.13
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.14
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -1138,16 +1138,22 @@ function jitaConvertClick() {
     $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/2/issue/' + ebrKey + '?fields=issuelinks,assignee', type: 'GET', dataType: 'json' })
         .done(function (d) {
             var before = jitaLinkedKeys(d.fields && d.fields.issuelinks);
-            jitaTakeToConvert(ebrKey, d, function () {
+            jitaTakeToConvert(ebrKey, d, function (taken) {
+                // A report taken only to convert it is given back to nobody when the conversion does not start, so it
+                // stays in the unassigned pool; said once that is done (or could not be).
+                var notConverted = function (xhr) {
+                    if (!taken) { fail(xhr); return; }
+                    jitaGiveBack(ebrKey).always(function () { fail(xhr); });
+                };
                 jitaInvokeAutomationRule(d.id, JITA_CONVERT_DEFECT_RULE)
                     .done(function (resp) {
                         // As for the GM rule: anything but SUCCESS means nothing is converting. Say so, rather than poll for
                         // a defect that will never come and then reload the page in silence.
                         var inv = resp && resp.invocations && resp.invocations[0];
-                        if (!inv || inv.status !== 'SUCCESS') { fail({ status: 0, jitaError: 'The conversion automation did not start (' + ((inv && inv.status) || 'no answer') + ').' }); return; }
+                        if (!inv || inv.status !== 'SUCCESS') { notConverted({ status: 0, jitaError: 'The conversion automation did not start (' + ((inv && inv.status) || 'no answer') + ').' }); return; }
                         jitaGoToNewDefect(ebrKey, before);   // poll the EBR's links for the new defect, then navigate
                     })
-                    .fail(fail);
+                    .fail(notConverted);
             });
         }).fail(fail);
 }
@@ -1155,15 +1161,21 @@ function jitaConvertClick() {
 // The conversion gives the defect the bug report's assignee, and a defect nobody has is where FC picks defects up already,
 // though its Defect checklist has not been worked through (JiTA.checklist). So an unassigned report is taken by the one
 // converting it first, and its defect starts out with them until they hand it over. `then` converts either way: with the
-// checklist switched off, with the report assigned already, or when taking it fails.
+// checklist switched off, with the report assigned already, or when taking it fails. It is told whether the report was
+// taken (true only once Jira took the change), so a conversion that does not start can give it back.
 function jitaTakeToConvert(key, d, then) {
-    if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(); return; }
+    if (!flagOn('defectChecklist') || (d && d.fields && d.fields.assignee)) { then(false); return; }
     JiTA.link.currentUser().then(function (me) {
-        if (!me) { then(); return; }
+        if (!me) { then(false); return; }
         $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/3/issue/' + key + '/assignee', type: 'PUT', contentType: 'application/json',
             headers: { 'X-Atlassian-Token': 'no-check' }, data: JSON.stringify({ accountId: me }) })
-            .always(function () { then(); });
-    }, function () { then(); });
+            .done(function () { then(true); }).fail(function () { then(false); });
+    }, function () { then(false); });
+}
+// The take undone: the report unassigned again, as it was before the click. The caller goes on either way (always).
+function jitaGiveBack(key) {
+    return $.ajax({ url: 'https://fenriscreations.atlassian.net/rest/api/3/issue/' + key + '/assignee', type: 'PUT', contentType: 'application/json',
+        headers: { 'X-Atlassian-Token': 'no-check' }, data: JSON.stringify({ accountId: null }) });
 }
 
 // The Close button: open the status menu and pick "Closed" once Jira has rendered it. It clicked after a fixed
@@ -13639,6 +13651,13 @@ JiTA.profile = {
     _logSig: function (att) {
         return JiTA.profile._logFiles(att).map(function (a) { return (a.filename || '') + ':' + (a.size || 0); }).sort().join('|');
     },
+    // The logs _readFiles reads, in the order it reads them: logs.txt first, then the smallest first; none over
+    // MAX_LOG_BYTES, and at most MAX_LOGS. The Defect checklist's Add looks for an exception's block in the same ones.
+    _pickLogs: function (att) {
+        var P = JiTA.profile, logs = P._logFiles(att);
+        logs.sort(function (a, b) { return ((/^logs\.txt$/i.test(b.filename) ? 1 : 0) - (/^logs\.txt$/i.test(a.filename) ? 1 : 0)) || ((a.size || 0) - (b.size || 0)); });
+        return logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); }).slice(0, P.MAX_LOGS);
+    },
     // Whether a reading's log is the logs.txt inside igbr.zip: it read one, and the report has no log of its own.
     _zipLog: function (rec, att) { return !!(rec && rec.hasLog) && !JiTA.profile._logFiles(att).length; },
     // Whether a reading's logs were read as the reader reads them now (LOG_V). Where the zip is not read (`zip` false), one
@@ -13655,7 +13674,29 @@ JiTA.profile = {
     // Read a report's files and cache what they said. `rec` is its cached reading, if any: a part it already has is
     // not read again. A download that fails leaves its part unread, so the next visit tries again; a file over its
     // size cap is skipped for good.
+    // One read of a report at a time (_readQ): a second one (the Defect checklist reading the report again while the
+    // profile or the background reader reads it) waits for the first, then starts from what that one stored. So a part
+    // read once is not downloaded again, and a reader that skips the zip does not store over the zip part another stored.
+    _readQ: {},   // report key -> its read under way
     _readFiles: function (issue, rec, zip) {
+        var P = JiTA.profile, key = issue.key, att = (issue.fields || {}).attachment || [], before = P._readQ[key], p;
+        if (!before) { p = P._readNow(issue, rec, zip); } else {
+            p = before.then(null, function () { /* it failed: this one reads for itself */ }).then(function () {
+                return JiTA.db.getMeta(P.CACHE_PREFIX + key).then(P._usable, function () { return null; });
+            }).then(function (s) {
+                if (!s) { return P._readNow(issue, rec, zip); }
+                if (s.logs && s.logSig != null && s.logSig !== P._logSig(att)) { s = P._dropLogs(JSON.parse(JSON.stringify(s))); }   // read for other logs
+                if (s.logs && P._logsCurrent(s, att, zip) && (!zip || s.zip)) { return s; }   // that one read everything this one wants
+                return P._readNow(issue, s, zip);
+            });
+        }
+        P._readQ[key] = p;
+        var done = function () { if (P._readQ[key] === p) { delete P._readQ[key]; } };
+        p.then(done, done);
+        return p;
+    },
+    // The read itself (_readFiles).
+    _readNow: function (issue, rec, zip) {
         var P = JiTA.profile, L = JiTA.logsig, f = issue.fields || {}, att = f.attachment || [], jobs = Promise.resolve();
         var hint = (JiTA.ocr._langFromLabels(f.labels || []) || {}).code;   // the client language, for Windows' own code page
         rec = rec ? JSON.parse(JSON.stringify(rec)) : { v: P.V, key: issue.key, logs: false, zip: false };
@@ -13678,9 +13719,7 @@ JiTA.profile = {
             into.hasLog = true;
         }
         if (!rec.logs) {
-            var logs = P._logFiles(att);
-            logs.sort(function (a, b) { return ((/^logs\.txt$/i.test(b.filename) ? 1 : 0) - (/^logs\.txt$/i.test(a.filename) ? 1 : 0)) || ((a.size || 0) - (b.size || 0)); });
-            var small = logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); }).slice(0, P.MAX_LOGS), got = {}, li = 0;
+            var logs = P._logFiles(att), small = P._pickLogs(att), got = {}, li = 0;
             // One log at a time, each read as it arrives and then let go: a report can carry three logs of 15 MB, and
             // three reports are read at once. What they say is kept only once every one of them was read.
             jobs = (function nextLog() {
@@ -14378,6 +14417,8 @@ JiTA.checklist = {
     _checking: false,
     _lastLoad: 0,
     _reverted: {},           // defect key -> the unassign put back, so one is put back only once
+    _handed: {},             // defect key -> the card's own hand-off: when it was made, then the unassign it made, until the defect is assigned again (_guard)
+    _keepQ: {},              // defect key -> the mark being saved, which the next one waits for (_keep)
     _rawCache: {},           // report key -> { signature: the block as its log has it }
     _labelsP: null,          // the labels in use, being counted or counted (_labelCounts)
     _excOpen: false,
@@ -14791,28 +14832,32 @@ JiTA.checklist = {
     },
 
     // Who the card is for: the defect's reporter ('reporter'), and a Lead on an ISD member's defect ('lead'); '' for
-    // anyone else, who sees no card and is refused nothing.
+    // anyone else, who sees no card and is refused nothing. Null when it cannot be told now: whether this browser's user
+    // is a Lead is not known yet (a first load, resolveMe still out), or for a Lead, the ISD group could not be read.
     _who: function (issue, me) {
         var rep = ((issue && issue.fields) || {}).reporter || {};
         if (me && rep.accountId === me) { return Promise.resolve('reporter'); }
-        if (!JiTA.leadduty.isLead() || !rep.accountId) { return Promise.resolve(''); }
+        if (!rep.accountId) { return Promise.resolve(''); }
+        if (!JiTA.leadduty.me()) { return Promise.resolve(null); }
+        if (!JiTA.leadduty.isLead()) { return Promise.resolve(''); }
         if (/^ISD\b/i.test(rep.displayName || '')) { return Promise.resolve('lead'); }
         return JiTA.leadduty.group.members().then(function (ms) {
             return (ms || []).some(function (m) { return m && m.accountId === rep.accountId; }) ? 'lead' : '';
-        }, function () { return ''; });
+        }, function () { return null; });
     },
 
     // ---- reading ------------------------------------------------------------------------------------------------------
     // Everything for `key`, each step handed to onState: who wrote the defect (for anyone else the card stops there, at
     // one small read), then the defect, its history and its bug report, then what the report's logs hold (a download,
     // unless the Defect Profile's reader has it already). Resolves the last state. A failure once the viewer is known
-    // carries who it is (sees, me), so the card can say the check failed instead of not showing at all.
+    // carries who it is (sees, me), so the card can say the check failed instead of not showing at all. A viewer who could
+    // not be told (this browser's user unknown, or the ISD group unread) gets a state that is tried again (retry).
     load: function (key, onState) {
         var C = JiTA.checklist, L = JiTA.leadduty, path = '/rest/api/3/issue/' + encodeURIComponent(key);
         return Promise.all([L._get(path + '?fields=reporter'), JiTA.link.currentUser()]).then(function (r0) {
             var me = r0[1] || '';
             return C._who(r0[0] || {}, me).then(function (sees) {
-                if (!sees) { var none = { key: key, sees: '' }; onState(none); return none; }
+                if (!sees) { var none = { key: key, sees: '' }; if (!me || sees === null) { none.retry = true; } onState(none); return none; }
                 return Promise.all([L._get(path + '?fields=*all,-comment,-worklog&expand=names&properties=' + encodeURIComponent(C.PROP)), L._changelog(key)])
                     .then(function (r) {
                         C._upd[key] = ((r[0] || {}).fields || {}).updated || '';   // what _check compares with
@@ -14845,9 +14890,13 @@ JiTA.checklist = {
             });
         });
     },
-    // Read `key` again and paint it. An answer for a load since overtaken, or for a defect since left, is dropped.
+    // Read `key` again and paint it. An answer for a load since overtaken, or for a defect since left, is dropped. A defect
+    // no longer on screen (a write for it ending after the user moved on) is not read: that load would overtake the one
+    // for the defect on screen, whose card would then never come. It is read afresh once it is on screen again (ensure).
     refresh: function (key) {
-        var C = JiTA.checklist, gen = ++C._gen;
+        var C = JiTA.checklist;
+        if (key !== C._key) { return Promise.resolve(); }
+        var gen = ++C._gen;
         C._lastLoad = Date.now();
         var still = function () { return C._gen === gen && C._key === key; };
         return C.load(key, function (s) {
@@ -14866,7 +14915,9 @@ JiTA.checklist = {
             if (!still()) { return; }
             C._seen = C._pageSig();   // checked again once the page changes, not on every change of it
             if (shown && shown.sees && !shown.error) { JiTA.ui.toast('The Defect checklist could not read ' + key + ' again: ' + why); return; }
-            if (!e || !e.sees) { return; }
+            // Who the card is for could not be read: tried again on the next click, key or focus (_retry), as a card
+            // never shown guards no unassign.
+            if (!e || !e.sees) { C._state[key] = { key: key, sees: '', retry: true }; return; }
             C._state[key] = { key: key, sees: e.sees, me: e.me || '', error: why };
             C._draw(key, C._state[key]);
         });
@@ -14913,6 +14964,7 @@ JiTA.checklist = {
     // a while later for a slow save.
     _onInput: function () {
         var C = JiTA.checklist, s = C._key && C._state[C._key];
+        if (s && s.retry) { C._retry(); return; }
         if (!s || !s.sees) { return; }
         C._inputT.forEach(function (t) { clearTimeout(t); });
         C._inputT = C.INPUT_MS.map(function (ms) { return setTimeout(function () { C._check(); }, ms); });
@@ -14949,9 +15001,15 @@ JiTA.checklist = {
     // most every FOCUS_MS.
     _onFocus: function () {
         var C = JiTA.checklist, s = C._key && C._state[C._key];
+        if (s && s.retry) { C._retry(); return; }
         if (!s || !s.sees) { return; }
         if (!s.error) { C._check(); return; }
         if (Date.now() - C._lastLoad > C.FOCUS_MS) { C.refresh(C._key); }
+    },
+    // A defect whose viewer could not be told (load, refresh): read again, at most every FOCUS_MS.
+    _retry: function () {
+        var C = JiTA.checklist;
+        if (C._key && Date.now() - C._lastLoad > C.FOCUS_MS) { C.refresh(C._key); }
     },
 
     // ---- nobody unassigns an unfinished defect ----------------------------------------------------------------------------
@@ -14962,10 +15020,28 @@ JiTA.checklist = {
         if (!s || !s.sees || !s.open || !s.held || !flagOn('defectChecklist')) { return; }
         var t = e.target, opt = t && t.closest && t.closest('[role="option"], [id*="-option-"]');
         if (!opt || !/^\s*(unassigned\s*)+$/i.test(opt.textContent || '')) { return; }
+        if (!C._ownPick(opt)) { return; }
         e.preventDefault();
         e.stopPropagation();
         if (e.stopImmediatePropagation) { e.stopImmediatePropagation(); }
         if (e.type === 'click') { JiTA.ui.toast(C._refusal(s)); }
+    },
+    // Whether a picked option is the defect's own assignee field's (its Details row): the option sits in that row, or the
+    // picker it belongs to does (the input that has the focus while it is open, or the one that names its list), for a
+    // menu Jira draws elsewhere on the page. An Unassigned picked anywhere else (the Create dialog, a filter, another
+    // issue's picker) goes through. Should Jira's markup change so the row is not found, nothing is refused here, and
+    // _guard still puts an unassign back.
+    _ownPick: function (opt) {
+        var rows = [];
+        try { rows = JiTA.declutter._fieldRows().filter(function (r) { return /^assignee$/i.test(r.label); }).map(function (r) { return r.el; }); } catch (e) { return false; }
+        if (!rows.length) { return false; }
+        var list = opt.closest && opt.closest('[role="listbox"]'), id = (list && list.id) || '', els = [opt, document.activeElement];
+        if (id) {
+            [].forEach.call(document.querySelectorAll('[aria-controls], [aria-owns]'), function (el) {
+                if ((' ' + (el.getAttribute('aria-controls') || '') + ' ' + (el.getAttribute('aria-owns') || '') + ' ').indexOf(' ' + id + ' ') >= 0) { els.push(el); }
+            });
+        }
+        return els.some(function (el) { return !!el && rows.some(function (r) { return r.contains(el); }); });
     },
     _refusal: function (s) {
         return s.key + ' stays assigned until the Defect checklist is done: ' + s.open + ' item' + (s.open === 1 ? '' : 's') + ' still open. Hand it to FC from the card once ' +
@@ -14975,9 +15051,15 @@ JiTA.checklist = {
     // once.
     _guard: function (key, s) {
         var C = JiTA.checklist;
+        if (s && s.assignee) { delete C._handed[key]; }   // assigned again, here or in Jira: a later unassign is not the card's
         if (!s || !s.sees || s.assignee || !s.open || !flagOn('defectChecklist')) { return; }
         var back = C._revertTo(s.hist, s.me, Date.now());
         if (!back || back.from !== s.d.reporter || C._reverted[key] === back.at) { return; }
+        // The card's own hand-off stays, though a later read finds an item open again (logs that failed to read before,
+        // read now): it was offered only once every item was done. The first unassign read within REVERT_MS of it is it.
+        var h = C._handed[key];
+        if (typeof h === 'number' && Date.now() - h < C.REVERT_MS) { C._handed[key] = h = back.at; }
+        if (h === back.at) { return; }
         C._reverted[key] = back.at;
         C._req('PUT', '/rest/api/3/issue/' + encodeURIComponent(key) + '/assignee', { accountId: back.from }).then(function () {
             JiTA.ui.toast(C._refusal(s) + ' It was put back to its assignee.');
@@ -15025,19 +15107,27 @@ JiTA.checklist = {
     // A mark kept on the issue (PROP): `kind` 'w' for an item marked Not needed, 'ok' for one ticked off (with `extra`, the
     // attachments' set it was ticked for), or taken away when `on` is false. Read and written again, so another browser's
     // marks are kept. Only the defect's reporter marks.
+    // Marks clicked one after another are saved one after another (_keepQ): each reads what the one before it wrote, so a
+    // second mark clicked while the first is being saved does not write the property back without the first.
     _keep: function (key, kind, id, on, extra) {
         var C = JiTA.checklist, s = C._state[key], path = C._issuePath(key) + '/properties/' + encodeURIComponent(C.PROP);
         if (!s || s.sees !== 'reporter') { return Promise.resolve(); }
         var me = JiTA.leadduty.me() || {};
-        return C._req('GET', path).then(function (p) { return (p && p.value) || null; }, function (e) { if (e && e.status === 404) { return null; } throw e; }).then(function (v) {
-            var map = function (o) { return (o && typeof o === 'object') ? o : {}; }, all = { w: map(v && v.w), ok: map(v && v.ok) };
-            if (on) {
-                var rec = { by: s.me, name: me.displayName || '', at: new Date().toISOString() };
-                Object.keys(extra || {}).forEach(function (k) { rec[k] = extra[k]; });
-                all[kind][id] = rec;
-            } else { delete all[kind][id]; }
-            return C._req('PUT', path, { v: 1, w: all.w, ok: all.ok });
-        }).then(function () { C.refresh(key); }, function (e) { JiTA.ui.toast('Could not save that on ' + key + ': ' + (e && e.message || e)); });
+        var save = function () {
+            return C._req('GET', path).then(function (p) { return (p && p.value) || null; }, function (e) { if (e && e.status === 404) { return null; } throw e; }).then(function (v) {
+                var map = function (o) { return (o && typeof o === 'object') ? o : {}; }, all = { w: map(v && v.w), ok: map(v && v.ok) };
+                if (on) {
+                    var rec = { by: s.me, name: me.displayName || '', at: new Date().toISOString() };
+                    Object.keys(extra || {}).forEach(function (k) { rec[k] = extra[k]; });
+                    all[kind][id] = rec;
+                } else { delete all[kind][id]; }
+                return C._req('PUT', path, { v: 1, w: all.w, ok: all.ok });
+            }).then(function () { C.refresh(key); }, function (e) { JiTA.ui.toast('Could not save that on ' + key + ': ' + (e && e.message || e)); });
+        };
+        var p = (C._keepQ[key] || Promise.resolve()).then(save);
+        C._keepQ[key] = p;
+        p.then(function () { if (C._keepQ[key] === p) { delete C._keepQ[key]; } });
+        return p;
     },
     // An item marked "Not needed", or not any more.
     _waive: function (key, id, on) { return JiTA.checklist._keep(key, 'w', id, on); },
@@ -15086,12 +15176,13 @@ JiTA.checklist = {
         return (m.length > 120 ? m.slice(0, 119) + '…' : m) || 'Exception';
     },
     // The exception as the report's log has it: its block, out of the logs read again (a reading keeps only signatures
-    // and messages). Every block of a log read is kept, so the next one is at hand. Falls back to its message and its
-    // stack as the signature has them.
+    // and messages). Only the logs the reader read are looked through, in its order (_pickLogs): a log it skipped as too
+    // big is not downloaded here either. Every block of a log read is kept, so the next one is at hand. Falls back to its
+    // message and its stack as the signature has them.
     _raw: function (src, e) {
         var C = JiTA.checklist, P = JiTA.profile, L = JiTA.logsig, cache = C._rawCache[src.key] || (C._rawCache[src.key] = {});
         if (cache[e.sig]) { return Promise.resolve(cache[e.sig]); }
-        var hint = (JiTA.ocr._langFromLabels(src.labels || []) || {}).code, logs = P._logFiles(src.attachments), i = 0;
+        var hint = (JiTA.ocr._langFromLabels(src.labels || []) || {}).code, logs = P._pickLogs(src.attachments), i = 0;
         function next() {
             if (i >= logs.length) { return Promise.resolve(P._sigTip(e.sig, e.msg)); }
             var a = logs[i++];
@@ -15134,6 +15225,7 @@ JiTA.checklist = {
         if (!window.confirm('Unassign ' + key + ' and hand it to FC?')) { return Promise.resolve(); }
         $btn.prop('disabled', true).text('Unassigning…');
         return C._req('PUT', C._issuePath(key) + '/assignee', { accountId: null }).then(function () {
+            C._handed[key] = Date.now();   // so _guard never puts this one back
             C._written(key, key + ' is unassigned: FC picks it up from here.');
         }, function (e) {
             $btn.prop('disabled', false).text('Hand to FC: unassign');

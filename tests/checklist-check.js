@@ -148,7 +148,8 @@ global.JiTA = {
     excfind: { _fps: (text) => fpsOf(text), _read: (item) => (readOf[item.key] instanceof Error ? Promise.reject(readOf[item.key]) : Promise.resolve(readOf[item.key])) },
     excnoise: { load: () => Promise.resolve(), counts: (sig) => !/^usererror/.test(sig) },
     profile: { _sigTip: (sig, msg) => 'tip:' + msg, _logFiles: (att) => (att || []).filter((a) => /log/i.test(a.filename) && a.content),
-        _fetchLog: (url) => (logText[url] != null ? Promise.resolve(logText[url]) : Promise.reject(new Error('404'))) },
+        _fetchLog: (url) => { fetched.push(url); return logText[url] != null ? Promise.resolve(logText[url]) : Promise.reject(new Error('404')); },
+        MAX_LOG_BYTES: 15 * 1024 * 1024, MAX_LOGS: 3 },
     ocr: { _langFromLabels: () => null },
     ui: { toast: (m) => { toasts.push(m); }, _buildSideGroup: (o) => {
         const g = N('<div class="jita-side-card"></div>'); g.id = o.id;
@@ -182,11 +183,12 @@ global.JiTA = {
 };
 require('./logstub')(JiTA);
 let gets = [], meta = {}, searches = [], searchAnswer = [], editmetaOf = {};
-let copied = [], copiedHtml = [], copyAnswer = true, built = 0, fieldRows = [], logText = {};
+let copied = [], copiedHtml = [], copyAnswer = true, built = 0, fieldRows = [], logText = {}, fetched = [];
 // The fingerprints of a description: "EXC[<sig>]" for each exception pasted in it.
 function fpsOf(text) { const out = [], re = /EXC\[([^\]]+)\]/g; let m; while ((m = re.exec(String(text)))) { out.push({ sig: m[1], msg: m[1] }); } return out; }
 Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + '})'));
 Object.assign(JiTA.logsig, eval('({' + member('    _crashOf: function (sig) {') + '})'));
+Object.assign(JiTA.profile, eval('({' + member('    _pickLogs: function (att) {') + '})'));   // the logs the reader reads, as Add looks through them
 eval(src.slice(cs + 1, ce) + '\n    _noop: null\n};');
 const C = JiTA.checklist;
 // The issue on screen, shown without a reload: the real helpers (softrefresh-check.js covers them), with a wait short
@@ -740,10 +742,24 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     issueOf['EDR-1'] = converted();
     await C.refresh('EDR-1');
     await settle();
-    const pick = (text, type) => {
+    // The issue view's Assignee row, and where the picked option is: in that row (the default), in a menu drawn elsewhere
+    // while the row's picker has the focus ('focus') or while the row's combobox names its list ('aria'), in another
+    // picker altogether ('elsewhere': the Create dialog, a filter), or on a page where no Assignee row is found ('norow').
+    const inRow = new Set(), assigneeRow = { label: 'Assignee', el: { textContent: 'ISD BH Hunter', contains: (x) => inRow.has(x) } };
+    const pick = (text, type, where) => {
         let stopped = 0, prevented = 0;
-        const opt = { textContent: text };
-        C._onPick({ type: type || 'click', target: { closest: (sel) => (/option/.test(sel) ? opt : null) }, preventDefault() { prevented++; }, stopPropagation() { stopped++; }, stopImmediatePropagation() { stopped++; } });
+        const list = { id: 'react-select-7-listbox' }, opt = { textContent: text, closest: (sel) => (/listbox/.test(sel) ? list : (/option/.test(sel) ? opt : null)) };
+        const input = { getAttribute: (a) => (a === 'aria-controls' ? 'react-select-7-listbox' : null) };
+        const rows0 = fieldRows, ae0 = document.activeElement, qsa0 = document.querySelectorAll;
+        where = where || 'row';
+        inRow.clear();
+        if (where !== 'norow') { fieldRows = fieldRows.concat([assigneeRow]); }
+        if (where === 'row') { inRow.add(opt); }
+        if (where === 'focus') { inRow.add(input); document.activeElement = input; }
+        if (where === 'aria') { inRow.add(input); document.querySelectorAll = (sel) => (/aria-controls/.test(sel) ? [input] : []); }
+        try {
+            C._onPick({ type: type || 'click', target: { closest: opt.closest }, preventDefault() { prevented++; }, stopPropagation() { stopped++; }, stopImmediatePropagation() { stopped++; } });
+        } finally { fieldRows = rows0; document.activeElement = ae0; document.querySelectorAll = qsa0; }
         return prevented && stopped;
     };
     toasts = [];
@@ -751,6 +767,13 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     ok('...saying why', toasts.length === 1 && /stays assigned until the Defect checklist is done: 9 items still open/.test(toasts[0]), toasts.join(' | '));
     ok('...the mousedown too, so the picker never hears of it', !!pick('Unassigned', 'mousedown') && toasts.length === 1);
     ok('...but nobody else is picked for', !pick('Bob Builder') && !pick('Assign to me'));
+    // only the defect's own assignee field (review 2026-11-20 checklist-logic-2)
+    toasts = [];
+    ok('an Unassigned in a menu Jira draws elsewhere is refused while the field\'s picker has the focus', !!pick('Unassigned', 'click', 'focus') && toasts.length === 1, toasts.join(' | '));
+    ok('...or while the field\'s combobox names its list', !!pick('Unassigned', 'mousedown', 'aria') && toasts.length === 1, toasts.join(' | '));
+    toasts = [];
+    ok('an Unassigned picked anywhere else on the page (the Create dialog, a filter, another issue) goes through, unsaid', !pick('Unassigned', 'click', 'elsewhere') && !pick('Unassigned', 'mousedown', 'elsewhere') && !toasts.length, toasts.join(' | '));
+    ok('...and so does any, on a page where no Assignee row is found: the put-back still guards it', !pick('Unassigned', 'click', 'norow') && !toasts.length);
     ok('the guard is bound in the capture phase', listeners.some((l) => l.ev === 'click' && l.cap === true && l.fn === C._onPick) && listeners.some((l) => l.ev === 'mousedown' && l.cap === true));
     issueOf['EDR-1'] = finished();
     await C.refresh('EDR-1');
@@ -802,6 +825,66 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     await settle();
     ok('...once: the same unassign is never put back twice', !puts().length);
     histOf['EDR-1'] = [];
+    // the card's own hand-off stays, though a later read finds an item open again (review 2026-11-20 checklist-robust-2)
+    issueOf['EDR-1'] = finished();
+    await C.refresh('EDR-1'); await settle();
+    const fin2 = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-finish')[0];
+    const i8 = converted(); i8.fields.assignee = null;   // what the read after it finds: the logs read this time, an item open
+    issueOf['EDR-1'] = i8;
+    histOf['EDR-1'] = [{ author: { accountId: 'acc-rep' }, created: new Date(Date.now() - 1000).toISOString(), items: [{ field: 'assignee', fieldId: 'assignee', from: 'acc-rep', to: null }] }];
+    ajaxLog = []; confirmAnswer = true; toasts = []; jiraEvents = [];
+    fin2.fire('click');
+    await settle(); await waitRefresh(); await settle();
+    ok('the card\'s own hand-off is not put back when the read after it finds an item open again', puts().length === 1 && J(puts()[0].body) === J({ accountId: null }) &&
+        !toasts.some((t) => /put back/.test(t)) && C._state['EDR-1'].open > 0, J(puts()) + ' ' + toasts.join(' | '));
+    ajaxLog = [];
+    await C.refresh('EDR-1'); await settle();
+    ok('...nor on any read after that', !puts().length);
+    // taken and unassigned again before the card read it: that unassign is not the card's
+    histOf['EDR-1'].push({ author: { accountId: 'acc-rep' }, created: new Date(Date.now() - 300).toISOString(), items: [{ field: 'assignee', fieldId: 'assignee', from: null, to: 'acc-rep' }] },
+        { author: { accountId: 'acc-rep' }, created: new Date(Date.now() - 200).toISOString(), items: [{ field: 'assignee', fieldId: 'assignee', from: 'acc-rep', to: null }] });
+    ajaxLog = []; toasts = [];
+    await C.refresh('EDR-1'); await settle();
+    ok('...but one made after it (taken and unassigned again before the card read it) is put back', puts().length === 1 && J(puts()[0].body) === J({ accountId: 'acc-rep' }), J(puts()));
+    await waitRefresh(); await settle();
+    // a hand-off whose next read found the defect done: once it is taken again in Jira, a later unassign is judged again
+    issueOf['EDR-1'] = finished(); histOf['EDR-1'] = [];
+    await C.refresh('EDR-1'); await settle();
+    const fin3 = byCls(document.getElementById(C.GROUP_ID).find('#jita-cl'), 'jcl-finish')[0];
+    const i10 = finished(); i10.fields.assignee = null;
+    issueOf['EDR-1'] = i10;
+    histOf['EDR-1'] = [{ author: { accountId: 'acc-rep' }, created: new Date(Date.now() - 100).toISOString(), items: [{ field: 'assignee', fieldId: 'assignee', from: 'acc-rep', to: null }] }];
+    ajaxLog = [];
+    fin3.fire('click');
+    await settle(); await waitRefresh(); await settle();
+    ok('a hand-off whose next read finds the defect done leaves it unassigned', puts().length === 1 && J(puts()[0].body) === J({ accountId: null }), J(puts()));
+    issueOf['EDR-1'] = converted(); histOf['EDR-1'] = [];
+    await C.refresh('EDR-1'); await settle();   // taken again, in Jira itself
+    const i9 = converted(); i9.fields.assignee = null;
+    issueOf['EDR-1'] = i9;
+    histOf['EDR-1'] = [{ author: { accountId: 'acc-rep' }, created: new Date(Date.now() - 50).toISOString(), items: [{ field: 'assignee', fieldId: 'assignee', from: 'acc-rep', to: null }] }];
+    ajaxLog = []; toasts = [];
+    await C.refresh('EDR-1'); await settle();
+    ok('...but once it was taken again, an unassign that got past the picker is put back', puts().length === 1 && J(puts()[0].body) === J({ accountId: 'acc-rep' }), J(puts()));
+    await waitRefresh(); await settle();
+    // a hand-off noted longer ago than REVERT_MS is not taken for a later unassign
+    C._handed['EDR-1'] = Date.now() - C.REVERT_MS - 1;
+    histOf['EDR-1'] = [{ author: { accountId: 'acc-rep' }, created: new Date(Date.now() - 30).toISOString(), items: [{ field: 'assignee', fieldId: 'assignee', from: 'acc-rep', to: null }] }];
+    ajaxLog = [];
+    await C.refresh('EDR-1'); await settle();
+    ok('...nor is a hand-off noted longer ago than REVERT_MS taken for a later unassign', puts().length === 1 && J(puts()[0].body) === J({ accountId: 'acc-rep' }), J(puts()));
+    await waitRefresh(); await settle();
+    delete C._handed['EDR-1'];
+    histOf['EDR-1'] = [];
+
+    // ---- a write for a defect since left (review 2026-11-20 checklist-logic-1) ----
+    issueOf['EDR-1'] = converted();
+    C.clear(); delete C._state['EDR-1'];
+    const genBefore = C._gen, onScreenLoad = C.refresh('EDR-1'), gotBefore = gets.length;
+    await C.refresh('EDR-9');   // as _written, _keep or _guard do for the defect they wrote, once the user has moved on
+    ok('a defect no longer on screen is not read again', gets.length === gotBefore && C._gen === genBefore + 1, J(gets.slice(gotBefore)) + ' ' + (C._gen - genBefore));
+    await onScreenLoad; await settle();
+    ok('...so the load of the defect on screen goes on, and its card comes', !!document.getElementById(C.GROUP_ID) && C._state['EDR-1'] && C._state['EDR-1'].sees === 'reporter', J(C._state['EDR-1'] && C._state['EDR-1'].sees));
 
     // ---- writes ----
     issueOf['EDR-1'] = converted();
@@ -821,6 +904,20 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     await settle();
     put = puts()[0];
     ok('...taking it back keeps the other marks, the ticks too (read again first)', put && J(put.body.w) === J({ exc: { by: 'acc-rep' } }) && J(put.body.ok) === J(KEPT.ok), put && J(put.body));
+    // two marks clicked one after the other, the second before the first is saved (review 2026-11-20 checklist-logic-4)
+    let prop = { v: 1, w: {}, ok: {} };
+    const PROP_PATH = 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist', ajaxBefore = $.ajax;
+    answers = {};
+    Object.defineProperty(answers, PROP_PATH, { enumerable: true, configurable: true, get: () => ({ ok: true, data: { key: 'jita.checklist', value: prop } }) });
+    $.ajax = (o) => { if (o.type === 'PUT' && /properties\/jita\.checklist$/.test(o.url)) { prop = JSON.parse(o.data); } return ajaxBefore(o); };   // Jira keeps what it is sent
+    ajaxLog = [];
+    try {
+        await Promise.all([C._tick('EDR-1', 'attachments', 'logs.txt:100', true), C._waive('EDR-1', 'exc', true)]);
+        await settle();
+    } finally { $.ajax = ajaxBefore; }
+    const order = ajaxLog.filter((r) => /properties\/jita\.checklist$/.test(r.path)).map((r) => r.method).join(',');
+    ok('two marks clicked one after the other are both kept: the second reads what the first wrote', !!prop.ok.attachments && !!prop.w.exc && order === 'GET,PUT,GET,PUT', order + ' ' + J(prop));
+    answers = {};
     // the attachments ticked off
     ajaxLog = [];
     answers = { 'GET /rest/api/3/issue/EDR-1/properties/jita.checklist': { ok: true, data: { key: 'jita.checklist', value: { v: 1, w: { exc: { by: 'acc-rep' } } } } } };
@@ -924,6 +1021,18 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     await settle();
     put = puts()[0];
     ok('an exception no log holds any more is added as its signature reads', put && put.body.fields.description.content[1].content[0].content[0].text === 'tip:Gone', put && J(put.body));
+    // only the logs the reader read, in its order (review 2026-11-20 checklist-logic-8)
+    logText = { 'u-big': 'big', 'u-b': 'b block', 'u-a': 'a block', 'u-lt': "keyerror: 'y'|p:q>r:s\nfrom logs.txt" };
+    fetched = []; C._rawCache = {};
+    const many = { key: 'EBR-77', labels: [], attachments: [
+        { filename: 'client_big_log.txt', size: 80 * 1024 * 1024, content: 'u-big' },
+        { filename: 'b_log.txt', size: 300, content: 'u-b' }, { filename: 'a_log.txt', size: 200, content: 'u-a' },
+        { filename: 'logs.txt', size: 900, content: 'u-lt' }, { filename: 'old_log.txt', size: 100, content: 'u-old' }] };
+    const rawY = await C._raw(many, { sig: "keyerror: 'y'|p:q>r:s", msg: "KeyError: 'y'" });
+    ok('Add reads the report\'s logs.txt first, and stops at the block it wanted', J(fetched) === J(['u-lt']) && /from logs\.txt/.test(rawY), J(fetched));
+    fetched = [];
+    const rawZ = await C._raw(many, { sig: 'nowhere|a:b>c:d', msg: 'Nowhere' });
+    ok('...for one no log holds: then the smallest first, three at most, never one over the reader\'s cap', J(fetched) === J(['u-lt', 'u-old', 'u-a']) && rawZ === 'tip:Nowhere', J(fetched));
     answers = {};
     await waitRefresh();
     // a Jira that no longer hears the event
@@ -1049,9 +1158,55 @@ const byId = (items, id) => items.filter((it) => it.id === id)[0];
     JiTA.dlog = (...a) => { debugged.push(a.join(' ')); };
     await C.refresh('EDR-1'); await settle();
     JiTA.dlog = realDlog;
-    ok('a failure before it knows who is looking draws no card, and is said only with debug logging on', !document.getElementById(C.GROUP_ID) && !C._state['EDR-1'] &&
+    ok('a failure before it knows who is looking draws no card, and is said only with debug logging on', !document.getElementById(C.GROUP_ID) && J(C._state['EDR-1']) === J({ key: 'EDR-1', sees: '', retry: true }) &&
         debugged.some((l) => /could not read EDR-1/.test(l)), J(debugged));
     issueOf['EDR-1'] = kept;
+    // ...and is tried again, as a card never shown guards no unassign (review 2026-11-20 checklist-logic-6)
+    let g0 = gets.length;
+    C._onInput(); C._onFocus();
+    await settle();
+    ok('...not on a click, a key or the focus soon after', gets.length === g0 && !document.getElementById(C.GROUP_ID), J(gets.slice(g0)));
+    C._lastLoad = Date.now() - C.FOCUS_MS - 1;
+    C._onInput();
+    await settle();
+    ok('...but on one once FOCUS_MS has passed, and the card comes', gets.length > g0 && !!document.getElementById(C.GROUP_ID) && C._state['EDR-1'].sees === 'reporter' && !C._state['EDR-1'].retry, J(C._state['EDR-1'] && C._state['EDR-1'].sees));
+    // this browser's user unknown (/myself failed, no meta tag)
+    C.clear(); delete C._state['EDR-1'];
+    me = '';
+    await C.refresh('EDR-1'); await settle();
+    ok('a viewer who cannot be told (this browser\'s user unknown) is tried again', J(C._state['EDR-1']) === J({ key: 'EDR-1', sees: '', retry: true }), J(C._state['EDR-1']));
+    me = 'acc-rep';
+    C._lastLoad = Date.now() - C.FOCUS_MS - 1;
+    C._onFocus();
+    await settle();
+    ok('...back in the tab, it is read again, and the card comes', C._state['EDR-1'].sees === 'reporter' && !!document.getElementById(C.GROUP_ID), J(C._state['EDR-1'] && C._state['EDR-1'].sees));
+    // whether this browser's user is a Lead not known yet (a first load), and a Lead whose ISD group could not be read
+    const realLeadMe = JiTA.leadduty.me, realMembers = JiTA.leadduty.group.members, others = converted();
+    others.fields.reporter = { accountId: 'acc-x', displayName: 'ISD BH Other' };
+    issueOf['EDR-1'] = others; C.clear(); delete C._state['EDR-1'];
+    JiTA.leadduty.me = () => null;
+    await C.refresh('EDR-1'); await settle();
+    ok('someone else\'s defect, while whether this user is a Lead is not known yet, is tried again', J(C._state['EDR-1']) === J({ key: 'EDR-1', sees: '', retry: true }), J(C._state['EDR-1']));
+    JiTA.leadduty.me = realLeadMe;
+    await C.refresh('EDR-1'); await settle();
+    ok('...known to be no Lead, it is final: no card, nothing tried again', J(C._state['EDR-1']) === J({ key: 'EDR-1', sees: '' }) && !document.getElementById(C.GROUP_ID), J(C._state['EDR-1']));
+    g0 = gets.length;
+    C._lastLoad = Date.now() - C.FOCUS_MS - 1;
+    C._onInput(); C._onFocus();
+    await settle();
+    ok('...and a click or the focus reads nothing for it', gets.length === g0, J(gets.slice(g0)));
+    isLead = true; others.fields.reporter = { accountId: 'acc-x', displayName: 'Other Person' };
+    JiTA.leadduty.group.members = () => Promise.reject(new Error('HTTP 503'));
+    await C.refresh('EDR-1'); await settle();
+    ok('a Lead whose ISD group could not be read is tried again', J(C._state['EDR-1']) === J({ key: 'EDR-1', sees: '', retry: true }), J(C._state['EDR-1']));
+    JiTA.leadduty.group.members = realMembers; groupMembers = [{ accountId: 'acc-x' }];
+    C._lastLoad = Date.now() - C.FOCUS_MS - 1;
+    C._onInput();
+    await settle();
+    ok('...and once it reads, the member\'s defect gets its card', C._state['EDR-1'].sees === 'lead' && !!document.getElementById(C.GROUP_ID), J(C._state['EDR-1'] && C._state['EDR-1'].sees));
+    isLead = false; groupMembers = [];
+    issueOf['EDR-1'] = kept;
+    await C.refresh('EDR-1'); await settle();
 
     // ================= is the defect still as it was read? =================
     issueOf['EDR-1'] = converted(); issueOf['EDR-1'].fields.updated = '2026-11-08T12:00:00.000+0000'; histOf['EDR-1'] = [];

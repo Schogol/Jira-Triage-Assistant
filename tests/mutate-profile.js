@@ -34,7 +34,9 @@ const muts = [
     [H, 'a blue screen counts as an EVE client crash', "            if (k === 'eve') {", "            if (k === 'eve' || k === 'kernel') {"],
     [H, 'PDMData memory is read in the wrong unit', 'hw.ramGB = Math.round(mem / 1073741824);', 'hw.ramGB = Math.round(mem / 1048576);'],
     // reading a report's files
-    [H, 'logs.txt is not read first', "            logs.sort(function (a, b) { return ((/^logs\\.txt$/i.test(b.filename) ? 1 : 0) - (/^logs\\.txt$/i.test(a.filename) ? 1 : 0)) || ((a.size || 0) - (b.size || 0)); });\n", ''],
+    [H, 'logs.txt is not read first', "        logs.sort(function (a, b) { return ((/^logs\\.txt$/i.test(b.filename) ? 1 : 0) - (/^logs\\.txt$/i.test(a.filename) ? 1 : 0)) || ((a.size || 0) - (b.size || 0)); });\n", ''],
+    [H, 'logs over the size cap are read', 'return logs.filter(function (a) { return !(a.size > P.MAX_LOG_BYTES); }).slice(0, P.MAX_LOGS);', 'return logs.slice(0, P.MAX_LOGS);'],
+    [H, 'a log too big counts as read, not skipped', 'var logs = P._logFiles(att), small = P._pickLogs(att), got = {}, li = 0;', 'var logs = P._pickLogs(att), small = logs, got = {}, li = 0;'],
     [H, 'a zip a player added is read as the igbr.zip', "return /^igbr\\.zip$/i.test(a.filename || '') && a.content;", "return /\\.zip$/i.test(a.filename || '') && a.content;"],
     [H, 'a failed log download is never read again', 'function () { /* a log failed: all of them are read again next time */ }', 'function () { return nextLog(); }'],
     [H, 'a report\'s logs are downloaded side by side', '            jobs = (function nextLog() {', '            small.forEach(function (a) { P._fetchLog(a.content, hint); });\n            jobs = (function nextLog() {'],
@@ -163,7 +165,16 @@ const muts = [
     [H, 'the card does not name the hidden defect', "                g.defects.forEach(function (d) { $('<a target=\"_blank\" rel=\"noopener\"></a>')", "                [].forEach(function (d) { $('<a target=\"_blank\" rel=\"noopener\"></a>')"],
     [H, 'the full profile shows the hidden exceptions unfolded', "var $hv = $('<div class=\"jpv-hidden\"></div>').appendTo($b);", "var $hv = $('<div class=\"jpv-hidden\"></div>').addClass('open').appendTo($b);"],
     [H, 'the full profile has no hidden exceptions', '        if (hx.length) {\n            var $hv', '        if (false) {\n            var $hv'],
-    [H, 'the full profile says no exception is shared when only hidden ones are', "(hx.length || lx.length) ? 'No exception or stacktrace appears in more than one log, apart from ' + apart + ' below.' :", "false ? '' :"]
+    [H, 'the full profile says no exception is shared when only hidden ones are', "(hx.length || lx.length) ? 'No exception or stacktrace appears in more than one log, apart from ' + apart + ' below.' :", "false ? '' :"],
+    // ---- one read of a report at a time (review 2026-11-20 checklist-robust-3) ----
+    [H, 'reads of one report side by side', '        if (!before) { p = P._readNow(issue, rec, zip); } else {', '        if (true) { p = P._readNow(issue, rec, zip); } else {'],
+    [H, 'the read under way is never noted', '        P._readQ[key] = p;\n', ''],
+    [H, 'a read after another starts from what it was given', '                if (!s) { return P._readNow(issue, rec, zip); }\n', '                return P._readNow(issue, rec, zip);\n'],
+    [H, 'a stored reading for other logs is taken as it is', '                if (s.logs && s.logSig != null && s.logSig !== P._logSig(att)) { s = P._dropLogs(JSON.parse(JSON.stringify(s))); }', '                if (false) { s = P._dropLogs(JSON.parse(JSON.stringify(s))); }'],
+    [H, 'a read with nothing left to do reads and stores again', '                if (s.logs && P._logsCurrent(s, att, zip) && (!zip || s.zip)) { return s; }', '                if (false) { return s; }'],
+    [H, 'a zip wanted counts as read', '&& (!zip || s.zip)) { return s; }', ') { return s; }'],
+    [H, 'a read that threw stops the next', "            p = before.then(null, function () { /* it failed: this one reads for itself */ }).then(function () {", '            p = before.then(function () {'],
+    [H, 'a finished read stays noted', 'var done = function () { if (P._readQ[key] === p) { delete P._readQ[key]; } };', 'var done = function () {};'],
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
