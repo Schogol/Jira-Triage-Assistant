@@ -38,7 +38,7 @@ global.JiTA = {
     profile: { zipOn: () => zip },
     dv: { _takeOn: () => { if (take === 'throw') { throw new Error('no dv'); } return take; } },
     leadduty: { OWNER: 'schogol', me: () => me, resolveMe: () => { resolves++; return resolveTo instanceof Error ? Promise.reject(resolveTo) : Promise.resolve(resolveTo); } },
-    worker: eval('({' + S.member(src, 'JiTA.worker', '_verCmp') + '})'),
+    worker: Object.assign({ _isLeader: true }, eval('({' + S.member(src, 'JiTA.worker', '_verCmp') + '})')),   // this tab leads the shared worker
     conf: eval(S.members(src, 'JiTA.conf', ['PAGE_LIMIT', 'CONFLICT', '_relPath', '_nextLink', 'isConflict', 'getProperty', '_mapProp', 'saveProperty']))
 };
 eval(S.top(src, 'JiTA.census'));
@@ -150,6 +150,24 @@ const mine = () => server.props[KEY] && server.props[KEY].value;
     gm[C.SENT_KEY] = { sig: J([me.displayName, '3.53.1', 'Tampermonkey 5.5.0', 'Firefox 158', C.entry().f]), at: now };   // another tab just wrote it
     server.calls.length = 0;
     ok('another tab of this browser has just written it: this one leaves it be', (await C.tick()) === false && server.calls.length === 0);
+
+    // only the tab that leads the shared worker writes: one tab per browser, the newest build (review of 2026-11-21: a tab
+    // not reloaded since an update wrote its old version back over the new one)
+    JiTA.worker._isLeader = false;
+    JiTA.SCRIPT_VERSION = '3.53.0';   // an old tab, kept open since before an update
+    gm[C.SENT_KEY] = { sig: 'what the leading tab wrote', at: now - 2 * 3600 * 1000 };
+    server.calls.length = 0;
+    ok('a tab that does not lead the worker writes nothing, though its version differs from what was written', (await C.tick()) === false && server.calls.length === 0 &&
+        gm[C.SENT_KEY].sig === 'what the leading tab wrote', server.calls.join(' | '));
+    now += C.DAY_MS;
+    ok('...not even a day later', (await C.tick()) === false && server.calls.length === 0);
+    JiTA.SCRIPT_VERSION = '3.53.1';
+    JiTA.worker._isLeader = true;
+    ok('the tab that leads it writes', (await C.tick()) === true && mine().b.Firefox.jita === '3.53.1');
+    delete JiTA.worker._isLeader;
+    server.calls.length = 0;
+    ok('...and with no worker known, nothing is written', (await C.tick()) === false && server.calls.length === 0);
+    JiTA.worker._isLeader = true;
 
     // a frame, and who is signed in
     global.JITA_IS_SUBFRAME = true;
@@ -295,8 +313,9 @@ const mine = () => server.props[KEY] && server.props[KEY].value;
         ok('a tab starts it once, in its top frame: a first look after a minute, then one every hour', inFrame === 0 && J(timers.map((x) => x[1])) === J([60000]) &&
             J(intervals.map((x) => x[1])) === J([3600000]) && timers[0][0] === C.tick && intervals[0][0] === C.tick, J(timers.map((x) => x[1])) + ' ' + J(intervals.map((x) => x[1])));
     } finally { global.setTimeout = st; global.setInterval = si; }
-    ok('the Jira boot and the Confluence boot both start it, each in a try that keeps what it throws', /try \{ JiTA\.census\.start\(\); \} catch \(eCs\) \{ JiTA\.caught\('census\.start', eCs\); \}/.test(src) &&
-        /try \{ JiTA\.census\.start\(\); \} catch \(e\) \{ JiTA\.caught\('census\.start', e\); \}/.test(src.slice(src.indexOf('\nif (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {'), src.indexOf('\n}\n', src.indexOf('\nif (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {')))));
+    const wikiBoot = src.slice(src.indexOf('\nif (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {'), src.indexOf('\n}\n', src.indexOf('\nif (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {')));
+    ok('the Jira boot starts it, in a try that keeps what it throws', /try \{ JiTA\.census\.start\(\); \} catch \(eCs\) \{ JiTA\.caught\('census\.start', eCs\); \}/.test(src));
+    ok('...and the Confluence boot does not: no worker runs there, so it never leads one', wikiBoot.length > 100 && wikiBoot.indexOf('JiTA.census.start()') < 0, wikiBoot.slice(0, 80));
     const about = /\n        if \(JiTA\.leadduty\.OWNER === \(\(JiTA\.leadduty\.me\(\) && JiTA\.leadduty\.me\(\)\.handle\) \|\| ''\)\) \{\n            \$\('<button class="jita-btn">Who runs what<\/button>'\)[^]*?\.on\('click', function \(\) \{ JiTA\.census\.openView\(\); \}\)/.exec(menuSrc);
     ok('Settings > About has the Who runs what button for the owner alone', !!about);
 

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.18
+// @version     3.53.19
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.18
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.19
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -25557,7 +25557,7 @@ JiTA.census = {
         { id: 'screenOcr', label: 'Screenshot translation', short: 'OCR' }
     ],
 
-    // Boot, in the top frame of a Jira or Confluence tab.
+    // Boot, in the top frame of a Jira tab (only a Jira tab runs the worker, whose leader writes: tick).
     start: function () {
         var C = JiTA.census;
         if (C._started || JITA_IS_SUBFRAME || JITA_IS_FORGE_FRAME) { return; }
@@ -25567,11 +25567,15 @@ JiTA.census = {
     },
     _started: false,
 
-    // Writes this browser's entry when it is due. Resolves true when it wrote. A look that overlaps another (a slow write,
-    // two tabs) finds the other's claim in SENT_KEY and leaves it be.
+    // Writes this browser's entry when it is due. Resolves true when it wrote. Only the tab that leads the shared worker
+    // writes: one tab per browser, and the one running the newest build, as an updated tab takes the lead within a second
+    // (JiTA.worker._announce). Every tab wrote before, and a tab not reloaded since an update wrote its old version back
+    // over the new one, each in turn. A look that overlaps another (a slow write) finds the other's claim in SENT_KEY and
+    // leaves it be.
     tick: function () {
         var C = JiTA.census, L = JiTA.leadduty;
         if (JITA_IS_SUBFRAME || JITA_IS_FORGE_FRAME) { return Promise.resolve(false); }
+        if (!(JiTA.worker && JiTA.worker._isLeader)) { return Promise.resolve(false); }
         var me = L.me();
         return ((me && me.accountId && me.displayName) ? Promise.resolve(me) : L.resolveMe()).then(function (m) {
             if (!m || !m.accountId) { return false; }
@@ -26074,7 +26078,7 @@ if (JITA_IS_WIKI && !JITA_IS_SUBFRAME) {
         if (!window.indexedDB) { return; }
         setTimeout(function () { try { jitaArmLeadDuties(); } catch (e) { JiTA.caught('jitaArmLeadDuties', e); } }, 1200);
         try { JiTA.changelog.start(); } catch (e) { JiTA.caught('changelog.start', e); }   // the "What's new" pill after an update
-        try { JiTA.census.start(); } catch (e) { JiTA.caught('census.start', e); }   // this browser's entry for Who runs what
+        // No census here: this browser's entry for Who runs what is written by the Jira tab that leads the worker.
         // The Lead chip and the What's new pill sit over the same Atlaskit sidebar here as on Jira, but Jira's shared
         // observer (which steps them aside for a menu) never runs on the wiki. Watch for menus here as well.
         try { new MutationObserver(function () { try { jitaPillsYieldSoon(); } catch (e) { /* ignore */ } }).observe(document.body, { childList: true, subtree: true }); } catch (e) { /* ignore */ }

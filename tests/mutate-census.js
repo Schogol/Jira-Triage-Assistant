@@ -47,7 +47,11 @@ const muts = [
     // ---- where it starts ----
     [H, 'a frame starts it', 'if (C._started || JITA_IS_SUBFRAME || JITA_IS_FORGE_FRAME) { return; }', 'if (C._started || JITA_IS_FORGE_FRAME) { return; }'],
     [H, 'a tab starts it twice', '        C._started = true;\n        setTimeout(C.tick, C.FIRST_MS);', '        setTimeout(C.tick, C.FIRST_MS);'],
-    [H, 'the Confluence boot does not start it', "        try { JiTA.census.start(); } catch (e) { JiTA.caught('census.start', e); }   // this browser's entry for Who runs what\n", ''],
+    // ---- only the tab that leads the worker writes (2026-11-21) ----
+    [H, 'every tab writes, old ones over new ones', '        if (!(JiTA.worker && JiTA.worker._isLeader)) { return Promise.resolve(false); }\n', ''],
+    [H, 'a tab writes while it does not lead', 'if (!(JiTA.worker && JiTA.worker._isLeader)) { return Promise.resolve(false); }', 'if (!JiTA.worker) { return Promise.resolve(false); }'],
+    [H, 'the Confluence boot starts it again', "        // No census here: this browser's entry for Who runs what is written by the Jira tab that leads the worker.\n",
+        "        try { JiTA.census.start(); } catch (e) { JiTA.caught('census.start', e); }   // this browser's entry for Who runs what\n"],
     [H, 'the button is there for everyone', "        if (JiTA.leadduty.OWNER === ((JiTA.leadduty.me() && JiTA.leadduty.me().handle) || '')) {\n            $('<button class=\"jita-btn\">Who runs what</button>')",
         "        if (true) {\n            $('<button class=\"jita-btn\">Who runs what</button>')"]
 ];
