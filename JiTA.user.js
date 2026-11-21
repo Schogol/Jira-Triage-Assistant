@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.23
+// @version     3.53.24
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.23
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.24
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -18806,6 +18806,16 @@ JiTA.leadduty = {
     // is somewhere near 550 pages. Well clear of the ~230 in rotation, but worth knowing before the section
     // doubles in size - _prune trims month history first and the write then refuses rather than truncating.
     MAX_PROP_BYTES: 28000,
+    // Whether a failed ledger write can go through when it is made again later: Confluence not reached (no status), a
+    // lapsed session (401, or a non-JSON answer), a timeout, a conflict, too many requests or a server error. A refusal
+    // the next try meets again (400, no edit right 403, page gone 404) and a full ledger cannot, and a mark kept for
+    // flushPending then showed as done, and counted, for ever while no other Lead and no page ever saw it.
+    _retryable: function (e) {
+        if (!e) { return true; }
+        if (e.full) { return false; }
+        var s = e.status;
+        return !s || e.noSession || s === 401 || s === 408 || s === 429 || JiTA.conf.isConflict(e) || s >= 500;
+    },
     POOL_TTL_MS: 24 * 60 * 60 * 1000,
     SNOOZE_MS: 24 * 60 * 60 * 1000,
     CAS_TRIES: 4,
@@ -19035,8 +19045,10 @@ JiTA.leadduty = {
                 next = L._prune(next);
                 var size = JSON.stringify(next).length;
                 if (size > L.MAX_PROP_BYTES) {
-                    throw new Error('The lead-duty ledger (' + key + ') is full (' + size + ' bytes, cap ' + L.MAX_PROP_BYTES +
+                    var full = new Error('The lead-duty ledger (' + key + ') is full (' + size + ' bytes, cap ' + L.MAX_PROP_BYTES +
                         '). It has outgrown a single Confluence property - raise the issue rather than losing history.');
+                    full.full = true;   // no retry gets it in (_retryable)
+                    throw full;
                 }
                 if (L._dry()) {
                     if (window.console) {   // the whole payload: the console only, never Copy diagnostics
@@ -20116,6 +20128,7 @@ JiTA.leadduty = {
             var actor = String((item && item.actor) || '').slice(0, 80);
             return L.qcl.mutate([ym], function (v) {
                 v = v || { v: 1, months: {}, done: {}, flags: {} };
+                var fid = L.qc.flagId(v.flags, key, ym);   // this month's follow-up of it: another month's is that month's
                 v.done = v.done || {};
                 v.done[ym] = v.done[ym] || {};
                 // A verdict this Lead has already given stands until it is undone: a replayed Checked from a browser that
@@ -20128,13 +20141,13 @@ JiTA.leadduty = {
                 if (verdict === 'flag' && txt) { v.done[ym][key].note = txt; }
                 if (verdict === 'flag') {
                     v.flags = v.flags || {};
-                    v.flags[key] = {
+                    v.flags[fid] = {
                         by: handle, at: nowIso, ym: ym, note: txt, actor: actor,
                         kind: (item && item.kind) || (/^EBR-/.test(key) ? 'report' : 'defect'),
                         summary: String((item && item.summary) || '').slice(0, 140)
                     };
-                } else if (v.flags && v.flags[key] && !v.flags[key].resolvedAt) {
-                    delete v.flags[key];   // re-judged as fine before anyone followed up
+                } else if (v.flags && v.flags[fid] && !v.flags[fid].resolvedAt && v.flags[fid].ym === ym) {
+                    delete v.flags[fid];   // re-judged as fine before anyone followed up
                 }
                 return v;
             }).then(L.report.tap);
@@ -20152,13 +20165,26 @@ JiTA.leadduty = {
             return L.qcl.mutate([ym], function (v) {
                 var d = v && v.done && v.done[ym] && v.done[ym][key];
                 if (!d || d.by !== handle) { return null; }
-                var f = v.flags && v.flags[key];
+                var fid = L.qc.flagId(v.flags, key, ym), f = v.flags && v.flags[fid];
                 if (f && f.ym === ym && f.resolvedAt) { return null; }
                 delete v.done[ym][key];
-                if (f && f.ym === ym) { delete v.flags[key]; }
+                if (f && f.ym === ym) { delete v.flags[fid]; }
                 return v;
             }).then(L.report.tap);
         },
+
+        // A follow-up is kept per issue AND month: the same issue can be sampled again in a later month (reopened and
+        // closed again) and flagged there too, for what someone else may have done, and that flag used to replace the
+        // earlier month's follow-up, reason, handler and all. The first one an issue gets is keyed by the issue, as
+        // always; one for another month while that one is kept is keyed issue@month. flagId names (key, ym)'s, kept or
+        // to be written; flagFor is the one kept, or null; issueOf is the issue a follow-up is about.
+        flagId: function (flags, key, ym) {
+            var at = key + '@' + ym, f = flags && flags[key];
+            if (flags && flags[at]) { return at; }
+            return (!f || f.ym === ym) ? key : at;
+        },
+        flagFor: function (flags, key, ym) { return (flags && flags[JiTA.leadduty.qc.flagId(flags, key, ym)]) || null; },
+        issueOf: function (id) { return String(id).split('@')[0]; },
 
         // Whether a judged row offers Undo: your own verdict, unless it is a flag that has already been resolved.
         // A mark still waiting to reach Confluence (made offline) is yours by definition and can always go.
@@ -20197,12 +20223,13 @@ JiTA.leadduty = {
             return { reason: (f && f.note) || '(no reason given)', outcome: (f && f.outcome) || '' };
         },
 
-        // Open (unresolved) follow-ups, newest first. Reads whatever ledger value the caller already has.
+        // Open (unresolved) follow-ups, newest first: { key: the issue, id: the follow-up (what resolveFlags takes), flag }.
+        // Reads whatever ledger value the caller already has.
         openFlags: function (ledgerValue) {
             var flags = (ledgerValue && ledgerValue.flags) || {};
             var out = [];
             Object.keys(flags).forEach(function (k) {
-                if (flags[k] && !flags[k].resolvedAt) { out.push({ key: k, flag: flags[k] }); }
+                if (flags[k] && !flags[k].resolvedAt) { out.push({ key: JiTA.leadduty.qc.issueOf(k), id: k, flag: flags[k] }); }
             });
             out.sort(function (a, b) { return (a.flag.at || '') < (b.flag.at || '') ? 1 : -1; });
             return out;
@@ -20435,7 +20462,9 @@ JiTA.leadduty = {
     // Drain marks that were made while Confluence was unreachable: this month's queue of each kind, and the month
     // before's. A wiki review queued on the 30th, or a check of the QC sample queued late in the month after it, sits
     // under its own month's key, and nothing read that key once the month had turned - it was dropped silently. Only
-    // a plain review and a plain Checked are ever queued (_act), so replaying them as those is faithful.
+    // a plain review and a plain Checked are ever queued (_act), so replaying them as those is faithful. A replay
+    // Confluence refuses for good (_retryable: no edit right, a full ledger) is taken out of the mirror: kept, it
+    // counted as done for ever. A mark queued before that rule came is cleared this way too.
     flushPending: function () {
         var L = JiTA.leadduty;
         var wym = L._ym(), qym = L._prevYm();
@@ -20452,7 +20481,7 @@ JiTA.leadduty = {
                 return ((rec && rec.pending) || []).slice().reduce(function (p2, id) {
                     return p2.then(function () {
                         return q.send(id, q.ym).then(function () { return L.local.mark(q.key, id, true); },
-                            function () { /* still down; keep it queued */ });
+                            function (e) { if (!L._retryable(e)) { return L.local.unmark(q.key, id); } /* still down; keep it queued */ });
                     });
                 }, Promise.resolve());
             });
@@ -20535,7 +20564,8 @@ JiTA.leadduty = {
     // one page version per mark.
     report: {
         HASH_KEY: 'reportHash',
-        // Who published the page last: { v, by, at }. This is leader election for the ledger PAGE, and the
+        // Who published the page last: { v, by, at, page }, page = the page version that publish wrote, which reportHash
+        // describes. This is leader election for the ledger PAGE, and the
         // ledger itself has to be the medium - the three Leads are three PEOPLE on three machines, so there
         // is no BroadcastChannel and no Web Lock between them the way there is between tabs of one browser
         // (see JiTA.worker). The shared Confluence property is the only channel all three touch.
@@ -20643,37 +20673,52 @@ JiTA.leadduty = {
                 // hashing it made "unchanged" unreachable and every tick wrote a new page version.
                 var body = R._content(wiki, qc, pool);
                 var hash = JiTA.util.hash(body);
-                if (!force && wiki && wiki[R.HASH_KEY] === hash) { return { skipped: 'unchanged' }; }
-                // An OLDER build never overwrites a page a newer one published. Three Leads means three
-                // browsers, and Tampermonkey applies an update on the next page load - so a tab left open
-                // across a release keeps rendering this page from last week's code indefinitely. Where the
-                // two builds disagree they take turns rewriting the page, each tick seeing the other's hash;
-                // the page then says whatever the last tick happened to say, which is the worst of both.
-                //
-                // Deliberately AFTER the hash check, so this only ever bites a build that would actually
-                // CHANGE the page - an old tab that agrees with what is already there still skips quietly as
-                // "unchanged" and reports nothing. The version is a proxy for correctness, not a proof, but
-                // it is the same proxy the worker's leader election already runs on, and it breaks the tie in
-                // the one direction that gets better over time. An unknown version (no GM_info) gates
-                // nothing: a build that cannot name itself must not be able to lock everyone else out.
-                var pub = (wiki && wiki[R.PUB_KEY]) || null;
-                if (pub && pub.v && JiTA.SCRIPT_VERSION && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, pub.v) < 0) {
-                    return { skipped: 'this tab runs v' + JiTA.SCRIPT_VERSION + ' and the page was last published by v' +
-                        pub.v + (pub.by ? (' on ' + pub.by + "'s tab") : '') +
-                        ' - an older build does not overwrite a newer one. Reload this tab to pick up the update.' };
-                }
-                return R._write(R._stamp(pool) + '\n' + body).then(function (res) {
-                    // Remember what we published so the next tick can skip. Deliberately NOT tapped: this
-                    // write is a consequence of publishing, not a reason to publish again.
-                    return L.ledger.mutate(L.LEDGER_KEY, function (v) {
-                        if (!v) { return null; }
-                        v[R.HASH_KEY] = hash;
-                        v[R.PUB_KEY] = { v: JiTA.SCRIPT_VERSION || '', by: (L.me() && L.me().handle) || '', at: new Date().toISOString() };
-                        return v;
-                    }).then(function () { return { written: true, version: res.version }; },
-                        function () { return { written: true, version: res.version }; });
-                });
+                if (!force && wiki && wiki[R.HASH_KEY] === hash) { return R._unchanged(wiki[R.PUB_KEY]).then(function (same) { return same ? { skipped: 'unchanged' } : R._publish(wiki, body, hash, pool, qc); }); }
+                return R._publish(wiki, body, hash, pool, qc);
             }).then(done, fail);
+        },
+        // The stored hash describes the page only while nobody wrote it since (reportPub.page): two Leads publishing at
+        // once could each store their hash while the page held the other's, and every later publish then skipped as
+        // unchanged. A pub from a build before the page was noted, or a page that cannot be read, goes by the hash alone.
+        _unchanged: function (pub) {
+            if (!pub || !pub.page) { return Promise.resolve(true); }
+            return JiTA.conf.getPage(JiTA.leadduty.ledgerPage(), false).then(function (page) { return page.version === pub.page; }, function () { return true; });
+        },
+        // Writes the page rendered from `wiki`, unless a newer build published it last.
+        _publish: function (wiki, body, hash, pool, qc) {
+            var L = JiTA.leadduty, R = L.report;
+            // An OLDER build never overwrites a page a newer one published. Three Leads means three
+            // browsers, and Tampermonkey applies an update on the next page load - so a tab left open
+            // across a release keeps rendering this page from last week's code indefinitely. Where the
+            // two builds disagree they take turns rewriting the page, each tick seeing the other's hash;
+            // the page then says whatever the last tick happened to say, which is the worst of both.
+            //
+            // Deliberately AFTER the hash check, so this only ever bites a build that would actually
+            // CHANGE the page - an old tab that agrees with what is already there still skips quietly as
+            // "unchanged" and reports nothing. The version is a proxy for correctness, not a proof, but
+            // it is the same proxy the worker's leader election already runs on, and it breaks the tie in
+            // the one direction that gets better over time. An unknown version (no GM_info) gates
+            // nothing: a build that cannot name itself must not be able to lock everyone else out.
+            var pub = (wiki && wiki[R.PUB_KEY]) || null;
+            if (pub && pub.v && JiTA.SCRIPT_VERSION && JiTA.worker._verCmp(JiTA.SCRIPT_VERSION, pub.v) < 0) {
+                return { skipped: 'this tab runs v' + JiTA.SCRIPT_VERSION + ' and the page was last published by v' +
+                    pub.v + (pub.by ? (' on ' + pub.by + "'s tab") : '') +
+                    ' - an older build does not overwrite a newer one. Reload this tab to pick up the update.' };
+            }
+            return R._write(R._stamp(pool) + '\n' + body).then(function (res) {
+                // Remember what we published so the next tick can skip. Deliberately NOT tapped: this
+                // write is a consequence of publishing, not a reason to publish again.
+                return L.ledger.mutate(L.LEDGER_KEY, function (v) {
+                    if (!v) { return null; }
+                    // A ledger written meanwhile (another Lead's mark) renders another page than the one written: publish
+                    // again once this one is done, from the ledger as it is now.
+                    if (JiTA.util.hash(R._content(v, qc, pool)) !== hash) { R._again = true; }
+                    v[R.HASH_KEY] = hash;
+                    v[R.PUB_KEY] = { v: JiTA.SCRIPT_VERSION || '', by: (L.me() && L.me().handle) || '', at: new Date().toISOString(), page: res.version };
+                    return v;
+                }).then(function () { return { written: true, version: res.version }; },
+                    function () { return { written: true, version: res.version }; });
+            });
         },
 
         // PUT the body, retrying once against a re-read version: two Leads publishing in the same second is
@@ -20845,7 +20890,7 @@ JiTA.leadduty = {
                     if (d && d.verdict === 'flag') { f++; flagged++; }
                     rows.push([R._issue(key), R._txt(lead), R._txt((d && d.actor) || ''),
                         R._txt(!d ? 'Outstanding' : (d.verdict === 'flag' ? 'Flagged' : 'Checked')),
-                        R._when(d && d.at), R._lines(R._reason(d, flags[key], pym))]);
+                        R._when(d && d.at), R._lines(R._reason(d, JiTA.leadduty.qc.flagFor(flags, key, pym), pym))]);
                 });
                 sum.push([R._txt(lead), String(n), String(c), String(f)]);
             });
@@ -21033,6 +21078,7 @@ JiTA.leadduty.ui = {
         var chain = force ? L.pool.ensureFresh(true) : Promise.resolve(null);
         chain.then(function () { return L.wiki.claimMonth(ym); }).then(function (res) {
             if (!U.isOpen()) { return; }
+            res.ym = ym;   // the month this list is: past the UTC month turn the clock says the next one (_wikiCtx)
             U._wiki = res;
             var ids = L.wiki.assignedIds(res.record, res.pool);   // frozen slice, minus anything now excluded
             var rec = { ym: ym, perLead: res.record.perLead, pageIds: ids, done: {}, pending: [] };
@@ -21090,7 +21136,7 @@ JiTA.leadduty.ui = {
 
     // Everything a wiki row is drawn from, read once per render rather than once per row.
     _wikiCtx: function () {
-        var L = JiTA.leadduty, U = L.ui, res = U._wiki, ym = L._ym(), v = res.ledgerValue || {};
+        var L = JiTA.leadduty, U = L.ui, res = U._wiki, ym = res.ym || L._ym(), v = res.ledgerValue || {};
         return {
             res: res, ym: ym, me: (L.me() && L.me().handle) || null,
             ids: L.wiki.assignedIds(res.record, res.pool),
@@ -21359,7 +21405,7 @@ JiTA.leadduty.ui = {
         });
         $row.on('mouseleave', function () { try { JiTA.ui._hideTip(); } catch (e) { /* ignore */ } });
         var $act = $('<span class="ld-act"></span>').appendTo($row);
-        if (done && L.qc.undoable(done, ctx.flags[it.key], ym)) {
+        if (done && L.qc.undoable(done, L.qc.flagFor(ctx.flags, it.key, ym), ym)) {
             $('<button class="jita-btn ld-mini">Undo</button>')
                 .attr('title', done.verdict === 'flag' ? 'Take the flag back - it also withdraws the follow-up and its reason'
                     : 'Take this back - the item goes back on your list')
@@ -21523,7 +21569,7 @@ JiTA.leadduty.ui = {
             // One conversation usually covers all of a person's follow-ups, so they can be closed out together, with
             // one note saved on each.
             if (g.entries.length > 1) {
-                var keys = g.entries.map(function (o) { return o.key; });
+                var keys = g.entries.map(function (o) { return o.id; });   // the follow-ups, one issue's months apart
                 $('<button class="jita-btn ld-mini" title="Close out every follow-up listed for this person at once, with one note saved on each">Resolve all</button>')
                     .on('click', function () {
                         var draft = U._resolveDraft(keys);
@@ -21548,11 +21594,11 @@ JiTA.leadduty.ui = {
                 var $act = $('<span class="ld-act"></span>').appendTo($row);
                 $('<button class="jita-btn ld-mini" title="Close this follow-up out - it leaves the list and the ledger page">Resolve</button>')
                     .on('click', function () {
-                        var $btn = $(this), draft = U._resolveDraft([o.key]);
+                        var $btn = $(this), draft = U._resolveDraft([o.id]);
                         U._askNote({
                             title: 'Resolve ' + o.key, save: 'Resolve', draft: draft,
                             hint: 'What was done about it? Optional.'
-                        }, function (note) { U._resolve($btn, [o.key], note, draft); });
+                        }, function (note) { U._resolve($btn, [o.id], note, draft); });
                     }).appendTo($act);
             });
         });
@@ -21565,11 +21611,11 @@ JiTA.leadduty.ui = {
         if (done.length) {
             $('<div class="ld-sub" style="margin-top:14px;"></div>').text('Recently resolved').appendTo($b);
             done.forEach(function (k) {
-                var f = flags[k];
+                var f = flags[k], issue = L.qc.issueOf(k);
                 var $row = $('<div class="ld-row ld-noterow done"></div>').appendTo($b);
                 $('<span class="ld-tick"></span>').text('✓').appendTo($row);
                 $('<a class="ld-title ld-key" target="_blank" rel="noopener"></a>')
-                    .attr('href', JiTA.HOST + '/browse/' + k).text(k).appendTo($row);
+                    .attr('href', JiTA.HOST + '/browse/' + issue).text(issue).appendTo($row);
                 var txt = L.qc.flagText(f);
                 var $sum = $('<span class="ld-sum ld-lines"></span>').text(txt.reason).appendTo($row);
                 if (txt.outcome) { $('<span class="ld-outcome"></span>').text('Resolved: ' + txt.outcome).appendTo($sum); }
@@ -21679,7 +21725,9 @@ JiTA.leadduty.ui = {
         L.apps.detail(it.id).then(function (res) {
             // The cursor may have moved on while this was in flight - only paint the one still selected.
             if (!U.isOpen() || U._tab !== 'apps' || !U._apps || U._apps.items[U._apps.idx] !== it) { return; }
-            if (res.ok) { st.qa[it.id] = { sections: res.sections, actions: res.actions, notes: res.notes, note: res.note }; U._showApp(i); }
+            // Shown where it is now: an application accepted or declined meanwhile moved the ones after it up, and the
+            // index it had when asked then named the next applicant.
+            if (res.ok) { U._apps.qa[it.id] = { sections: res.sections, actions: res.actions, notes: res.notes, note: res.note }; U._showApp(U._apps.idx); }
             else { $('#ld-apps-detail').find('.ld-empty').text(L.apps.line(res)); }
         }, function () {
             if (!U.isOpen() || U._tab !== 'apps') { return; }
@@ -21987,6 +22035,8 @@ JiTA.leadduty.ui = {
         }, function (e) {
             var why = String(e && e.message || e);
             if (queue === false) { done(null, 'Not saved - ' + why + ' Try again once Confluence answers.', null); return null; }
+            // Refused for good (no edit right on the ledger page, a full ledger): not kept for a replay that cannot work.
+            if (!L._retryable(e)) { done(null, 'Not saved - ' + why + ' Trying again will not save it.', null); return null; }
             return L.local.mark(localKey, id, false).then(function () {
                 done(null, 'Saved locally only - ' + why + ' It will be retried automatically.', true);
             });

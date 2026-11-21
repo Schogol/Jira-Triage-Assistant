@@ -14,6 +14,16 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.24 (2026-11-21)
+
+### Fixed issues
+
+- Lead duties: an issue sampled for quality control in two months keeps a follow-up for each, instead of the later one replacing the earlier, and a Checked no longer withdraws another month's open follow-up.
+- Lead duties: the ledger page no longer stays out of date when two Leads publish it at the same time.
+- Lead duties: in Applications, a detail that loads after you accept or decline someone no longer moves you on to the next applicant.
+- Lead duties: around midnight UTC at the end of a month, the wiki list marks and undoes reviews for its own month.
+- Lead duties: a review or check Confluence refuses for good (no edit right on the ledger page, or a full ledger) says it was not saved, instead of showing as done and waiting for a retry that never works.
+
 ## 3.53.23 (2026-11-21)
 
 ### Fixed issues
