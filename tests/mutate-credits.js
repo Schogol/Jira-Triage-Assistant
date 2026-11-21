@@ -36,7 +36,7 @@ const muts = [
     [H, 'another month\'s count of your own is used', ' || self.ym !== res.ym', ''],
     [H, 'another account\'s count is used', ' || self.me !== me', ''],
     [H, 'the cached leaderboard is changed in place', '        out.table = table; out.selfAt = self.computedAt;\n        return out;', '        res.table = table; res.selfAt = self.computedAt;\n        return res;'],
-    [H, 'only your credits are taken from your own count', 'return [row[0], self.created, self.resolved, self.attached, self.trashed, self.reassigned, self.actioned, row[7], self.credits];', 'return row.slice(0, 8).concat([self.credits]);'],
+    [H, 'only your credits are taken from your own count', 'return [row[0], self.created, resolved, self.attached, self.trashed, self.reassigned, self.actioned, row[7], Math.round((self.credits - self.resolved + resolved) * 10) / 10];', 'return row.slice(0, 8).concat([Math.round((self.credits - self.resolved + resolved) * 10) / 10]);'],
     [H, 'the footer leaves out when your row was counted', "(fullRes.selfAt ? ', your row ' + at(fullRes.selfAt).slice(11) + ' UTC' : '')", "''"],
     [H, 'the open leaderboard is not told what the badge read', '                if (r[0] && JiTA.credits._viewSync) { JiTA.credits._viewSync(r[0].stamp); }   // the open leaderboard follows\n', ''],
     [H, 'the leaderboard never hooks the badge', '        C._viewSync = sync;\n', ''],
@@ -48,7 +48,7 @@ const muts = [
     [H, 'a redraw jumps to the top', '                $scroll.scrollTop(top);\n', ''],
     [H, 'last month is never finished', "            if (gmGet(S.PREV_DONE_KEY, '') !== prev.ym && ", '            if (false && '],
     [H, 'last month is recomputed every poll', '                }).then(function () { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); end(); },', '                }).then(function () { gmSet(S.FAIL_PREV_KEY, 0); end(); },'],
-    [H, 'a month already final is recomputed', "                    if (!res || String(res.computedAt || '') >= now.ym + '-01') { return; }", '                    if (!res) { return; }'],
+    [H, 'a month already final is recomputed', '                    if (!res || JiTA.credits.countsAll(res, prev.y, prev.m)) { return; }', '                    if (!res) { return; }'],
     [H, 'Refresh flips the quiet flag over a running crawl', "            if (C.running) { JiTA.ui.toast('A credit computation is already running…'); return; }\n", ''],
     [H, 'a manual Refresh leaves the scheduler to repeat it', '                gmSet(C.sched.LAST_FULL_KEY, Date.now()); gmSet(C.sched.FAIL_FULL_KEY, 0);\n', ''],
     // ---- for the Members tab (v3.48.0) ----
@@ -81,7 +81,20 @@ const muts = [
         "var key = 'gmold:' + payload.y + '-' + payload.m + ':' + (payload.cut || ''), tag = payload.tag || null;\n        if (false) {"],
     [H, 'an old-way GM count runs alongside a count', '        var begin = function () { crActiveTags = run.tags; return crGmOld(payload); };\n        run.promise = prev.then(begin, begin);',
         '        var begin = function () { crActiveTags = run.tags; return crGmOld(payload); };\n        run.promise = begin();'],
-    [H, 'the worker does not answer it', "            else if (type === 'creditsGmOld') { result = await runGmOld(payload); }   // the Members tab's old-way GM handoffs, queued like a count\n", '']
+    [H, 'the worker does not answer it', "            else if (type === 'creditsGmOld') { result = await runGmOld(payload); }   // the Members tab's old-way GM handoffs, queued like a count\n", ''],
+    // ---- your row's resolved defects from the full count while it is fresh (review 2026-11-20 worker-logic-2) ----
+    [H, 'your row keeps your own resolved defects however fresh the full count', 'var resolved = (fresh && row[2] != null) ? row[2] : self.resolved;', 'var resolved = self.resolved;'],
+    [H, 'your row takes the full count\'s resolved defects however old it is', 'var resolved = (fresh && row[2] != null) ? row[2] : self.resolved;', 'var resolved = (row[2] != null) ? row[2] : self.resolved;'],
+    [H, 'a full count just RESOLVED_FRESH_MS old is stale', '- Date.parse(res.computedAt) <= JiTA.credits.RESOLVED_FRESH_MS;', '- Date.parse(res.computedAt) < JiTA.credits.RESOLVED_FRESH_MS;'],
+    [H, 'a full count is fresh for longer', 'RESOLVED_FRESH_MS: 30 * 60 * 1000,', 'RESOLVED_FRESH_MS: 60 * 60 * 1000,'],
+    [H, 'your credits do not move with the resolved defects', 'Math.round((self.credits - self.resolved + resolved) * 10) / 10]', 'self.credits]'],
+    [H, 'your credits carry float dust', 'Math.round((self.credits - self.resolved + resolved) * 10) / 10]', '(self.credits - self.resolved + resolved)]'],
+    [H, 'a resolved defect is worth more than a credit', 'c += 0.1 * r.reassigned + r.created + r.resolved;', 'c += 0.1 * r.reassigned + r.created + 1.5 * r.resolved;'],
+    // ---- a month ends in this browser's time zone (review 2026-11-20 worker-logic-1) ----
+    [H, 'a month ends at UTC midnight', '    _endMs: function (y, m) { return new Date(y, m, 1).getTime(); },', '    _endMs: function (y, m) { return Date.UTC(y, m, 1); },'],
+    [H, 'a month ends on its own first day', '    _endMs: function (y, m) { return new Date(y, m, 1).getTime(); },', '    _endMs: function (y, m) { return new Date(y, m - 1, 1).getTime(); },'],
+    [H, 'last month is judged final as text', '                    if (!res || JiTA.credits.countsAll(res, prev.y, prev.m)) { return; }', "                    if (!res || String(res.computedAt || '') >= now.ym + '-01') { return; }"],
+    [H, 'any count with a time is final', "    countsAll: function (res, y, m) { return Date.parse((res && res.computedAt) || '') >= JiTA.credits._endMs(y, m); },", "    countsAll: function (res, y, m) { return !!(res && res.computedAt); },"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

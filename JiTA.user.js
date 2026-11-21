@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.16
+// @version     3.53.17
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.16
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.17
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -10718,6 +10718,13 @@ JiTA.credits = {
         var n = JiTA.credits._ymNow(), y = n.m === 1 ? n.y - 1 : n.y, m = n.m === 1 ? 12 : n.m - 1;
         return { y: y, m: m, ym: y + '-' + (m < 10 ? '0' : '') + m };
     },
+    // When month y-m ends here: midnight on the 1st after it, in this browser's time zone. Jira reads a count's bare
+    // dates in the counting user's time zone, the one their browser keeps as a rule, so the month it counts ends then.
+    _endMs: function (y, m) { return new Date(y, m, 1).getTime(); },
+    // Whether a cached count of month y-m counts all of it: made once the month had ended here. Compared as instants: a
+    // UTC timestamp compared as text with the date of the 1st took a count made in the last evening hours west of UTC
+    // (already the 1st in UTC) for a final one, and those hours were never counted.
+    countsAll: function (res, y, m) { return Date.parse((res && res.computedAt) || '') >= JiTA.credits._endMs(y, m); },   // no time: NaN, never final
 
     // Compute a month + cache it. Guarded so two calls don't overlap. Resolves the result object.
     refresh: function (y, m, mentor) {
@@ -10833,15 +10840,22 @@ JiTA.credits = {
     // The viewer's row is counted twice: with everyone about every 15 minutes (the leaderboard) and alone every 2 (the
     // badge). The newer count wins in both, so the badge and the leaderboard show the same numbers and rank. Resolves
     // res as it is, or a copy whose viewer row comes from their own newer count (selfAt says when); the cache is untouched.
+    // Its resolved defects are the full count's, while that count is fresh (at most RESOLVED_FRESH_MS older than the
+    // viewer's own): the viewer's own count sees only their own defects, so their clone of another member's defect (a
+    // Cloners link), which the full count credits once, to the EO one, counted for them as well. Their credits move with
+    // it, one for each resolved defect (crCreditFormula). A full count older than that may not have a defect resolved
+    // since, so their own count of them stands.
+    RESOLVED_FRESH_MS: 30 * 60 * 1000,
     _withSelf: function (res, self, me) {
         if (!res || !res.table || !self || !me || self.me !== me || self.ym !== res.ym || !((self.computedAt || '') > (res.computedAt || ''))) { return res; }
         var myName = null;
         for (var name in res.nameToAcc) { if (res.nameToAcc.hasOwnProperty(name) && res.nameToAcc[name] === me) { myName = name; } }
-        var hit = false;
+        var hit = false, fresh = Date.parse(self.computedAt) - Date.parse(res.computedAt) <= JiTA.credits.RESOLVED_FRESH_MS;
         var table = res.table.map(function (row) {
             if (row[0] !== myName) { return row; }
             hit = true;
-            return [row[0], self.created, self.resolved, self.attached, self.trashed, self.reassigned, self.actioned, row[7], self.credits];
+            var resolved = (fresh && row[2] != null) ? row[2] : self.resolved;
+            return [row[0], self.created, resolved, self.attached, self.trashed, self.reassigned, self.actioned, row[7], Math.round((self.credits - self.resolved + resolved) * 10) / 10];
         });
         if (!hit) { return res; }
         var out = {};
@@ -11276,7 +11290,7 @@ JiTA.credits = {
                 var hbp = setInterval(function () { gmSet(S.FULL_LEASE_KEY, { tabId: JiTA.sched.tabId, ts: Date.now() }); }, S.HEARTBEAT_MS);
                 var end = function () { clearInterval(hbp); S._release(S.FULL_LEASE_KEY); };
                 JiTA.credits.getCached(prev.ym).then(function (res) {
-                    if (!res || String(res.computedAt || '') >= now.ym + '-01') { return; }   // never computed, or already after its end
+                    if (!res || JiTA.credits.countsAll(res, prev.y, prev.m)) { return; }   // never computed, or already after its end
                     JiTA.credits._quiet = true;
                     return JiTA.credits.refresh(prev.y, prev.m);
                 }).then(function () { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); end(); },
@@ -18643,8 +18657,9 @@ JiTA.leadduty = {
         return y + '-' + JiTA.leadduty._p2(m);
     },
     _monthIndex: function (ym) { var p = JiTA.leadduty._ymParts(ym); return p.y * 12 + p.m; },
-    // Half-open [start, end) month bounds, matching the worker's crMonthBounds. Jira resolves these bare
-    // date strings in the INSTANCE timezone, identical for every Lead, so determinism holds.
+    // Half-open [start, end) month bounds, matching the worker's crMonthBounds. Jira reads these bare date strings in the
+    // searching user's own time zone, so a Lead's count covers the month in theirs; which months are shown stays UTC, the
+    // same for every Lead, and a month is counted only once it is over in the counting Lead's zone (members.over).
     _bounds: function (ym) {
         var p = JiTA.leadduty._ymParts(ym);
         var ny = p.m === 12 ? p.y + 1 : p.y, nm = p.m === 12 ? 1 : p.m + 1;
@@ -22936,9 +22951,13 @@ JiTA.leadduty.members = {
         for (var i = list.length - 1; i >= 0; i--) { out.push(i); }
         return out;
     },
-    // Whether a cached credits result counts its whole month: computed on or after the first day after it, the credits
-    // scheduler's own rule for its final count.
-    isFinal: function (res, ym) { return !!(res && res.ym === ym && String(res.computedAt || '') >= JiTA.leadduty._bounds(ym).end); },
+    // Whether a cached credits result counts its whole month: computed once the month had ended in this browser's time zone,
+    // the credits scheduler's own rule for its final count (JiTA.credits.countsAll).
+    isFinal: function (res, ym) { var p = JiTA.leadduty._ymParts(ym); return !!(res && res.ym === ym && JiTA.credits.countsAll(res, p.y, p.m)); },
+    // Whether month `ym` has ended here. The months shown are UTC months, the same for every Lead, but a Lead west of UTC
+    // counts the last one in their own time zone, where it goes on for a few hours more: counted before then, the count
+    // missed those hours and was kept for every Lead. So a month is offered and counted only once it is over here too.
+    over: function (ym) { var p = JiTA.leadduty._ymParts(ym); return Date.now() >= JiTA.credits._endMs(p.y, p.m); },
     // The end of the stretch of `ym` before the GM switch, in which handoffs made the old way are counted: the month's end,
     // the switch day, or null for a month entirely after it.
     gmCut: function (ym) {
@@ -23461,7 +23480,7 @@ JiTA.leadduty.members = {
                 var act = r[0].value || null, frozen = (act && act.frozen) || {};
                 return { act: act, mem: r[1].value || null, live: (live && live.ym === cur) ? live : null, cur: cur,
                     actVersion: (r[0].prop && r[0].prop.version) || 0, memVersion: (r[1].prop && r[1].prop.version) || 0,
-                    missing: wins.filter(function (ym) { return !frozen[ym]; }) };
+                    missing: wins.filter(function (ym) { return !frozen[ym] && M.over(ym); }) };
             });
         });
         var clear = function () { if (M._gather === p) { M._gather = null; } };
@@ -23487,7 +23506,7 @@ JiTA.leadduty.members = {
                 var v = r.value || {}, frozen = v.frozen || {}, crawl = v.crawl || {}, now = Date.now();
                 var todo = M.window(L._ym()).filter(function (ym) {
                     var c = crawl[ym];
-                    return !frozen[ym] && !tried[ym] && !(c && c.tab !== JiTA.sched.tabId && now - Date.parse(c.at) < M.CLAIM_MS);
+                    return !frozen[ym] && !tried[ym] && M.over(ym) && !(c && c.tab !== JiTA.sched.tabId && now - Date.parse(c.at) < M.CLAIM_MS);
                 });
                 if (!todo.length) { return null; }
                 tried[todo[0]] = true;

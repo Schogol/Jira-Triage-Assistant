@@ -10,6 +10,8 @@
 //  - v3.51.5: the badge and the leaderboard show the same for the viewer: the newer of their own count and the
 //    leaderboard's takes their row in both, rank included, and an open leaderboard is drawn again when the badge reads
 //    newer counts
+// Month ends are in the browser's own time zone: held at UTC, where CI runs, and moved for the checks that need another.
+process.env.TZ = 'UTC';
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const cut = (from, to, at) => {
@@ -162,6 +164,24 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     ok('...as does one of another month, or another account\'s', C._withSelf(full, Object.assign({}, mine, { ym: '2026-10' }), 'a-me') === full &&
         C._withSelf(full, Object.assign({}, mine, { me: 'a-old' }), 'a-me') === full);
     ok('...or one of someone not on it', C._withSelf(full, Object.assign({}, mine, { me: 'a-new' }), 'a-new') === full);
+    // your resolved defects are the full count's while it is fresh (review 2026-11-20 worker-logic-2): your own count sees
+    // only your defects, so your clone of another member's defect, which the full count credits once, counted for you too
+    const cloned = Object.assign({}, mine, { resolved: 2, credits: 36.4 });
+    let row = C._derive(C._withSelf(full, cloned, 'a-me'), 'a-me').myRow;
+    ok('your own count\'s other numbers take your row, its resolved defects the full count\'s while that is fresh, your credits with them', row.join() === 'Me,9,1,47,36,5,97,2,35.4', row.join());
+    const stale = Object.assign({}, cloned, { computedAt: new Date(Date.parse(full.computedAt) + C.RESOLVED_FRESH_MS + 60000).toISOString() });
+    row = C._derive(C._withSelf(full, stale, 'a-me'), 'a-me').myRow;
+    ok('...a full count older than RESOLVED_FRESH_MS leaves your own count of them, as it may not have one resolved since', row.join() === 'Me,9,2,47,36,5,97,2,36.4', row.join());
+    const atEdge = Object.assign({}, cloned, { computedAt: new Date(Date.parse(full.computedAt) + C.RESOLVED_FRESH_MS).toISOString() });
+    ok('...one just that old still counts as fresh', C._derive(C._withSelf(full, atEdge, 'a-me'), 'a-me').myRow[2] === 1);
+    ok('...two full counts\' time apart, as a full count is redone every FULL_MS', C.RESOLVED_FRESH_MS === 2 * C.sched.FULL_MS, String(C.RESOLVED_FRESH_MS));
+    const fewer = Object.assign({}, mine, { resolved: 0, credits: 34.4 });
+    ok('...and the other way round too: one the full count credits you that your own count does not', C._derive(C._withSelf(full, fewer, 'a-me'), 'a-me').myRow.join() === 'Me,9,1,47,36,5,97,2,35.4');
+    const tenths = Object.assign({}, mine, { resolved: 3, credits: 0.3 });
+    ok('...with no float dust in the credits', C._derive(C._withSelf(full, tenths, 'a-me'), 'a-me').myRow[8] === -1.7, String(C._derive(C._withSelf(full, tenths, 'a-me'), 'a-me').myRow[8]));
+    const formula = new Function(fn('crCreditFormula') + '\nreturn crCreditFormula;')();
+    const r0 = { attached: 47, trashed: 36, reassigned: 5, created: 9, resolved: 1 };
+    ok('a resolved defect is one credit in the credit formula, which the swap counts on', formula(Object.assign({}, r0, { resolved: 2 })) - formula(r0) === 1 && formula(r0) === 35.4, formula(r0) + ' ' + formula(Object.assign({}, r0, { resolved: 2 })));
 
     C._updating = false;
     C.getCached = (ym) => Promise.resolve(ym === '2026-11' ? full : null);
@@ -256,6 +276,25 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     C.sched.tick();
     await flush();
     ok('a month already computed after its end is left alone', refreshed.length === 0 && store[C.sched.PREV_DONE_KEY] === '2026-09', refreshed.join());
+    // west of UTC a count made in the last evening hours of the month (already the 1st in UTC) counted none of those hours
+    // (review 2026-11-20 worker-logic-1)
+    process.env.TZ = 'America/New_York';
+    store = {}; store[C.sched.LAST_FULL_KEY] = Date.now(); store[C.sched.LAST_SELF_KEY] = Date.now(); refreshed = [];
+    C.getCached = () => Promise.resolve({ computedAt: '2026-10-01T03:00:00.000Z' });   // 30 September, 23:00 in New York
+    C.sched.tick();
+    await flush();
+    ok('west of UTC, last month counted in its last evening hours there is computed once more', refreshed.join() === '2026-9' && store[C.sched.PREV_DONE_KEY] === '2026-09', refreshed.join());
+    store = {}; store[C.sched.LAST_FULL_KEY] = Date.now(); store[C.sched.LAST_SELF_KEY] = Date.now(); refreshed = [];
+    C.getCached = () => Promise.resolve({ computedAt: '2026-10-01T04:10:00.000Z' });   // 1 October, 00:10 there
+    C.sched.tick();
+    await flush();
+    ok('...one counted after midnight there is left alone', refreshed.length === 0 && store[C.sched.PREV_DONE_KEY] === '2026-09', refreshed.join());
+    ok('...and a count with no time is no final one', !C.countsAll({}, 2026, 9) && !C.countsAll(null, 2026, 9) && !C.countsAll({ computedAt: 'soon' }, 2026, 9));
+    process.env.TZ = 'Europe/Berlin';
+    ok('east of UTC one counted after midnight there is final, though it was still the last day in UTC', C.countsAll({ computedAt: '2026-09-30T22:30:00.000Z' }, 2026, 9) &&
+        !C.countsAll({ computedAt: '2026-09-30T21:30:00.000Z' }, 2026, 9));
+    ok('...December ends at the new year', C.countsAll({ computedAt: '2026-12-31T23:30:00.000Z' }, 2026, 12) && !C.countsAll({ computedAt: '2026-12-31T22:30:00.000Z' }, 2026, 12));
+    process.env.TZ = 'UTC';
 
     const view = cut('    openView: function (ym) {', '\n    // ---- always-on corner badge', cStart);
     ok('Refresh checks for a running crawl before it touches the quiet flag', /if \(C\.running\) \{ JiTA\.ui\.toast\([^)]*\); return; \}\s*\n\s*\$refresh\.prop\('disabled', true\)/.test(view) && view.indexOf('C._quiet = false;') > view.indexOf('if (C.running)'));

@@ -14,6 +14,13 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.17 (2026-11-21)
+
+### Fixed issues
+
+- ISD credits: a month counts as finished only once it is over in your own time zone, so west of UTC its last evening hours are counted too.
+- ISD credits: your resolved defects follow the full count while that is fresh, so your clone of another member's defect no longer counts for you as well.
+
 ## 3.53.16 (2026-11-21)
 
 ### Fixed issues
