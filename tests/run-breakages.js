@@ -92,6 +92,7 @@ for (let k = 0; k < W; k++) {
     roots.push(root);
     fs.copyFileSync(path.join(REPO, 'JiTA.user.js'), path.join(root, 'JiTA.user.js'));
     fs.copyFileSync(path.join(REPO, 'CHANGELOG.md'), path.join(root, 'CHANGELOG.md'));   // the changelog the script reads (v3.52.2)
+    fs.copyFileSync(path.join(REPO, 'settings-window.json'), path.join(root, 'settings-window.json'));   // the settings window's layout (v3.54.0)
     fs.cpSync(DIR, path.join(root, 'tests'), { recursive: true, filter: (s) => !scratch(path.basename(s)) });
     copies.push(path.join(root, 'tests'));
 }

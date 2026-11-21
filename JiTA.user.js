@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.37
+// @version     3.54.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.37
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.54.0
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.54.0
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -2021,7 +2022,7 @@ var JiTA = {
 JiTA.logparser = {
     // ---- what a file's parse carries across ticks: the detection or the click, the mount and the draw run apart ----
     text: '',       // the raw text of the file being parsed, read when its view was mounted
-    igbr: null,     // the header-less igbr.zip file a click just opened ('oc', 'lc', 'pdm' or 'dx'): swap() takes it, once
+    igbr: null,     // the header-less igbr.zip file a click just opened ('oc', 'lc', 'pdm', 'dx' or 'set'): swap() takes it, once
     gen: 0,         // file-entry clicks in the igbr.zip viewer so far: a newer click cancels an older click's poll
     pending: 0,     // the click generation of a header-less file being loaded, or 0: hide() hides its code-block meanwhile
 
@@ -2032,7 +2033,8 @@ JiTA.logparser = {
     PH_HDR: 'dateTime\tpyDateTime\tprocCpu\tthreadCpu\tpyMem\tvirtualMem\ttaskletsProcessed\ttaskletsQueued\twatchdog time\tspf\tserviceCalls\tcallsFromClient\tbytesReceived\tbytesSent\tpacketsReceived\tpacketsSent\tsessionCount\ttidiFactor',
     MC_HDR: 'Time\tMethod\tDuration [ms]',
     // The igbr.zip files with no header row, told apart by the button clicked: which view each opens in (swap()).
-    IGBR: { 'outstandingcalls.txt': 'oc', 'lastcrashes.txt': 'lc', 'PDMData.txt': 'pdm', 'dxdiag.txt': 'dx' },
+    // settings.yaml opens as the in-game Settings window (JiTA.settingsview).
+    IGBR: { 'outstandingcalls.txt': 'oc', 'lastcrashes.txt': 'lc', 'PDMData.txt': 'pdm', 'dxdiag.txt': 'dx', 'settings.yaml': 'set' },
 
     // At load: watch for a file to parse. One with a header row is found by it, in Jira's code-block or in the CodeMirror
     // viewer a logs.txt attached to the report opens in (it keeps only the lines in view in the page, so swap() reads the
@@ -2100,7 +2102,7 @@ JiTA.logparser = {
         }
     },
 
-    // A header-less igbr.zip file (outstandingcalls.txt, lastcrashes.txt, PDMData.txt, dxdiag.txt) loads its text into the
+    // A header-less igbr.zip file (outstandingcalls.txt, lastcrashes.txt, PDMData.txt, dxdiag.txt, settings.yaml) loads its text into the
     // code-block a moment after its button is clicked: poll for that text, then open it as `file` (IGBR). A plain "the
     // text changed" poll goes wrong, so it is guarded five ways:
     //   1. A newer click (the same file clicked twice too) bumps gen, and an older poll gives up.
@@ -2179,6 +2181,7 @@ JiTA.logparser = {
             // the reading of the file included: malformed PDM text used to throw before the view was revealed.
             try { renderRequirements(convertTextToObject(P.text)); } catch (e) { $('#Requirements').text('Could not evaluate system requirements.'); }
         }
+        else if (igbr === 'set' && flagOn('parser')) { JiTA.settingsview.mount(); }
         // The view is mounted, or this was no file to parse: nothing is pending any more, and what was hidden shows again.
         P.pending = 0;
         P.reveal();
@@ -3049,6 +3052,889 @@ JiTA.logparser = {
 
 // The parser watches for files to parse from here on: it needs the module above.
 JiTA.logparser.start();
+
+
+/* ---- settings.yaml: the client's settings, drawn as the in-game Settings window ----
+ * settings.yaml in a report's igbr.zip holds the client's settings as they were when the report was sent. It opens as the
+ * game's own Settings window would show them: the same tabs, sections, labels and controls, read-only, each at the file's
+ * value or, where the file holds none, at the default the game shows then. A value that differs from its default is
+ * marked (its hover says the default), and "Only changed from default" narrows every tab to those. Reset Settings lists
+ * the warnings the player switched off. What the window has no place for is under Everything else (less what the player
+ * typed: the notepad, the calculator and edit-box history), and the file as it is under Show raw, with Copy.
+ * The window itself (labels, keys, defaults, options, which setting greys out which, the shortcut list) is
+ * settings-window.json, fetched with the script (@resource settingswindow), as the in-game window shows it: a new EVE
+ * release changes that file, not this code.
+ * The time stored with each value is never shown: the client stamps a setting whenever it READS it, so it says when a
+ * setting was last read, not when it was changed.
+ */
+JiTA.settingsview = {
+    RESOURCE: 'settingswindow',   // settings-window.json's @resource name in the header
+    // Left out of Everything else, as what the player typed: a whole group (section.group) or one key (section.group|key).
+    PRIVATE: { 'char.notepad': 1, 'public.ui|CalculatorHistory': 1, 'user.ui|editHistory': 1 },
+    _t: undefined,      // the window's layout as read (null: none came with the script)
+    _idx: null,         // { 'section.group|key': the control that shows it }, for the rules that read another setting
+    _cover: null,       // { 'section.group|key': 1 } the window shows (and 'section.group|*' for a whole group)
+    _last: null,        // { text, doc } of the file drawn last, for the parts drawn when opened (Everything else)
+
+    // ---- the window's layout ----
+    // settings-window.json as Tampermonkey fetched it with the script, read once; null when it is not there (an install
+    // from before it existed, or a script manager without GM_getResourceText).
+    table: function () {
+        var SV = JiTA.settingsview;
+        if (SV._t !== undefined) { return SV._t; }
+        var t = null;
+        try {
+            var text = (typeof GM_getResourceText === 'function' && GM_getResourceText(SV.RESOURCE)) || '';
+            t = text ? JSON.parse(text) : null;
+        } catch (e) { t = null; }
+        if (!t || !t.tabs || !t.shortcuts) { t = null; }
+        SV._t = t;
+        SV._idx = {};
+        SV._cover = { 'user.cmd|customCmds': 1, 'user.suppress|*': 1 };
+        if (t) {
+            t.tabs.forEach(function (tab) {
+                (tab.sections || []).forEach(function (sec) {
+                    sec.c.forEach(function (c) {
+                        if (c.key) { SV._idx[c.s + '|' + c.key] = c; SV._cover[c.s + '|' + c.key] = 1; }
+                        (c.mk || []).concat(c.ak || []).forEach(function (k) { SV._cover[c.s + '|' + k] = 1; });
+                        if (c.fb) { SV._cover[c.fb[0] + '|' + c.fb[1]] = 1; }
+                    });
+                });
+            });
+        }
+        return t;
+    },
+
+    // ---- the file: YAML as the client's Python writes it ----
+    // The whole document, as plain objects (maps have no prototype, so a key like __proto__ is just a key), arrays, strings,
+    // numbers, booleans and null. What the client writes, all of it seen in real files: block maps and lists (a list under
+    // a key at the key's own indent), complex keys ("? key" / ": value", tuples as keys), anchors and aliases (&id001 /
+    // *id001), flow lists and maps running over several lines, single- and double-quoted strings folded over lines with
+    // their escapes, and Python's tags: tuples are lists, a set is the list of its members, unicode/long are a string/an
+    // integer, an object is its map. An integer too long for a JS number stays a string of its digits. Throws, naming the
+    // line, on text it cannot read.
+    parse: function (text) {
+        var s = String(text == null ? '' : text).replace(/\r\n?/g, '\n'), p = 0, n = s.length, anchors = Object.create(null);
+        var keyText = JiTA.settingsview.keyText;
+        function Sc(raw, q) { this.raw = raw; this.q = q; }   // a scalar not yet resolved: its tag may still say what it is
+        function fail(msg) { throw new Error(msg + ' (line ' + s.slice(0, p).split('\n').length + ')'); }
+        function col(at) { return at - (s.lastIndexOf('\n', at - 1) + 1); }
+        function spaces() { while (s.charAt(p) === ' ') { p++; } }
+        function eolOrComment() { return p >= n || s.charAt(p) === '\n' || s.charAt(p) === '#'; }
+        // To the first character of the next line with content (blank and comment lines passed over); p = n at the end.
+        function nextContent() {
+            for (;;) {
+                var q = p;
+                while (q < n && s.charAt(q) === ' ') { q++; }
+                if (q >= n) { p = n; return; }
+                var ch = s.charAt(q);
+                if (ch === '\n') { p = q + 1; continue; }
+                if (ch === '#') { var e = s.indexOf('\n', q); p = e < 0 ? n : e + 1; continue; }
+                p = q;
+                return;
+            }
+        }
+        function isSeqItem() { return s.charAt(p) === '-' && (p + 1 >= n || s.charAt(p + 1) === ' ' || s.charAt(p + 1) === '\n'); }
+        function isComplexKey() { return s.charAt(p) === '?' && (p + 1 >= n || s.charAt(p + 1) === ' ' || s.charAt(p + 1) === '\n'); }
+        // Whether the line from p is "key: ...": a ": " (or a ":" ending the line) outside quotes and brackets.
+        function isKeyLine() {
+            var q = p, depth = 0, c, quote;
+            while (q < n) {
+                c = s.charAt(q);
+                if (c === '\n') { return false; }
+                if (c === "'" || c === '"') {
+                    quote = c;
+                    for (q++; q < n; q++) {
+                        c = s.charAt(q);
+                        if (c === '\n') { return false; }   // a quoted string running on: a value, not a key
+                        if (quote === '"' && c === '\\') { q++; continue; }
+                        if (c === quote) { if (quote === "'" && s.charAt(q + 1) === "'") { q++; continue; } break; }
+                    }
+                } else if (c === '[' || c === '{') { depth++; }
+                else if (c === ']' || c === '}') { depth--; }
+                else if (c === ':' && depth <= 0 && (q + 1 >= n || s.charAt(q + 1) === ' ' || s.charAt(q + 1) === '\n')) { return true; }
+                else if (c === '#' && depth <= 0 && q > p && s.charAt(q - 1) === ' ') { return false; }
+                q++;
+            }
+            return false;
+        }
+        // An anchor (&id) and a tag (!!python/tuple), in either order, before a node.
+        function props() {
+            var r = { anchor: null, tag: null }, m;
+            while (s.charAt(p) === '&' || s.charAt(p) === '!') {
+                m = /^[&!][^\s,\[\]{}]*/.exec(s.slice(p, p + 300));
+                if (m[0].charAt(0) === '&') { r.anchor = m[0].slice(1); } else { r.tag = m[0]; }
+                p += m[0].length;
+                spaces();
+            }
+            return r;
+        }
+        function toInt(raw) {
+            var t = String(raw).replace(/_/g, '').replace(/^\+/, '');
+            if (!/^-?\d+$/.test(t)) { return raw; }
+            return t.replace(/^-/, '').length <= 15 ? Number(t) : t;
+        }
+        function plainValue(raw) {
+            if (raw === '' || raw === '~' || /^(null|Null|NULL)$/.test(raw)) { return null; }
+            if (/^(true|True|TRUE|yes|Yes|YES|on|On|ON)$/.test(raw)) { return true; }
+            if (/^(false|False|FALSE|no|No|NO|off|Off|OFF)$/.test(raw)) { return false; }
+            if (/^[-+]?(0|[1-9][0-9_]*)$/.test(raw)) { return toInt(raw); }
+            if (/^[-+]?(\.[0-9]+|[0-9][0-9_]*(\.[0-9_]*)?)([eE][-+]?[0-9]+)?$/.test(raw)) { return Number(raw.replace(/_/g, '')); }
+            if (/^[-+]?\.(inf|Inf|INF)$/.test(raw)) { return raw.charAt(0) === '-' ? -Infinity : Infinity; }
+            if (/^\.(nan|NaN|NAN)$/.test(raw)) { return NaN; }
+            return raw;
+        }
+        function scalar(raw, quoted, tag) {
+            if (tag === '!!python/unicode' || tag === '!!python/str' || tag === '!!str') { return raw; }
+            if (tag === '!!python/long' || tag === '!!int') { return toInt(raw); }
+            if (tag === '!!float') { return Number(raw); }
+            if (tag === '!!bool') { return /^(true|yes|on)$/i.test(raw); }
+            if (tag === '!!null') { return null; }
+            return quoted ? raw : plainValue(raw);
+        }
+        // A node finished: a scalar resolved by its tag, a set turned into its members, and its anchor kept for aliases.
+        function fin(pr, v) {
+            var tag = pr && pr.tag;
+            if (v instanceof Sc) { v = scalar(v.raw, v.q, tag); }
+            else if (tag === '!!set' && v && typeof v === 'object' && !Array.isArray(v)) { v = Object.keys(v); }
+            if (pr && pr.anchor) { anchors[pr.anchor] = v; }
+            return v;
+        }
+        function alias() {
+            var m = /^\*([^\s,\[\]{}]+)/.exec(s.slice(p, p + 300));
+            if (!m) { fail('a bad alias'); }
+            p += m[0].length;
+            return m[1] in anchors ? anchors[m[1]] : null;
+        }
+        // Quoted strings, folded as YAML folds them: one line break is a space, more are line breaks, and the indent of a
+        // continued line is not part of the text.
+        function fold(out) {
+            var breaks = 0;
+            out = out.replace(/[ \t]+$/, '');
+            while (p < n && /[\n \t]/.test(s.charAt(p))) { if (s.charAt(p) === '\n') { breaks++; } p++; }
+            return out + (breaks > 1 ? new Array(breaks).join('\n') : ' ');
+        }
+        function single() {
+            var out = '', c;
+            p++;
+            for (;;) {
+                if (p >= n) { fail('a quote that never closes'); }
+                c = s.charAt(p);
+                if (c === "'") { if (s.charAt(p + 1) === "'") { out += "'"; p += 2; continue; } p++; return out; }
+                if (c === '\n') { out = fold(out); continue; }
+                out += c;
+                p++;
+            }
+        }
+        var ESC = { '0': '\0', 'a': '\x07', 'b': '\b', 't': '\t', '\t': '\t', 'n': '\n', 'v': '\x0b', 'f': '\f', 'r': '\r', 'e': '\x1b',
+            ' ': ' ', '"': '"', '/': '/', '\\': '\\', 'N': '\x85', '_': '\xa0', 'L': ' ', 'P': ' ' };
+        function dbl() {
+            var out = '', c, len, code;
+            p++;
+            for (;;) {
+                if (p >= n) { fail('a quote that never closes'); }
+                c = s.charAt(p);
+                if (c === '"') { p++; return out; }
+                if (c === '\n') { out = fold(out); continue; }
+                if (c !== '\\') { out += c; p++; continue; }
+                c = s.charAt(p + 1);
+                if (c === '\n') { p += 2; while (p < n && /[ \t]/.test(s.charAt(p))) { p++; } continue; }   // an escaped line break joins
+                len = { x: 2, u: 4, U: 8 }[c];
+                if (len) {
+                    code = parseInt(s.substr(p + 2, len), 16);
+                    if (isNaN(code)) { fail('a bad escape'); }
+                    if (code > 0xFFFF) { code -= 0x10000; out += String.fromCharCode(0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF)); }
+                    else { out += String.fromCharCode(code); }
+                    p += 2 + len;
+                    continue;
+                }
+                if (!(c in ESC)) { fail('a bad escape'); }
+                out += ESC[c];
+                p += 2;
+            }
+        }
+        // ---- inside brackets: line breaks are spaces ----
+        function flowSpace() {
+            while (p < n) {
+                var c = s.charAt(p);
+                if (c === ' ' || c === '\n' || c === '\t') { p++; }
+                else if (c === '#' && (p === 0 || /\s/.test(s.charAt(p - 1)))) { var e = s.indexOf('\n', p); p = e < 0 ? n : e; }
+                else { return; }
+            }
+        }
+        function plainFlow() {
+            var st = p, c;
+            while (p < n) {
+                c = s.charAt(p);
+                if (c === ',' || c === ']' || c === '}' || c === '[' || c === '{') { break; }
+                if (c === ':' && /[\s,\[\]{}]/.test(s.charAt(p + 1) || ' ')) { break; }
+                if (c === '#' && /\s/.test(s.charAt(p - 1))) { break; }
+                p++;
+            }
+            return new Sc(s.slice(st, p).replace(/\s+/g, ' ').trim(), false);
+        }
+        function flowNode() {
+            flowSpace();
+            var pr = props(), c, v, k, val;
+            flowSpace();
+            c = s.charAt(p);
+            if (c === '[') {
+                v = [];
+                p++;
+                flowSpace();
+                while (s.charAt(p) !== ']') {
+                    if (p >= n) { fail('a [ that never closes'); }
+                    k = flowNode();
+                    flowSpace();
+                    if (s.charAt(p) === ':') {   // a one-pair map inside a list
+                        p++;
+                        flowSpace();
+                        val = (s.charAt(p) === ',' || s.charAt(p) === ']') ? null : flowNode();
+                        var one = Object.create(null);
+                        one[keyText(k)] = val;
+                        k = one;
+                        flowSpace();
+                    }
+                    v.push(k);
+                    if (s.charAt(p) === ',') { p++; flowSpace(); } else if (s.charAt(p) !== ']') { fail('a list missing its , or ]'); }
+                }
+                p++;
+            } else if (c === '{') {
+                v = Object.create(null);
+                p++;
+                flowSpace();
+                while (s.charAt(p) !== '}') {
+                    if (p >= n) { fail('a { that never closes'); }
+                    if (isComplexKey()) { p++; }
+                    k = flowNode();
+                    flowSpace();
+                    val = null;
+                    if (s.charAt(p) === ':') {
+                        p++;
+                        flowSpace();
+                        if (s.charAt(p) !== ',' && s.charAt(p) !== '}') { val = flowNode(); }
+                    }
+                    v[keyText(k)] = val;
+                    flowSpace();
+                    if (s.charAt(p) === ',') { p++; flowSpace(); } else if (s.charAt(p) !== '}') { fail('a map missing its , or }'); }
+                }
+                p++;
+            } else if (c === '*') { v = alias(); }
+            else if (c === "'") { v = new Sc(single(), true); }
+            else if (c === '"') { v = new Sc(dbl(), true); }
+            else { v = plainFlow(); }
+            return fin(pr, v);
+        }
+        // ---- block context ----
+        // A plain scalar on its line, running on over the next lines indented deeper than its parent (`parentInd`).
+        function plainBlock(parentInd) {
+            var parts = [], save;
+            for (;;) {
+                var e = s.indexOf('\n', p), line = s.slice(p, e < 0 ? n : e).replace(/\s+#.*$/, '').trim();
+                parts.push(line);
+                p = e < 0 ? n : e;
+                save = p;
+                nextContent();
+                if (p >= n || col(p) <= parentInd) { p = save; break; }
+            }
+            return new Sc(parts.join(' '), false);
+        }
+        // What follows on the line: an alias, a flow collection, a quoted or a plain scalar.
+        function inlineValue(parentInd) {
+            var c = s.charAt(p);
+            if (c === '*') { return alias(); }
+            if (c === '[' || c === '{') { return flowNode(); }
+            if (c === "'") { return new Sc(single(), true); }
+            if (c === '"') { return new Sc(dbl(), true); }
+            return plainBlock(parentInd);
+        }
+        // A node starting at p in block context: a list, a map, or a value on the line (`parentInd`: its parent's indent). A
+        // line that is "key: ..." starts a map at its own column, the key's tag (!!python/long '123':) staying the key's.
+        function blockNode(parentInd) {
+            if (isSeqItem()) { return blockSeq(col(p)); }   // first: "- key: value" is a list item holding a map, not a key
+            if (isComplexKey() || isKeyLine()) { return blockMap(col(p)); }
+            var pr = props(), v;
+            if (eolOrComment()) {   // the properties alone on the line: the node is on the next lines, deeper
+                nextContent();
+                v = (p < n && col(p) > parentInd) ? blockNode(parentInd) : null;
+            } else if (isSeqItem()) { v = blockSeq(col(p)); }
+            else if (isComplexKey() || isKeyLine()) { v = blockMap(col(p)); }
+            else { v = inlineValue(parentInd); }
+            return fin(pr, v);
+        }
+        // The value after a key's ":", or a complex key after its "?" (the map at `ind`): on the line, or on the next lines,
+        // deeper, or a list at the map's own indent (the client writes a list under a key, and a tuple key, so).
+        function valueAfterColon(ind) {
+            spaces();
+            if (isSeqItem()) { return blockSeq(col(p)); }   // "? - a": a list starting on the indicator's line
+            var pr = props(), v, save;
+            if (eolOrComment()) {
+                save = p;
+                nextContent();
+                if (p < n && col(p) > ind) { v = blockNode(ind); }
+                else if (p < n && col(p) === ind && isSeqItem()) { v = blockSeq(ind); }
+                else { v = null; p = save; }
+            } else { v = inlineValue(ind); }
+            return fin(pr, v);
+        }
+        function blockKey() {
+            var pr = props(), c = s.charAt(p), v, st;
+            if (c === "'") { v = new Sc(single(), true); }
+            else if (c === '"') { v = new Sc(dbl(), true); }
+            else if (c === '[' || c === '{') { v = flowNode(); }
+            else {
+                st = p;
+                while (p < n && s.charAt(p) !== '\n' && !(s.charAt(p) === ':' && (p + 1 >= n || s.charAt(p + 1) === ' ' || s.charAt(p + 1) === '\n'))) { p++; }
+                v = new Sc(s.slice(st, p).trim(), false);
+            }
+            spaces();
+            if (s.charAt(p) !== ':') { fail('a key without its ":"'); }
+            p++;
+            return fin(pr, v);
+        }
+        function blockMap(ind) {
+            var obj = Object.create(null), k, v;
+            for (;;) {
+                if (isComplexKey()) {
+                    p++;
+                    k = valueAfterColon(ind);   // the key: on the line, deeper below, or a list at the map's own indent
+                    nextContent();
+                    v = null;
+                    if (p < n && col(p) === ind && s.charAt(p) === ':' && (p + 1 >= n || /[ \n]/.test(s.charAt(p + 1)))) { p++; v = valueAfterColon(ind); }
+                } else {
+                    k = blockKey();
+                    v = valueAfterColon(ind);
+                }
+                obj[keyText(k)] = v;
+                nextContent();
+                if (p >= n || col(p) < ind || (col(p) === ind && isSeqItem())) { return obj; }
+                if (col(p) > ind) { fail('text indented deeper than its map'); }
+            }
+        }
+        function blockSeq(ind) {
+            var arr = [];
+            for (;;) {
+                p++;
+                spaces();
+                if (eolOrComment()) {
+                    nextContent();
+                    arr.push(p < n && col(p) > ind ? blockNode(ind) : null);
+                } else { arr.push(blockNode(ind)); }
+                nextContent();
+                if (p >= n || col(p) !== ind || !isSeqItem()) { return arr; }
+            }
+        }
+        nextContent();
+        if (p >= n) { return Object.create(null); }
+        var root = blockNode(-1);
+        nextContent();
+        if (p < n) { fail('text after the end of the document'); }
+        return root;
+    },
+
+    // A parsed key as the map holds it: a tuple key (the client keys some settings by tuples) as "(a, b)".
+    keyText: function (k) {
+        if (k === null || k === undefined) { return 'null'; }
+        if (Array.isArray(k)) { return '(' + k.map(JiTA.settingsview.keyText).join(', ') + ')'; }
+        if (typeof k === 'object') { return JiTA.settingsview.valueText(k); }
+        return String(k);
+    },
+
+    // ---- what a control shows ----
+    // The value a setting holds in the file: the second half of its [time, value] pair; undefined when the file has none.
+    raw: function (doc, store, key) {
+        var parts = String(store).split('.'), g = doc && doc[parts[0]];
+        g = g && typeof g === 'object' ? g[parts[1]] : null;
+        if (!g || typeof g !== 'object' || !Object.prototype.hasOwnProperty.call(g, key)) { return undefined; }
+        return JiTA.settingsview.unstamp(g[key]);
+    },
+    // A stored entry without its time: [time, value] -> value. The time is a FILETIME, longer than a JS number holds.
+    unstamp: function (e) {
+        var stamp = Array.isArray(e) && e.length === 2 && ((typeof e[0] === 'string' && /^\d{16,19}$/.test(e[0])) || (typeof e[0] === 'number' && e[0] > 1e16));
+        return stamp ? e[1] : e;
+    },
+    // A setting's default, from the control that shows it (another control's rule reads it when the file has none).
+    defaultOf: function (store, key) {
+        var SV = JiTA.settingsview, c = (SV.table(), SV._idx[store + '|' + key]);
+        return c ? c.d : undefined;
+    },
+    // The display mode (public.device.WindowMode): 0 fullscreen, 1 windowed, 2 fixed window. The window size, adapter,
+    // V-Sync and UI scale are kept per mode, and the game shows the current mode's.
+    mode: function (doc) {
+        var SV = JiTA.settingsview, m = SV.raw(doc, 'public.device', 'WindowMode');
+        if (m === undefined) { m = SV.defaultOf('public.device', 'WindowMode'); }
+        m = Number(m);
+        return m === 1 || m === 2 ? m : 0;
+    },
+    // What a control shows: { v: the value, set: whether the file holds it, d: the default (undefined: not known) }. A
+    // setting the file does not hold shows its default, as the game does.
+    read: function (doc, c) {
+        var SV = JiTA.settingsview, mode = SV.mode(doc), v, d = c.d, dv;
+        if (c.k === 'uiscale') {
+            var auto = SV.raw(doc, c.s, c.ak[mode]), scale = SV.raw(doc, c.s, c.mk[mode]);
+            if (auto === undefined && scale === undefined) { return { v: d, set: false, d: d }; }
+            return { v: (auto || scale === undefined || scale === null) ? 'auto' : scale, set: true, d: d };
+        }
+        if (c.mk) {
+            var dict = SV.raw(doc, c.s, c.mk[mode]);
+            if (!dict || typeof dict !== 'object') { return { v: d, set: false, d: d }; }
+            v = c.f.length > 1 ? c.f.map(function (f) { return dict[f]; }) : dict[c.f[0]];
+            return v === undefined ? { v: d, set: false, d: d } : { v: v, set: true, d: d };
+        }
+        v = SV.raw(doc, c.s, c.key);
+        if (v === undefined && c.fb) { v = SV.raw(doc, c.fb[0], c.fb[1]); }   // the control starts from another key while its own is unset
+        if (c.dk) {   // a default that follows another setting (the chat font size follows the client's)
+            dv = SV.raw(doc, c.dk.s, c.dk.key);
+            if (dv === undefined) { dv = SV.defaultOf(c.dk.s, c.dk.key); }
+            d = Object.prototype.hasOwnProperty.call(c.dk.map, String(dv)) ? c.dk.map[String(dv)] : c.dk['else'];
+        }
+        return v === undefined ? { v: d, set: false, d: d } : { v: v, set: true, d: d };
+    },
+    // Two values the same as the game means them: a checkbox stores 0/1 or False/True alike, and a float may come back
+    // with a rounding tail.
+    same: function (a, b) {
+        if (typeof a === 'boolean') { a = a ? 1 : 0; }
+        if (typeof b === 'boolean') { b = b ? 1 : 0; }
+        if (a === null || a === undefined || b === null || b === undefined) { return (a === null || a === undefined) && (b === null || b === undefined); }
+        if (typeof a === 'number' && typeof b === 'number') { return Math.abs(a - b) < 1e-9; }
+        if (typeof a === 'object' || typeof b === 'object') { return JSON.stringify(a) === JSON.stringify(b); }
+        return String(a) === String(b);
+    },
+    // Whether a control's value differs from its default. Only a value the file holds; never one whose default is not
+    // known. A graphics setting whose default depends on the graphics card counts as changed only when it is none of them.
+    differs: function (c, r) {
+        var SV = JiTA.settingsview, ds;
+        if (!r.set) { return false; }
+        if (c.dc) { ds = Object.keys(c.dc).map(function (k) { return c.dc[k]; }).concat([c.d]); }
+        else if (r.d === undefined) { return false; }
+        else { ds = [r.d]; }
+        if (c.k === 'check') { return ds.every(function (d) { return !!SV.truthy(d) !== !!SV.truthy(r.v); }); }
+        return ds.every(function (d) { return !SV.same(r.v, d); });
+    },
+    truthy: function (v) { return !!v && v !== '0' && v !== 'False' && v !== 'false'; },
+    // Whether a rule (another setting's value: eq, le, in, falsy, truthy) holds: the setting from the file, or its default.
+    cond: function (doc, w) {
+        var SV = JiTA.settingsview, v = SV.raw(doc, w.s, w.key);
+        if (v === undefined) { v = SV.defaultOf(w.s, w.key); }
+        if (w.op === 'eq') { return SV.same(v, w.v); }
+        if (w.op === 'le') { return Number(typeof v === 'boolean' ? +v : v) <= w.v; }
+        if (w.op === 'in') { return w.v.some(function (x) { return SV.same(v, x); }); }
+        if (w.op === 'falsy') { return !SV.truthy(v); }
+        if (w.op === 'truthy') { return SV.truthy(v); }
+        return false;
+    },
+    // A value as its control shows it: an option's label, a window size, an adapter, a slider's number.
+    show: function (c, v) {
+        var SV = JiTA.settingsview, o;
+        if (v === undefined) { return '-'; }
+        if (c.k === 'res') { return Array.isArray(v) && v[0] != null ? v[0] + 'x' + v[1] : '-'; }
+        if (c.k === 'adapter') { return 'Adapter ' + (Number(v) + 1); }
+        if (c.k === 'uiscale' && v === 'auto') { return c.auto || 'Auto'; }
+        if (c.o) {
+            o = c.o.filter(function (x) { return SV.same(x[0], v); })[0];
+            if (o) { return o[1]; }
+            if (c.ns) { return c.ns; }
+            if (c.k === 'uiscale' && typeof v === 'number') { return Math.round(v * 100) + '%'; }
+        }
+        if (c.k === 'check') { return SV.truthy(v) ? 'On' : 'Off'; }
+        if (typeof v === 'number') { return String(Math.round(v * 1000) / 1000); }
+        return SV.valueText(v);
+    },
+    // What a control's hover says about its default.
+    defaultText: function (c, r) {
+        var SV = JiTA.settingsview;
+        if (c.dc) {
+            var by = [['high', 'a high-end'], ['medium', 'a mid-range'], ['low', 'a low-end']].filter(function (x) { return x[0] in c.dc; })
+                .map(function (x) { return SV.show(c, c.dc[x[0]]) + ' on ' + x[1]; });
+            return 'Default depends on the graphics card: ' + by.join(', ') + ' graphics card.';
+        }
+        return r.d === undefined ? 'Default not known.' : 'Default: ' + SV.show(c, r.d) + '.';
+    },
+    // Any value as short text (Everything else, and what has no label): lists and maps in brackets.
+    valueText: function (v, depth) {
+        var SV = JiTA.settingsview;
+        depth = depth || 0;
+        if (v === null || v === undefined) { return 'null'; }
+        if (typeof v !== 'object') { return String(v); }
+        if (depth > 6) { return '...'; }
+        if (Array.isArray(v)) { return '[' + v.map(function (x) { return SV.valueText(x, depth + 1); }).join(', ') + ']'; }
+        return '{' + Object.keys(v).map(function (k) { return k + ': ' + SV.valueText(v[k], depth + 1); }).join(', ') + '}';
+    },
+
+    // ---- Shortcuts and Reset Settings ----
+    // Every command with the shortcut it has: the player's own (user.cmd.customCmds; None clears it) or its default. A
+    // default the player gave to another command is lost, as the game drops it. { name, label, cat, keys, dkeys, own, locked }.
+    commands: function (doc) {
+        var SV = JiTA.settingsview, T = SV.table().shortcuts, own = SV.raw(doc, T.s, T.key), taken = {};
+        if (!own || typeof own !== 'object' || Array.isArray(own)) { own = {}; }
+        Object.keys(own).forEach(function (name) { var k = SV.keysOf(own[name]); if (k) { taken[k.join('-')] = 1; } });
+        return T.cmds.map(function (row) {
+            var r = { name: row[0], label: row[1], cat: row[2], dkeys: row[3] || null, locked: !!row[4], own: false };
+            if (Object.prototype.hasOwnProperty.call(own, r.name)) { r.keys = SV.keysOf(own[r.name]); r.own = true; }
+            else { r.keys = r.dkeys && !taken[r.dkeys.join('-')] ? r.dkeys : null; }
+            r.changed = (r.keys ? r.keys.join('-') : '') !== (r.dkeys ? r.dkeys.join('-') : '');
+            return r;
+        }).sort(function (a, b) { return a.label.toLowerCase() < b.label.toLowerCase() ? -1 : a.label.toLowerCase() > b.label.toLowerCase() ? 1 : 0; });
+    },
+    // A stored shortcut as key codes: a list of virtual-key codes (modifiers first), or the old (ctrl, alt, shift, "KEY")
+    // form older clients wrote; null for none.
+    keysOf: function (v) {
+        if (v === null || v === undefined) { return null; }
+        if (typeof v === 'number') { return [v]; }
+        if (!Array.isArray(v) || !v.length) { return null; }
+        if (v.length === 4 && typeof v[3] === 'string') {
+            var k = [];
+            if (v[0]) { k.push(17); }
+            if (v[1]) { k.push(18); }
+            if (v[2]) { k.push(16); }
+            k.push(v[3].toUpperCase());
+            return k;
+        }
+        return v.filter(function (x) { return typeof x === 'number' || typeof x === 'string'; });
+    },
+    // Key codes as one fixed set of names (US): the game shows the names of the PC's own keyboard layout, so the same
+    // binding reads STRG-W on one machine and CTRL-W on another.
+    keysText: function (keys) {
+        var vk = JiTA.settingsview.table().shortcuts.vk;
+        if (!keys || !keys.length) { return JiTA.settingsview.table().shortcuts.none; }
+        return keys.map(function (k) { return typeof k === 'string' ? k : (vk[String(k)] || 'KEY ' + k); }).join('-');
+    },
+    // The warnings the player switched off (user.suppress): { key, title, answer }, by title. The game names each by its
+    // message's title, and the stored value is the answer it now gives by itself.
+    suppressed: function (doc) {
+        var SV = JiTA.settingsview, T = SV.table(), g = doc && doc.user && doc.user.suppress, tab = T.tabs.filter(function (t) { return t.k === 'suppress'; })[0];
+        var titles = (tab && tab.titles) || {};
+        if (!g || typeof g !== 'object') { return []; }
+        return Object.keys(g).map(function (key) {
+            var msg = key.replace(/^suppress\./, ''), v = SV.unstamp(g[key]), a = Array.isArray(v) ? v[0] : v, answer = T.answers[String(a)];
+            // A dialog with choices stores its answer with the choice: (1, 'radioboxOption2Selected') is OK, option 2.
+            if (answer && Array.isArray(v) && typeof v[1] === 'string') { answer += ' (' + v[1].replace(/^radiobox/, '').replace(/Selected$/, '').replace(/^Option(\d+)$/, 'option $1') + ')'; }
+            if (v === true) { answer = 'Not shown'; }   // a message with no buttons to answer, only hidden
+            return { key: key, title: titles[msg] || msg, answer: answer || SV.valueText(v) };
+        }).sort(function (a, b) { return a.title.toLowerCase() < b.title.toLowerCase() ? -1 : a.title.toLowerCase() > b.title.toLowerCase() ? 1 : 0; });
+    },
+    // Everything the window does not show, by section and group: [{ id: 'user.overview', rows: [[key, value]] }], less what
+    // the player typed (PRIVATE).
+    rest: function (doc) {
+        var SV = JiTA.settingsview, out = [];
+        SV.table();
+        ['char', 'user', 'public'].forEach(function (sec) {
+            var groups = doc && doc[sec];
+            if (!groups || typeof groups !== 'object') { return; }
+            Object.keys(groups).sort().forEach(function (gname) {
+                var id = sec + '.' + gname, g = groups[gname], rows = [];
+                if (SV.PRIVATE[id] || SV._cover[id + '|*'] || !g || typeof g !== 'object') { return; }
+                Object.keys(g).sort().forEach(function (k) {
+                    if (SV._cover[id + '|' + k] || SV.PRIVATE[id + '|' + k]) { return; }
+                    rows.push([k, SV.unstamp(g[k])]);
+                });
+                if (rows.length) { out.push({ id: id, rows: rows }); }
+            });
+        });
+        return out;
+    },
+
+    // ---- the view ----
+    esc: function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); },
+    MARK: '◆',   // the changed-from-default marker (a diamond, coloured by CSS)
+    // The whole window for a file's text, as HTML. A file it cannot read, or no layout, still gets Show raw and Copy.
+    view: function (text) {
+        var SV = JiTA.settingsview, T = SV.table(), H = SV.esc, doc = null, err = '', nav = [], panels = [], total = 0;
+        try { doc = SV.parse(text); } catch (e) { err = 'This file could not be read: ' + (e && e.message || e) + '.'; }
+        if (!T) { err = 'The settings window did not come with the script. Reinstall JiTA to get it.'; }
+        SV._last = { text: text, doc: doc };
+        if (!err) {
+            T.tabs.forEach(function (tab, i) {
+                var body = '', count = 0;
+                if (tab.k === 'shortcuts') {
+                    var cmds = SV.commands(doc);
+                    nav.push(SV._tab(tab.id, tab.label, cmds.filter(function (r) { return r.changed; }).length, i === 0));
+                    count = 0;
+                    tab.sub.forEach(function (st) {
+                        var rows = cmds.filter(function (r) { return r.cat === st.id; }), n = rows.filter(function (r) { return r.changed; }).length;
+                        nav.push(SV._tab('sc-' + st.id, st.label, n, false, true));
+                        total += n;
+                        panels.push(SV._panel('sc-' + st.id, SV._shortcuts(st.label, rows)));
+                    });
+                    panels.push(SV._panel(tab.id, SV._shortcuts(tab.label, cmds.filter(function (r) { return r.cat === 'general'; }))));
+                    return;
+                }
+                if (tab.k === 'suppress') {
+                    var sup = SV.suppressed(doc);
+                    body = SV._suppress(tab.sections[0] && tab.sections[0].h, sup);
+                    count = sup.length;
+                } else {
+                    tab.sections.forEach(function (sec) {
+                        var out = SV._section(doc, sec);
+                        body += out.html;
+                        count += out.changed;
+                    });
+                }
+                total += count;
+                nav.push(SV._tab(tab.id, tab.label, count, i === 0));
+                panels.push(SV._panel(tab.id, body));
+            });
+            nav.push(SV._tab('rest', 'Everything else', 0, false));
+            panels.push(SV._panel('rest', SV._rest(doc)));
+        }
+        return '<div id="jita-setv" class="jsv">\n<style>' + SV.CSS + '</style>\n' +
+            '<div class="jsv-top"><span class="jsv-title">' + H(T ? T.title : 'Settings') + '</span>' +
+            '<span class="jsv-sub">as the client had them when the report was sent</span>' +
+            (err ? '' : '<label class="jsv-onlylbl" title="Show only the settings that differ from the game\'s default"><input type="checkbox" class="jsv-only"> Only changed from default (' + total + ')</label>' +
+                '<input type="search" class="jsv-q" placeholder="Search settings">') +
+            '<button type="button" class="jsv-btn jsv-rawbtn">Show raw</button><button type="button" class="jsv-btn jsv-copy" title="Copy settings.yaml as it is">Copy</button>' +
+            '<span class="jsv-status"></span></div>\n' +
+            (err ? '<div class="jsv-err">' + H(err) + '</div>' :
+                '<div class="jsv-body"><div class="jsv-nav">' + nav.join('') + '</div><div class="jsv-main">' + panels.join('') + '</div></div>') +
+            '\n<pre class="jsv-raw" style="display:none"></pre>\n</div>';
+    },
+    _tab: function (id, label, count, on, sub) {
+        var H = JiTA.settingsview.esc;
+        return '<div class="jsv-tab' + (on ? ' jsv-on' : '') + (sub ? ' jsv-subtab' : '') + '" data-tab="' + H(id) + '">' + H(label) +
+            (count ? '<span class="jsv-cnt" title="' + count + ' changed from default">' + count + '</span>' : '') + '</div>';
+    },
+    _panel: function (id, body) {
+        return '<div class="jsv-panel" data-panel="' + JiTA.settingsview.esc(id) + '"' + (id === 'displayandgraphics' ? '' : ' style="display:none"') + '>' + body + '</div>';
+    },
+    // One section: its header, its intro, its controls. { html, changed: how many differ from default }.
+    _section: function (doc, sec) {
+        var SV = JiTA.settingsview, H = SV.esc, rows = '', changed = 0, any = false;
+        sec.c.forEach(function (c) {
+            if (c.k === 'text') { rows += '<div class="jsv-text">' + H(c.l) + '</div>'; return; }
+            var r = SV.read(doc, c);
+            if (r.set) { any = true; }
+            if (c.when && c.when.then === 'hide' && SV.cond(doc, c.when)) { return; }
+            var off = !!(c.when && c.when.then === 'off' && SV.cond(doc, c.when)), chg = SV.differs(c, r);
+            if (chg) { changed++; }
+            rows += SV._row(c, r, off, chg);
+        });
+        if (sec.onlyIfSet && !any) { return { html: '', changed: 0 }; }
+        return { html: '<div class="jsv-sec">' + (sec.h ? '<div class="jsv-h">' + H(sec.h) + '</div>' : '') + (sec.t ? '<div class="jsv-text">' + H(sec.t) + '</div>' : '') + rows + '</div>', changed: changed };
+    },
+    // One control, read-only, as the game draws it; its hover says what the game's own hint says, and the default.
+    _row: function (c, r, off, chg) {
+        var SV = JiTA.settingsview, H = SV.esc, label = c.l || '', shown, ctl, hint;
+        shown = off && c.when.text ? c.when.text : SV.show(c, r.v);
+        hint = (c.h ? c.h + '\n\n' : '') + (r.set ? '' : 'Not in the file: the game shows its default.\n') + SV.defaultText(c, r);
+        if (c.k === 'check') {
+            ctl = '<span class="jsv-cb' + (SV.truthy(r.v) ? ' jsv-cbon' : '') + '"></span>';
+            return SV._wrap('jsv-crow', '', ctl + '<span class="jsv-l">' + H(label) + '</span>', off, chg, label + ' ' + shown, hint, c.ind);
+        }
+        if (c.k === 'slider') {
+            var min = c.min == null ? 0 : c.min, max = c.max == null ? 1 : c.max, x = Number(c.inv ? c.inv - r.v : r.v);
+            var pct = max > min && !isNaN(x) ? Math.max(0, Math.min(1, (x - min) / (max - min))) * 100 : 0;
+            ctl = '<span class="jsv-slider"><span class="jsv-track"><span class="jsv-fill" style="width:' + pct.toFixed(1) + '%"></span>' +
+                '<span class="jsv-knob" style="left:' + pct.toFixed(1) + '%"></span></span>' +
+                (c.lo || c.hi ? '<span class="jsv-ends"><span>' + H(c.lo || '') + '</span><span>' + H(c.hi || '') + '</span></span>' : '') + '</span>';
+            hint = 'Value: ' + shown + '\n' + hint;
+        } else if (c.k === 'theme') {
+            ctl = SV._theme(c, r);
+            label = '';
+        } else if (c.k === 'hues') {
+            ctl = '<span class="jsv-hues">' + (Array.isArray(r.v) ? r.v : []).map(function (hue) {
+                return '<span class="jsv-hue" style="background:hsl(' + Math.round(Number(hue) * 360) + ',75%,55%)"></span>';
+            }).join('') + '</span>';
+        } else if (c.k === 'card') {
+            ctl = '<div class="jsv-card"><div class="jsv-cardt">' + H(c.l) + '<span class="jsv-state' + (SV.truthy(r.v) ? ' jsv-stateon' : '') + '">' +
+                H(SV.truthy(r.v) ? c.on : c.off) + '</span></div><div class="jsv-cardd">' + H(c.desc || '') + '</div></div>';
+            return SV._wrap('jsv-cardrow', '', ctl, off, chg, label + ' ' + (SV.truthy(r.v) ? c.on : c.off), SV.defaultText(c, r), 0);
+        } else {
+            ctl = '<span class="jsv-combo">' + H(shown) + '</span>';
+        }
+        return SV._wrap('jsv-vrow', label ? '<span class="jsv-l">' + H(label) + '</span>' : '', ctl, off, chg, label + ' ' + shown, hint, c.ind);
+    },
+    _wrap: function (cls, labelHtml, ctl, off, chg, q, hint, ind) {
+        var SV = JiTA.settingsview, H = SV.esc;
+        return '<div class="jsv-row ' + cls + (off ? ' jsv-off' : '') + (chg ? ' jsv-chg' : '') + '" data-q="' + H(String(q).toLowerCase()) + '" title="' + H(hint) + '"' +
+            (ind ? ' style="padding-left:' + (8 + 16 * ind) + 'px"' : '') + '>' + labelHtml + ctl +
+            (chg ? '<span class="jsv-mark" title="Changed from the default">' + SV.MARK + '</span>' : '') + '</div>';
+    },
+    _theme: function (c, r) {
+        var H = JiTA.settingsview.esc, found = false;
+        var list = c.presets.map(function (p) {
+            var on = p[0] === r.v;
+            if (on) { found = true; }
+            return '<span class="jsv-preset' + (on ? ' jsv-preseton' : '') + '"><span class="jsv-sw" style="background:' + H(p[2][1]) + '"></span>' +
+                '<span class="jsv-sw" style="background:' + H(p[2][2]) + '"></span>' + H(p[1]) + '</span>';
+        }).join('');
+        return '<span class="jsv-presets">' + list + (found ? '' : '<span class="jsv-preset jsv-preseton">' + H(c.custom || 'Custom') + ': ' + H(r.v) + '</span>') + '</span>';
+    },
+    _shortcuts: function (title, rows) {
+        var SV = JiTA.settingsview, H = SV.esc, T = SV.table().shortcuts;
+        return '<div class="jsv-sec"><div class="jsv-h">' + H(title) + '</div><div class="jsv-schead"><span>' + H(T.cols[0]) + '</span><span>' + H(T.cols[1]) + '</span></div>' +
+            rows.map(function (r) {
+                var keys = SV.keysText(r.keys), hint = r.name + (r.locked ? '\n' + T.locked : '') + (r.changed ? '\nDefault: ' + SV.keysText(r.dkeys) : '');
+                return '<div class="jsv-row jsv-screw' + (r.changed ? ' jsv-chg' : '') + '" data-q="' + H((r.label + ' ' + keys).toLowerCase()) + '" title="' + H(hint) + '">' +
+                    '<span class="jsv-l">' + H(r.label) + '</span><span class="jsv-keys' + (r.keys ? '' : ' jsv-none') + '">' + H(keys) + '</span>' +
+                    (r.changed ? '<span class="jsv-mark">' + SV.MARK + '</span>' : '') + '</div>';
+            }).join('') + '</div>';
+    },
+    _suppress: function (title, rows) {
+        var H = JiTA.settingsview.esc;
+        return '<div class="jsv-sec"><div class="jsv-h">' + H(title || '') + '</div>' +
+            (rows.length ? '<div class="jsv-text">Warnings the player switched off ("don\'t show again"), with the answer the game now gives by itself.</div>' +
+                rows.map(function (r) {
+                    return '<div class="jsv-row jsv-vrow jsv-chg" data-q="' + H((r.title + ' ' + r.key).toLowerCase()) + '" title="' + H(r.key) + '">' +
+                        '<span class="jsv-l">' + H(r.title) + '</span><span class="jsv-ans">' + H(r.answer) + '</span></div>';
+                }).join('') : '<div class="jsv-text">No warning is switched off.</div>') + '</div>';
+    },
+    _rest: function (doc) {
+        var SV = JiTA.settingsview, H = SV.esc;
+        return '<div class="jsv-sec"><div class="jsv-h">Everything else</div><div class="jsv-text">The rest of the file, which the Settings window has no place for. ' +
+            'Left out: the notepad, the calculator history and what was typed into edit boxes.</div><div class="jsv-hits"></div>' +
+            SV.rest(doc).map(function (g) {
+                return '<details class="jsv-group" data-g="' + H(g.id) + '"><summary>' + H(g.id) + ' <span class="jsv-gn">(' + g.rows.length + ')</span></summary><div class="jsv-gbody"></div></details>';
+            }).join('') + '</div>';
+    },
+    // A group's rows, drawn when it is opened (a file has thousands).
+    _restRows: function (rows, prefix) {
+        var SV = JiTA.settingsview, H = SV.esc;
+        return rows.map(function (kv) {
+            var full = SV.valueText(kv[1]), cut = full.length > 300 ? full.slice(0, 300) + '…' : full;
+            return '<div class="jsv-rrow" title="' + H(full.slice(0, 3000)) + '"><span class="jsv-rk">' + H((prefix || '') + kv[0]) + '</span><span class="jsv-rv">' + H(cut) + '</span></div>';
+        }).join('');
+    },
+
+    // Swap the code-block's raw settings.yaml for the window (JiTA.logparser.swap, once the file's text has landed). Should
+    // drawing fail, the raw text stays as it is.
+    mount: function () {
+        var SV = JiTA.settingsview, text = JiTA.logparser.readBlock(), $cb = $(SELECTORS.CODE_BLOCK).first(), html;
+        try { html = SV.view(text); } catch (e) { JiTA.log('[JiTA] settings view failed:', e); return; }
+        $cb.html(html);
+        SV.wire($cb.find('#jita-setv')[0], text);
+    },
+    // The window's controls: the tabs, the filter, the search, Everything else's groups, Show raw and Copy.
+    wire: function (el, text) {
+        var SV = JiTA.settingsview, $el = $(el), timer = 0;
+        if (!el) { return; }
+        // As tall as the screen below it: the code-block it sits in grows with its content.
+        function fit() {
+            if (!document.body.contains(el)) { $(window).off('resize.jitasetv'); return; }
+            el.style.height = Math.max(320, window.innerHeight - el.getBoundingClientRect().top - 12) + 'px';
+        }
+        fit();
+        $(window).off('resize.jitasetv').on('resize.jitasetv', fit);
+        $el.on('click', '.jsv-tab', function () {
+            var id = this.getAttribute('data-tab');
+            $el.find('.jsv-tab').removeClass('jsv-on');
+            $(this).addClass('jsv-on');
+            $el.find('.jsv-panel').each(function () { this.style.display = this.getAttribute('data-panel') === id ? '' : 'none'; });
+        });
+        $el.on('change', '.jsv-only', function () { $el.toggleClass('jsv-onlyon', this.checked); SV.filter(el); });
+        $el.on('input', '.jsv-q', function () { clearTimeout(timer); timer = setTimeout(function () { SV.filter(el); }, 150); });
+        el.addEventListener('toggle', function (e) {   // toggle does not bubble: caught on the way down
+            var d = e.target;
+            if (!d || !d.classList || !d.classList.contains('jsv-group') || !d.open || d.getAttribute('data-drawn')) { return; }
+            var g = SV.rest(SV._last && SV._last.doc).filter(function (x) { return x.id === d.getAttribute('data-g'); })[0];
+            $(d).find('.jsv-gbody').html(g ? SV._restRows(g.rows) : '');
+            d.setAttribute('data-drawn', '1');
+        }, true);
+        $el.on('click', '.jsv-rawbtn', function () {
+            var $raw = $el.find('.jsv-raw'), open = $raw.is(':visible');
+            if (!open && !$raw.data('filled')) { $raw[0].textContent = text; $raw.data('filled', 1); }
+            $raw.toggle(!open);
+            $el.find('.jsv-body, .jsv-err').toggle(open);
+            $(this).text(open ? 'Show raw' : 'Show settings');
+        });
+        $el.on('click', '.jsv-copy', function () {
+            var $st = $el.find('.jsv-status');
+            Promise.resolve().then(function () { return JiTA.util.copy(text); }).then(function () { $st.text('Copied.'); },
+                function () { $st.text('Could not reach the clipboard: open Show raw and copy it by hand.'); });
+        });
+    },
+    // Narrow the window to what the filter and the search leave: rows, then sections with none left, and the left list's
+    // entries that have none. In Everything else the search lists the matching keys of every group.
+    filter: function (el) {
+        var SV = JiTA.settingsview, $el = $(el), only = $el.hasClass('jsv-onlyon'), q = $.trim(String($el.find('.jsv-q').val() || '')).toLowerCase();
+        $el.find('.jsv-panel:not([data-panel="rest"]) .jsv-row').each(function () {
+            var hit = (!only || this.classList.contains('jsv-chg')) && (!q || (this.getAttribute('data-q') || '').indexOf(q) >= 0);
+            this.classList.toggle('jsv-hid', !hit);
+        });
+        $el.find('.jsv-panel:not([data-panel="rest"]) .jsv-sec').each(function () {
+            this.classList.toggle('jsv-hid', !!(only || q) && !$(this).find('.jsv-row:not(.jsv-hid)').length);
+        });
+        $el.find('.jsv-tab').each(function () {
+            var id = this.getAttribute('data-tab'), $p = $el.find('.jsv-panel[data-panel="' + id + '"]');
+            this.classList.toggle('jsv-dim', id !== 'rest' && !!(only || q) && !$p.find('.jsv-row:not(.jsv-hid)').length);
+        });
+        var $hits = $el.find('.jsv-hits'), hits = [];
+        if (q.length >= 2) {
+            SV.rest(SV._last && SV._last.doc).forEach(function (g) {
+                g.rows.forEach(function (kv) { if (hits.length < 300 && (g.id + '.' + kv[0] + ' ' + SV.valueText(kv[1])).toLowerCase().indexOf(q) >= 0) { hits.push([kv[0], kv[1], g.id + '.']); } });
+            });
+        }
+        $hits.html(hits.length ? hits.map(function (h) { return SV._restRows([[h[0], h[1]]], h[2]); }).join('') : (q.length >= 2 ? '<div class="jsv-text">No key matches.</div>' : ''));
+        $el.find('.jsv-group').toggle(q.length < 2);
+    },
+
+    // The in-game window's look (the Photon theme): near-black panels, the chosen entry highlighted on the left, teal ticks
+    // and slider knobs, greyed controls the game disables. Scoped to #jita-setv; the code-block's own monospace undone.
+    CSS: `
+#jita-setv { display: flex; flex-direction: column; box-sizing: border-box; min-height: 320px; background: #0b0d0f; color: #c8ced2;
+    font: 12px/1.45 "Segoe UI", Roboto, Arial, sans-serif; white-space: normal; text-align: left; border: 1px solid #1f2529; }
+#jita-setv * { box-sizing: border-box; font-family: inherit; }
+#jita-setv .jsv-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid #1f2529; background: #0f1215; }
+#jita-setv .jsv-title { font-size: 17px; color: #e6e6e6; letter-spacing: 0.3px; }
+#jita-setv .jsv-sub { color: #7f8a90; }
+#jita-setv .jsv-onlylbl { margin-left: auto; color: #c8ced2; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+#jita-setv .jsv-q { background: #15191c; border: 1px solid #2a3136; color: #e6e6e6; padding: 4px 8px; width: 200px; border-radius: 2px; }
+#jita-setv .jsv-btn { background: #15191c; border: 1px solid #2a3136; color: #c8ced2; padding: 4px 12px; cursor: pointer; border-radius: 2px; }
+#jita-setv .jsv-btn:hover { border-color: #58a7bf; color: #e6e6e6; }
+#jita-setv .jsv-status { color: #7fdca4; }
+#jita-setv .jsv-body { display: flex; flex: 1; min-height: 0; }
+#jita-setv .jsv-nav { width: 230px; flex: none; overflow-y: auto; padding: 10px 0; background: #0d1013; border-right: 1px solid #1f2529; }
+#jita-setv .jsv-tab { padding: 7px 14px 7px 16px; cursor: pointer; color: #c8ced2; font-size: 13px; border-left: 2px solid transparent; display: flex; align-items: center; }
+#jita-setv .jsv-tab:hover { background: #151b1f; }
+#jita-setv .jsv-tab.jsv-on { background: #1b2a31; border-left-color: #58a7bf; color: #e6e6e6; }
+#jita-setv .jsv-subtab { padding: 3px 14px 3px 34px; font-size: 12px; }
+#jita-setv .jsv-tab.jsv-dim { opacity: 0.35; }
+#jita-setv .jsv-cnt { margin-left: auto; color: #f39058; font-size: 11px; }
+#jita-setv .jsv-main { flex: 1; overflow-y: auto; padding: 12px 22px 30px; min-width: 0; }
+#jita-setv .jsv-sec { margin-bottom: 22px; max-width: 760px; }
+#jita-setv .jsv-h { font-size: 14px; color: #e6e6e6; margin: 4px 0 8px; }
+#jita-setv .jsv-text { color: #7f8a90; margin: 0 0 8px; white-space: pre-wrap; }
+#jita-setv .jsv-row { display: flex; align-items: center; min-height: 26px; padding: 2px 26px 2px 8px; position: relative; }
+#jita-setv .jsv-ans { color: #e6e6e6; }
+#jita-setv .jsv-row:hover { background: #12171a; }
+#jita-setv .jsv-vrow .jsv-l { width: 45%; flex: none; padding-right: 10px; }
+#jita-setv .jsv-combo { flex: 1; background: #15191c; border: 1px solid #2a3136; padding: 3px 26px 3px 8px; color: #e6e6e6; position: relative; min-height: 22px; }
+#jita-setv .jsv-combo::after { content: "\\25BE"; position: absolute; right: 8px; top: 2px; color: #7f8a90; }
+#jita-setv .jsv-cb { width: 13px; height: 13px; border: 1px solid #4a565c; margin-right: 8px; flex: none; position: relative; background: #0b0d0f; }
+#jita-setv .jsv-cb.jsv-cbon { border-color: #58a7bf; }
+#jita-setv .jsv-cb.jsv-cbon::after { content: "\\2713"; position: absolute; left: 1px; top: -4px; font-size: 12px; color: #58a7bf; }
+#jita-setv .jsv-slider { flex: 1; display: flex; flex-direction: column; }
+#jita-setv .jsv-track { height: 3px; background: #2a3136; position: relative; margin: 8px 0 4px; }
+#jita-setv .jsv-fill { position: absolute; left: 0; top: 0; bottom: 0; background: #305665; }
+#jita-setv .jsv-knob { position: absolute; top: -5px; width: 3px; height: 13px; margin-left: -1px; background: #58a7bf; }
+#jita-setv .jsv-ends { display: flex; justify-content: space-between; color: #7f8a90; font-size: 11px; }
+#jita-setv .jsv-off { opacity: 0.45; }
+#jita-setv .jsv-mark { color: #f39058; font-size: 11px; position: absolute; right: 8px; top: 50%; transform: translateY(-50%); }
+#jita-setv .jsv-presets { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+#jita-setv .jsv-preset { display: flex; align-items: center; gap: 4px; padding: 2px 6px; }
+#jita-setv .jsv-preset.jsv-preseton { background: #1b2a31; color: #e6e6e6; }
+#jita-setv .jsv-sw { width: 12px; height: 12px; display: inline-block; }
+#jita-setv .jsv-hues { display: flex; gap: 4px; }
+#jita-setv .jsv-hue { width: 22px; height: 12px; display: inline-block; }
+#jita-setv .jsv-card { border: 1px solid #2a3136; background: #101417; padding: 10px 12px; flex: 1; }
+#jita-setv .jsv-cardt { font-size: 14px; color: #e6e6e6; display: flex; align-items: center; gap: 10px; }
+#jita-setv .jsv-state { font-size: 11px; color: #7f8a90; border: 1px solid #2a3136; padding: 1px 6px; }
+#jita-setv .jsv-state.jsv-stateon { color: #7fdca4; border-color: #3c6b50; }
+#jita-setv .jsv-cardd { color: #9aa4a9; white-space: pre-wrap; margin-top: 6px; }
+#jita-setv .jsv-schead { display: flex; color: #7f8a90; padding: 2px 8px; border-bottom: 1px solid #1f2529; margin-bottom: 4px; }
+#jita-setv .jsv-schead span:first-child, #jita-setv .jsv-screw .jsv-l { width: 55%; flex: none; }
+#jita-setv .jsv-keys { color: #e6e6e6; }
+#jita-setv .jsv-keys.jsv-none { color: #5d676c; }
+#jita-setv .jsv-hid, #jita-setv .jsv-group[style*="none"] { display: none !important; }
+#jita-setv .jsv-group { border-bottom: 1px solid #161b1e; }
+#jita-setv .jsv-group summary { cursor: pointer; padding: 4px 6px; color: #c8ced2; }
+#jita-setv .jsv-gn { color: #7f8a90; }
+#jita-setv .jsv-rrow { display: flex; gap: 10px; padding: 1px 6px 1px 20px; font-family: Consolas, "Courier New", monospace; font-size: 11px; }
+#jita-setv .jsv-rk { color: #9ad2e3; flex: none; max-width: 40%; overflow-wrap: anywhere; }
+#jita-setv .jsv-rv { color: #c8ced2; overflow-wrap: anywhere; min-width: 0; }
+#jita-setv .jsv-err { padding: 16px; color: #f39058; }
+#jita-setv .jsv-raw { flex: 1; overflow: auto; margin: 0; padding: 10px 14px; font: 11px/1.4 Consolas, "Courier New", monospace; color: #c8ced2; white-space: pre; background: #0b0d0f; }
+`
+};
 
 /* ---- Shared with the worker: written once, run by the page and by the worker ------------------------------------------
  * The shared worker (jitaWorkerBody) runs from its own source text (JiTA.worker._src) and sees nothing of the page, so

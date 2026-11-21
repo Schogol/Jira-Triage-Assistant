@@ -403,13 +403,13 @@ ok('start() watches for each header row, the CodeMirror viewer\'s too, and swaps
     CB + ':contains(' + Q.PH_HDR + ')', CB + ':contains(' + Q.MC_HDR + ')', SELECTORS.CM_LINE + ':contains(' + HDR + ')']) && watches.slice(0, 4).every((w) => w[1] === Q.swap),
     JSON.stringify(headSels));
 const fileWatch = watches.slice(4);
-ok('...and for each header-less igbr.zip file\'s entry', JSON.stringify(fileWatch.map((w) => w[0])) === JSON.stringify(['outstandingcalls.txt', 'lastcrashes.txt', 'PDMData.txt', 'dxdiag.txt']
+ok('...and for each header-less igbr.zip file\'s entry', JSON.stringify(fileWatch.map((w) => w[0])) === JSON.stringify(['outstandingcalls.txt', 'lastcrashes.txt', 'PDMData.txt', 'dxdiag.txt', 'settings.yaml']
     .map((n) => 'span[data-item-title="true"]:contains(' + n + ')')), JSON.stringify(fileWatch.map((w) => w[0])));
 const bound = {};
 route = (sel) => { const m = /^button:contains\('(.+)'\)$/.exec(sel); if (m) { const b = { attrs: {} }; bound[m[1]] = b; return [b]; } return null; };
 fileWatch.forEach((w) => w[1]());
 Object.keys(bound).forEach((name) => { bound[name]['onclick.jita'](); });
-ok('...whose button opens it as its file', JSON.stringify(loaded) === JSON.stringify(['oc', 'lc', 'pdm', 'dx']), JSON.stringify(loaded));
+ok('...whose button opens it as its file', JSON.stringify(loaded) === JSON.stringify(['oc', 'lc', 'pdm', 'dx', 'set']), JSON.stringify(loaded));
 const genAt = Q.gen;
 const fileBtn = { querySelector: (s) => (s === '[data-item-title]' ? {} : null) }, otherBtn = { querySelector: () => null };
 listener.fn({ target: { closest: () => fileBtn } });
@@ -430,7 +430,8 @@ ok('the observer looks when a node was added, or while a header-less file loads,
 global.JITA_NO_JIRA_UI = true;
 fresh();
 JiTA.logparser.start();
-ok('off a Jira page there is no observer and no click listener', !observer && !listener && styled === 0 && watches.length === 8, (!!observer) + ' / ' + (!!listener));
+ok('off a Jira page there is no observer and no click listener', !observer && !listener && styled === 0 && watches.length === 9,
+    'observer ' + (!!observer) + ', listener ' + (!!listener) + ', ' + watches.length + ' watches (4 header rows + 5 files)');
 global.JITA_NO_JIRA_UI = false;
 
 // ============ the parser keeps its state in JiTA.logparser ============

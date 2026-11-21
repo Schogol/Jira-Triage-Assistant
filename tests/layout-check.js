@@ -65,8 +65,9 @@ const PAGE_HTML = '<!doctype html><html><head><meta charset="utf-8"><title>JiTA 
 // Runs in the page before the script: the GM_* functions over a store preset with `gm`, GM_addStyle putting a real
 // <style> in, GM_info with the script's version, and every way out failing at once ($.ajax, fetch, GM_xmlhttpRequest;
 // the browser itself resolves no host name). __hideIdb / __showIdb take window.indexedDB away while the script loads.
-function prelude(gm, version) {
+function prelude(gm, version, res) {
     const own = Object.prototype.hasOwnProperty, store = {};
+    window.GM_getResourceText = (name) => (res && own.call(res, name) ? res[name] : null);   // the files fetched with the script
     const copy = (v) => (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
     Object.keys(gm || {}).forEach((k) => { store[k] = copy(gm[k]); });
     let n = 0;
@@ -170,12 +171,12 @@ function helpers() {
 }
 
 // A page with the script loaded in it, and nothing of JiTA running but what a view starts.
-async function scriptPage(b, jq, src, gm) {
+async function scriptPage(b, jq, src, gm, res) {
     const page = await b.page({ width: W, height: H });
     await page.load(PAGE_HTML);
     await page.evaluate(jq + '\n;void 0;\n//# sourceURL=jquery.min.js');
     const version = (/^\/\/ @version\s+(\S+)/m.exec(src) || [])[1] || '';
-    await page.evaluate('(' + prelude.toString() + ')(' + JSON.stringify(gm || {}) + ', ' + JSON.stringify(version) + ')');
+    await page.evaluate('(' + prelude.toString() + ')(' + JSON.stringify(gm || {}) + ', ' + JSON.stringify(version) + ', ' + JSON.stringify(res || {}) + ')');
     await page.evaluate('window.__hideIdb()');
     let threw = null;
     try { await page.evaluate(src + '\n;void 0;\n//# sourceURL=JiTA.user.js', 60000); } catch (e) { threw = e; }
@@ -464,13 +465,99 @@ function ldTabsChecks(m) {
     ok('...and the next tab scrolls as one again', !a.after.fill && a.after.overflow === 'auto', JSON.stringify(a.after));
 }
 
+// ================= 6. settings.yaml as the in-game Settings window =================
+// The igbr.zip viewer's code-block holding a settings.yaml (tests/settings-fixture.yaml), swapped for the window as the log
+// parser does it (JiTA.settingsview.mount). Then every tab clicked, the filter on and off, a search, Everything else's
+// groups opened (one holds a value with an <img> tag in it), Show raw and back, and Copy.
+async function setvView(fixture) {
+    const { box } = window.__lc, wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const host = document.createElement('div'), cb = document.createElement('code');
+    host.style.cssText = 'position: relative; margin: 60px 16px 0;';
+    cb.setAttribute('data-testid', 'code-block');
+    cb.style.cssText = 'display: block; white-space: pre; font-family: monospace;';
+    cb.textContent = fixture;
+    host.appendChild(cb);
+    document.body.appendChild(host);
+    let copied = null;
+    JiTA.util.copy = (t) => { copied = t; return Promise.resolve(); };
+    JiTA.settingsview.mount();
+    const el = document.getElementById('jita-setv');
+    if (!el) { return { mounted: false }; }
+    const shown = (e) => !!e && getComputedStyle(e).display !== 'none' && e.getClientRects().length > 0;
+    const all = (sel) => Array.prototype.slice.call(el.querySelectorAll(sel));
+    const tabs = all('.jsv-tab'), rows = () => all('.jsv-panel .jsv-row').filter((r) => !r.classList.contains('jsv-hid'));
+    const total = all('.jsv-panel .jsv-row').length;
+    const opened = tabs.map((t) => {
+        t.click();
+        return { tab: t.getAttribute('data-tab'), panels: all('.jsv-panel').filter(shown).map((p) => p.getAttribute('data-panel')), on: all('.jsv-tab.jsv-on').map((x) => x.getAttribute('data-tab')) };
+    });
+    tabs[0].click();
+    const sizes = { el: box(el), nav: box(el.querySelector('.jsv-nav')), main: box(el.querySelector('.jsv-main')), vh: window.innerHeight, overX: el.scrollWidth - el.clientWidth,
+        mainScrolls: getComputedStyle(el.querySelector('.jsv-main')).overflowY };
+    const only = el.querySelector('.jsv-only');
+    only.click();
+    const filtered = { rows: rows().length, changed: rows().filter((r) => r.classList.contains('jsv-chg')).length, dim: tabs.filter((t) => t.classList.contains('jsv-dim')).map((t) => t.getAttribute('data-tab')) };
+    only.click();
+    const unfiltered = rows().length;
+    const q = el.querySelector('.jsv-q');
+    q.value = 'turret';
+    q.dispatchEvent(new Event('input', { bubbles: true }));
+    await wait(400);
+    const searched = rows().map((r) => r.getAttribute('data-q'));
+    q.value = 'quotein';
+    q.dispatchEvent(new Event('input', { bubbles: true }));
+    await wait(400);
+    const restHits = all('.jsv-hits .jsv-rrow').map((r) => r.textContent);
+    q.value = '';
+    q.dispatchEvent(new Event('input', { bubbles: true }));
+    await wait(400);
+    el.querySelector('.jsv-tab[data-tab="rest"]').click();
+    all('.jsv-group').forEach((g) => { g.open = true; });
+    await wait(100);
+    const groups = all('.jsv-group').map((g) => ({ id: g.getAttribute('data-g'), rows: g.querySelectorAll('.jsv-rrow').length }));
+    const imgs = document.querySelectorAll('#jita-setv img').length;
+    const rawBtn = el.querySelector('.jsv-rawbtn'), raw = el.querySelector('.jsv-raw');
+    rawBtn.click();
+    const rawOpen = { shown: shown(raw), same: raw.textContent === fixture, bodyHidden: !shown(el.querySelector('.jsv-body')), label: rawBtn.textContent };
+    rawBtn.click();
+    const rawShut = { hidden: !shown(raw), bodyShown: shown(el.querySelector('.jsv-body')), label: rawBtn.textContent };
+    el.querySelector('.jsv-copy').click();
+    await wait(50);
+    return { mounted: true, total: total, opened: opened, sizes: sizes, filtered: filtered, unfiltered: unfiltered, searched: searched, restHits: restHits, groups: groups, imgs: imgs,
+        rawOpen: rawOpen, rawShut: rawShut, copiedSame: copied === fixture, status: el.querySelector('.jsv-status').textContent };
+}
+function setvChecks(m) {
+    ok('Settings window: settings.yaml\'s code-block is swapped for it', m.mounted, 'no #jita-setv after mount()');
+    if (!m.mounted) { return; }
+    const s = m.sizes;
+    ok('Settings window: it fills the screen below its top, the left list 230 px wide, the controls beside it scrolling on their own',
+        s.el.b <= s.vh + PX && s.el.h >= 320 && near(s.nav.w, 230) && s.main.l >= s.nav.r - PX && s.mainScrolls === 'auto', JSON.stringify(s));
+    ok('Settings window: nothing reaches past its right edge', s.overX <= 0, s.overX + ' px over');
+    const bad = m.opened.filter((o) => o.panels.length !== 1 || o.panels[0] !== o.tab || o.on.length !== 1 || o.on[0] !== o.tab);
+    ok('Settings window: every entry on the left shows its own tab, and only it, highlighted', m.opened.length >= 18 && !bad.length, JSON.stringify(bad.slice(0, 3)));
+    ok('Settings window: "Only changed from default" leaves the changed rows only, and dims what has none (Camera)', m.filtered.rows > 5 && m.filtered.rows === m.filtered.changed &&
+        m.filtered.dim.indexOf('camera') >= 0 && m.filtered.dim.indexOf('rest') < 0, JSON.stringify(m.filtered));
+    ok('Settings window: ...and off again, every row is back', m.unfiltered === m.total, m.unfiltered + ' of ' + m.total);
+    ok('Settings window: a search leaves the rows it names (turret)', m.searched.length >= 2 && m.searched.every((q) => q.indexOf('turret') >= 0), JSON.stringify(m.searched));
+    ok('Settings window: ...and finds a key in Everything else (quoteIn)', m.restHits.length === 1 && /quoteIn/.test(m.restHits[0]), JSON.stringify(m.restHits));
+    ok('Settings window: Everything else draws a group when it is opened, and a value\'s tag is text, never an element', m.groups.length >= 3 && m.groups.every((g) => g.rows > 0) && m.imgs === 0,
+        JSON.stringify(m.groups) + ', ' + m.imgs + ' <img>');
+    ok('Settings window: Show raw shows the file exactly as it is, in place of the window', m.rawOpen.shown && m.rawOpen.same && m.rawOpen.bodyHidden && m.rawOpen.label === 'Show settings', JSON.stringify(m.rawOpen));
+    ok('Settings window: ...and back', m.rawShut.hidden && m.rawShut.bodyShown && m.rawShut.label === 'Show raw', JSON.stringify(m.rawShut));
+    ok('Settings window: Copy copies the file exactly as it is', m.copiedSame && m.status === 'Copied.', m.status);
+}
+
+const SETV_FIXTURE = fs.readFileSync(path.join(__dirname, 'settings-fixture.yaml'), 'utf8').replace(/\r\n/g, '\n');
 const VIEWS = [
     { title: 'Members', page: membersView, check: membersChecks },
     { title: 'Cards', page: cardsView, check: cardsChecks },
     { title: 'Settings', page: settingsView, check: settingsChecks },
     { title: 'Quality control', page: qcView, check: qcChecks },
-    { title: 'Lead duties tabs', page: ldTabsView, check: ldTabsChecks }
+    { title: 'Lead duties tabs', page: ldTabsView, check: ldTabsChecks },
+    { title: 'Settings window', page: setvView, check: setvChecks, data: SETV_FIXTURE }
 ];
+// The files Tampermonkey fetches with the script (@resource), as the page's GM_getResourceText hands them out.
+const RESOURCES = { settingswindow: fs.readFileSync(path.join(__dirname, '..', 'settings-window.json'), 'utf8') };
 
 (async () => {
     // A browser that stops answering must not hold up a CI run for its whole timeout.
@@ -490,8 +577,8 @@ const VIEWS = [
     for (const v of VIEWS) {
         let page = null, m = null;
         try {
-            page = await scriptPage(b, jq.text, src, gmFor(src));
-            m = await page.evaluate('(' + v.page.toString() + ')()', 30000);
+            page = await scriptPage(b, jq.text, src, gmFor(src), RESOURCES);
+            m = await page.evaluate('(' + v.page.toString() + ')(' + (v.data === undefined ? '' : JSON.stringify(v.data)) + ')', 30000);
         } catch (e) {
             ok(v.title + ': the view opens and is measured', false, String(e && e.message || e) + (page && page.errors.length ? ' | the page said: ' + page.errors.slice(0, 3).join(' | ') : ''));
         }

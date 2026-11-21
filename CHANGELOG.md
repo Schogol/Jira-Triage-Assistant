@@ -14,6 +14,13 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.54.0 (2026-11-21)
+
+### New features
+
+- settings.yaml in a report's igbr.zip now opens as the in-game Settings window, with every value as the player had it and the settings that differ from the game's default marked.
+- The settings window has a filter for changed settings, a search, the player's shortcuts, the warnings they switched off, the rest of the file, and Show raw and Copy for the file as it is.
+
 ## 3.53.37 (2026-11-21)
 
 ### Fixed issues

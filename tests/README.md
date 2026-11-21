@@ -49,9 +49,10 @@ left out); only an entry with New features brings up the What's new pill:
 - One item per line, at most 240 characters.
 - A backslash goes before any of `` \ ` * _ [ ] < > # ~ | & `` in an item (and before a `-` or `+` that starts one),
   so GitHub shows the item as JiTA does.
-- The `@resource` line in `JiTA.user.js` ends in `?v=` and the same version, so Tampermonkey fetches the file again.
+- Every `@resource` line in `JiTA.user.js` (`CHANGELOG.md`, `settings-window.json`) ends in `?v=` and the same
+  version, so Tampermonkey fetches each file again.
 
-`release.js` does all of that in one go: it raises `@version`, sets the `?v=` and puts the entry at the top, dated
+`release.js` does all of that in one go: it raises `@version`, sets every `?v=` and puts the entry at the top, dated
 today, each item escaped. Write the items as JiTA shows them, without backslashes:
 
 ```
@@ -157,7 +158,8 @@ time. The checklist harness waited about 0.8 s per run before, the members harne
 
 The harnesses draw into fake DOMs, so a column that shifts from row to row passes them all. `layout-check.js` loads
 the real script into a headless Chrome, Chromium or Edge, opens the Lead duties Members and Quality control tabs, the
-sidebar cards and Settings with fixture data, and measures them. `browser.js` drives the browser over the DevTools
+sidebar cards, Settings and the settings.yaml window (its tabs, filter, search, Show raw and Copy clicked) with fixture
+data, and measures them. `browser.js` drives the browser over the DevTools
 protocol with Node's own WebSocket (Node 22 or later, no npm package); jQuery comes from the script's `@require`,
 checked against its sha256 and kept in the temp folder.
 
