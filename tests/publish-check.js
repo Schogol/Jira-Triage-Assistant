@@ -73,6 +73,43 @@ R.schedule = () => { R._scheduled = (R._scheduled || 0) + 1; };
     ok('a second publish with nothing changed is skipped', r2 && r2.skipped === 'unchanged', JSON.stringify(r2));
     ok('...so the page keeps its version', page.version === before, page.version + ' vs ' + before);
 
+    // Two Leads publishing at once: the other's page, rendered from an older ledger, landed after this one, while this
+    // tab's hash was stored. Every publish then skipped as unchanged and the page kept the older ledger.
+    const LK = L.LEDGER_KEY, pubOf = () => props[LK].value[R.PUB_KEY] || {};
+    ok('a publish notes the page version it wrote with its hash', pubOf().page === page.version, JSON.stringify(pubOf()) + ' / v' + page.version);
+    const good = page.body, w0 = writes;
+    page.version++; page.body = 'a page rendered from an older ledger';
+    let rr = await R.publish(false);
+    ok('a page written since that publish is written again, though the ledger renders the same', rr && rr.written === true && writes === w0 + 1 && page.body.split('\n').slice(1).join('\n') === good.split('\n').slice(1).join('\n'),
+        JSON.stringify(rr));
+    rr = await R.publish(false);
+    ok('...and then skipped as unchanged again', rr && rr.skipped === 'unchanged' && writes === w0 + 1, JSON.stringify(rr));
+    const p0 = pubOf().page;
+    delete props[LK].value[R.PUB_KEY].page;   // published by a build from before the page version was noted
+    page.version++;
+    rr = await R.publish(false);
+    ok('...a publish from a build that noted no page version goes by the hash alone, as before', rr && rr.skipped === 'unchanged' && writes === w0 + 1, JSON.stringify(rr));
+    props[LK].value[R.PUB_KEY].page = p0; page.version--;
+    // The ledger written while this tab writes the page (another Lead's mark): the page written is the older one.
+    R._scheduled = 0;
+    const save0 = JiTA.conf.savePageBody;
+    JiTA.conf.savePageBody = (pg, html) => {
+        const v = props[LK].value;
+        v.done = v.done || {}; v.done[ym] = Object.assign({}, v.done[ym], { '12': { by: 'solnichka', at: new Date().toISOString() } });
+        v.lastReviewed = Object.assign({}, v.lastReviewed, { '12': new Date().toISOString().slice(0, 10) });
+        props[LK].version++;
+        return save0(pg, html);
+    };
+    await R.publish(true);
+    JiTA.conf.savePageBody = save0;
+    ok('a ledger written while the page was being written asks for another publish, from the ledger as it is now', R._scheduled === 1, String(R._scheduled));
+    R._scheduled = 0;
+    rr = await R.publish(false);
+    ok('...which writes the newer ledger, and asks for nothing more', rr && rr.written === true && R._scheduled === 0, JSON.stringify(rr) + ' ' + R._scheduled);
+    ok('...and the next is skipped as unchanged', (await R.publish(false)).skipped === 'unchanged');
+    delete props[LK].value.done[ym]['12']; delete props[LK].value.lastReviewed['12'];
+    await R.publish(false);
+
     // The skip above only proves anything because both publishes landed in the SAME minute - which is how
     // this hid. The stamp is minute-precision, so a minute later the hash differed and the page was
     // rewritten regardless of the ledger. Move the clock and compare what is actually hashed.
@@ -274,6 +311,15 @@ R.schedule = () => { R._scheduled = (R._scheduled || 0) + 1; };
         JiTA.conf.savePageBody = () => Promise.reject(new Error('HTTP 403'));
         await R.publish(true).catch(() => {});
         ok('a FAILED publish is recorded with its error', /FAILED/.test(R.lastLine()) && /403/.test(R.lastLine()), R.lastLine());
+    }
+
+    // The page's QC table: a flag recorded before reasons were kept with the verdict reads its own month's follow-up,
+    // which is not the issue's first when it was flagged in an earlier month too.
+    {
+        const pym = L._prevYm();
+        const html = R._qcSection({ months: { [pym]: { assign: { schogol: ['EBR-5'] } } }, done: { [pym]: { 'EBR-5': { by: 'schogol', at: 'x', verdict: 'flag' } } },
+            flags: { 'EBR-5': { ym: '2020-01', note: 'the first month' }, ['EBR-5@' + pym]: { ym: pym, note: 'this month' } } }, pym);
+        ok("the page's QC table gives a flag its own month's reason", html.indexOf('this month') >= 0 && html.indexOf('the first month') < 0 && html.indexOf('(no reason given)') < 0, html.slice(0, 300));
     }
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'publish checks passed.'));

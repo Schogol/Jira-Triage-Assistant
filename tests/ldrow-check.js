@@ -109,7 +109,8 @@ JiTA.conf.getProperty = (p, key) => {
     return Promise.resolve(props[key] ? JSON.parse(JSON.stringify(props[key])) : null);
 };
 JiTA.conf.saveProperty = (p, key, value, prop) => {
-    if (failNext) { failNext = false; return Promise.reject(new Error('HTTP 500')); }
+    // failNext true: HTTP 500 with no status read (Confluence not reached); a number: refused with that status
+    if (failNext) { const s = failNext; failNext = false; return Promise.reject(s === true ? new Error('HTTP 500') : Object.assign(new Error('HTTP ' + s), { status: s })); }
     props[key] = { id: key, key: key, value: JSON.parse(JSON.stringify(value)), version: (prop ? prop.version : 0) + 1 };
     const answerOf = JSON.parse(JSON.stringify(props[key]));
     if (parkNext) { parkNext = false; return new Promise((res) => { release = () => res(answerOf); }); }
@@ -310,6 +311,16 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('a settle with no row to swap paints nothing over the rebuild', rows().length === 0 && status.textContent === 'Sampling ' + qym + '…', status.textContent);
     ok('...but still folds the Undo into the state', !U._qc.done['EBR-3']);
     U._renderQc();
+    // Flagged this month, its follow-up resolved, while an earlier month's for the same issue is open: no Undo.
+    const keepD = U._qc.done['EDR-2'], keepF = U._qc.ledgerValue.flags;
+    U._qc.done['EDR-2'] = { by: 'schogol', at: 'x', verdict: 'flag', note: 'n' };
+    U._qc.ledgerValue.flags = Object.assign({}, keepF, { 'EDR-2': { by: 'x', at: 'x', ym: '2020-01', note: 'old' },
+        ['EDR-2@' + qym]: { by: 'schogol', at: 'x', ym: qym, note: 'n', resolvedBy: 'solnichka', resolvedAt: 'y' } });
+    U._renderQc();
+    ok('a flag whose own follow-up is resolved offers no Undo, whatever an earlier month\'s follow-up of the issue is', isDone(rowOf('EDR-2')) && !button(rowOf('EDR-2'), 'Undo'));
+    if (keepD) { U._qc.done['EDR-2'] = keepD; } else { delete U._qc.done['EDR-2']; }
+    U._qc.ledgerValue.flags = keepF;
+    U._renderQc();
 
     // ================= Wiki review =================
     const ym = L._ym(), WK = L.LEDGER_KEY, WL = L.wiki.localKey(ym), today = new Date().toISOString().slice(0, 10);
@@ -401,6 +412,37 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('a wiki settle with no row to swap paints nothing over the rebuild', rows().length === 0 && status.textContent === 'Loading the wiki queue…', status.textContent);
     U._renderWiki();
 
+    // Refused for good: no edit right on the ledger page. Kept for a replay, it showed as done for ever.
+    const open1 = rows().find((r) => !!button(r, 'Mark reviewed'));
+    const oid = open1.attrs['data-key'];
+    failNext = 403;
+    await click(open1, 'Mark reviewed');
+    const o1 = rowOf(oid);
+    ok('a review Confluence refuses for good (403) is not saved locally: the row stays open', !isDone(o1) && !!button(o1, 'Mark reviewed') && !button(o1, 'Mark reviewed').props.disabled,
+        JSON.stringify(o1.kids.map((k) => k.html)));
+    ok('...the mirror has nothing to replay', !mirror(WL).done[oid] && mirror(WL).pending.indexOf(oid) < 0, JSON.stringify(mirror(WL)));
+    ok('...and the status line says it was not saved, and that trying again will not', status.textContent.indexOf('Not saved - HTTP 403 Trying again will not save it.') === 0, status.textContent);
+
+    // ...as is one the full ledger refuses (no write can make it fit).
+    const cap0 = L.MAX_PROP_BYTES;
+    L.MAX_PROP_BYTES = 10;
+    await click(rowOf(oid), 'Mark reviewed');
+    L.MAX_PROP_BYTES = cap0;
+    ok('a review the full ledger refuses is not saved locally either', !isDone(rowOf(oid)) && !mirror(WL).done[oid] && mirror(WL).pending.indexOf(oid) < 0 &&
+        /^Not saved - The lead-duty ledger (.+) is full .* Trying again will not save it./.test(status.textContent), status.textContent);
+
+    // Past the UTC month turn with the list still open: the clock says the next month, the list is this one's.
+    const ym0 = L._ym, [yy, mm] = ym.split('-').map(Number), nextYm = mm === 12 ? (yy + 1) + '-01' : yy + '-' + String(mm + 1).padStart(2, '0');
+    U._wiki.ym = ym;
+    L._ym = () => nextYm;
+    await click(rowOf(oid), 'Mark reviewed');
+    const wd = props[WK].value.done || {};
+    ok('past the month turn, a review on the open list is written for the month the list is', !!(wd[ym] && wd[ym][oid]) && !(wd[nextYm] && wd[nextYm][oid]), JSON.stringify(Object.keys(wd)));
+    ok('...and its row is drawn from that month, with an Undo for it', isDone(rowOf(oid)) && !!button(rowOf(oid), 'Undo'), status.textContent);
+    await click(rowOf(oid), 'Undo');
+    ok('...so its Undo takes that review back, not one of the next month', !((props[WK].value.done[ym] || {})[oid]) && !isDone(rowOf(oid)), JSON.stringify(props[WK].value.done));
+    L._ym = ym0;
+
     // Two wiki writes whose answers come back in the other order (ui._adopt, by the property's version; v3.53.5 moved
     // the QC case to _qcAdopt, so this is the one that keeps it honest for the wiki ledger and the Members tab).
     parkNext = true;
@@ -452,6 +494,27 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     await settle();
     ok('a Resolve landing on another tab leaves that tab alone', body.emptied === fbase && loads.flags === 0);
     ok('...but the count and the QC state follow it', counts[counts.length - 1] === L.qc.openFlags(qv()).length && L.qc.openFlags(U._qc.ledgerValue).length === L.qc.openFlags(qv()).length, String(counts));
+
+    // One issue flagged in two months: two follow-ups, each shown by the issue, each resolved on its own.
+    const at77 = 'EBR-77@' + qym;
+    qv().flags['EBR-77'] = { by: 'schogol', at: '2020-02-01T00:00:00Z', ym: '2020-01', note: 'first time', actor: 'Gil', kind: 'report', summary: 'x' };
+    qv().flags[at77] = { by: 'schogol', at: '2020-03-01T00:00:00Z', ym: qym, note: 'second time', actor: 'Hal', kind: 'report', summary: 'x' };
+    U._tab = 'flags';
+    U._renderFlags(clone(qv()));
+    const rows77 = descendants(body).filter((n) => has(n, 'ld-noterow') && has(n, 'flagged') && find(n, (k) => has(k, 'ld-key') && k._text === 'EBR-77'));
+    const second = rows77.find((n) => !!find(n, (k) => has(k, 'ld-sum') && k._text === 'second time'));
+    ok('an issue flagged in two months has two follow-up rows, both shown by the issue', rows77.length === 2 && !!second &&
+        rows77.every((n) => find(n, (k) => has(k, 'ld-key')).attrs.href === JiTA.HOST + '/browse/EBR-77'), rows77.length + '');
+    answer = 'talked to Hal';
+    const rb77 = find(second, (n) => n.html.indexOf('>Resolve</button>') >= 0);
+    rb77.handlers.click.forEach((f) => f.call(rb77));
+    await settle();
+    ok('...Resolve on the later one resolves that one alone', !!(qv().flags[at77] && qv().flags[at77].resolvedAt) && qv().flags[at77].outcome === 'talked to Hal' &&
+        !qv().flags['EBR-77'].resolvedAt, JSON.stringify([qv().flags['EBR-77'], qv().flags[at77]]));
+    const done77 = descendants(body).filter((n) => has(n, 'ld-noterow') && has(n, 'done') && find(n, (k) => has(k, 'ld-key') && k._text === 'EBR-77'));
+    ok('...and Recently resolved shows it by the issue too', done77.length === 1 && find(done77[0], (k) => has(k, 'ld-key')).attrs.href === JiTA.HOST + '/browse/EBR-77', done77.length + '');
+    delete qv().flags['EBR-77']; delete qv().flags[at77];
+    U._tab = 'qc';
 
     await L.qc.markChecked('EBR-3', 'flag', qym, 'late', { kind: 'report', summary: 'three', actor: 'Cara' });
     gm.leadDutyDryRun = true;
@@ -517,7 +580,39 @@ const mirror = (key) => meta[key] || { done: {}, pending: [] };
     ok('...and leaves the other people\'s alone', !qv().flags['EBR-73'].resolvedAt);
     ok('...the tab is redrawn once, without the group', body.emptied === rbase + 1 && !groupOf('ISD Dana') && !!groupOf('ISD Erin') && loads.flags === 1);
     ok('...and the count follows it', counts[counts.length - 1] === L.qc.openFlags(qv()).length, String(counts.slice(-2)));
+    // One person's follow-ups for one issue in two months: Resolve all closes out both.
+    qv().flags['EBR-74'] = { by: 'schogol', at: '2020-02-01T00:00:00.000Z', ym: '2020-01', note: 'first', actor: 'ISD Finn', kind: 'report', summary: 'four' };
+    qv().flags['EBR-74@' + qym] = { by: 'schogol', at: '2026-10-04T00:00:00.000Z', ym: qym, note: 'again', actor: 'ISD Finn', kind: 'report', summary: 'four' };
+    U._renderFlags(clone(qv()));
+    ra = button(groupOf('ISD Finn'), 'Resolve all');
+    answer = 'both with Finn';
+    ra.handlers.click.forEach((f) => f.call(ra));
+    await settle();
+    ok('Resolve all on one issue flagged in two months closes out both', !!qv().flags['EBR-74'].resolvedAt && !!qv().flags['EBR-74@' + qym].resolvedAt,
+        JSON.stringify([qv().flags['EBR-74'], qv().flags['EBR-74@' + qym]]));
+    delete qv().flags['EBR-74']; delete qv().flags['EBR-74@' + qym];
     JiTA.conf.saveProperty = save0;
+
+    // ================= A late application detail =================
+    // Decline #1 and move on to #2 at once: the decline moves #2 up to where #1 was, and #2's detail lands after that.
+    {
+        const keep = { appActions: U._appActions, paintNotes: U._paintNotes, paintQa: U._paintQa, apps: L.apps, tab: U._tab };
+        L.apps = Object.assign({ age: () => '', line: () => '', TEAM: 'ECAID' }, L.apps);   // vmsapp-check.js covers the real ones
+        U._appActions = () => {}; U._paintNotes = () => {}; U._paintQa = () => {};   // vmsapp-check.js and friends cover them
+        const asks = {};
+        L.apps.detail = (id) => new Promise((res) => { asks[id] = res; });
+        const A = { id: 'a1', name: 'Ann', url: 'u1' }, B = { id: 'b2', name: 'Ben', url: 'u2' }, C = { id: 'c3', name: 'Cat', url: 'u3' };
+        U._tab = 'apps';
+        U._apps = { items: [A, B, C], idx: 0, qa: { a1: { sections: [], actions: [], notes: [] } }, rows: [], drafts: {} };
+        U._showApp(1);   // down-arrow to Ben: his detail is asked
+        U._apps.items.splice(0, 1); U._apps.idx = 0;   // Ann declined: Ben is first now, the cursor on him
+        asks.b2({ ok: true, sections: [], actions: [], notes: [], note: '' });
+        await settle();
+        ok('a late detail shows its applicant where they are now, not the next one at their old place', U._apps.idx === 0 && U._apps.items[U._apps.idx] === B && !!U._apps.qa.b2,
+            U._apps.idx + ' ' + (U._apps.items[U._apps.idx] || {}).name);
+        Object.assign(U, { _appActions: keep.appActions, _paintNotes: keep.paintNotes, _paintQa: keep.paintQa, _tab: keep.tab });
+        L.apps = keep.apps; U._apps = null;
+    }
 
     // ================= Late loads paint only into their own tab =================
     const errorShown = (msg) => !!find(body, (n) => n._text === msg);

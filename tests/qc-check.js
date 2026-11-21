@@ -179,6 +179,36 @@ function cell(tbl, key, col) {
     ok("another month's resolved follow-up does not block Undo", !value().done[pym]['EBR-7'] && r.written);
     ok("...and is not withdrawn by it", value().flags['EBR-7'] && value().flags['EBR-7'].note === 'old');
 
+    // The same issue sampled again in another month (reopened and closed again): checked fine there, it leaves the
+    // earlier month's open follow-up alone, reason and all.
+    value().flags['EBR-9'] = { by: 'solnichka', at: 'x', ym: '2020-01', note: 'handled it wrong', actor: 'Dana' };
+    r = await Q.markChecked('EBR-9', 'ok', pym, '', { key: 'EBR-9', actor: 'Eve' });
+    ok("a Checked leaves another month's open follow-up for the same issue alone", r.written && value().done[pym]['EBR-9'].verdict === 'ok' &&
+        value().flags['EBR-9'] && value().flags['EBR-9'].note === 'handled it wrong' && !value().flags['EBR-9'].resolvedAt, JSON.stringify(value().flags['EBR-9']));
+    // ...and flagged there, it is kept beside it: each month's follow-up for its own handler (Schogol, 2026-11-21).
+    delete value().done[pym]['EBR-9'];   // that Checked undone
+    r = await Q.markChecked('EBR-9', 'flag', pym, 'wrong again', { key: 'EBR-9', actor: 'Eve', kind: 'report', summary: 'nine' });
+    let F9 = value().flags, at9 = 'EBR-9@' + pym;
+    ok("a Flag in another month keeps the earlier month's open follow-up, reason and handler", r.written && F9['EBR-9'].note === 'handled it wrong' && F9['EBR-9'].actor === 'Dana' &&
+        F9['EBR-9'].ym === '2020-01', JSON.stringify(F9['EBR-9']));
+    ok('...and keeps its own beside it, under the issue and its month', !!F9[at9] && F9[at9].note === 'wrong again' && F9[at9].actor === 'Eve' && F9[at9].ym === pym, JSON.stringify(F9));
+    const o9 = Q.openFlags(value()).filter((o) => o.key === 'EBR-9');
+    ok('...both are open follow-ups, each shown by the issue, each with its own id', o9.length === 2 && o9.map((o) => o.id).sort().join() === ['EBR-9', at9].sort().join(), JSON.stringify(o9));
+    ok('...grouped under their own handlers', Q.groupFlags(value()).some((g) => g.name === 'Eve' && g.entries.some((o) => o.id === at9)) &&
+        Q.groupFlags(value()).some((g) => g.name === 'Dana' && g.entries.some((o) => o.id === 'EBR-9')), JSON.stringify(Q.groupFlags(value()).map((g) => g.name)));
+    ok('...each month finds its own', Q.flagFor(value().flags, 'EBR-9', pym) === F9[at9] && Q.flagFor(value().flags, 'EBR-9', '2020-01') === F9['EBR-9'] &&
+        Q.flagFor(value().flags, 'EBR-9', '2019-12') === null && Q.issueOf(at9) === 'EBR-9');
+    r = await Q.uncheck('EBR-9', pym);
+    ok('Undo of that Flag withdraws its own follow-up only', r.written && !value().flags[at9] && value().flags['EBR-9'].note === 'handled it wrong', JSON.stringify(value().flags));
+    await Q.markChecked('EBR-9', 'flag', pym, 'wrong again', { key: 'EBR-9', actor: 'Eve' });
+    r = await Q.resolveFlags([at9], 'talked to Eve');
+    ok('a follow-up is resolved by its id, the other month\'s left open', r.written && value().flags[at9].resolvedAt && value().flags[at9].outcome === 'talked to Eve' &&
+        !value().flags['EBR-9'].resolvedAt, JSON.stringify(value().flags));
+    ok('...and its Undo is refused once resolved, as for any follow-up', Q.undoable(value().done[pym]['EBR-9'], Q.flagFor(value().flags, 'EBR-9', pym), pym) === false);
+    delete value().flags['EBR-9'];   // the first one gone (undone, or pruned once resolved): the later month's is still found
+    ok("...found again once the issue's first follow-up is gone", Q.flagFor(value().flags, 'EBR-9', pym) === value().flags[at9] && Q.flagId(value().flags, 'EBR-9', pym) === at9);
+    delete value().done[pym]['EBR-9']; delete value().flags[at9];
+
     const w2 = writes; taps = 0;
     r = await Q.uncheck('EBR-404', pym);
     ok('nothing to take back writes nothing', !r.written && writes === w2 && taps === 0);

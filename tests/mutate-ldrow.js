@@ -94,7 +94,7 @@ const muts = [
     [H, 'a landed resolve keeps its note', 'function (r) { delete U._drafts[draft]; U._afterResolve(r); }', 'U._afterResolve'],
     [H, 'a failed resolve drops its note', "function (e) { $btns.prop('disabled', false); U._status(", "function (e) { delete U._drafts[draft]; $btns.prop('disabled', false); U._status("],
     [H, 'a Resolve all is not told where its note is kept', "U._resolve($g.find('button'), keys, note, draft);", "U._resolve($g.find('button'), keys, note);"],
-    [H, 'a Resolve is not told where its note is kept', 'U._resolve($btn, [o.key], note, draft);', 'U._resolve($btn, [o.key], note);'],
+    [H, 'a Resolve is not told where its note is kept', 'U._resolve($btn, [o.id], note, draft);', 'U._resolve($btn, [o.id], note);'],
     [H, 'a resolve note is kept under one key for everything', "_resolveDraft: function (keys) { return 'resolve:' + keys.join(','); },", "_resolveDraft: function () { return 'resolve'; },"],
     [H, 'Resolve all asks without naming the person', "' follow-ups' + (g.known ? (' for ' + g.name) : '')", "' follow-ups'"],
     [H, 'Resolve all keeps its note under the first row', 'var draft = U._resolveDraft(keys);', 'var draft = U._resolveDraft([keys[0]]);'],
@@ -102,6 +102,14 @@ const muts = [
     [H, 'an open follow-up\'s reason loses its lines', "$('<span class=\"ld-sum ld-lines\"></span>').text(f.note || f.summary", "$('<span class=\"ld-sum\"></span>').text(f.note || f.summary"],
     [H, 'a resolved follow-up\'s notes lose their lines', "$('<span class=\"ld-sum ld-lines\"></span>').text(txt.reason)", "$('<span class=\"ld-sum\"></span>').text(txt.reason)"],
     [H, 'an open follow-up row is not lined up with its note', "$('<div class=\"ld-row ld-noterow flagged\"></div>')", "$('<div class=\"ld-row flagged\"></div>')"],
+    [H, "a write refused for good is queued as retried automatically", "            if (!L._retryable(e)) { done(null, 'Not saved - ' + why + ' Trying again will not save it.', null); return null; }\n", ""],
+    [H, "a full ledger is never told apart", "                    full.full = true;   // no retry gets it in (_retryable)\n", ""],
+    [H, "the wiki tab works in the clock's month", "res = U._wiki, ym = res.ym || L._ym(), v = res.ledgerValue || {};", "res = U._wiki, ym = L._ym(), v = res.ledgerValue || {};"],
+    [H, "a late application detail shows the applicant at its old place", "            if (res.ok) { U._apps.qa[it.id] = { sections: res.sections, actions: res.actions, notes: res.notes, note: res.note }; U._showApp(U._apps.idx); }", "            if (res.ok) { U._apps.qa[it.id] = { sections: res.sections, actions: res.actions, notes: res.notes, note: res.note }; U._showApp(i); }"],
+    [H, "Resolve resolves by the issue", "U._resolve($btn, [o.id], note, draft); });", "U._resolve($btn, [o.key], note, draft); });"],
+    [H, "Resolve all resolves by the issue", "                var keys = g.entries.map(function (o) { return o.id; });", "                var keys = g.entries.map(function (o) { return o.key; });"],
+    [H, "Recently resolved shows the id", "var f = flags[k], issue = L.qc.issueOf(k);", "var f = flags[k], issue = k;"],
+    [H, "the QC row's Undo looks at the issue's first follow-up", "L.qc.undoable(done, L.qc.flagFor(ctx.flags, it.key, ym), ym)", "L.qc.undoable(done, ctx.flags[it.key], ym)"],
     [H, 'a resolved follow-up row is not lined up with its note', "$('<div class=\"ld-row ld-noterow done\"></div>')", "$('<div class=\"ld-row done\"></div>')"]
 ];
 let allRed = true;
