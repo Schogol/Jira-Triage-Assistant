@@ -15,7 +15,7 @@ const muts = [
     // ---- embedPass ----
     [H, 'embedPass keeps the indexes', '            dropIndexes();\n        }\n    }', '        }\n    }'],
     // ---- a sync run ----
-    [H, 'a run never tells the worker', 'function settled() { if (changed > 0) { JiTA.sync._invalidateWorker(); } }', 'function settled() {}'],
+    [H, 'a run never tells the worker', 'function settled() { if (changed > 0) { JiTA.sync._invalidateWorker(); JiTA.sync._tellChanged(!opts.isEbr, !!opts.isEbr); } }', 'function settled() {}'],
     [H, 'a run that stored nothing tells it anyway', 'function settled() { if (changed > 0) {', 'function settled() { if (true) {'],
     [H, 'a failed run does not tell it', 'function (e) {\n            settled();\n', 'function (e) {\n'],
     // ---- the leader changes ----

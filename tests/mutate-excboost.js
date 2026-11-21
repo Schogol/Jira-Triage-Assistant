@@ -57,11 +57,11 @@ const muts = [
         "            return { sigs: (idx && idx.keyToSigs[key]) || [], crashes: [], cuts: (idx && idx.keyToCut && idx.keyToCut[key]) || [] };\n        });"],
 
     // ---- a report's own exceptions ----
-    [X, 'a reading made without its logs counts', '                if (!(rec && rec.logs)) { return null; }\n', '                if (!rec) { return null; }\n'],
+    [X, 'a reading made without its logs counts', 'if (!(rec && rec.logs && (rec.hasLog || (rec.exc && rec.exc.length)))) { c.empty = true; return null; }', 'if (!rec) { c.empty = true; return null; }'],
     [X, 'a reading keeps no messages', '                R._keep(key, rec.exc);\n', ''],
     [X, 'a scanned report keeps no messages', '                JiTA.repexc._keep(key, exc);\n', ''],
     [X, 'no message kept', '        (exc || []).forEach(function (e) { if (e && e.sig && e.msg) { m[e.sig] = e.msg; } });\n', ''],
-    [X, 'readings looked up every time', '        if (!R._reads[key]) {\n            R._reads[key] = ', '        if (true) {\n            R._reads[key] = '],
+    [X, 'readings looked up every time', '        if (!c) {\n            c = R._reads[key] = ', '        if (true) {\n            c = R._reads[key] = '],
     [X, 'a new reading does not replace the cached one', '    forget: function (key) { delete JiTA.repexc._reads[key]; delete JiTA.repexc._report[key];', '    forget: function (key) { delete JiTA.repexc._report[key];'],
     [X, 'a new reading keeps the old messages', ' delete JiTA.repexc._report[key]; delete JiTA.repexc._msgs[key]; },', ' delete JiTA.repexc._report[key]; },'],
     // ---- naming what the log holds ----
@@ -114,7 +114,7 @@ const muts = [
     [X, 'the scan keeps no exceptions', '                            keepExc(txt);\n', ''],
     [X, 'the scan forgets what it kept', '                            JiTA.ui._logExc[key] = exc;\n', ''],
     [X, 'a fingerprinting error hangs the scan', '                        } catch (e) { /* the matching below still runs */ }', '                        } catch (e) { throw e; }'],
-    [X, 'a new reading leaves the ranking\'s copy', 'var stored = function () { JiTA.repexc.forget(issue.key); return rec; };', 'var stored = function () { return rec; };'],
+    [X, 'a new reading leaves the ranking\'s copy', 'var stored = function () { JiTA.repexc.readStored(issue.key); return rec; };', 'var stored = function () { return rec; };'],
     [X, 'a finished profile is not told', '            if (s.done) { JiTA.repexc.profileReady(key); }', '            if (s.done) { }'],
 
     // ---- the background reader ----

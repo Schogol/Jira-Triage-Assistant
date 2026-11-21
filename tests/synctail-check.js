@@ -124,6 +124,7 @@ const rec = (key, over) => Object.assign({
     R.util.jqlSince = () => '-15m';
     R.sync._mapIssue = (i) => ({ key: i.key, updated: i.updated || '2026-10-03T10:00' });
     R.sync._invalidateWorker = () => { invalidates++; };
+    R.sync._tellChanged = () => {};
     const calls = [];
     R.sync._apiPost = (path, body) => {
         calls.push(body);

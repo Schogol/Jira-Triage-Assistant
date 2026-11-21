@@ -41,11 +41,12 @@ global.flagOn = (n) => !!flags[n];
 global.JITA_NO_JIRA_UI = false;
 let gm = {};
 global.gmGet = (k, d) => (Object.prototype.hasOwnProperty.call(gm, k) ? gm[k] : d);
+global.gmSet = (k, v) => { gm[k] = v; };
 
 let renders = 0;
 global.JiTA = {
     TOP_N: 3, HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, LEFT_OUT: { labels: ['Vanguard', 'Launcher'], components: ['Launcher'] },
-    worker: { _started: true, usable: () => true },
+    worker: { _started: true, usable: () => true }, sched: { tabId: 'tabA' },
     embed: { WARM_WAIT_MS: 5000 },
     rank: { CAND: 50, RRF_K: 60 },
     util: {}, logsig: {}, db: {}, sync: {}, profile: { CACHE_PREFIX: 'rp:', V: 3 },
@@ -233,12 +234,14 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     meta['rp:EBR-1'] = { v: 3, logs: true, exc: [{ sig: A }, { sig: C }] };
     meta['rp:EBR-2'] = { v: 3, logs: false, exc: [] };
     meta['rp:EBR-3'] = { v: 2, logs: true, exc: [{ sig: A }] };
-    meta['rp:EBR-4'] = { v: 3, logs: true, hasLog: false, exc: [] };
+    meta['rp:EBR-4'] = { v: 3, logs: true, hasLog: true, exc: [] };
+    meta['rp:EBR-7'] = { v: 3, logs: true, hasLog: false, exc: [] };
     ok('a reading whose logs were read gives their exceptions', JSON.stringify(await R._reading('EBR-1')) === JSON.stringify([A, C]));
     ok('...one made without its logs counts as not read', (await R._reading('EBR-2')) === null);
     ok('...so does one from an older reader', (await R._reading('EBR-3')) === null);
     ok('...and a report with no reading', (await R._reading('EBR-9')) === null);
     ok('...a read report with no exceptions has none, which is not the same', JSON.stringify(await R._reading('EBR-4')) === '[]');
+    ok('...but one read when it had no log file is nothing to go by (a log attached since is scanned)', (await R._reading('EBR-7')) === null);
     reads = 0;
     await R._reading('EBR-1'); await R._reading('EBR-1');
     ok('a reading is looked up once', reads === 0);
@@ -435,7 +438,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('...and one the fingerprinting throws on still finishes the scan', done32 === 'done' && JSON.stringify(JiTA.ui._logExc['EBR-33']) === '[]', done32);
     JiTA.ui = ui0; JiTA.profile.logExceptions = lp0; JiTA.logsig.matchText = mt0; console.log = log1;
     const readFiles = member('    _readFiles: function (issue, rec, zip) {');
-    ok('a new reading drops the ranking\'s copy once it is stored', /var stored = function \(\) \{ JiTA\.repexc\.forget\(issue\.key\); return rec; \};/.test(readFiles) && /\.then\(stored, stored\)/.test(readFiles));
+    ok('a new reading drops the ranking\'s copy once it is stored', /var stored = function \(\) \{ JiTA\.repexc\.readStored\(issue\.key\); return rec; \};/.test(readFiles) && /\.then\(stored, stored\)/.test(readFiles));
     const section = member('    renderSection: function (key, background) {');
     ok('a finished profile tells the boost', /if \(s\.done\) \{ JiTA\.repexc\.profileReady\(key\); \}/.test(section));
 
@@ -454,7 +457,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     JiTA.excfind._read = (item) => { readsDone.push(item.key); items[item.key] = item; const s = readScript[item.key] || 'download'; return s === 'fail' ? Promise.reject(new Error('x'))
         : Promise.resolve({ rec: { logs: s !== 'nolog' }, cached: s === 'cached' }); };
     const iss = (key, extra) => ({ key: key, fields: Object.assign({ status: { name: 'Open' }, labels: ['Russian'], attachment: [{ filename: 'logs.txt', size: 9, content: 'u', id: 1 }] }, extra || {}) });
-    function setup() { posted = []; readsDone = []; stamped = {}; readScript = {}; meta = {}; renders = 0; delays = []; }
+    function setup() { posted = []; readsDone = []; stamped = {}; readScript = {}; meta = {}; renders = 0; delays = []; delete gm.jitaReadingsStored; }
     const gaps = () => delays.filter((ms) => ms === LR.GAP_MS).length;
     const log0 = console.log;
     console.log = () => {};
@@ -474,6 +477,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     const marked = (m) => !!m && typeof m.at === 'string' && !isNaN(Date.parse(m.at)) && m.lv === JiTA.profile.LOG_V;
     ok('...and, having read them all, marks when it began, and how it read logs', marked(stamped.logreadAt), JSON.stringify(stamped));
     ok('...a defect on screen ranks its reports again', renders === 1);
+    ok('...and the other tabs are told the pass ended, so theirs do too', !!gm.jitaReadingsStored && gm.jitaReadingsStored.done === true && gm.jitaReadingsStored.tab === 'tabA', JSON.stringify(gm.jitaReadingsStored));
 
     setup();
     meta.logreadAt = { at: new Date(Date.now() - 3600e3).toISOString(), lv: JiTA.profile.LOG_V };
@@ -485,6 +489,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('a later pass lists only the reports updated since the last complete one', posted[0].jql.indexOf(JiTA.excfind.SCOPE + ' AND updated >= "') === 0 &&
         /updated >= "-6\dm" ORDER BY created DESC$/.test(posted[0].jql), posted[0].jql);
     ok('...and with nothing downloaded, ranks nothing again', n === 0 && renders === 0);
+    ok('...nor tells the other tabs to', !('jitaReadingsStored' in gm), JSON.stringify(gm.jitaReadingsStored));
     // A mark from a pass that read logs another way: every report again, so their logs are read with stacktraces.
     for (const old of [new Date(Date.now() - 3600e3).toISOString(), { at: new Date(Date.now() - 3600e3).toISOString(), lv: JiTA.profile.LOG_V - 1 }]) {
         setup();

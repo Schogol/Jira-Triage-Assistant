@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.10 (2026-11-20)
+
+### Fixed issues
+
+- Every open Jira tab now hears another tab's sync and log readings: a parsed log's known defects, and the reports a defect's exceptions raise, no longer stay out of date until the tab is reloaded.
+
 ## 3.53.9 (2026-11-20)
 
 ### Fixed issues
