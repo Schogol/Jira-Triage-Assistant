@@ -76,7 +76,7 @@ const log0 = console.log;
 
     // ================= the defect-side Attach =================
     let attaches = [], drops = [], fades = 0, dropFails = false;
-    Object.assign(JiTA.ui, ui(['_assigneeCache', '_getAssignee', '_attachReportButton', '_markDupButton']));
+    Object.assign(JiTA.ui, ui(['_assigneeCache', 'ASSIGNEE_LANES', '_assigneeBusy', '_assigneeWait', '_getAssignee', '_attachReportButton', '_markDupButton']));
     // Jira's issue view, told to read the issue on screen again (softrefresh-check.js covers the real helpers).
     let onScreen = 'EDR-1', viewRefreshes = 0, shows = [], statusNow = 'Open', patched = [];
     global.jitaCurrentKey = () => onScreen;
