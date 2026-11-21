@@ -25,7 +25,8 @@ global.gmGet = (k, d) => (k in gm ? gm[k] : d);
 global.gmSet = (k, v) => { gm[k] = v; };
 global.JITA_IS_SUBFRAME = false; global.JITA_IS_FORGE_FRAME = false;
 const flags = { parser: true, scrollbar: false, buttons: true, similarDefects: true, defectProfile: true, defectChecklist: true, credits: false, detailView: true, screenOcr: false };
-global.flagOn = (n) => !!flags[n];
+global.flagStored = (n) => !!flags[n];   // the switches as stored (the real flagStored is checked below)
+global.flagOn = () => { throw new Error('the tab\'s own copy read'); };
 global.GM_info = { scriptHandler: 'Tampermonkey', version: '5.5.0' };
 const FIREFOX = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0';
 Object.defineProperty(global, 'navigator', { value: { userAgent: FIREFOX }, configurable: true, writable: true });
@@ -98,6 +99,19 @@ const mine = () => server.props[KEY] && server.props[KEY].value;
     ok('the entry holds the JiTA and Tampermonkey versions, the browser and the switches, and nothing else', J(Object.keys(e)) === J(['jita', 'tm', 'browser', 'f']) &&
         e.jita === '3.53.1' && e.tm === 'Tampermonkey 5.5.0' && e.browser === 'Firefox 158', J(e));
     ok('...each switch as it is set', J(e.f) === J({ parser: true, scrollbar: false, buttons: true, similarDefects: true, defectProfile: true, igbrZip: true, defectChecklist: true, credits: false, detailView: true, dvTake: false, screenOcr: false }), J(e.f));
+    // A switch turned in another tab: this tab's own copy (savedVariables, read at load) still has it on.
+    const top = (head) => { const s = src.indexOf('\n' + head); return src.slice(s + 1, src.indexOf('\n', s + 1)); };
+    const real = new Function('gmGet', [top('var savedVariables = '), top('var FLAG = '), top('function flagOn(name) '), top('function flagStored(name) ')].join('\n') +
+        '\nreturn { saved: savedVariables, flagOn: flagOn, flagStored: flagStored };')(global.gmGet);
+    const stubs = [global.flagOn, global.flagStored];
+    real.saved.forEach((v) => { v[1] = true; });   // every switch on when this tab loaded
+    gm.credits = false; gm.screenOcr = false;     // since turned off in another tab of this browser
+    global.flagOn = real.flagOn; global.flagStored = real.flagStored;
+    const ef = C.entry().f;
+    ok('a switch turned off in another tab is sent as off, as every tab of the browser has it now', ef.credits === false && ef.screenOcr === false && real.flagOn('credits') === true, J(ef));
+    ok('...one never stored is on, as a new install has it', ef.parser === true && ef.buttons === true, J(ef));
+    delete gm.credits; delete gm.screenOcr;
+    [global.flagOn, global.flagStored] = stubs;
     take = 'throw';
     ok('...and one that cannot be read as not known', C.entry().f.dvTake === null);
     take = false;
