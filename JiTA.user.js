@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.17
+// @version     3.53.18
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.17
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.18
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
