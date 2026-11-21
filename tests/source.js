@@ -136,7 +136,21 @@ function shared(src) { return new Function(fn(src, 'jitaShared') + '\nreturn jit
 function logsigShared(src) {
     const SH = shared(src);
     return { MIN_FRAMES: SH.MIN_FRAMES, CRASH_FRAMES: SH.CRASH_FRAMES, TRACE: SH.TRACE, OPEN_CUT: SH.OPEN_CUT, isTrace: SH.isTrace, isCut: SH.isCut,
-        _traceKey: SH.traceKey, isUserError: SH.isUserError, _splitBlocks: SH.splitBlocks, _fingerprint: SH.fingerprint, _logBlocks: SH.logBlocks, _crashOf: SH.crashOf };
+        _traceKey: SH.traceKey, isUserError: SH.isUserError, _splitBlocks: SH.splitBlocks, _fingerprint: SH.fingerprint, _logBlocks: SH.logBlocks, _crashOf: SH.crashOf,
+        _traceMates: SH.traceMates, _pointAt: SH.pointAt };
+}
+// The worker's logsig side, from jitaWorkerBody itself: its index build (buildIndexes, whose logsig part is jitaShared's
+// buildIndex) and its request dispatcher (logsigOp), on its own run of jitaShared, as the worker has it. The rest of
+// buildIndexes runs on stubs. `idx`, when given, is the index it holds to begin with (none: it has none yet).
+// { SH, build(recs): the index it holds then, op(payload): the answer to a logsig request }.
+function workerLogsig(src, idx) {
+    const body = fn(src, 'jitaWorkerBody'), SH = shared(src);
+    const w = new Function('SH', 'cfg', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'idx0',
+        'var vecCache = null, kwCache = null, logsigCache = idx0 || null;\n' + fn(src, 'buildIndexes', body) + '\n' + fn(src, 'logsigOp', body) +
+        '\nreturn { build: function (r) { buildIndexes(r); return logsigCache; }, op: logsigOp };')(
+        SH, { MODEL_VERSION: 'm' }, () => false, () => false, (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
+        (r) => (r.summary || '') + ' ' + (r.description || ''), idx);
+    return { SH: SH, build: w.build, op: w.op };
 }
 
-module.exports = { load: load, top: top, member: member, members: members, fn: fn, block: block, shared: shared, logsigShared: logsigShared };
+module.exports = { load: load, top: top, member: member, members: members, fn: fn, block: block, shared: shared, logsigShared: logsigShared, workerLogsig: workerLogsig };

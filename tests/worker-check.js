@@ -20,7 +20,7 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
 
 // ---- the worker's index builds ----
 const reads = [];
-const idx = new Function('allRecords', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'lgSplit', 'lgFp', 'cfg',
+const idx = new Function('allRecords', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'SH', 'cfg',
     'var vecCache = null, kwCache = null, logsigCache = null;\n' +
     cut('    var idxGen = 0, idxP = null;', '    // Cosine == dot product') +
     '\nreturn { ensureIndexes: ensureIndexes, dropIndexes: dropIndexes, kw: function () { return kwCache; } };')(
@@ -28,7 +28,7 @@ const idx = new Function('allRecords', 'isClosedStatus', 'leftOut', 'tokenize', 
     (s) => /closed|attached/i.test(s || ''), () => false,
     (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
     (r) => (r.summary || '') + ' ' + (r.description || ''),
-    () => [], () => ({}), { MODEL_VERSION: 'm1' });
+    require('./source').shared(src), { MODEL_VERSION: 'm1' });
 const ebrKeys = () => (idx.kw() ? idx.kw().ebr.docs.map((d) => d.key).join(',') : 'none');
 const OPEN = [{ key: 'EBR-1', project: 'EBR', status: 'Open', summary: 'crash on undock' }, { key: 'EBR-2', project: 'EBR', status: 'Open', summary: 'warp bug' }];
 const ONE_ATTACHED = [{ key: 'EBR-1', project: 'EBR', status: 'Attached', summary: 'crash on undock' }, { key: 'EBR-2', project: 'EBR', status: 'Open', summary: 'warp bug' }];

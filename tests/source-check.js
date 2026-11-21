@@ -144,8 +144,8 @@ ok('...the members of each of the ' + nObj + ' objects cover all of its code bet
 ok('...and no member runs on into the next', !runOn.length, runOn.slice(0, 5).join(', '));
 ok('the pieces the harnesses take most are where they should be', /^    ebrPool: function \(\) \{[\s\S]*\n    \}$/.test(S.member(src, 'JiTA.rank', 'ebrPool')) &&
     /^function jitaWorkerBody\(/.test(S.fn(src, 'jitaWorkerBody')) && /\n\}$/.test(S.fn(src, 'jitaWorkerBody')) &&
-    /^    function lgMatch\(text\) \{/.test(S.fn(src, 'lgMatch', S.fn(src, 'jitaWorkerBody'))) && /^function jitaShared\(\) \{/.test(S.fn(src, 'jitaShared')) &&
-    typeof S.shared(src).fingerprint === 'function');
+    /^    function logsigOp\(payload\) \{/.test(S.fn(src, 'logsigOp', S.fn(src, 'jitaWorkerBody'))) && /^function jitaShared\(\) \{/.test(S.fn(src, 'jitaShared')) &&
+    typeof S.shared(src).fingerprint === 'function' && typeof S.workerLogsig(src).op === 'function');
 
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'source checks passed.'));
 process.exit(fail ? 1 : 0);

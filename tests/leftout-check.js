@@ -90,7 +90,7 @@ const keys = (list) => list.map((r) => r.key).join(',');
     ok('the translate pass skips the reports left out, as it skips closed ones', /if \(JiTA\.util\.isClosedStatus\(r\.status\) \|\| JiTA\.util\.isLeftOut\(r\)\) \{ continue; \}/.test(tr.slice(0, tr.indexOf('\n};\n'))));
 
     // ================= the worker =================
-    const idx = new Function('allRecords', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'lgSplit', 'lgFp', 'cfg',
+    const idx = new Function('allRecords', 'isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'SH', 'cfg',
         'var vecCache = null, kwCache = null, logsigCache = null, K1 = 1.5, B = 0.75;\n' +
         cut('    var idxGen = 0, idxP = null;', '    // Cosine == dot product') + cut('    function bm25Score(idx, text, excludeKey, limit, filterTerms, gate) {', '\n    }\n') + '\n    }\n' +
         cut('    async function rankKeyword(payload) {', '\n    }\n') + '\n    }\n' +
@@ -98,7 +98,7 @@ const keys = (list) => list.map((r) => r.key).join(',');
         () => Promise.resolve(RECS.slice()), JiTA.util.isClosedStatus, workerLeftOut,
         (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
         (r) => (r.summary || '') + ' ' + (r.description || ''),
-        () => [], () => ({}), { MODEL_VERSION: 'm1' });
+        require('./source').shared(src), { MODEL_VERSION: 'm1' });
     await idx.ensureIndexes();
     ok('the worker\'s keyword index of bug reports leaves them out, keeps the GM team\'s', keys(idx.kw().ebr.docs) === 'EBR-1,EBR-4', keys(idx.kw().ebr.docs));
     ok('...and so does its vector index, though the Vanguard one was embedded before', keys(idx.vec().ebr) === 'EBR-4', keys(idx.vec().ebr));

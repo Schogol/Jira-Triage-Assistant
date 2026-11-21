@@ -59,8 +59,8 @@ const NONE = { sigMap: {}, crashMap: {}, keyToSigs: {}, keyToCrash: {} };
 global.JiTA = { logsig: {} };
 const line = (head) => { const s = src.indexOf(head); if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + head.trim()); } return src.slice(s, src.indexOf('\n', s) + 1); };
 Object.assign(JiTA.logsig, require('./source').logsigShared(src));   // jitaShared
-Object.assign(JiTA.logsig, eval('({' + slice('    applyToTable: function () {') + slice('    rematch: function () {') +
-    slice('    _traceMates: function (idx, sig) {') + slice('    _pointAt: function (idx, sig, crashSig) {') + '})'), {
+global.JITA_SH = require('./source').shared(src);   // the page's run of it, which applyToTable's lookups call
+Object.assign(JiTA.logsig, eval('({' + slice('    applyToTable: function () {') + slice('    rematch: function () {') + '})'), {
     ensure: () => Promise.resolve(idx),
     _fingerprint: (text) => (/Boom/.test(text) ? { sig: 'S1', crashSig: 'C1', msg: 'Boom' } : {}),
     renderPanel: (f) => { found = f; }

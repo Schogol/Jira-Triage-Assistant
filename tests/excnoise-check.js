@@ -43,12 +43,9 @@ JiTA.util.delay = () => Promise.resolve();
 JiTA.ocr._langFromLabels = () => null;
 const L = JiTA.logsig;
 Object.assign(L, require('./source').logsigShared(src));   // jitaShared
-Object.assign(L, eval('({' +
-    line('    _msgKey: function (sig) {') +
-    lsMember('    ensure: function () {') + member('    applyToTable: function () {') +
-    member('    rematch: function () {') + member('    _matchTextLocal: function (text) {') + member('    _defectsLocal: function (sigs) {') +
-    member('    _holdingLocal: function (sigs) {') + member('    _sigsOfLocal: function (key) {') + member('    _traceMates: function (idx, sig) {') +
-    member('    _pointAt: function (idx, sig, crashSig) {') + member('    defectsForSigs: function (sigs) {') + member('    holding: function (sigs) {') + member('    sigsOf: function (key) {') + '})'));
+global.JITA_SH = require('./source').shared(src);   // the page's run of it, which its lookups call
+Object.assign(L, eval(require('./source').members(src, 'JiTA.logsig', ['_msgKey', 'ensure', 'applyToTable', 'rematch', '_matchTextLocal', '_defectsLocal',
+    '_holdingLocal', '_sigsOfLocal', 'defectsForSigs', 'holding', 'sigsOf'])));
 L._index = null; L._dirty = true; L._building = null;
 eval(block('JiTA.excnoise = {', '\n};\n'));
 eval(block('JiTA.profile = {', '\n    _noop: null\n};\n'));
@@ -58,13 +55,9 @@ eval(block('JiTA.excfind = {', '\n    _noop: null\n};\n'));
 Object.assign(JiTA.ui, eval('({' + uiMember('    _counting: function (found) {') + uiMember('    _scanIssueLog: function (key) {') + '})'));
 const reread = () => { JiTA.excnoise._freqRead = Date.now() - JiTA.excnoise.LOAD_MS - 1; return JiTA.excnoise.load(); };
 const N = JiTA.excnoise, P = JiTA.profile, X = JiTA.excfind, R = JiTA.repexc, LR = JiTA.logread;
-// The worker's copies, from jitaWorkerBody itself.
-const W = new Function('isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'cfg', 'SH',
-    'var vecCache = null, kwCache = null, logsigCache = null;\n' + line('    var lgSplit = SH.') + line('    var lgIsTrace = SH.') +
-    src.slice(once('    // ---- logsig: exception-signature mining'), once('\n    // One load at a time')) +
-    src.slice(once('    function buildIndexes(recs) {'), once('    // Cosine == dot product')) +
-    '\nreturn { isUserError: lgIsUserError, match: lgMatch, holding: lgHolding, build: function (r) { buildIndexes(r); return logsigCache; } };')(
-    () => false, () => false, (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean), (r) => (r.summary || '') + ' ' + (r.description || ''), { MODEL_VERSION: 'm' }, require('./source').shared(src));
+// The worker's side, from jitaWorkerBody itself: its index build and its logsig requests, on its own run of jitaShared.
+const WL = require('./source').workerLogsig(src);
+const W = { isUserError: WL.SH.isUserError, match: (x) => WL.op({ op: 'match', text: x }), holding: (s) => WL.op({ op: 'holding', sigs: s }), build: WL.build };
 
 // ---- logs as the client writes them ----
 const col = (t, type) => t + '\tclient::general\t' + (type || 'warning') + '\t';
