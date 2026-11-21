@@ -39,7 +39,24 @@ const muts = [
     [H, 'the tab keeps a tokenizer of its own', '    _tokenize: JITA_SH.tokenize,   // jitaShared', '    _tokenize: function (text) { return JITA_SH.tokenize(text); },'],
     [H, 'the tab keeps a text helper of its own', '    cleanForCompare: JITA_SH.cleanForCompare,   // jitaShared', '    cleanForCompare: function (s, d) { return JITA_SH.cleanForCompare(s, d); },'],
     [H, 'a stale note is left on a piece written once', '    // A bug report the matching lists leave out (cfg.LEFT_OUT = JiTA.LEFT_OUT), so it is neither indexed nor embedded.',
-        '    // Mirror of JiTA.util.isLeftOut: a bug report the matching lists leave out (cfg.LEFT_OUT = JiTA.LEFT_OUT).']
+        '    // Mirror of JiTA.util.isLeftOut: a bug report the matching lists leave out (cfg.LEFT_OUT = JiTA.LEFT_OUT).'],
+    // ---- the number rules, the schema, a member's handles and the Lead rule (refactor 1 PR 4) ----
+    [H, 'the shared copy leaves the schema out', 'normMsg: normMsg, dbSchema: dbSchema, handles: handles,', 'normMsg: normMsg, handles: handles,'],
+    [H, 'a long number is kept', "            .replace(/\\b\\d{4,}\\b/g, '#');              // other long numeric ids (a bare scalar < 4 digits survives)\n    }",
+        "            .replace(/\\b\\d{5,}\\b/g, '#');              // other long numeric ids (a bare scalar < 4 digits survives)\n    }"],
+    [H, 'the signatures turn numbers their own way', '        var nmsg = normMsg(msg);\n', "        var nmsg = msg.replace(/0x[0-9a-fA-F]+/g, '0x#');\n"],
+    [H, 'the exception search turns numbers its own way', '    _normMsg: JITA_SH.normMsg,   // jitaShared', "    _normMsg: function (msg) { return String(msg == null ? '' : msg).replace(/\\b\\d{4,}\\b/g, '#'); },"],
+    [H, 'the page makes no stores', 'req.onupgradeneeded = function (e) { JITA_SH.dbSchema(e.target.result); };', 'req.onupgradeneeded = function (e) { };'],
+    [H, 'the worker makes no stores', 'req.onupgradeneeded = function (e) { SH.dbSchema(e.target.result); };', 'req.onupgradeneeded = function (e) { };'],
+    [H, 'the schema leaves an index out', "            s.createIndex('by_modelVersion', 'embeddingModelVersion', { unique: false });\n", ''],
+    [H, 'the schema makes a store twice', "        if (!db.objectStoreNames.contains('meta')) {", '        if (true) {'],
+    [H, 'the worker reads no email handle', 'function crHandles(member) { return SH.handles(member.displayName, member.emailAddress); }', "function crHandles(member) { return SH.handles(member.displayName, ''); }"],
+    [H, 'Lead duties keeps handles of its own', '    _handles: JITA_SH.handles,   // jitaShared', '    _handles: function (dn, em) { return JITA_SH.handles(dn, em).slice(0, 2); },'],
+    [H, 'the bonus is given once whatever the handles', 'var e = SH.leadWords(n, crc.LEADS) * crc.LEAD_BONUS;', 'var e = (SH.leadWords(n, crc.LEADS) ? 1 : 0) * crc.LEAD_BONUS;'],
+    [H, 'the Members tab takes no name for a Lead', "        return JITA_SH.leadWords(name, JiTA.credits.LEADS || {}) ? 'Lead' : (rank || 'Bug Hunter');", "        return rank || 'Bug Hunter';"],
+    [H, 'a Lead listed as false still counts', 'Object.prototype.hasOwnProperty.call(leads, k) && leads[k] && w[k]', 'Object.prototype.hasOwnProperty.call(leads, k) && w[k]'],
+    [H, 'a hyphen joins two words', "        String(name || '').toLowerCase().replace(/-/g, ' ').split(/\\s+/)", "        String(name || '').toLowerCase().split(/\\s+/)"],
+    [H, 'a KEEP IN SYNC note comes back', '    // The tab\'s schema (JiTA.db.open), so whichever context wins the open race', '    // KEEP IN SYNC with JiTA.db.open. The tab\'s schema (JiTA.db.open), so whichever context wins the open race']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

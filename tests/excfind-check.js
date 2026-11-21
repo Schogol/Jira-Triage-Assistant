@@ -227,7 +227,8 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('...its edit ends in a * for the rest of it all the same', X._editText(tL) === cutL.trim() + '*', X._editText(tL).slice(-12));
     m = X.match(X._entry(item('EBR-38'), { exc: [{ sig: fL.sig, msg: cutL }] }, {}), [X._withPattern({ sig: fL.sig, crash: fL.crashSig, msg: cutL }, X._editText(tL).replace('25', '#'))]);
     ok('...so edited, it still matches the report it came from', m.length === 1 && m[0].exact, JSON.stringify(m.map((x) => x.exact)));
-    ok('a message is cut where a profile reading cuts it', /msg: String\(fp\.msg \|\| ''\)\.slice\(0, (\d+)\)/.exec(src)[1] === String(X.MSG_CUT));
+    ok('a message is cut where a profile reading cuts it', /msg: String\(fp\.msg \|\| ''\)\.slice\(0, JiTA\.excfind\.MSG_CUT\)/.test(S.member(src, 'JiTA.profile', 'logExceptions')) &&
+        X.MSG_CUT > 0, String(X.MSG_CUT));
     let re = X._pattern(UE.replace('25', '#'));
     ok('# stands for any number', re.test(um(UE)) && re.test(um(UE.replace('25', '30'))) && re.test(um(UE.replace('25', '7').replace('1677', '42'))), re.source);
     ok('...not for text', !re.test(um(UE.replace('25', 'x'))));

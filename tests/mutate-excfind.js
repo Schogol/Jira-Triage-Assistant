@@ -39,7 +39,8 @@ const muts = [
     [XF, 'nothing ever cut', "cut: w.length >= JiTA.excfind.MSG_CUT };", "cut: false };"],
     [XF, 'no message read as an empty one', "        if (msg == null) { return null; }\n        var w = String(msg);", "        if (msg == null) { msg = ''; }\n        var w = String(msg);"],
     // ---- editing ----
-    [XF, 'an edit\'s long numbers left as they are', "{4,}\\b/g, '#');\n    },", "{40,}\\b/g, '#');\n    },"],
+    [XF, 'an edit\'s long numbers left as they are', "{4,}\\b/g, '#');              // other long numeric ids (a bare scalar < 4 digits survives)\n    }\n    function fingerprint(",
+        "{40,}\\b/g, '#');              // other long numeric ids (a bare scalar < 4 digits survives)\n    }\n    function fingerprint("],
     [XF, 'an edit is case-sensitive', "            return X._normMsg(piece).toLowerCase().split('#')", "            return X._normMsg(piece).split('#')"],
     [XF, 'an edit\'s numbers not read as the signature reads them', "            return X._normMsg(piece).toLowerCase().split('#')", "            return piece.toLowerCase().split('#')"],
     [XF, 'regex characters in an edit read as regex', "                return lit.replace(", "                return lit || lit.replace("],

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.34
+// @version     3.53.35
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.34
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.35
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -3511,6 +3511,17 @@ function jitaShared() {
     // "<TRACE message>|", with no frames (isCut), matched by its message alone. `open` says a stacktrace's message may
     // run on past where it ends: in a description whose lines Jira joined, what followed its first line has become
     // part of it, so only OPEN_CUT characters of it are kept.
+    // The numbers in an exception's message that differ from report to report, turned into # (see fingerprint for why
+    // these and not a bare number of 1 to 3 digits). Case is kept: the signature lowercases after. JiTA.excfind turns an
+    // edited message the same way, so what a Lead types matches the signatures.
+    function normMsg(msg) {
+        return String(msg == null ? '' : msg)
+            .replace(/0x[0-9a-fA-F]+/g, '0x#')        // memory addresses (e.g. object repr ids)
+            .replace(/\b\d+L\b/g, '#')                 // python long literals - always an id (item/type/char/...)
+            .replace(/([(\[{,]\s*)\d+/g, '$1#')        // tuple/list/dict element (leading edge: after ( [ { or ,)
+            .replace(/\d+(\s*[)\]},])/g, '#$1')        // ...and trailing edge (before ) ] } or ,)
+            .replace(/\b\d{4,}\b/g, '#');              // other long numeric ids (a bare scalar < 4 digits survives)
+    }
     function fingerprint(text) {
         text = text || '';
         var si = text.search(/STACKTRACE #/i), ei = text.search(/EXCEPTION #/i), msg = '', open = false, mm;
@@ -3559,12 +3570,7 @@ function jitaShared() {
         // (1-3 digits, not bracketed), because for a KeyError/ValueError the scalar key IS the meaningful part.
         // Identifiers/words (UserError, MISMATCH_COST, ...) are never touched, and the stack still gates every
         // match on top of this.
-        var nmsg = msg
-            .replace(/0x[0-9a-fA-F]+/g, '0x#')        // memory addresses (e.g. object repr ids)
-            .replace(/\b\d+L\b/g, '#')                 // python long literals - always an id (item/type/char/...)
-            .replace(/([(\[{,]\s*)\d+/g, '$1#')        // tuple/list/dict element (leading edge: after ( [ { or ,)
-            .replace(/\d+(\s*[)\]},])/g, '#$1')        // ...and trailing edge (before ) ] } or ,)
-            .replace(/\b\d{4,}\b/g, '#');              // other long numeric ids (a bare scalar < 4 digits survives)
+        var nmsg = normMsg(msg);
         if (trace) { nmsg = TRACE + nmsg; }
         // A stacktrace with too few frames to trust was cut off before its stack: it keeps its message, if it has one.
         var deep = frames.length >= MIN_FRAMES;
@@ -3782,6 +3788,52 @@ function jitaShared() {
         return out;
     }
 
+    // ---- the local copy's schema, and who a member is ----
+    // The local copy's stores, made by whichever of the page (JiTA.db.open) and the worker (openDb) opens a new DB_VERSION
+    // first, in its onupgradeneeded: an open at a new version that made no stores would leave the other's open, at that
+    // same version, with none ever made.
+    function dbSchema(db) {
+        if (!db.objectStoreNames.contains('defects')) {
+            var s = db.createObjectStore('defects', { keyPath: 'key' });
+            s.createIndex('by_updated', 'updated', { unique: false });
+            s.createIndex('by_project', 'project', { unique: false });
+            s.createIndex('by_modelVersion', 'embeddingModelVersion', { unique: false });
+        }
+        if (!db.objectStoreNames.contains('meta')) {
+            db.createObjectStore('meta', { keyPath: 'k' });
+        }
+    }
+    // A Jira user's handles, the names the credits crawl and Lead duties know a member by, so both agree on what
+    // "schogol" means: the part of the email before the @, then the display name less a leading "ISD ", its spaces
+    // taken out, and its first word, lowercased, each once.
+    function handles(displayName, email) {
+        var out = [], seen = {}, uniq = [];
+        if (email && email.indexOf('@') > 0) { out.push(email.split('@')[0]); }
+        var dn = String(displayName || '').replace(/^\s+|\s+$/g, '');
+        var norm = /^isd /i.test(dn) ? dn.slice(4) : dn;
+        out.push(norm.replace(/ /g, '').toLowerCase());
+        out.push(norm.split(' ')[0].toLowerCase());
+        for (var i = 0; i < out.length; i++) {
+            var h = out[i];
+            if (h && !seen[h]) { seen[h] = true; uniq.push(h); }
+        }
+        return uniq;
+    }
+    // The words of a display name, as the Lead bonus and a mentor's bonus go by them: lowercased, a hyphen read as a
+    // space. { word: true }.
+    function nameWords(name) {
+        var w = {};
+        String(name || '').toLowerCase().replace(/-/g, ' ').split(/\s+/).forEach(function (t) { if (t) { w[t] = true; } });
+        return w;
+    }
+    // How many of `leads` (JiTA.credits.LEADS: { handle: true }) are words of the name. The credits give the Lead bonus
+    // once for each; the Members tab takes a name with any for a Lead.
+    function leadWords(name, leads) {
+        var w = nameWords(name), n = 0;
+        for (var k in leads) { if (Object.prototype.hasOwnProperty.call(leads, k) && leads[k] && w[k]) { n++; } }
+        return n;
+    }
+
     // ---- the text the ranking compares, and the keyword ranking ----
     // True when a BUG REPORT is closed or handled, judged by its STATUS NAME ONLY (open / closed / attached) - deliberately
     // NOT the resolution field. A REOPENED bug report typically keeps its old Resolution (the reopen transition doesn't
@@ -3922,7 +3974,8 @@ function jitaShared() {
         buildIndex: buildIndex, traceMates: traceMates, pointAt: pointAt, matchText: matchText, defects: defects, holding: holding,
         sigsOf: sigsOf, siblings: siblings, related: related, clusters: clusters,
         isClosedStatus: isClosedStatus, isLeftOut: isLeftOut, cleanForCompare: cleanForCompare, effectiveText: effectiveText,
-        K1: K1, B: B, STOP: STOP, tokenize: tokenize, matchTerms: matchTerms, keywordIndex: keywordIndex, passesGate: passesGate, bm25Score: bm25Score
+        K1: K1, B: B, STOP: STOP, tokenize: tokenize, matchTerms: matchTerms, keywordIndex: keywordIndex, passesGate: passesGate, bm25Score: bm25Score,
+        normMsg: normMsg, dbSchema: dbSchema, handles: handles, nameWords: nameWords, leadWords: leadWords
     };
 }
 var JITA_SH = jitaShared();
@@ -5816,18 +5869,7 @@ JiTA.db = {
         if (JiTA.db._db) { return Promise.resolve(JiTA.db._db); }
         return new Promise(function (resolve, reject) {
             var req = JiTA.db._idb().open(JiTA.DB_NAME, JiTA.DB_VERSION);
-            req.onupgradeneeded = function (e) {
-                var db = e.target.result;
-                if (!db.objectStoreNames.contains('defects')) {
-                    var s = db.createObjectStore('defects', { keyPath: 'key' });
-                    s.createIndex('by_updated', 'updated', { unique: false });
-                    s.createIndex('by_project', 'project', { unique: false });
-                    s.createIndex('by_modelVersion', 'embeddingModelVersion', { unique: false });
-                }
-                if (!db.objectStoreNames.contains('meta')) {
-                    db.createObjectStore('meta', { keyPath: 'k' });
-                }
-            };
+            req.onupgradeneeded = function (e) { JITA_SH.dbSchema(e.target.result); };   // the stores, as the worker makes them (jitaShared)
             req.onsuccess = function (e) {
                 var db = e.target.result;
                 // Another tab bumping DB_VERSION needs every open connection to close first or its
@@ -11649,22 +11691,10 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         if (dbP) { return dbP; }   // concurrent first calls used to open (and leak) a connection each
         dbP = new Promise(function (resolve, reject) {
             var req = indexedDB.open(cfg.DB_NAME, cfg.DB_VERSION);   // pristine in a worker (no consent-gate wrapper)
-            // Mirror the tab's schema (JiTA.db.open) so whichever context wins the open race at a
-            // NEW DB_VERSION creates the stores. Without this the worker could bump the version with
-            // no stores, and the tab's own open (same version) would then never fire onupgradeneeded.
-            // KEEP IN SYNC with JiTA.db.open's onupgradeneeded.
-            req.onupgradeneeded = function (e) {
-                var d = e.target.result;
-                if (!d.objectStoreNames.contains('defects')) {
-                    var s = d.createObjectStore('defects', { keyPath: 'key' });
-                    s.createIndex('by_updated', 'updated', { unique: false });
-                    s.createIndex('by_project', 'project', { unique: false });
-                    s.createIndex('by_modelVersion', 'embeddingModelVersion', { unique: false });
-                }
-                if (!d.objectStoreNames.contains('meta')) {
-                    d.createObjectStore('meta', { keyPath: 'k' });
-                }
-            };
+            // The tab's schema (JiTA.db.open), so whichever context wins the open race at a NEW DB_VERSION creates the
+            // stores. Without it the worker could bump the version with no stores, and the tab's own open (same version)
+            // would then never fire onupgradeneeded. Written once in jitaShared.
+            req.onupgradeneeded = function (e) { SH.dbSchema(e.target.result); };
             req.onsuccess = function () {
                 db = req.result;
                 var conn = db;
@@ -11938,18 +11968,7 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
             });
         });
     }
-    function crHandles(member) {
-        var out = [], seen = {};
-        var email = member.emailAddress || '';
-        if (email.indexOf('@') > 0) { out.push(email.split('@')[0]); }
-        var dn = (member.displayName || '').replace(/^\s+|\s+$/g, '');
-        var norm = /^isd /i.test(dn) ? dn.slice(4) : dn;
-        out.push(norm.replace(/ /g, '').toLowerCase());
-        out.push(norm.split(' ')[0].toLowerCase());
-        var uniq = [];
-        for (var i = 0; i < out.length; i++) { var h = out[i]; if (h && !seen[h]) { seen[h] = true; uniq.push(h); } }
-        return uniq;
-    }
+    function crHandles(member) { return SH.handles(member.displayName, member.emailAddress); }   // jitaShared, as Lead duties reads them
     function crReporterAccount(value) {
         var q = String(value).replace(/[\\"]/g, '\\$&');   // a quote in the handle gave a 400, read as "no such account"
         return crSearch('reporter = "' + q + '"', ['reporter'], null).then(function (d) {
@@ -12187,9 +12206,8 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         var out = {};
         for (var i = 0; i < names.length; i++) {
             var n = names[i];
-            var toks = {}; n.toLowerCase().replace(/-/g, ' ').split(/\s+/).forEach(function (t) { if (t) { toks[t] = true; } });
-            var e = 0;
-            for (var lead in crc.LEADS) { if (crc.LEADS.hasOwnProperty(lead) && toks[lead]) { e += crc.LEAD_BONUS; } }
+            var toks = SH.nameWords(n);
+            var e = SH.leadWords(n, crc.LEADS) * crc.LEAD_BONUS;   // once for each Lead's handle in the name (jitaShared, as the Members tab reads it)
             if (mentor) { for (var hh in mentor) { if (mentor.hasOwnProperty(hh) && toks[hh]) { e += mentor[hh]; } } }
             if (e) { out[n] = e; }
         }
@@ -13396,7 +13414,7 @@ JiTA.profile = {
             var fp = JiTA.logsig._fingerprint(b);
             if (!fp.sig || seen[fp.sig]) { return; }
             seen[fp.sig] = true;
-            out.push({ sig: fp.sig, msg: String(fp.msg || '').slice(0, 200) });
+            out.push({ sig: fp.sig, msg: String(fp.msg || '').slice(0, JiTA.excfind.MSG_CUT) });   // excfind tells a message cut here
         });
         return out;
     },
@@ -15540,7 +15558,7 @@ JiTA.excfind = {
     CONCURRENCY: 4,
     MAX_SHARED: 12,              // shared exceptions offered, the most shared first
     WAIT_MS: 150,                // a lane with nothing to read waits this long for the next page of reports
-    MSG_CUT: 200,                // a profile reading keeps this many characters of a message. KEEP IN SYNC with JiTA.profile.logExceptions
+    MSG_CUT: 200,                // a profile reading keeps this many characters of a message (JiTA.profile.logExceptions cuts by it)
     FIELDS: ['summary', 'created', 'status', 'attachment', 'labels', 'description'],
     // The reports looked in: the open ones, less those filed in the launcher, which have no logs.txt or igbr.zip. They are
     // told apart as the bug hunters' backlog filter leaves them out (JiTA.dv.DEFAULT_JQL): by the label or the component
@@ -15620,16 +15638,9 @@ JiTA.excfind = {
             pat: a.text, re: X._pattern(a.text), rawRe: X._rawPattern(a.text), toks: X._toks(a.text), fr: null, cfr: null };
     },
     // ---- editing what an exception is looked for by ---------------------------------------------------------------------
-    // The numbers _fingerprint turns into # in an exception's message, turned the same way, case kept. KEEP IN SYNC with
-    // the nmsg rules in JiTA.logsig._fingerprint.
-    _normMsg: function (msg) {
-        return String(msg == null ? '' : msg)
-            .replace(/0x[0-9a-fA-F]+/g, '0x#')
-            .replace(/\b\d+L\b/g, '#')
-            .replace(/([(\[{,]\s*)\d+/g, '$1#')
-            .replace(/\d+(\s*[)\]},])/g, '#$1')
-            .replace(/\b\d{4,}\b/g, '#');
-    },
+    // The numbers _fingerprint turns into # in an exception's message, turned the same way, case kept: the very rules it
+    // uses (jitaShared normMsg).
+    _normMsg: JITA_SH.normMsg,   // jitaShared
     // The test an edited message stands for, run on an exception's message as its signature holds it (numbers turned
     // into # as _normMsg turns them, lowercased): # stands for any number, * for any text, the rest must be as written.
     _pattern: function (text) {
@@ -18738,21 +18749,8 @@ JiTA.leadduty = {
     // The roster is the hardcoded JiTA.credits.LEADS map, sorted so every Lead derives the same order.
     ROSTER: function () { return Object.keys(JiTA.credits.LEADS || {}).sort(); },
 
-    // Handle tokens for a Jira user, mirroring the worker's crHandles so both sides agree on what
-    // "schogol" means. Keep the two in sync.
-    _handles: function (displayName, email) {
-        var out = [], seen = {}, uniq = [];
-        if (email && email.indexOf('@') > 0) { out.push(email.split('@')[0]); }
-        var dn = String(displayName || '').replace(/^\s+|\s+$/g, '');
-        var norm = /^isd /i.test(dn) ? dn.slice(4) : dn;
-        out.push(norm.replace(/ /g, '').toLowerCase());
-        out.push(norm.split(' ')[0].toLowerCase());
-        for (var i = 0; i < out.length; i++) {
-            var h = out[i];
-            if (h && !seen[h]) { seen[h] = true; uniq.push(h); }
-        }
-        return uniq;
-    },
+    // Handle tokens for a Jira user, as the credits crawl reads them (jitaShared), so both sides agree on what "schogol" means.
+    _handles: JITA_SH.handles,   // jitaShared
     _matchRoster: function (displayName, email) {
         var hs = JiTA.leadduty._handles(displayName, email), leads = JiTA.credits.LEADS || {};
         for (var i = 0; i < hs.length; i++) { if (leads[hs[i]]) { return hs[i]; } }
@@ -23047,12 +23045,10 @@ JiTA.leadduty.members = {
     },
 
     // The role a member has unless a Lead set one: Lead for a name with any word in JiTA.credits.LEADS (the rule the
-    // worker's crComputeExtra gives the lead bonus by - KEEP IN SYNC), else their rank on the team page (a role, as
-    // rankRole gives it), else Bug Hunter.
+    // credits give the Lead bonus by: jitaShared leadWords), else their rank on the team page (a role, as rankRole gives
+    // it), else Bug Hunter.
     defaultRole: function (name, rank) {
-        var leads = JiTA.credits.LEADS || {}, own = Object.prototype.hasOwnProperty, toks = String(name || '').toLowerCase().replace(/-/g, ' ').split(/\s+/);
-        for (var i = 0; i < toks.length; i++) { if (toks[i] && own.call(leads, toks[i]) && leads[toks[i]]) { return 'Lead'; } }
-        return rank || 'Bug Hunter';
+        return JITA_SH.leadWords(name, JiTA.credits.LEADS || {}) ? 'Lead' : (rank || 'Bug Hunter');
     },
 
     // ---- the team page (TEAM_PAGE): each member's rank ----

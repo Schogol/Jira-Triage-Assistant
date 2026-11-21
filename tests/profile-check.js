@@ -28,6 +28,7 @@ global.flagOn = (n) => flags[n] !== false;
 ).join('\n') + '\nObject.assign(global, { pdmBestGpu, pdmGpuName, convertTextToObject, parseWER, dxWerKind, dxCrashCode, dxExceptionName, dxFirst, dxDateOrder, dxGpus });');
 global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, repexc: { forget() {}, readStored() {}, profileReady() {} } };
 Object.assign(JiTA.util, eval(S.members(src, 'JiTA.util', ['toPlainText', 'isResolved'])));
+JiTA.excfind = eval(S.members(src, 'JiTA.excfind', ['MSG_CUT']));   // where a reading cuts a message (logExceptions)
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 Object.assign(JiTA.logsig, S.logsigShared(src));   // jitaShared
 global.JITA_SH = S.shared(src);   // the page's run of it, which its lookups call

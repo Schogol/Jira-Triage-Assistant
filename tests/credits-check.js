@@ -14,6 +14,7 @@
 process.env.TZ = 'UTC';
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const S = require('./source');   // S.shared: jitaShared, which the worker's crHandles reads its handles from
 const cut = (from, to, at) => {
     const s = src.indexOf(from, at || 0), e = src.indexOf(to, s);
     if (s < 0 || e < 0 || (at == null && src.indexOf(from, s + 1) >= 0)) { throw new Error('could not slice from ' + from.trim().slice(0, 60)); }
@@ -62,7 +63,7 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     let failing = {};   // handle -> the HTTP status its lookup fails with, past the retries
     const resolve = async (delays, members) => {
         let queries = [], jqls = [];
-        const R = new Function('crc', 'crSearch', 'crTick',
+        const R = new Function('crc', 'crSearch', 'crTick', 'SH',
             fn('crHandles') + fn('crReporterAccount') + fn('crSerial') + fn('crParallel') + fn('crResolveOldReporters') + '\nreturn crResolveOldReporters;')(
             { OLD_DOMAIN: 'old', CONCURRENCY: 4 },
             (jql) => {
@@ -75,7 +76,7 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
                     (function hop() { if (n++ < hops) { setImmediate(hop); return; } failing[h] ? rej(Object.assign(new Error('HTTP ' + failing[h]), { status: failing[h] })) :
                         exists[h] ? res({ issues: [{ fields: { reporter: { accountId: exists[h] } } }] }) : (h in exists ? rej(Object.assign(new Error('HTTP 400'), { status: 400 })) : res({ issues: [] })); })();
                 });
-            }, () => {});
+            }, () => {}, S.shared(src));
         const out = await R(members || [{ displayName: 'John Smith', emailAddress: 'jsmith@new' }, { displayName: 'John Doe', emailAddress: 'jdoe@new' }]);
         return { out: out, queries: queries, jqls: jqls };
     };
@@ -97,8 +98,8 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     exists['o"brien@old'] = 'A-OB';
     const c = await (async () => {
         let jqls = [];
-        const R = new Function('crc', 'crSearch', 'crTick', fn('crHandles') + fn('crReporterAccount') + fn('crSerial') + fn('crParallel') + fn('crResolveOldReporters') + '\nreturn crResolveOldReporters;')(
-            { OLD_DOMAIN: 'old', CONCURRENCY: 4 }, (jql) => { jqls.push(jql); return Promise.resolve({ issues: [{ fields: { reporter: { accountId: 'A-OB' } } }] }); }, () => {});
+        const R = new Function('crc', 'crSearch', 'crTick', 'SH', fn('crHandles') + fn('crReporterAccount') + fn('crSerial') + fn('crParallel') + fn('crResolveOldReporters') + '\nreturn crResolveOldReporters;')(
+            { OLD_DOMAIN: 'old', CONCURRENCY: 4 }, (jql) => { jqls.push(jql); return Promise.resolve({ issues: [{ fields: { reporter: { accountId: 'A-OB' } } }] }); }, () => {}, S.shared(src));
         const out = await R([{ displayName: 'Pat', emailAddress: 'o"brien@new' }]);
         return { out: out, jqls: jqls };
     })();
