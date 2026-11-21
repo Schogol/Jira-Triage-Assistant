@@ -331,9 +331,11 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ok('a cached reading of the same log files is used, nothing downloaded', r.cached === true && reads.length === 0 && r.rec.exc[0].sig === B.sig);
     meta['rp:EBR-5'].logSig = 'logs.txt:400';
     r = await X._read(it5);
-    ok('a log replaced since is read again', r.cached === false && reads.length === 1 && reads[0].rec && reads[0].rec.logs === false && reads[0].rec.exc.length === 0 &&
-        reads[0].rec.logSig === undefined, JSON.stringify(reads[0] && reads[0].rec));
-    ok('...keeping what the zip said, and without the zip', reads[0].rec.zip === true && reads[0].rec.wer === true && reads[0].zip === false);
+    // The reading goes to the reader as it is: the reader reads the logs again, and keeps what they said should that fail
+    // (profile-check.js checks that).
+    ok('a log replaced since is read again: the reading handed to the reader as it is, which reads its logs again', r.cached === false && reads.length === 1 && reads[0].rec &&
+        reads[0].rec.logs === true && reads[0].rec.logSig === 'logs.txt:400' && reads[0].rec.exc.length === 1, JSON.stringify(reads[0] && reads[0].rec));
+    ok('...without the zip', reads[0].rec.zip === true && reads[0].rec.wer === true && reads[0].zip === false);
     ok('...the cached reading itself is not changed', meta['rp:EBR-5'].logs === true && meta['rp:EBR-5'].exc.length === 1);
     reads = [];
     delete meta['rp:EBR-5'].logSig;
@@ -343,11 +345,11 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: 'logs.txt:500', zip: true, wer: true };
     r = await X._read(it5);
     ok('a reading made before the reader read stacktraces is read again, its logs only, what the zip said kept', r.cached === false && reads.length === 1 &&
-        reads[0].rec.logs === false && reads[0].rec.exc.length === 0 && reads[0].rec.zip === true && reads[0].rec.wer === true && reads[0].zip === false, JSON.stringify(reads[0] && reads[0].rec));
+        reads[0].rec.logs === true && reads[0].rec.lv === undefined && reads[0].rec.zip === true && reads[0].rec.wer === true && reads[0].zip === false, JSON.stringify(reads[0] && reads[0].rec));
     reads = [];
     meta['rp:EBR-5'].lv = P.LOG_V - 1;
     r = await X._read(it5);
-    ok('...as is one made by an older reader that said so', r.cached === false && reads.length === 1 && reads[0].rec.logs === false);
+    ok('...as is one made by an older reader that said so', r.cached === false && reads.length === 1 && reads[0].rec.lv === P.LOG_V - 1);
     reads = [];
     meta['rp:EBR-5'] = { v: P.V, key: 'EBR-5', logs: true, hasLog: true, exc: [{ sig: B.sig }], logSig: '', zip: true, hasZip: true };
     r = await X._read({ key: 'EBR-5', desc: [], fields: { attachment: [att('igbr.zip', 900)] } });
@@ -376,7 +378,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     P._readFiles = (it) => {
         readsStarted.push(it.key);
         inFlight++; maxIn = Math.max(maxIn, inFlight);
-        const go = () => { inFlight--; return { v: P.V, key: it.key, logs: it.key !== 'EBR-9', hasLog: true, exc: it.key === 'EBR-4' ? [{ sig: A2.sig, msg: 'KeyError: 2' }] : [], logSig: 'logs.txt:100' }; };
+        const go = () => { inFlight--; return { v: P.V, key: it.key, logs: it.key !== 'EBR-9', hasLog: true, exc: it.key === 'EBR-4' ? [{ sig: A2.sig, msg: 'KeyError: 2' }] : [], logSig: 'logs.txt:100', lv: P.LOG_V }; };
         if (held) { return held.promise.then(go); }
         return new Promise((res) => setImmediate(() => res(go())));
     };

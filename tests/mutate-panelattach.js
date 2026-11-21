@@ -28,13 +28,19 @@ const muts = [
     [H, 'the defect side does not show its new link', "                        if (res.linked && jitaCurrentKey() === defectKey) { jitaRefreshIssueView(); }   // the defect's own Linked work items\n", ''],
     [H, 'a failed translation is cached', "                        if (out && out.en) { JiTA.ui._qtx = { key: key, text: out.en }; return out.en; }\n                        return t;",
         "                        var en = (out && out.en) ? out.en : t;\n                        JiTA.ui._qtx = { key: key, text: en };\n                        return en;"],
-    [H, 'an attachment fetch reads an error page as a log', "onload: function (r) { resolve((r.status >= 200 && r.status < 300) ? (r.responseText || '') : ''); },",
+    [H, 'an attachment fetch reads an error page as a log', "onload: function (r) { resolve((r.status >= 200 && r.status < 300) ? (r.responseText || '') : null); },",
         "onload: function (r) { resolve(r.responseText || ''); },"],
+    [H, 'a failed attachment fetch passes for an empty log', "onload: function (r) { resolve((r.status >= 200 && r.status < 300) ? (r.responseText || '') : null); },",
+        "onload: function (r) { resolve((r.status >= 200 && r.status < 300) ? (r.responseText || '') : ''); },"],
     [H, 'an attachment fetch never gives up', "                    method: 'GET', url: url, timeout: 60000,\n", "                    method: 'GET', url: url,\n"],
-    [H, 'a timed-out attachment fetch hangs the scan', "                    ontimeout: function () { resolve(''); }\n", "                    ontimeout: function () { }\n"],
-    [H, 'a failed attachment fetch hangs the scan', "                    onerror: function () { resolve(''); },\n", "                    onerror: function () { },\n"],
+    [H, 'a timed-out attachment fetch hangs the scan', "                    ontimeout: function () { resolve(null); }\n", "                    ontimeout: function () { }\n"],
+    [H, 'a failed attachment fetch hangs the scan', "                    onerror: function () { resolve(null); },\n", "                    onerror: function () { },\n"],
+    // ---- a log that did not download leaves the scan incomplete (review 2026-11-20 boost-logic-4) ----
+    [H, 'a log not read counts as read', '                            if (txt === null) { failed++; mergeFound({}); return; }   // not read: the scan is not complete\n', ''],
+    [H, 'an incomplete scan is kept as complete', "if (failed) { Object.defineProperty(merged, '_partial', { value: true }); } else { JiTA.ui._logExc[key] = exc; }", 'JiTA.ui._logExc[key] = exc;'],
+    [H, 'an incomplete scan is kept for the session', 'p.then(function (m) { if (m && m._partial) { drop(); } }, drop);', 'p.then(null, drop);'],
     [H, 'two renders scan the logs twice', '        if (cache[key]) { return cache[key]; }\n', ''],
-    [H, 'a failed scan is kept', '        p.then(null, function () { if (cache[key] === p) { delete cache[key]; } });\n', ''],
+    [H, 'a failed scan is kept', 'p.then(function (m) { if (m && m._partial) { drop(); } }, drop);', 'p.then(function (m) { if (m && m._partial) { drop(); } });'],
     [H, 'an unreadable reporter ID is "none"', "                            reject(new Error('could not read the Original Reporter ID (HTTP ' + xhr.status + ')'));", "                            resolve('');"],
     [H, 'the closed-report rule misses the list again', '#jita-sd-list li.jita-sd-closed { opacity: .6; }', '.jita-sd-list li.jita-sd-closed { opacity: .6; }']
 ];

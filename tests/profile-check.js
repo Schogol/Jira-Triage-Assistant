@@ -388,8 +388,26 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const fromZip = { v: P.V, key: 'EBR-50', logs: true, hasLog: true, exc: [{ sig: 'z', msg: 'Z' }], lv: P.LOG_V, logSig: 'logs.txt:1000', zip: true, hasZip: true, wer: true, crashes: [] };
     texts = []; bytes = []; byteAnswer = () => Promise.resolve(zLog);
     rec = await P._readFiles({ key: 'EBR-50', fields: { attachment: [att('igbr.zip')] } }, fromZip, true);
-    ok('...and one whose log was taken off since reads the zip\'s log instead', texts.length === 0 && bytes.length === 1 && rec.logSig === '' && rec.hasLog === true, texts.join() + ' / ' + bytes.join());
+    ok('...and one whose log was taken off since reads the zip\'s log instead, what the old log said gone', texts.length === 0 && bytes.length === 1 && rec.logSig === '' && rec.hasLog === true &&
+        !rec.exc.some((e) => e.sig === 'z'), texts.join() + ' / ' + bytes.join() + ' ' + JSON.stringify(rec.exc.map((e) => e.sig)));
     byteAnswer = () => Promise.resolve(zbuf);
+    // a re-read that fails keeps what the logs said before (review 2026-11-20 boost-robust-5)
+    const staleRec = { v: P.V, key: 'EBR-51', logs: true, hasLog: true, exc: [{ sig: 'old|a.py:f>b.py:g', msg: 'Old' }], lv: P.LOG_V - 1, logSig: 'logs.txt:1000', zip: true, wer: true };
+    const att51 = [att('logs.txt')];
+    textAnswer = () => Promise.reject(new Error('timeout'));
+    texts = [];
+    rec = await P._readFiles({ key: 'EBR-51', fields: { attachment: att51 } }, staleRec, false);
+    ok('a re-read whose download fails keeps what the logs said before, marked as read the old way: read again next time, matched meanwhile', texts.length === 1 && rec.logs === true &&
+        rec.exc.length === 1 && rec.exc[0].msg === 'Old' && rec.lv === P.LOG_V - 1 && rec.logSig === 'logs.txt:1000' && !P._current(rec, att51, false) &&
+        meta['rp:EBR-51'].exc.length === 1 && rec.wer === true, JSON.stringify(rec).slice(0, 200));
+    const grown51 = att51.concat([att('late_log.txt', 10)]);
+    rec = await P._readFiles({ key: 'EBR-51', fields: { attachment: grown51 } }, Object.assign({}, staleRec, { lv: P.LOG_V }), false);
+    ok('...so does one for a log added since', rec.logs === true && rec.exc[0].msg === 'Old' && rec.logSig === 'logs.txt:1000' && !P._current(rec, grown51, false), JSON.stringify(rec).slice(0, 160));
+    textAnswer = () => Promise.resolve(LOG_A);
+    rec = await P._readFiles({ key: 'EBR-51', fields: { attachment: att51 } }, staleRec, false);
+    ok('...and once a read goes through, the new reading takes its place', rec.lv === P.LOG_V && rec.exc.length === 2 && rec.exc[0].msg !== 'Old' && P._current(rec, att51, false), JSON.stringify(rec.exc));
+    rec = await P._readFiles({ key: 'EBR-52', fields: { attachment: att51 } }, null, false);
+    ok('...while a first read is as before: nothing kept from nothing', rec.logs === true && rec.lv === P.LOG_V);
 
     // ================= one report as the profile sees it =================
     let v = P.view({ key: 'EBR-9', fields: { description: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: CI }] }] }, labels: ['Russian'], created: '2026-10-01T10:00:00.000+0000' } },

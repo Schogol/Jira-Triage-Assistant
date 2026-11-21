@@ -190,7 +190,7 @@ const fO2 = fpOf(TIMEOUT([B + 'packages/other/place.py(1) Elsewhere', B + 'packa
     let posted = [], readItems = [];
     JiTA.excfind.SCOPE = 'SCOPE';
     JiTA.sync._apiPost = (path, body) => { posted.push(body); return Promise.resolve({ data: { issues: [1, 2, 3].map((i) => ({ key: 'EBR-' + i, fields: { status: { name: 'Open' }, labels: [], attachment: [] } })), isLast: true } }); };
-    const readings = { 'EBR-1': { logs: true, hasLog: true, exc: [{ sig: fK.sig }] }, 'EBR-2': { logs: true, hasLog: true, exc: [{ sig: fK.sig }] }, 'EBR-3': { logs: true, hasLog: false, exc: [] } };
+    const readings = { 'EBR-1': { logs: true, hasLog: true, exc: [{ sig: fK.sig }], lv: P.LOG_V }, 'EBR-2': { logs: true, hasLog: true, exc: [{ sig: fK.sig }], lv: P.LOG_V }, 'EBR-3': { logs: true, hasLog: false, exc: [], lv: P.LOG_V } };
     X._read = (item) => { readItems.push(item.key); return Promise.resolve({ rec: readings[item.key], cached: true }); };
     JiTA.ui._isReportsKey = () => false;
     const log0 = console.log; console.log = () => {};
@@ -210,10 +210,18 @@ const fO2 = fpOf(TIMEOUT([B + 'packages/other/place.py(1) Elsewhere', B + 'packa
     ok('an old count is not done again within hours of the last try at it', / AND updated >= "/.test(posted[0].jql) && metaSets.indexOf(N.FREQ_KEY) < 0);
     meta[N.TRIED_KEY] = Date.now() - N.RETRY_MS - 1;
     readings['EBR-2'] = null;   // one that cannot be read
+    const share0 = LR.FAIL_SHARE;
+    LR.FAIL_SHARE = 0.4;   // a few of many, as here one of three
     await passOf();
+    LR.FAIL_SHARE = share0;
     ok('...but after that, it is: every report listed, the count left even though one could not be read', posted[0].jql === 'SCOPE ORDER BY created DESC' &&
         metaSets.indexOf(N.FREQ_KEY) >= 0 && meta[N.FREQ_KEY].n === 1, J(meta[N.FREQ_KEY]));
-    readings['EBR-2'] = { logs: true, hasLog: true, exc: [{ sig: fK.sig }] };
+    // more of them than FAIL_SHARE (the network gone, the laptop asleep): the count of the few read is not left (review 2026-11-20 boost-logic-5)
+    meta[N.TRIED_KEY] = Date.now() - N.RETRY_MS - 1; meta[N.FREQ_KEY] = { at: Date.now() - N.FREQ_MS - 1, n: 2, c: {} };
+    await passOf();
+    ok('...but not when more of them than FAIL_SHARE could not be read: the count stays as it was', LR.FAIL_SHARE === 0.05 && posted[0].jql === 'SCOPE ORDER BY created DESC' &&
+        metaSets.indexOf(N.FREQ_KEY) < 0 && meta[N.FREQ_KEY].n === 2, J(meta[N.FREQ_KEY]));
+    readings['EBR-2'] = { logs: true, hasLog: true, exc: [{ sig: fK.sig }], lv: P.LOG_V };
     meta[N.FREQ_KEY] = { at: Date.now() - N.FREQ_MS - 1, n: 2, c: {} };
     meta[N.TRIED_KEY] = Date.now() - N.RETRY_MS - 1;
     const post0 = JiTA.sync._apiPost;

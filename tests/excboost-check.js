@@ -66,6 +66,7 @@ Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRAS
     member('    holding: function (sigs) {') + member('    _holdingLocal: function (sigs) {') + member('    sigsOf: function (key) {') + member('    _sigsOfLocal: function (key) {') + '})'));
 Object.assign(JiTA.profile, eval('({' + line('    LOG_V: ') + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') +
     member('    _sigParts: function (sig) {') + member('    _sigTip: function (sigs, msg) {') + '})'));
+Object.assign(JiTA.profile, eval(require('./source').members(src, 'JiTA.profile', ['_logSig', '_zipLog', '_logsCurrent', '_otherLogs', '_current'])));   // whether a reading is current
 Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + '})'));   // the cards' symbols: the badge is ≡ or ≈
 // What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
 Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
@@ -260,9 +261,30 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('a report read ahead is not scanned', JSON.stringify(await R._reportSigs('EBR-1')) === JSON.stringify([A, C]) && scans === 0);
     ok('...one that is not is scanned, as the panel scans it', JSON.stringify(await R._reportSigs('EBR-9')) === JSON.stringify([B2]) && scans === 1);
     ok('...keeping how its log writes them too', R._msgs['EBR-9'][B2] === 'KeyError: 9', JSON.stringify(R._msgs['EBR-9']));
-    JiTA.ui.scanIssueLog = (k) => { scans++; return Promise.resolve({}); };
-    delete JiTA.ui._logExc['EBR-8'];
+    JiTA.ui.scanIssueLog = (k) => { scans++; JiTA.ui._logExc[k] = []; return Promise.resolve({}); };
     ok('...a scan that read nothing gives nothing', JSON.stringify(await R._reportSigs('EBR-8')) === '[]');
+    // a scan that could not be made: the attachment list, or a log, did not download (review 2026-11-20 boost-logic-2)
+    JiTA.ui.scanIssueLog = (k) => { scans++; return Promise.resolve({}); };
+    delete JiTA.ui._logExc['EBR-8']; R.forget('EBR-8');
+    const failedScan = await R._reportSigs('EBR-8').then(() => 'resolved', (e) => 'rejected: ' + e.message);
+    ok('...one that could not be made rejects, rather than giving nothing', failedScan === 'rejected: the log scan could not read EBR-8', failedScan);
+    delete R._report['EBR-8'];
+    const fr8 = await R.forReport('EBR-8');
+    ok('...so forReport answers nothing for now and keeps nothing: the next draw asks again', JSON.stringify(fr8) === '{}' && !R._report['EBR-8'], JSON.stringify(fr8));
+    // a reading that skipped a log is joined with the scan, which reads every log (review 2026-11-20 boost-logic-3)
+    meta['rp:EBR-72'] = { v: 3, logs: true, hasLog: true, skippedLogs: true, exc: [{ sig: A, msg: 'from the read log' }] };
+    JiTA.ui.scanIssueLog = (k) => { scans++; JiTA.ui._logExc[k] = [{ sig: A, msg: 'x' }, { sig: B2, msg: 'KeyError: 9' }]; return Promise.resolve({}); };
+    scans = 0;
+    const joined = await R._reportSigs('EBR-72');
+    ok('a reading that skipped a log is joined with the scan: what it read and what the scan found in the log it skipped', JSON.stringify(joined) === JSON.stringify([A, B2]) && scans === 1 &&
+        R._msgs['EBR-72'][B2] === 'KeyError: 9' && R._msgs['EBR-72'][A] === 'from the read log', JSON.stringify(joined) + ' ' + JSON.stringify(R._msgs['EBR-72']));
+    JiTA.ui.scanIssueLog = (k) => { scans++; return Promise.resolve({}); };
+    R.forget('EBR-72'); delete JiTA.ui._logExc['EBR-72'];
+    ok('...and when the scan cannot be made, the reading\'s own still count', JSON.stringify(await R._reportSigs('EBR-72')) === JSON.stringify([A]));
+    meta['rp:EBR-73'] = { v: 3, logs: true, hasLog: true, exc: [{ sig: C, msg: 'whole' }] };
+    scans = 0;
+    ok('...while one that read every log is not scanned', JSON.stringify(await R._reportSigs('EBR-73')) === JSON.stringify([C]) && scans === 0);
+    delete meta['rp:EBR-72']; delete meta['rp:EBR-73'];
 
     // forReport: the defects holding an exception of this report's log.
     let held = [];
@@ -416,7 +438,10 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('...and so is the report slid in after an attach', /suggestEbrBest\(text, defectKey, JiTA\.ui\.modeOverride, terms, undefined, JiTA\.repexc\.forDefect\(defectKey\)\)/.test(append));
     ok('Similar open reports are not (report to report is not asked for)', !/repexc/.test(similar));
     const scan = member('    _scanIssueLog: function (key) {', uiStart);
-    ok('the log scan keeps the exceptions it read', /JiTA\.ui\._logExc\[key\] = exc;\n\s*resolve\(merged\);/.test(scan) && /keepExc\(txt\);\n\s*JiTA\.logsig\.matchText/.test(scan) &&
+    const logLink = member('    renderLogLink: function (key, background) {', uiStart);
+    ok('the log scan section is painted on the default list only, not into trending, similar reports or the reporter\'s (review 2026-11-20 boost-logic-6)',
+        /if \(JiTA\.ui\.currentKey !== key \|\| JiTA\.ui\.reporterMode \|\| JiTA\.ui\.simReportsMode \|\| JiTA\.ui\.trendMode\) \{ return; \}/.test(logLink));
+    ok('the log scan keeps the exceptions it read', /else \{ JiTA\.ui\._logExc\[key\] = exc; \}\n\s*resolve\(merged\);/.test(scan) && /keepExc\(txt\);\n\s*JiTA\.logsig\.matchText/.test(scan) &&
         /if \(!logs\.length\) \{ JiTA\.ui\._logExc\[key\] = \[\]; resolve\(\{\}\); return; \}/.test(scan));
     // ...run: two logs, each fingerprinted, every exception kept once.
     const scanFn = eval('({' + member('    _scanIssueLog: function (key) {', uiStart) + '})')._scanIssueLog;
@@ -455,7 +480,7 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     JiTA.db.setMeta = (k, v) => { stamped[k] = v; return Promise.resolve(); };
     let readScript, items = {};
     JiTA.excfind._read = (item) => { readsDone.push(item.key); items[item.key] = item; const s = readScript[item.key] || 'download'; return s === 'fail' ? Promise.reject(new Error('x'))
-        : Promise.resolve({ rec: { logs: s !== 'nolog' }, cached: s === 'cached' }); };
+        : Promise.resolve({ rec: { logs: s !== 'nolog', lv: JiTA.profile.LOG_V }, cached: s === 'cached' }); };
     const iss = (key, extra) => ({ key: key, fields: Object.assign({ status: { name: 'Open' }, labels: ['Russian'], attachment: [{ filename: 'logs.txt', size: 9, content: 'u', id: 1 }] }, extra || {}) });
     function setup() { posted = []; readsDone = []; stamped = {}; readScript = {}; meta = {}; renders = 0; delays = []; delete gm.jitaReadingsStored; }
     const gaps = () => delays.filter((ms) => ms === LR.GAP_MS).length;
@@ -515,12 +540,12 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     readScript = { 'EBR-1': 'fail', 'EBR-2': 'download' };
     n = await LR.prepare();
     ok('a report that could not be read: the others still are', readsDone.join() === 'EBR-1,EBR-2' && n === 1);
-    ok('...but the mark stays, so it is listed again next time', !stamped.logreadAt, JSON.stringify(stamped));
+    ok('...and the mark moves on all the same: the next pass that lists every report reads it again, or one once it changes (review 2026-11-20 boost-robust-2)', marked(stamped.logreadAt), JSON.stringify(stamped));
     setup();
     pages = [{ issues: [iss('EBR-1')], isLast: true }];
     readScript = { 'EBR-1': 'nolog' };
     await LR.prepare();
-    ok('...nor does one whose log did not download', !stamped.logreadAt);
+    ok('...as it does past one whose log did not download', marked(stamped.logreadAt), JSON.stringify(stamped));
     setup();
     pages = [{ issues: [iss('EBR-1')], nextPageToken: 't' }, new Error('HTTP 502')];
     await LR.prepare();

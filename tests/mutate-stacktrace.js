@@ -100,7 +100,7 @@ const muts = [
     [T, 'a re-match keeps a stacktrace\'s old hover', '/^(Known (exception|stacktrace)|Possibly related \\(same [^)]*\\)) · /', '/^(Known exception|Possibly related \\(same crash site\\)) · /'],
     // ---- the profile's readings ----
     [T, 'a reading made now does not say how', '                    rec.lv = P.LOG_V;\n', ''],
-    [T, 'a reading from before stacktraces never read again', '        if (rec.logs && (!P._logsCurrent(rec, att, zip) || P._otherLogs(rec, att))) {', '        if (false) {'],
+    [T, 'a reading from before stacktraces never read again', '        if (rec.logs && !P._current(rec, att, zip)) {', '        if (false) {'],
     [T, 'a log out of the zip read again without the zip', '            if (P._zipLog(rec, att)) { rec.zip = false; }\n', ''],
     [T, 'a log out of the zip lost where the zip is not read', '(rec.lv === JiTA.profile.LOG_V || (!zip && JiTA.profile._zipLog(rec, att)))', '(rec.lv === JiTA.profile.LOG_V)'],
     [T, 'a log out of the zip never read again', '(rec.lv === JiTA.profile.LOG_V || (!zip && JiTA.profile._zipLog(rec, att)))', '(rec.lv === JiTA.profile.LOG_V || JiTA.profile._zipLog(rec, att))'],
@@ -141,7 +141,7 @@ const muts = [
     [XF, 'one cut off not said to be cut off', "JiTA.logsig.isCut(t.sig) ? 'stacktrace, stack cut off' : 'stacktrace'", "'stacktrace'"],
     [XF, 'a match by message said to be at a site', "h.bare ? '~ same message, stack cut off'", "false ? '~ same message, stack cut off'"],
     [XF, 'a stacktrace\'s site called a crash site in the search', "(JiTA.logsig.isTrace(h.t.sig) ? '~ same trace site' : '~ same crash site')", "'~ same crash site'"],
-    [XF, 'a reading from before stacktraces handed on as read', '&& P._logsCurrent(rec, att, false)) { return { rec: rec, cached: true }; }', ') { return { rec: rec, cached: true }; }'],
+    [XF, 'a reading from before stacktraces handed on as read', 'return !!rec && !!rec.logs && JiTA.profile._logsCurrent(rec, att, zip) && !JiTA.profile._otherLogs(rec, att); },', 'return !!rec && !!rec.logs && !JiTA.profile._otherLogs(rec, att); },'],
     // ---- the ranking boost ----
     [T, 'a stacktrace raises nothing', "'st-exact': 1.3,", "'st-exact': 1,"],
     [T, 'a stacktrace\'s site raises as much as its stack', "'st-site': 1.15,", "'st-site': 1.3,"],
