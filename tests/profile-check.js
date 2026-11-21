@@ -965,6 +965,8 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     ok('the profile left the Triage Assistant card; the floating panel keeps it as a section', S.member(src, 'JiTA.ui', '_sidebarBodyHtml').indexOf('jita-sd-profile') < 0 &&
         S.member(src, 'JiTA.ui', '_ensureFloating').indexOf('<div id="jita-sd-profile"></div>') >= 0);
     const sbg = S.member(src, 'JiTA.ui', '_buildSideGroup');
+    ok('the builder brings its own stylesheet: the Defect checklist builds a card with the panel switched off', sbg.indexOf('JiTA.ui.injectCss();') >= 0 &&
+        sbg.indexOf('JiTA.ui.injectCss();') < sbg.indexOf('var collapsed = '));
     ok('both cards come from one builder, which names, fills and remembers each by what it is given', sbg.indexOf('Triage Assistant') < 0 &&
         sbg.indexOf('titleEl.textContent = o.title;') >= 0 && sbg.indexOf('.textContent = o.title;') !== sbg.lastIndexOf('.textContent = o.title;') &&
         sbg.indexOf('freshBody.innerHTML = o.body;') >= 0 && sbg.indexOf('gmSet(o.collapseKey, isColl);') >= 0 && sbg.indexOf('gmGet(o.collapseKey, false)') >= 0 &&

@@ -185,6 +185,32 @@ Object.assign(JiTA.ui, {
     st = await late('renderSimilarReports', 'simReportsMode', async () => { D.text.resolve(''); await flush(); away(); statuses = []; D.count.resolve(5); });
     ok('...nor "could not read this report\'s text"', st === '', st);
 
+    // ---- a redraw asked from elsewhere (an exception ignored in another tab, a log pass done) ----
+    {
+        Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['scheduleRender'])));
+        const keep = { render: JiTA.ui.render, reports: JiTA.ui.renderReports, isR: JiTA.ui._isReportsKey, st: global.setTimeout, ck: global.jitaCurrentKey };
+        const drawn = [], due = [];
+        let shown = '';
+        JiTA.ui.render = (k) => { drawn.push('render ' + k); }; JiTA.ui.renderReports = (k) => { drawn.push('reports ' + k); };
+        JiTA.ui._isReportsKey = (k) => /^(EDR|EO|PLAT)-/.test(k || '');
+        global.jitaCurrentKey = () => shown;
+        global.setTimeout = (fn) => { due.push(fn); return due.length; };
+        const redraw = () => { JiTA.ui._renderTimer = null; JiTA.ui.scheduleRender(); global.setTimeout = keep.st; due.splice(0).forEach((fn) => fn()); global.setTimeout = (fn) => { due.push(fn); return due.length; }; };
+        JiTA.ui.currentKey = 'EBR-123'; shown = '';   // Jira moved on to a dashboard: no issue on screen, the key kept
+        redraw();
+        ok('a redraw asked while no issue is on screen draws nothing (it put a floating panel on dashboards)', drawn.length === 0, drawn.join());
+        shown = 'EDR-9';
+        redraw();
+        ok('...nor while another issue is, before the panel has taken it', drawn.length === 0, drawn.join());
+        shown = 'EBR-123';
+        redraw();
+        JiTA.ui.currentKey = 'EDR-9'; shown = 'EDR-9';
+        redraw();
+        ok('...while one for the issue on screen draws it (control)', drawn.join() === 'render EBR-123,reports EDR-9', drawn.join());
+        Object.assign(JiTA.ui, { render: keep.render, renderReports: keep.reports, _isReportsKey: keep.isR });
+        global.setTimeout = keep.st; if (keep.ck) { global.jitaCurrentKey = keep.ck; } else { delete global.jitaCurrentKey; }
+    }
+
     // ---- the two Attach buttons ----
     JiTA.link.attachDuplicate = (a, b) => { attaches.push(a + ' -> ' + b); return new Promise(() => {}); };
     const tap = (el) => el.handlers.click.forEach((f) => f.call(el, { preventDefault() {}, stopPropagation() {} }));

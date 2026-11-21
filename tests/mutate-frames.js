@@ -24,7 +24,8 @@ const muts = [
     [NG, 'the daily reminder opens in a frame', 'if (R._nagged || JITA_IS_SUBFRAME || !L.isLead()) { return; }', 'if (R._nagged || !L.isLead()) { return; }'],
     [CL, 'the What\'s new pill shows in a frame', 'return !JITA_IS_SUBFRAME && JiTA.changelog.unseenFeatures().length > 0;', 'return JiTA.changelog.unseenFeatures().length > 0;'],
     [FR, 'the duplicate finder opens in a frame', 'var D = JiTA.dupfind;\n        if (JITA_IS_SUBFRAME) { return; }', 'var D = JiTA.dupfind;'],
-    [FR, 'the shared worker starts in a frame', 'if (JiTA.worker._started || JITA_IS_SUBFRAME) { return; }', 'if (JiTA.worker._started) { return; }']
+    [FR, 'the shared worker starts in a frame', 'if (JiTA.worker._started || JITA_IS_SUBFRAME) { return; }', 'if (JiTA.worker._started) { return; }'],
+    [FR, "the menu commands are registered in every frame but the Forge one", "if (!JITA_IS_SUBFRAME) {\n    // Available on Confluence too: the Lead-duties diagnostics", "if (!JITA_IS_FORGE_FRAME) {\n    // Available on Confluence too: the Lead-duties diagnostics"]
 ];
 function within(fn) {
     if (!fn) { return [0, src.length]; }
