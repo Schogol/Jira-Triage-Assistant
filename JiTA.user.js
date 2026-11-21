@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.21
+// @version     3.53.22
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.21
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.22
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -6965,7 +6965,8 @@ JiTA.rank.suggestBest = function (text, key, brCreated, forceMode, filterTerms, 
     // is very unlikely to be the report's real duplicate. Scales whatever score fields the result carries
     // (score / rrf / pct) by the age factor and notes the gap, so the row says why it ranks lower.
     function demote(r) {
-        if (!brCreated || !r.resolutiondate || !JiTA.util.isResolved(r.status, r.resolution)) { return; }
+        // Closed as the card shows it (_statusCat): a reopened defect that kept its resolution and date is open, never stale.
+        if (!brCreated || !r.resolutiondate || JiTA.ui._statusCat(r) !== 'done') { return; }
         var sf = JiTA.util.staleFactor(brCreated, r.resolutiondate);
         if (sf.factor >= 1) { return; }
         if (typeof r.score === 'number') { r.score *= sf.factor; }
@@ -7563,14 +7564,16 @@ JiTA.ui = {
     _gateSpec: function () {
         var f = JiTA.ui.filters;
         if (!f || ((!f.status || f.status === 'all') && !(f.createdDays > 0))) { return null; }
-        return { status: f.status || 'all', createdDays: f.createdDays || 0, now: Date.now() };
+        // cats: the status categories the cards go by (STATUS_CAT), so the worker judges open and fixed as the card shows them.
+        return { status: f.status || 'all', createdDays: f.createdDays || 0, now: Date.now(), cats: JiTA.ui.STATUS_CAT };
     },
 
     passesFilter: function (doc) {
         var f = JiTA.ui.filters;
         if (!f) { return true; }
         if (f.status && f.status !== 'all' && doc.project !== 'EBR') {
-            var resolved = JiTA.util.isResolved(doc.status, doc.resolution);
+            // As the card shows it (_statusCat): a reopened defect that kept its resolution is open, and listed under Open.
+            var resolved = JiTA.ui._statusCat(doc) === 'done';
             if (f.status === 'open' && resolved) { return false; }
             if (f.status === 'fixed' && !resolved) { return false; }
         }
@@ -8503,7 +8506,7 @@ JiTA.ui = {
             ev.preventDefault();
             ev.stopPropagation();
             var $btn = $(this);
-            if ($btn.hasClass('jita-sd-linked') || $btn.hasClass('jita-sd-linking')) { return; }
+            if ($btn.hasClass('jita-sd-linked') || $btn.hasClass('jita-sd-linking') || $btn.hasClass('jita-sd-noattach')) { return; }
             var ebr = forKey;
             if (!ebr) { return; }
             // A row can outlive its issue for a moment (the next issue's list has not painted yet): attach only the
@@ -8511,35 +8514,53 @@ JiTA.ui = {
             if (JiTA.ui.currentKey !== ebr) { JiTA.ui.toast('This list was drawn for ' + ebr + ', not the issue on screen - wait for it to refresh.'); return; }
             if (!confirm('Link ' + ebr + ' as a duplicate of ' + defectKey + ' and set it to Attached?')) { return; }
             $btn.addClass('jita-sd-linking').text('…');
-            // Single call: the Attached transition sets the status, resolution AND the duplicate link at once.
-            JiTA.link.attachDuplicate(ebr, defectKey, 'Attached', 'Duplicate').then(function (res) {
-                JiTA.ui._hideTip();
-                $btn.removeClass('jita-sd-linking').addClass('jita-sd-linked').text(res.attached ? '✓ attached' : '✓ linked');
-                var msg = res.attached
-                    ? ('Linked ' + ebr + ' as a duplicate of ' + defectKey + ' and set it to Attached.')
-                    : ('Linked ' + ebr + ' as a duplicate of ' + defectKey + ' (could not set Attached).');
-                if (!res.linked) { msg = 'Set ' + ebr + ' to Attached, but the duplicate link failed.'; }
-                // Jira shows the new status and the duplicate link once told to read the issue again. A Jira that
-                // does not hear that gets the status patched in by hand, as before, and the link on a reload.
-                if (res.attached) {
-                    var was = jitaStatusText();
-                    jitaShowWritten(ebr, function () { return jitaStatusText() !== was; }, function () { JiTA.ui.softRefreshStatus('Attached'); });
-                    // Drop the now-Attached report from the local open-report DB immediately so it no longer
-                    // shows up as an open match on defects before the next EBR sync prunes it.
-                    JiTA.db.deleteDefects([ebr]).then(function () {
-                        JiTA.sync._ebrRemoved([ebr]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
-                    }, function (e) { JiTA.log('[JiTA] could not drop ' + ebr + ' from the local DB:', e && e.message || e); });
-                } else if (res.linked) {
-                    jitaRefreshIssueView();   // the link alone
+            // Attached or closed in Jira itself since the page was drawn (another triager, Jira's own Attach): linking it
+            // again posted a second duplicate link. Asked of the issue, which is up to date (_statusNow).
+            JiTA.ui._statusNow(ebr).then(function (st) {
+                if (Object.prototype.hasOwnProperty.call(st, ebr) && !JiTA.ui._isOpenStatus(st[ebr])) {
+                    $btn.removeClass('jita-sd-linking').addClass('jita-sd-noattach').text(st[ebr] || 'gone').attr('title', ebr + ' is no longer an open bug report in Jira');
+                    JiTA.ui.toast(st[ebr] ? (ebr + ' is already ' + st[ebr] + ' in Jira - not linked.') : (ebr + ' is no longer an open bug report in Jira - not linked.'));
+                    return null;
                 }
-                JiTA.ui.toast(msg);
-            }, function (e) {
-                JiTA.log('[JiTA] mark-dup failed (attachDuplicate rejected):', e && e.message || e);
-                $btn.removeClass('jita-sd-linking').text('Attach');
-                JiTA.ui.toast('Could not link: ' + (e && e.message || e));
+                return JiTA.ui._linkReport($btn, ebr, defectKey);
             });
         });
         return $dup;
+    },
+    // The bug report on screen linked as a duplicate of defectKey from one of its rows ($btn), once its status allowed it.
+    _linkReport: function ($btn, ebr, defectKey) {
+        // Single call: the Attached transition sets the status, resolution AND the duplicate link at once.
+        return JiTA.link.attachDuplicate(ebr, defectKey, 'Attached', 'Duplicate').then(function (res) {
+            JiTA.ui._hideTip();
+            $btn.removeClass('jita-sd-linking').addClass('jita-sd-linked').text(res.attached ? '✓ attached' : '✓ linked');
+            // The report is linked now: the other rows' Attach would link it a second time ($btn is linked already).
+            if (res.attached || res.linked) {
+                $('#jita-sd-list .jita-sd-link, #jita-sd-loglink .jita-sd-link').not('.jita-sd-linked').addClass('jita-sd-noattach')
+                    .attr('title', ebr + ' is linked to ' + defectKey + ' now');
+            }
+            var msg = res.attached
+                ? ('Linked ' + ebr + ' as a duplicate of ' + defectKey + ' and set it to Attached.')
+                : ('Linked ' + ebr + ' as a duplicate of ' + defectKey + ' (could not set Attached).');
+            if (!res.linked) { msg = 'Set ' + ebr + ' to Attached, but the duplicate link failed.'; }
+            // Jira shows the new status and the duplicate link once told to read the issue again. A Jira that
+            // does not hear that gets the status patched in by hand, as before, and the link on a reload.
+            if (res.attached) {
+                var was = jitaStatusText();
+                jitaShowWritten(ebr, function () { return jitaStatusText() !== was; }, function () { JiTA.ui.softRefreshStatus('Attached'); });
+                // Drop the now-Attached report from the local open-report DB immediately so it no longer
+                // shows up as an open match on defects before the next EBR sync prunes it.
+                JiTA.db.deleteDefects([ebr]).then(function () {
+                    JiTA.sync._ebrRemoved([ebr]);   // rebuild indexes + drop the worker's stale EBR vectors + tell other tabs
+                }, function (e) { JiTA.log('[JiTA] could not drop ' + ebr + ' from the local DB:', e && e.message || e); });
+            } else if (res.linked) {
+                jitaRefreshIssueView();   // the link alone
+            }
+            JiTA.ui.toast(msg);
+        }, function (e) {
+            JiTA.log('[JiTA] mark-dup failed (attachDuplicate rejected):', e && e.message || e);
+            $btn.removeClass('jita-sd-linking').text('Attach');
+            JiTA.ui.toast('Could not link: ' + (e && e.message || e));
+        });
     },
 
     // Fetch (and cache per key) a bug report's current assignee. Resolves { accountId, name } when assigned,
@@ -8548,12 +8569,16 @@ JiTA.ui = {
     _assigneeCache: {},
     // Asked ASSIGNEE_LANES at a time: the exception search can draw hundreds of rows at once, each asking for its report's
     // assignee, and a burst like that drew 429s.
+    // An answer is used for ASSIGNEE_MS: one kept for the tab's life left a report someone had once with a dead "assigned"
+    // until a reload, though they had given it up since.
     ASSIGNEE_LANES: 4,
+    ASSIGNEE_MS: 2 * 60 * 1000,
     _assigneeBusy: 0,
     _assigneeWait: [],
+    _assigneeAt: {},
     _getAssignee: function (key) {
         var U = JiTA.ui;
-        if (Object.prototype.hasOwnProperty.call(U._assigneeCache, key)) {
+        if (Object.prototype.hasOwnProperty.call(U._assigneeCache, key) && Date.now() - (U._assigneeAt[key] || 0) < U.ASSIGNEE_MS) {
             return Promise.resolve(U._assigneeCache[key]);
         }
         return new Promise(function (resolve, reject) {
@@ -8565,6 +8590,7 @@ JiTA.ui = {
                         var a = d && d.fields && d.fields.assignee;
                         var v = a ? { accountId: a.accountId, name: a.displayName || a.name || '' } : null;
                         U._assigneeCache[key] = v;
+                        U._assigneeAt[key] = Date.now();
                         next();
                         resolve(v);
                     })
@@ -8619,7 +8645,7 @@ JiTA.ui = {
                 // reassigned it to this user. Ask Jira again now: one that is someone else's is refused, or with
                 // anyAssignee attached without touching its assignee.
                 delete JiTA.ui._assigneeCache[reportKey];
-                Promise.all([JiTA.link.currentUser(), JiTA.ui._getAssignee(reportKey), JiTA.ui._liveStatus([reportKey])]).then(function (r0) {
+                Promise.all([JiTA.link.currentUser(), JiTA.ui._getAssignee(reportKey), JiTA.ui._statusNow(reportKey)]).then(function (r0) {
                     var me = r0[0], now = r0[1], st = r0[2], taken = theirs(now, me);
                     who(now, me);
                     // Attached or closed in Jira itself since the list was drawn: attaching would add a second link to it.
@@ -8750,6 +8776,19 @@ JiTA.ui = {
         }).then(JiTA.ui._ifSignedIn);
     },
 
+    // One report's status as Jira has it this moment, for the check made when Attach is clicked: { key: status name }, '' for
+    // one Jira no longer has, nothing when it could not be asked (unknown, never closed). The issue read is up to date, the
+    // search _liveStatus makes is not (Jira's search catches up a little later): a report attached in Jira seconds before
+    // read as open there, and attaching it again posted a second duplicate link.
+    _statusNow: function (key) {
+        return new Promise(function (resolve) {
+            var out = {};
+            $.ajax({ url: JiTA.HOST + '/rest/api/2/issue/' + encodeURIComponent(key) + '?fields=status', dataType: 'json' })
+                .done(function (d) { out[key] = (d && d.key === key && d.fields && d.fields.status && d.fields.status.name) || ''; resolve(out); })
+                .fail(function (xhr) { if (xhr && xhr.status === 404) { out[key] = ''; } resolve(out); });
+        }).then(JiTA.ui._ifSignedIn);   // a lapsed session reads every issue as gone (404): then nothing is known
+    },
+
     // Jira shows no issues at all to a visitor whose session has lapsed, so every key of a batch would read as gone, and
     // each redraw would take the next batch off too. A batch in which no key has a status is believed only while Jira
     // still knows who is asking (asked fresh: the page's account id outlives the session); otherwise nothing is known.
@@ -8776,7 +8815,10 @@ JiTA.ui = {
             var gone = [], t = Date.now();
             keys.forEach(function (k) {
                 if (!Object.prototype.hasOwnProperty.call(st, k)) { return; }   // not checked: left as it is
-                if (U._isOpenStatus(st[k])) { U._openSeen[k] = t; } else { gone.push(k); }
+                // Open again (reopened after it was taken off): taken off again, and out of the local copy, the next time it
+                // closes. Left marked, a report attached, reopened and attached again in one session stayed ranked until the
+                // sync pruned it.
+                if (U._isOpenStatus(st[k])) { U._openSeen[k] = t; delete U._liveGone[k]; } else { gone.push(k); }
             });
             if (!gone.length) { return gone; }
             return U._takeOffList(gone, still).then(function () { return gone; });
@@ -9448,8 +9490,11 @@ JiTA.ui = {
         $('#jita-sd-loglink').removeClass('has-hits').empty();        // similar-defects-only section
         $('#jita-sd-list').empty();
         JiTA.ui.setStatus('Finding this reporter’s other reports…');
+        // Navigated or toggled off meanwhile: nothing more is drawn, not even an error that came late (a retried read of
+        // the reporter id), which went into the next issue's status line with a Retry that drew that issue again.
+        var stale = function () { return JiTA.ui.currentKey !== key || !JiTA.ui.reporterMode; };
         JiTA.ui._getReporterId(key).then(function (rid) {
-            if (JiTA.ui.currentKey !== key || !JiTA.ui.reporterMode) { return; }   // navigated / toggled off meanwhile
+            if (stale()) { return; }
             if (!rid) { JiTA.ui.setStatus('This report has no Original Reporter ID.'); return; }
             var jql = 'project = EBR AND cf[11660] ~ ' + JiTA.ui._jqlQuote(rid) + ' ORDER BY created DESC';
             return JiTA.sync._apiPost('/rest/api/3/search/jql', {
@@ -9479,7 +9524,10 @@ JiTA.ui = {
                 for (var j = 0; j < rows.length; j++) { $list.append(JiTA.ui._reporterRow(rows[j])); }
                 JiTA.ui._fitVertical();
             });
-        }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
+        }).catch(function (e) {
+            if (stale()) { return; }
+            JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); });
+        });
     },
 
     // EBR view, "similar open reports" mode (funnel toggle): rank the OTHER open bug reports whose text best
@@ -9497,9 +9545,12 @@ JiTA.ui = {
         $('#jita-sd-exccluster').removeClass('has-hits').empty();   // defect-only section, unused here
         JiTA.profile.clear();                                         // defect-only section, unused here
         if (!background) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('Finding similar open reports…'); }
+        // Navigated or toggled off meanwhile: nothing more is drawn, an empty state or an error that came late included.
+        var stale = function () { return JiTA.ui.currentKey !== key || !JiTA.ui.simReportsMode; };
         JiTA.ui.getIssueText(key).then(function (text) {
-            if (JiTA.ui.currentKey !== key || !JiTA.ui.simReportsMode) { return; }   // navigated / toggled off meanwhile
+            if (stale()) { return; }
             return JiTA.db.countEbr().then(function (n) {
+                if (stale()) { return; }
                 if (!n) {
                     JiTA.ui.setStatusAction('No bug reports synced yet.', 'Sync bug reports now', function () { JiTA.sync.syncAllNow(); });
                     return;
@@ -9528,7 +9579,10 @@ JiTA.ui = {
                     });
                 });
             });
-        }).catch(function (e) { JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); }); });
+        }).catch(function (e) {
+            if (stale()) { return; }
+            JiTA.ui.setStatusAction('Error: ' + (e && e.message || e), 'Retry', function () { JiTA.ui._rerenderCurrent(); });
+        });
     },
 
     // EBR view, "trending defects" mode (funnel toggle): swap the similar defects for every defect that recently
@@ -11599,12 +11653,14 @@ function jitaWorkerBody(cfg) {
     function matchTerms(hay, terms) { for (var i = 0; i < terms.length; i++) { if (hay.indexOf(terms[i]) === -1) { return false; } } return true; }
     // The session filters (Status, Created within) a ranking call carries, applied BEFORE the top-N cut. Applied after
     // it, in the tab, a strict filter left a handful of the top 200 and the panel said nothing matched while real
-    // matches sat just below the cut. The same rule as JiTA.ui.passesFilter (resolved = a resolution, or a closed
-    // status name, as JiTA.util.isResolved); the tab still applies that too, as a backstop. No gate: everything passes.
+    // matches sat just below the cut. The same rule as JiTA.ui.passesFilter: a status the cards know (gate.cats, their
+    // STATUS_CAT) by its category, whatever resolution it kept; any other as JiTA.util.isResolved does (a resolution, or a
+    // closed status name). The tab still applies that too, as a backstop. No gate: everything passes.
     function passesGate(doc, gate) {
         if (!gate) { return true; }
         if (gate.status && gate.status !== 'all' && doc.project !== 'EBR') {   // open bug reports are open by definition
-            var resolved = !!doc.resolution || isClosedStatus(doc.status);
+            var sk = String(doc.status || '').toLowerCase().trim(), cats = gate.cats || {};
+            var resolved = Object.prototype.hasOwnProperty.call(cats, sk) ? cats[sk] === 'done' : (!!doc.resolution || isClosedStatus(doc.status));
             if (gate.status === 'open' && resolved) { return false; }
             if (gate.status === 'fixed' && !resolved) { return false; }
         }

@@ -12,6 +12,7 @@ const muts = [
     [H, 'the panel row no longer greys a closed report', "        if (r.closed) { $li.addClass('jita-sd-closed'); }", "        if (false) { $li.addClass('jita-sd-closed'); }"],
     [H, 'the panel\'s reporter list keeps the old flag', '                        closed: JiTA.util.isClosedStatus(status)   // grey out closed reports so the open ones stand out',
         '                        stale: JiTA.util.isClosedStatus(status)   // grey out closed reports so the open ones stand out'],
+    [H, "a reopened defect is demoted for its old resolution", "if (!brCreated || !r.resolutiondate || JiTA.ui._statusCat(r) !== 'done') { return; }", "if (!brCreated || !r.resolutiondate) { return; }"],
     [H, 'the panel stylesheet keeps the old class', '#jita-sd-list li.jita-sd-closed { opacity: .6; }', '#jita-sd-list li.jita-sd-stale { opacity: .6; }']
 ];
 let allRed = true;

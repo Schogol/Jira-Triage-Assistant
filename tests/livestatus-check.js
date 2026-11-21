@@ -180,6 +180,18 @@ Date.now = () => clock;
     await JiTA.ui._checkReportRows(() => true);
     ok('...and when it comes back, it is hidden without another delete or redraw, so nothing loops', deleted.length === 0 && renders === 0, deleted.join() + ' ' + renders);
 
+    // A report taken off, then reopened (a wrong attach) and synced back, then attached again in Jira.
+    collapsed = []; deleted = []; removed = []; renders = 0;
+    rows = [row('EBR-2')];
+    answer = { 'EBR-2': 'Open' };
+    await JiTA.ui._checkReportRows(() => true);
+    ok('a report taken off that Jira reads as open again stays on the list', collapsed.length === 0 && !JiTA.ui._liveGone['EBR-2'], collapsed.join() + ' ' + JSON.stringify(JiTA.ui._liveGone));
+    clock += 61 * 1000;
+    answer = { 'EBR-2': 'Attached' };
+    await JiTA.ui._checkReportRows(() => true);
+    ok('...and attached again it leaves the local copy again, with every tab told and the list drawn again', collapsed.join() === 'EBR-2' &&
+        deleted.join('|') === 'EBR-2' && removed.join('|') === 'EBR-2' && renders === 1, collapsed.join() + ' / ' + deleted.join('|') + ' / ' + removed.join('|') + ' / ' + renders);
+
     // ================= the collapse =================
     let doneRan = 0, gonePlain = [];
     const el = { offsetHeight: 40, style: {}, parentNode: { removeChild: (e) => { gonePlain.push(e); } } };
@@ -193,26 +205,31 @@ Date.now = () => clock;
     // ================= Attach =================
     JiTA.ui._liveStatus = realLive;
     JiTA.ui._collapseRow = (e) => { collapsed.push(e.key); };
-    Object.assign(JiTA.ui, eval('({' + line('    _assigneeCache: {},') + line('    ASSIGNEE_LANES: 4,') + line('    _assigneeBusy: 0,') + line('    _assigneeWait: [],') + member('    _getAssignee: function (key) {') + member('    _attachReportButton: function (reportKey, opts) {') + '})'));
+    Object.assign(JiTA.ui, eval('({' + line('    _assigneeCache: {},') + line('    ASSIGNEE_LANES: 4,') + line('    ASSIGNEE_MS: ') + line('    _assigneeBusy: 0,') + line('    _assigneeWait: [],') + line('    _assigneeAt: {},') +
+        member('    _getAssignee: function (key) {') + member('    _attachReportButton: function (reportKey, opts) {') + member('    _statusNow: function (key) {') + '})'));
     let attaches = [];
     Object.assign(JiTA.ui, { currentKey: 'EDR-1', toast: (m) => { toasts.push(m); }, _hideTip() {}, _fadeOutAndReplace() {} });
+    global.jitaCurrentKey = () => 'EDR-1'; global.jitaRefreshIssueView = () => {};   // softrefresh-check.js covers them
     JiTA.link.currentUser = () => Promise.resolve('me');
     JiTA.link.attachDuplicate = (a, b) => { attaches.push(a + '->' + b); return Promise.resolve({ attached: true, linked: true }); };
     const tap = (b) => (b.el.handlers.click || []).forEach((f) => f.call(b, { preventDefault() {}, stopPropagation() {} }));
-    ajaxScript = { 'EBR-9': { ok: true, data: { fields: { assignee: null } } } };
-    postAnswer = () => Promise.resolve({ data: { issues: [{ key: 'EBR-9', fields: { status: { name: 'Attached' } } }] } });
+    // Attached in Jira seconds ago: the issue read says so, Jira's search (a step behind) still reads it as open.
+    ajaxScript = { 'EBR-9': { ok: true, data: { key: 'EBR-9', fields: { assignee: null, status: { name: 'Attached' } } } } };
+    postAnswer = () => Promise.resolve({ data: { issues: [{ key: 'EBR-9', fields: { status: { name: 'Open' } } }] } });
     rows = [row('EBR-9')]; collapsed = []; deleted = []; removed = []; renders = 0; toasts = [];
     let b = JiTA.ui._attachReportButton('EBR-9');
     await flush();
     ok('the gate offers Attach on an unassigned report (control)', b.text() === 'Attach', b.text());
+    ajaxCalls = []; posts = [];
     tap(b);
     await flush();
     ok('a report already attached in Jira is not attached again', attaches.length === 0, attaches.join());
+    ok('...told by the issue itself, which is up to date, not by the search, which lags', ajaxCalls.indexOf('https://jira/rest/api/2/issue/EBR-9?fields=status') >= 0 && !posts.length, ajaxCalls.join(' ') + ' / ' + posts.length);
     ok('...the button and a toast say why', b.text() === 'Attached' && toasts.some((m) => /EBR-9 is already Attached in Jira - not attached/.test(m)), b.text() + ' / ' + toasts.join(' | '));
     ok('...and it leaves the list and the local copy', collapsed.join() === 'EBR-9' && deleted.join('|') === 'EBR-9' && renders === 1, collapsed.join() + ' / ' + deleted.join('|') + ' / ' + renders);
 
     postAnswer = () => Promise.resolve({ data: { issues: [{ key: 'EBR-8', fields: { status: { name: 'Open' } } }] } });
-    ajaxScript = { 'EBR-8': { ok: true, data: { fields: { assignee: null } } } };
+    ajaxScript = { 'EBR-8': { ok: true, data: { key: 'EBR-8', fields: { assignee: null, status: { name: 'Open' } } } } };
     b = JiTA.ui._attachReportButton('EBR-8');
     await flush();
     tap(b);

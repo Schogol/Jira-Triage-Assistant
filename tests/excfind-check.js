@@ -933,10 +933,10 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     X._sweep = realSweep;
 
     // ================= the Attach control's options (the real one) =================
-    Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['_assigneeCache', 'ASSIGNEE_LANES', '_assigneeBusy', '_assigneeWait', '_getAssignee', '_attachReportButton'])));
+    Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['_assigneeCache', 'ASSIGNEE_LANES', 'ASSIGNEE_MS', '_assigneeBusy', '_assigneeWait', '_assigneeAt', '_getAssignee', '_attachReportButton'])));
     let attaches = [], assigned = [], dones = [], fades = 0, offList = [], live = {};
     Object.assign(JiTA.ui, { currentKey: null, _fadeOutAndReplace() { fades++; }, _takeOffList(keys, still) { offList.push(keys.join() + ':' + still()); return Promise.resolve(); },
-        _liveStatus: (keys) => Promise.resolve(live), _isOpenStatus: (s) => !!s && !JiTA.util.isClosedStatus(s) });
+        _liveStatus: (keys) => Promise.resolve(live), _statusNow: (k) => Promise.resolve(live), _isOpenStatus: (s) => !!s && !JiTA.util.isClosedStatus(s) });
     JiTA.link.currentUser = () => Promise.resolve('me');
     JiTA.link.attachDuplicate = (a, b, s, r, to) => { attaches.push(a + '->' + b); assigned.push(to); return Promise.resolve({ attached: true, linked: true }); };
     JiTA.db.deleteDefects = () => Promise.resolve();

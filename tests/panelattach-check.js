@@ -76,7 +76,7 @@ const log0 = console.log;
 
     // ================= the defect-side Attach =================
     let attaches = [], drops = [], fades = 0, dropFails = false;
-    Object.assign(JiTA.ui, ui(['_assigneeCache', 'ASSIGNEE_LANES', '_assigneeBusy', '_assigneeWait', '_getAssignee', '_attachReportButton', '_markDupButton']));
+    Object.assign(JiTA.ui, ui(['_assigneeCache', 'ASSIGNEE_LANES', 'ASSIGNEE_MS', '_assigneeBusy', '_assigneeWait', '_assigneeAt', '_getAssignee', '_attachReportButton', '_markDupButton', '_linkReport']));
     // Jira's issue view, told to read the issue on screen again (softrefresh-check.js covers the real helpers).
     let onScreen = 'EDR-1', viewRefreshes = 0, shows = [], statusNow = 'Open', patched = [];
     global.jitaCurrentKey = () => onScreen;
@@ -85,13 +85,21 @@ const log0 = console.log;
     global.jitaStatusText = () => statusNow;
     Object.assign(JiTA.ui, { currentKey: 'EDR-1', toast: (m) => { toasts.push(m); }, _hideTip() {}, softRefreshStatus: (s) => { patched.push(s); }, _fadeOutAndReplace: () => { fades++; },
         // Every report still open; livestatus-check.js covers the real status lookup and an attach refused by it.
-        _liveStatus: (keys) => Promise.resolve(keys.reduce((o, k) => { o[k] = 'Open'; return o; }, {})), _isOpenStatus: (s) => !!s && !/closed|attached/i.test(s) });
+        _liveStatus: (keys) => Promise.resolve(keys.reduce((o, k) => { o[k] = 'Open'; return o; }, {})), _statusNow: (k) => { statusReads++; return Promise.resolve({ [k]: k in liveNow ? liveNow[k] : 'Open' }); },
+        _isOpenStatus: (s) => !!s && !/closed|attached/i.test(s) });
+    const liveNow = {};   // a report's status as the issue read at click time gives it (Open unless set)
+    let statusReads = 0;
     JiTA.link.currentUser = () => Promise.resolve('me');
     JiTA.link.attachDuplicate = (a, b) => { attaches.push(a + '->' + b); return Promise.resolve({ attached: true, linked: true }); };
     JiTA.db.deleteDefects = (keys) => { drops.push(keys.join()); return dropFails ? Promise.reject(new Error('QuotaExceededError')) : Promise.resolve(); };
     JiTA.sync._ebrRemoved = () => {};
     const tap = (b) => (b.el.handlers.click || []).forEach((f) => f.call(b, { preventDefault() {}, stopPropagation() {} }));
-    global.$ = (x) => (typeof x === 'string' && x.charAt(0) === '<' ? El() : (x && x.el ? x : { text: () => textOf[x] || '' }));
+    // The other rows' Attach buttons on screen, as the list's selector finds them.
+    let rows = [];
+    const set = (els) => ({ length: els.length,
+        not: (x) => set(els.filter((j) => (typeof x === 'string' ? !j.hasClass(x.replace(/^\./, '')) : j !== x))),
+        addClass: (c) => { els.forEach((j) => j.addClass(c)); return set(els); }, attr: (k, v) => { els.forEach((j) => j.attr(k, v)); return set(els); } });
+    global.$ = (x) => (typeof x === 'string' && x.charAt(0) === '<' ? El() : (x && x.el ? x : (/jita-sd-link/.test(String(x)) ? set(rows) : { text: () => textOf[x] || '' })));
     $.ajax = (o) => { ajaxCalls.push(o.url); const r = ajaxScript.shift() || { ok: true, data: {} }; const d = { done(f) { if (r.ok) { setImmediate(() => f(r.data)); } return d; }, fail(f) { if (!r.ok) { setImmediate(() => f(r.xhr)); } return d; } }; return d; };
     ajaxScript = [{ ok: true, data: { fields: { assignee: null } } },                                              // the gate: unassigned
         { ok: true, data: { fields: { assignee: { accountId: 'bob', displayName: 'Bob' } } } }];             // asked again: Bob took it
@@ -134,6 +142,56 @@ const log0 = console.log;
     await flush();
     ok('a link without the Attached status is shown too, with nothing patched', viewRefreshes === 1 && !shows.length && !patched.length, viewRefreshes + ' ' + shows.length);
     JiTA.link.attachDuplicate = (a, b2) => { attaches.push(a + '->' + b2); return Promise.resolve({ attached: true, linked: true }); };
+
+    // ---- the report-side Attach asks the report's status first ----
+    JiTA.ui.currentKey = 'EBR-3'; onScreen = 'EBR-3';
+    attaches = []; toasts = []; liveNow['EBR-3'] = 'Attached';
+    let m2 = JiTA.ui._markDupButton('EDR-6');
+    tap(m2);
+    await flush();
+    ok('a report attached in Jira since the page was drawn is not linked a second time', attaches.length === 0, attaches.join());
+    ok('...the button and a toast say why', m2.text() === 'Attached' && m2.hasClass('jita-sd-noattach') && !m2.hasClass('jita-sd-linking') &&
+        toasts.some((t) => /EBR-3 is already Attached in Jira - not linked/.test(t)), m2.text() + ' / ' + toasts.join(' | '));
+    statusReads = 0; toasts = [];
+    tap(m2);
+    await flush();
+    ok('...and a second click does nothing, not even ask again', attaches.length === 0 && statusReads === 0 && !toasts.length && m2.text() === 'Attached',
+        statusReads + ' / ' + toasts.join(' | ') + ' / ' + m2.text());
+    liveNow['EBR-3'] = '';
+    m2 = JiTA.ui._markDupButton('EDR-6'); toasts = [];
+    tap(m2);
+    await flush();
+    ok('one Jira no longer has is refused too', attaches.length === 0 && m2.text() === 'gone' && toasts.some((t) => /no longer an open bug report/.test(t)), m2.text() + ' / ' + toasts.join(' | '));
+    delete liveNow['EBR-3'];
+    const o1 = JiTA.ui._markDupButton('EDR-7'), o2 = JiTA.ui._markDupButton('EDR-8');   // the other rows, offering the same report
+    m2 = JiTA.ui._markDupButton('EDR-6');
+    rows = [m2, o1, o2];
+    tap(m2);
+    await flush();
+    ok('an open one is linked (control)', attaches.join() === 'EBR-3->EDR-6' && m2.text() === '✓ attached', attaches.join() + ' / ' + m2.text());
+    ok('...and the other rows\' Attach stop offering it, which would link it again', o1.hasClass('jita-sd-noattach') && o2.hasClass('jita-sd-noattach') && !m2.hasClass('jita-sd-noattach') &&
+        /EBR-3 is linked to EDR-6 now/.test(o1.el.attrs.title || ''), JSON.stringify([o1.el.classes, o2.el.classes]));
+    statusReads = 0;
+    tap(o1);
+    await flush();
+    ok('...so a click on one of them links nothing and asks nothing', attaches.length === 1 && statusReads === 0, attaches.join() + ' / ' + statusReads);
+    rows = [];
+
+    // ---- an assignee read is kept a while, not for the tab's life ----
+    const now0 = Date.now; let clockA = 5e6; Date.now = () => clockA;
+    JiTA.ui._assigneeCache = {}; JiTA.ui._assigneeAt = {}; ajaxCalls = [];
+    ajaxScript = [{ ok: true, data: { fields: { assignee: { accountId: 'x', displayName: 'Xena' } } } }];
+    const who1 = await JiTA.ui._getAssignee('EBR-40');
+    clockA += JiTA.ui.ASSIGNEE_MS - 1;
+    let who2 = await JiTA.ui._getAssignee('EBR-40');
+    ok('an assignee read is used again for a while', ajaxCalls.length === 1 && who1.accountId === 'x' && who2 === who1, String(ajaxCalls.length));
+    ajaxScript = [{ ok: true, data: { fields: { assignee: null } } }];
+    clockA += 2;
+    who2 = await JiTA.ui._getAssignee('EBR-40');
+    ok('...and read again once ASSIGNEE_MS is over, so a report given up since can be attached', ajaxCalls.length === 2 && who2 === null, ajaxCalls.length + ' ' + JSON.stringify(who2));
+    ok('...a couple of minutes', JiTA.ui.ASSIGNEE_MS >= 60000 && JiTA.ui.ASSIGNEE_MS <= 5 * 60000, String(JiTA.ui.ASSIGNEE_MS));
+    Date.now = now0;
+
     JiTA.ui.currentKey = 'EDR-1'; onScreen = 'EDR-1';
     dropFails = false;
 

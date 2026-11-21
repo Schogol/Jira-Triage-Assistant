@@ -57,7 +57,7 @@ global.JiTA = {
 };
 JiTA.link.attachDuplicate = eval(S.members(src, 'JiTA.link', ['attachDuplicate'])).attachDuplicate;
 const realAttach = JiTA.link.attachDuplicate;
-Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['render', 'renderReports', '_markDupButton', '_attachReportButton'])));
+Object.assign(JiTA.ui, eval(S.members(src, 'JiTA.ui', ['render', 'renderReports', 'renderReporterReports', 'renderSimilarReports', '_markDupButton', '_linkReport', '_attachReportButton'])));
 Object.assign(JiTA.ui, {
     currentKey: null, reporterMode: false, simReportsMode: false, trendMode: false, modeOverride: null,
     _ensurePanel() {}, _syncFilterBtn() {}, _filterTerms: () => [], renderLogLink() {}, renderExceptionCluster() {},
@@ -67,6 +67,7 @@ Object.assign(JiTA.ui, {
     _reportItem: (r) => ({ row: 'report', key: r.key, defect: JiTA.ui.currentKey }),
     _getAssignee: () => Promise.resolve(null), _assigneeCache: {}, _rerenderCurrent() {},
     _liveStatus: (keys) => Promise.resolve(keys.reduce((o, k) => { o[k] = 'Open'; return o; }, {})),   // livestatus-check.js covers the real one
+    _statusNow: (k) => Promise.resolve({ [k]: 'Open' }),
     _isOpenStatus: (s) => !!s && !/closed|attached/i.test(s), _checkReportRows: () => Promise.resolve([])
 });
 
@@ -148,6 +149,42 @@ Object.assign(JiTA.ui, {
     await run('renderReports', 'EDR-1', 'EBR-9', 'text', away, 'text');
     ok('...and its errors stay with the issue they belong to', nothingPainted(), statuses.join('|'));
 
+    // ---- the reporter's reports and the similar open reports: nothing late for the issue left behind ----
+    let rid = null;
+    JiTA.ui._getReporterId = () => (rid = deferred()).promise;
+    const late = async (fn, mode, step, how) => {
+        Object.keys(D).forEach((k) => { delete D[k]; });
+        JiTA.ui.currentKey = 'EBR-1'; JiTA.ui.reporterMode = JiTA.ui.simReportsMode = JiTA.ui.trendMode = false; JiTA.ui[mode] = true;
+        JiTA.ui[fn]('EBR-1');
+        await flush();
+        if (how) { how(); }
+        statuses = []; list.kids = [];
+        await step();
+        await flush();
+        return statuses.join('|');
+    };
+    const failRid = () => rid.reject(new Error('could not read the Original Reporter ID (HTTP 429)'));
+    let st = await late('renderReporterReports', 'reporterMode', failRid);
+    ok('the reporter\'s reports show an error on the report on screen (control)', /^Error: could not read the Original Reporter ID/.test(st), st);
+    st = await late('renderReporterReports', 'reporterMode', failRid, away);
+    ok('...but not one that came after moving on, which landed in the next issue\'s status line', st === '', st);
+    st = await late('renderReporterReports', 'reporterMode', failRid, () => { JiTA.ui.reporterMode = false; });
+    ok('...nor one that came after the view was switched off', st === '', st);
+    const failText = () => D.text.reject(new Error('HTTP 502'));
+    st = await late('renderSimilarReports', 'simReportsMode', failText);
+    ok('the similar open reports show an error on the report on screen (control)', /^Error: HTTP 502/.test(st), st);
+    st = await late('renderSimilarReports', 'simReportsMode', failText, away);
+    ok('...but not one that came after moving on', st === '', st);
+    st = await late('renderSimilarReports', 'simReportsMode', failText, () => { JiTA.ui.simReportsMode = false; });
+    ok('...nor one that came after the view was switched off', st === '', st);
+    const noneSynced = async () => { D.text.resolve('the text'); await flush(); D.count.resolve(0); };
+    st = await late('renderSimilarReports', 'simReportsMode', noneSynced);
+    ok('with nothing synced it says so on the report on screen (control)', st === 'No bug reports synced yet.', st);
+    st = await late('renderSimilarReports', 'simReportsMode', async () => { D.text.resolve('the text'); await flush(); away(); statuses = []; D.count.resolve(0); });
+    ok('...but not on the next issue, when the count came after moving on', st === '', st);
+    st = await late('renderSimilarReports', 'simReportsMode', async () => { D.text.resolve(''); await flush(); away(); statuses = []; D.count.resolve(5); });
+    ok('...nor "could not read this report\'s text"', st === '', st);
+
     // ---- the two Attach buttons ----
     JiTA.link.attachDuplicate = (a, b) => { attaches.push(a + ' -> ' + b); return new Promise(() => {}); };
     const tap = (el) => el.handlers.click.forEach((f) => f.call(el, { preventDefault() {}, stopPropagation() {} }));
@@ -161,6 +198,7 @@ Object.assign(JiTA.ui, {
     JiTA.ui.currentKey = 'EBR-1';
     b = JiTA.ui._markDupButton('EDR-1');
     tap(b);
+    await flush();   // the report's status is asked first
     ok('...while on its own report it attaches that report', attaches.join() === 'EBR-1 -> EDR-1', attaches.join());
 
     JiTA.ui.currentKey = 'EDR-1';

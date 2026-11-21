@@ -7,7 +7,11 @@ const H = 'gate-check.js';
 const muts = [
     [H, 'Status is ignored in the worker', "            if (gate.status === 'open' && resolved) { return false; }\n", ''],
     [H, 'Status fixed keeps everything', "            if (gate.status === 'fixed' && !resolved) { return false; }\n", ''],
-    [H, 'a resolution alone does not count as resolved', 'var resolved = !!doc.resolution || isClosedStatus(doc.status);', 'var resolved = isClosedStatus(doc.status);'],
+    [H, "a resolution alone does not count as resolved", "var resolved = Object.prototype.hasOwnProperty.call(cats, sk) ? cats[sk] === 'done' : (!!doc.resolution || isClosedStatus(doc.status));", "var resolved = Object.prototype.hasOwnProperty.call(cats, sk) ? cats[sk] === 'done' : isClosedStatus(doc.status);"],
+    [H, "the worker ignores the statuses' categories", "var resolved = Object.prototype.hasOwnProperty.call(cats, sk) ? cats[sk] === 'done' : (!!doc.resolution || isClosedStatus(doc.status));", "var resolved = !!doc.resolution || isClosedStatus(doc.status);"],
+    [H, "the worker reads a status as written", "var sk = String(doc.status || '').toLowerCase().trim(), cats = gate.cats || {};", "var sk = String(doc.status || ''), cats = gate.cats || {};"],
+    [H, "the tab sends no categories", "now: Date.now(), cats: JiTA.ui.STATUS_CAT };", "now: Date.now() };"],
+    [H, "the tab's filter goes by the resolution", "var resolved = JiTA.ui._statusCat(doc) === 'done';", "var resolved = JiTA.util.isResolved(doc.status, doc.resolution);"],
     [H, 'Status applies to bug reports', "if (gate.status && gate.status !== 'all' && doc.project !== 'EBR') {", "if (gate.status && gate.status !== 'all') {"],
     [H, 'Created within is ignored in the worker', "            if (isNaN(t) || (gate.now - t) > gate.createdDays * 86400000) { return false; }\n", ''],
     [H, 'the semantic scorer skips the gate', '            if (!passesGate(e, gate)) { continue; }', ''],
