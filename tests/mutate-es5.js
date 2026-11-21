@@ -9,7 +9,7 @@ const TMP = 'mut.js';
 
 // Page code: the first statement of jitaRunParserWhenLoaded. Worker code: the first line inside jitaWorkerBody.
 const PAGE = '\nfunction jitaRunParserWhenLoaded(setFlag) {\n';
-const WORKER = '\nfunction jitaWorkerBody(cfg) {\n';
+const WORKER = '\nfunction jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiTA.worker._src)\n';
 const at = (anchor, line) => (t) => {
     if (t.split(anchor).length !== 2) { throw new Error('ANCHOR'); }
     return t.replace(anchor, () => anchor + line + '\n');

@@ -61,8 +61,8 @@ Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, r
 JiTA.util.fmtDate = (s) => (s ? String(s).slice(0, 10) : '');
 let delays = [];
 JiTA.util.delay = (ms) => { delays.push(ms); return Promise.resolve(); };
-Object.assign(JiTA.logsig, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    isTrace: function (sig) {') + line('    isCut: function (sig) {') +
-    line('    _traceKey: function (sig) {') + member('    _crashOf: function (sig) {') + member('    _traceMates: function (idx, sig) {') +
+Object.assign(JiTA.logsig, eval('({' +
+    member('    _traceMates: function (idx, sig) {') +
     member('    holding: function (sigs) {') + member('    _holdingLocal: function (sigs) {') + member('    sigsOf: function (key) {') + member('    _sigsOfLocal: function (key) {') + '})'));
 Object.assign(JiTA.profile, eval('({' + line('    LOG_V: ') + member('    _usable: function (rec) {') + member('    _logFiles: function (att) {') +
     member('    _sigParts: function (sig) {') + member('    _sigTip: function (sigs, msg) {') + '})'));
@@ -71,7 +71,8 @@ Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + '})'));   // the cards' 
 // A card's status category (cardfoot-check.js covers it): the stale demote reads it.
 Object.assign(JiTA.ui, eval(require('./source').members(src, 'JiTA.ui', ['PROGRESS_RE', 'STATUS_CAT', '_statusCat'])));
 // What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
-Object.assign(JiTA.logsig, eval('({' + line('    isUserError: function (sig) {') + line('    _msgKey: function (sig) {') + '})'));
+Object.assign(JiTA.logsig, require('./source').logsigShared(src));   // jitaShared
+Object.assign(JiTA.logsig, eval('({' + line('    _msgKey: function (sig) {') + '})'));
 Object.assign(JiTA.util, eval('({' + member('    hash: function (str) {') + '})'));
 (0, eval)(cut('JiTA.excnoise = {', '\n};\n'));
 ['_boostMap', '_boostRow', '_withBoost', '_fuse', '_hybridResults', '_pickMode', 'suggestBest', 'suggestEbrBest'].forEach((n) => {
@@ -215,14 +216,14 @@ const crash = (s) => JiTA.logsig._crashOf(s);
     ok('...none for a defect with no pasted exception', none.sigs.length === 0 && none.crashes.length === 0);
     // The worker's twins, from jitaWorkerBody itself: same index, same answers.
     const wfn = (name) => { const s = once('    function ' + name + '('); return src.slice(s, src.indexOf('\n    }\n', s) + 7); };
-    const LGT = line('    var LG_TRACE = ');   // the worker's stacktrace tag, and the helpers lgHolding reads it with (lgIsTrace to lgMates)
-    const W = new Function('idx', 'var logsigCache = idx, LG_MIN = 2, LG_CRASH = 2;\n' + LGT + wfn('lgCrashOf') + wfn('lgIsTrace') + wfn('lgHolding') + wfn('lgSigsOf') +
-        '\nreturn { lgHolding: lgHolding, lgSigsOf: lgSigsOf };')(IDX);
+    // The helpers lgHolding reads with come from jitaShared, as the worker takes them.
+    const wsh = (idx) => new Function('idx', 'SH', 'var logsigCache = idx;\n' + line('    var lgSplit = SH.') + line('    var lgIsTrace = SH.') + wfn('lgMates') + wfn('lgHolding') +
+        wfn('lgSigsOf') + '\nreturn { lgHolding: lgHolding, lgSigsOf: lgSigsOf };')(idx, require('./source').shared(src));
+    const W = wsh(IDX);
     ok('the worker\'s holding agrees with the tab\'s', JSON.stringify(W.lgHolding([A, B2])) === JSON.stringify(await JiTA.logsig._holdingLocal([A, B2])) &&
         JSON.stringify(W.lgHolding([B2, B])) === JSON.stringify(await JiTA.logsig._holdingLocal([B2, B])), JSON.stringify(W.lgHolding([B2, B])));
     ok('...and its sigsOf too', JSON.stringify(W.lgSigsOf('EDR-3')) === JSON.stringify(await JiTA.logsig._sigsOfLocal('EDR-3')) && W.lgSigsOf('EDR-9').sigs.length === 0);
-    const W0 = new Function('idx', 'var logsigCache = idx, LG_MIN = 2, LG_CRASH = 2;\n' + LGT + wfn('lgCrashOf') + wfn('lgIsTrace') + wfn('lgHolding') + wfn('lgSigsOf') +
-        '\nreturn { lgHolding: lgHolding, lgSigsOf: lgSigsOf };')(null);
+    const W0 = wsh(null);
     ok('...a worker with no index yet answers nothing rather than throwing', !Object.keys(W0.lgHolding([A])).length && W0.lgSigsOf('EDR-3').sigs.length === 0);
     const opSrc = src.slice(once("            else if (type === 'logsig') {"), once("            else if (type === 'embedPass') {"));
     ok('the worker answers both ops', /op === 'holding'\) \{ result = lgHolding\(payload\.sigs\); \}/.test(opSrc) && /op === 'sigsOf'\) \{ result = lgSigsOf\(payload\.key\); \}/.test(opSrc));

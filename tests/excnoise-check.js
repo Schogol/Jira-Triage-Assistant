@@ -42,11 +42,12 @@ JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 JiTA.util.delay = () => Promise.resolve();
 JiTA.ocr._langFromLabels = () => null;
 const L = JiTA.logsig;
-Object.assign(L, eval('({' + line('    MIN_FRAMES: ') + line('    CRASH_FRAMES: ') + line('    TRACE: ') + line('    OPEN_CUT: ') + line('    isTrace: function (sig) {') +
-    line('    isCut: function (sig) {') + line('    _traceKey: function (sig) {') + line('    _msgKey: function (sig) {') + line('    isUserError: function (sig) {') +
-    member('    _splitBlocks: function (text) {') + member('    _fingerprint: function (text) {') + lsMember('    ensure: function () {') + member('    applyToTable: function () {') +
-    member('    rematch: function () {') + member('    _logBlocks: function (text) {') + member('    _matchTextLocal: function (text) {') + member('    _defectsLocal: function (sigs) {') +
-    member('    _holdingLocal: function (sigs) {') + member('    _sigsOfLocal: function (key) {') + member('    _crashOf: function (sig) {') + member('    _traceMates: function (idx, sig) {') +
+Object.assign(L, require('./source').logsigShared(src));   // jitaShared
+Object.assign(L, eval('({' +
+    line('    _msgKey: function (sig) {') +
+    lsMember('    ensure: function () {') + member('    applyToTable: function () {') +
+    member('    rematch: function () {') + member('    _matchTextLocal: function (text) {') + member('    _defectsLocal: function (sigs) {') +
+    member('    _holdingLocal: function (sigs) {') + member('    _sigsOfLocal: function (key) {') + member('    _traceMates: function (idx, sig) {') +
     member('    _pointAt: function (idx, sig, crashSig) {') + member('    defectsForSigs: function (sigs) {') + member('    holding: function (sigs) {') + member('    sigsOf: function (key) {') + '})'));
 L._index = null; L._dirty = true; L._building = null;
 eval(block('JiTA.excnoise = {', '\n};\n'));
@@ -58,12 +59,12 @@ Object.assign(JiTA.ui, eval('({' + uiMember('    _counting: function (found) {')
 const reread = () => { JiTA.excnoise._freqRead = Date.now() - JiTA.excnoise.LOAD_MS - 1; return JiTA.excnoise.load(); };
 const N = JiTA.excnoise, P = JiTA.profile, X = JiTA.excfind, R = JiTA.repexc, LR = JiTA.logread;
 // The worker's copies, from jitaWorkerBody itself.
-const W = new Function('isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'cfg',
-    'var vecCache = null, kwCache = null, logsigCache = null;\n' + line('    var LG_MIN = 2') + line('    var LG_TRACE = ') +
+const W = new Function('isClosedStatus', 'leftOut', 'tokenize', 'effectiveText', 'cfg', 'SH',
+    'var vecCache = null, kwCache = null, logsigCache = null;\n' + line('    var lgSplit = SH.') + line('    var lgIsTrace = SH.') +
     src.slice(once('    // ---- logsig: exception-signature mining'), once('\n    // One load at a time')) +
     src.slice(once('    function buildIndexes(recs) {'), once('    // Cosine == dot product')) +
     '\nreturn { isUserError: lgIsUserError, match: lgMatch, holding: lgHolding, build: function (r) { buildIndexes(r); return logsigCache; } };')(
-    () => false, () => false, (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean), (r) => (r.summary || '') + ' ' + (r.description || ''), { MODEL_VERSION: 'm' });
+    () => false, () => false, (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean), (r) => (r.summary || '') + ' ' + (r.description || ''), { MODEL_VERSION: 'm' }, require('./source').shared(src));
 
 // ---- logs as the client writes them ----
 const col = (t, type) => t + '\tclient::general\t' + (type || 'warning') + '\t';

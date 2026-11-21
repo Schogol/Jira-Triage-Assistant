@@ -12,13 +12,10 @@ const muts = [
     [H, 'hidden occurrences are cycled through', 'var rowsArr = entry.rows.filter(function (r) { return r.isConnected && r.offsetParent !== null; });', 'var rowsArr = entry.rows;'],
     [H, 'all hidden goes unsaid', "                    if (entry.rows.length) { try { JiTA.ui.toast('Every occurrence is hidden by the filters or Group Repeats.'); } catch (e) { /* ignore */ } }\n", ''],
     [H, 'a second render adds a second panel', '        var panel = existing;\n        if (!panel) {', '        var panel = null;\n        if (!panel) {'],
-    [H, "the tab reads past EXCEPTION END", "    // lgSplit in the worker.\n    _splitBlocks: function (text) {\n        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\\s\\S]*?(?:\\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m, c;",
-        "    // lgSplit in the worker.\n    _splitBlocks: function (text) {\n        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\\s\\S]*?(?=(?:EXCEPTION|STACKTRACE) #|$)/gi, m, c;"],
-    [H, "the worker reads past EXCEPTION END", "    function lgSplit(text) {   // KEEP IN SYNC with JiTA.logsig._splitBlocks\n        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\\s\\S]*?(?:\\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m, c;",
-        "    function lgSplit(text) {   // KEEP IN SYNC with JiTA.logsig._splitBlocks\n        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\\s\\S]*?(?=(?:EXCEPTION|STACKTRACE) #|$)/gi, m, c;"],
-    [H, 'the tab strips only line-start prefixes', "KEEP IN SYNC with lgFp.\n        text = text.replace(/(^|\\s)\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t/g, '$1');",
-        "KEEP IN SYNC with lgFp.\n        text = text.replace(/^[ \\t]*\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t/gm, '');"],
-    [H, 'the worker strips only line-start prefixes', "        }\n        text = text.replace(/(^|\\s)\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t/g, '$1');", "        }\n        text = text.replace(/^[ \\t]*\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t/gm, '');"],
+    [H, "the tab reads past EXCEPTION END", "    function splitBlocks(text) {\n        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\\s\\S]*?(?:\\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m, c;",
+        "    function splitBlocks(text) {\n        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\\s\\S]*?(?=(?:EXCEPTION|STACKTRACE) #|$)/gi, m, c;"],
+    [H, 'the tab strips only line-start prefixes', "        text = text.replace(/(^|\\s)\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t/g, '$1');",
+        "        text = text.replace(/^[ \\t]*\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t/gm, '');"],
     [H, 'the tab index is marked clean after its build', '        R[dirtyKey] = false;\n        R[buildingKey] = JiTA.db.allDefects().then(function (records) {\n            R[indexKey] = build(records);\n            R[buildingKey] = null;',
         '        R[buildingKey] = JiTA.db.allDefects().then(function (records) {\n            R[indexKey] = build(records);\n            R[dirtyKey] = false;\n            R[buildingKey] = null;']
 ];

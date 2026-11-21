@@ -29,11 +29,12 @@ global.flagOn = (n) => flags[n] !== false;
 global.JiTA = { HOST: 'https://jira', util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, repexc: { forget() {}, readStored() {}, profileReady() {} } };
 Object.assign(JiTA.util, eval(S.members(src, 'JiTA.util', ['toPlainText', 'isResolved'])));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
-Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['MIN_FRAMES', 'CRASH_FRAMES', 'TRACE', 'OPEN_CUT', 'isTrace', 'isCut', '_traceKey', '_fingerprint', '_logBlocks',
-    'defectsForSigs', '_defectsLocal', '_crashOf', '_traceMates', '_pointAt'])));
+Object.assign(JiTA.logsig, S.logsigShared(src));   // jitaShared
+Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', [
+    'defectsForSigs', '_defectsLocal', '_traceMates', '_pointAt'])));
 JiTA.hidden = { keys: {}, isHidden: (k) => !!JiTA.hidden.keys[k] };
 // What counts (JiTA.excnoise), the real one over the GM and meta stubs (excnoise-check.js covers it).
-Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['isUserError', '_msgKey'])));
+Object.assign(JiTA.logsig, eval(S.members(src, 'JiTA.logsig', ['_msgKey'])));
 eval(S.top(src, 'JiTA.excnoise'));
 Object.assign(JiTA.ocr, eval(S.members(src, 'JiTA.ocr', ['LANGS', '_langFromLabels'])));
 JiTA.db.getMeta = (k) => Promise.resolve(k in meta ? meta[k] : null);
@@ -728,9 +729,9 @@ const PDM = '{DATA}\n\t{OS}\n\t\tTYPE: Windows\n\t\tBUILD_NUMBER: 19045\n\t}\n\t
     const sigIdx = { sigMap: {}, crashMap: {} };
     sigIdx.sigMap[fA.sig] = { members: [{ key: 'EDR-2' }, { key: 'EDR-1' }] };
     sigIdx.crashMap[fA.crashSig] = { members: [{ key: 'EDR-3' }] };
-    const wStart = once("    // A signature's crash site, from the signature alone.");
-    const W = new Function('LG_MIN', 'LG_CRASH', 'logsigCache', line('    var LG_TRACE = ') + src.slice(wStart, src.indexOf('\n    // One load at a time', wStart)) +
-        '\nreturn { lgCrashOf: lgCrashOf, lgDefects: lgDefects };')(2, 2, sigIdx);
+    const wStart = once("    // The defects with a stacktrace of this one's message");
+    const W = new Function('SH', 'logsigCache', line('    var lgSplit = SH.') + line('    var lgIsTrace = SH.') + src.slice(wStart, src.indexOf('\n    // One load at a time', wStart)) +
+        '\nreturn { lgCrashOf: lgCrashOf, lgDefects: lgDefects };')(require('./source').shared(src), sigIdx);
     ok('...and so does the worker\'s copy', [fA, fB, fC].every((f) => W.lgCrashOf(f.sig) === f.crashSig));
     JiTA.logsig.ensure = () => Promise.resolve(sigIdx);
     JiTA.worker = { usable: () => false };

@@ -30,6 +30,7 @@ global.JiTA = {
     excnoise: { isIgnored: () => false },
     log() {}, dlog() {}, caught() {}
 };
+global.JITA_SH = S.shared(src);   // what JiTA.logsig hands on from jitaShared
 (0, eval)(S.top(src, 'JiTA.logsig'));
 (0, eval)(S.top(src, 'JiTA.repexc'));
 JiTA.sync = (0, eval)(S.members(src, 'JiTA.sync', ['CHANGED_KEY', '_tellChanged', 'heardChanged']));
