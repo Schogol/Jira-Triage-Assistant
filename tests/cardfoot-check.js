@@ -4,6 +4,8 @@
 // stylesheets that put the footer at the bottom of the card in both themes.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const shu = (name) => '\n' + require('./source').member(src, 'JiTA.util', name) + '\n,';   // a JiTA.util member that is a piece of jitaShared
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it, which JiTA.util's text helpers are
 const once = (head, from) => {
     const s = src.indexOf(head, from || 0);
     if (s < 0 || src.indexOf(head, s + 1) >= 0 && !from) { throw new Error('could not slice ' + head.trim().slice(0, 60)); }
@@ -35,7 +37,7 @@ const find = (e, c) => all(e).filter((k) => k.has(c));
 // ---- the real code ----
 let tips = [];
 global.JiTA = { util: {}, ui: {}, profile: {}, logsig: {} };
-Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + member('    isClosedStatus: function (status) {') +
+Object.assign(JiTA.util, eval('({' + member('    isResolved: function (status, resolution) {') + shu('isClosedStatus') +
     src.slice(once('    fmtDate: function (iso) {'), src.indexOf('\n    }\n};', once('    fmtDate: function (iso) {'))) + '\n    }' + '})'));   // fmtDate and shortDate, the last members
 const UI_AT = once('\nJiTA.ui = {');
 Object.assign(JiTA.ui, eval('({' + line('    SYM: {') + line('    PROGRESS_RE: ') + member('    _mark: function (cls, glyph, title, count) {') + object('    STATUS_CAT: {') + member('    _statusCat: function (r) {') +

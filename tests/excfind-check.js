@@ -103,6 +103,7 @@ let viewRefreshes = 0;   // Jira's issue view told to read the issue on screen a
 global.jitaRefreshIssueView = () => { viewRefreshes++; };
 global.jitaLinkedKeys = (links) => (links || []).map((l) => (l.outwardIssue || l.inwardIssue).key);
 global.JiTA = { HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {}, link: {} };
+global.JITA_SH = S.shared(src);   // jitaShared, the page's run of it, which JiTA.util's isClosedStatus is
 Object.assign(JiTA.util, eval(S.members(src, 'JiTA.util', ['toPlainText', 'isClosedStatus'])));
 JiTA.util.fmtDate = (iso) => (iso ? String(iso).slice(0, 10) : '');
 JiTA.util.delay = (ms) => new Promise((r) => setTimeout(r, ms));

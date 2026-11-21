@@ -1,17 +1,13 @@
 // gate-check.js - the session filters reach the shared worker's ranking BEFORE its top-N cut (v3.38.13). The worker
 // returned its top 100-200 candidates and the tab dropped those failing Status / Created within afterwards, so with a
-// strict filter the panel said nothing matched while real matches sat just below the cut. Evals the worker body's
-// real passesGate / cosineTopN / bm25Score and the tab's _gateSpec / _workerKeyword / _workerSemantic.
+// strict filter the panel said nothing matched while real matches sat just below the cut. Evals the real passesGate and
+// bm25Score (jitaShared), the worker body's cosineTopN / rankKeyword and the tab's _gateSpec / _workerKeyword /
+// _workerSemantic / passesFilter.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
-const WS = src.indexOf('\nfunction jitaWorkerBody(');
-function fn(name) {   // a function declared at the top of the worker body, one line or many
-    const s = src.indexOf('\n    function ' + name + '(', WS);
-    if (WS < 0 || s < 0) { throw new Error('could not slice worker ' + name); }
-    const line = src.slice(s + 1, src.indexOf('\n', s + 1));
-    if ((line.match(/\{/g) || []).length === (line.match(/\}/g) || []).length) { return line; }
-    return src.slice(s + 1, src.indexOf('\n    }\n', s + 1) + 6);
-}
+const S = require('./source');
+const SH = S.shared(src), BODY = S.fn(src, 'jitaWorkerBody');
+global.JITA_SH = SH;   // the page's run of it, which passesFilter asks
 function member(head) {
     const s = src.indexOf(head);
     if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + head.trim().slice(0, 50)); }
@@ -21,11 +17,13 @@ function member(head) {
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
 
-// ---- the worker's scorers ----
-const W = new Function('tokenize', 'K1', 'B',
-    [fn('matchTerms'), fn('isClosedStatus'), fn('passesGate'), fn('cosineTopN'), fn('bm25Score')].join('\n') +
-    '\nreturn { passesGate: passesGate, cosineTopN: cosineTopN, bm25Score: bm25Score };')(
-    (s) => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean), 1.2, 0.75);
+// ---- the worker's scorers: its semantic cut, and its keyword request over a keyword index it holds ----
+const RK = BODY.indexOf('\n    async function rankKeyword(') + 1;   // async: S.fn finds plain declarations only
+if (RK < 1) { throw new Error('could not slice worker rankKeyword'); }
+const WK = new Function('SH', 'var kwCache = null; function ensureIndexes() { return Promise.resolve(); }\n' + S.fn(src, 'cosineTopN', BODY) + '\n' + S.block(BODY, RK) +
+    '\nreturn { cosineTopN: cosineTopN, rankKeyword: rankKeyword, hold: function (k) { kwCache = { defects: k, ebr: k }; } };')(SH);
+const W = { passesGate: SH.passesGate, cosineTopN: WK.cosineTopN };
+(async () => {
 const NOW = Date.parse('2026-10-03T12:00:00Z'), DAY = 86400000;
 const iso = (daysAgo) => new Date(NOW - daysAgo * DAY).toISOString();
 const OPEN = { status: 'open', createdDays: 0, now: NOW };
@@ -55,13 +53,15 @@ let sem = W.cosineTopN([1], entries, 200, null, null, null);
 ok('(without a gate the semantic top 200 holds no open defect at all - the old behaviour)', sem.length === 200 && openKeys(sem) === 0, openKeys(sem));
 sem = W.cosineTopN([1], entries, 200, null, null, OPEN);
 ok('with Status open, the semantic ranking returns the 50 open defects that sat below the cut', sem.length === 50 && openKeys(sem) === 50, sem.length + ' ' + openKeys(sem));
-let bm = W.bm25Score(kw, 'warp', null, 200, null, null);
+WK.hold(kw);
+let bm = (await WK.rankKeyword({ text: 'warp', scope: 'defects', topN: 200 })).results;
 ok('(without a gate the keyword top 200 holds no open defect either)', bm.length === 200 && openKeys(bm) === 0, openKeys(bm));
-bm = W.bm25Score(kw, 'warp', null, 200, null, OPEN);
+bm = (await WK.rankKeyword({ text: 'warp', scope: 'defects', topN: 200, gate: OPEN })).results;
 ok('with Status open, the keyword ranking returns them too', bm.length === 50 && openKeys(bm) === 50, bm.length + ' ' + openKeys(bm));
-ok('the worker hands the gate a ranking call carries to both scorers',
-    src.indexOf('cosineTopN(q, entries, payload.topN || 10, payload.excludeKey, payload.filterTerms, payload.gate)') >= 0 &&
-    src.indexOf("bm25Score(idx, payload.text || '', payload.excludeKey, payload.topN || 200, payload.filterTerms, payload.gate)") >= 0);
+bm = (await WK.rankKeyword({ text: 'warp', scope: 'ebr', topN: 200, gate: { status: 'all', createdDays: 14, now: NOW + 30 * DAY } })).results;
+ok('...and Created within as well', bm.length === 0, bm.length);
+ok('the worker hands the gate a ranking call carries to its semantic scorer',
+    src.indexOf('cosineTopN(q, entries, payload.topN || 10, payload.excludeKey, payload.filterTerms, payload.gate)') >= 0);
 
 // ---- the tab sends it ----
 const calls = [];
@@ -83,8 +83,7 @@ ok('both ranking calls carry it', calls.length === 2 && calls.every((c) => c.pay
     JSON.stringify(calls.map((c) => c.type + ':' + JSON.stringify(c.payload.gate))));
 
 // ---- a reopened defect that kept its resolution: open, as its card shows it ----
-const S = require('./source');
-const UI = eval(S.members(S.load(), 'JiTA.ui', ['PROGRESS_RE', 'STATUS_CAT', '_statusCat', 'passesFilter']));
+const UI = eval(S.members(src, 'JiTA.ui', ['PROGRESS_RE', 'STATUS_CAT', '_statusCat', 'passesFilter']));
 const CATS = UI.STATUS_CAT, gated = (g) => Object.assign({ cats: CATS }, g);
 const reopened = { project: 'EDR', key: 'EDR-42', status: 'Open', resolution: 'Fixed' }, shut = { project: 'EDR', key: 'EDR-43', status: 'Closed', resolution: 'Fixed' };
 ok('the worker, told the statuses\' categories, keeps a reopened defect that kept its resolution under Status open',
@@ -94,13 +93,27 @@ ok('...a status it does not list goes by the older rule (status name or resoluti
     !W.passesGate({ project: 'EDR', status: 'Won\'t Do', resolution: 'Won\'t Do' }, gated(OPEN)) && W.passesGate({ project: 'EDR', status: 'Triage' }, gated(OPEN)) &&
     !W.passesGate({ project: 'EDR', status: 'Triage', resolution: 'Duplicate' }, gated(OPEN)));
 ok('...as statuses are written in Jira (case and spaces)', W.passesGate({ project: 'EDR', status: ' OPEN ', resolution: 'Fixed' }, gated(OPEN)));
-JiTA.util = eval('({' + member('    isResolved: function (status, resolution) {') + member('    isClosedStatus: function (status) {') + '})');
+JiTA.util = eval('({' + member('    isResolved: function (status, resolution) {') + '\n' + S.member(src, 'JiTA.util', 'isClosedStatus') + '\n})');
 Object.assign(JiTA.ui, UI);
 JiTA.ui.filters = { status: 'open', createdDays: 0 };
 ok('the tab\'s own filter keeps the reopened defect under Open', JiTA.ui.passesFilter(reopened) && !JiTA.ui.passesFilter(shut));
 JiTA.ui.filters = { status: 'fixed', createdDays: 0 };
 ok('...and leaves it out under Fixed, where its card showed an open dot', !JiTA.ui.passesFilter(reopened) && JiTA.ui.passesFilter(shut));
 ok('the tab sends the worker those categories with the gate', JiTA.ui._gateSpec().cats === JiTA.ui.STATUS_CAT);
+// the tab's filter judges as its cards do: for every status a defect can carry, passesFilter agrees with _statusCat
+const STATUSES = Object.keys(CATS).concat(['Triage', 'Won\'t Do', 'Fixing', 'Resolved', '', ' Closed ']);
+let disagree = [];
+['open', 'fixed'].forEach((st) => {
+    JiTA.ui.filters = { status: st, createdDays: 0 };
+    STATUSES.forEach((s) => [null, 'Fixed'].forEach((res) => {
+        const d = { project: 'EDR', key: 'EDR-9', status: s, resolution: res }, done = JiTA.ui._statusCat(d) === 'done';
+        if (JiTA.ui.passesFilter(d) !== (st === 'open' ? !done : done)) { disagree.push(st + ':' + s + '/' + res); }
+    }));
+});
+ok('the tab\'s filter judges every status as the card\'s dot does', !disagree.length, disagree.join(' '));
+JiTA.ui.filters = { status: 'all', createdDays: 0 };
+ok('no filter set lets everything through', JiTA.ui.passesFilter({ project: 'EDR', status: 'Closed', resolution: 'Fixed' }));
 
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'session filter checks passed.'));
 process.exit(fail ? 1 : 0);
+})().catch((e) => { console.log('CRASH ' + (e && e.stack || e)); process.exit(2); });

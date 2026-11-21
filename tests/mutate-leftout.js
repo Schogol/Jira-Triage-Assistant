@@ -5,19 +5,20 @@ const fs = require('fs');
 const { execSync } = require('child_process');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const H = 'leftout-check.js', TMP = 'mutlo.js';
-const TAB = '    isLeftOut: function (rec) {\n        function has(list, names) {\n            for (var i = 0; i < (list || []).length; i++) {\n';
-const WK = '    function leftOut(rec) {\n        function has(list, names) {\n            for (var i = 0; i < (list || []).length; i++) {\n';
-const SAME = "                for (var j = 0; j < names.length; j++) { if (String(list[i]).toLowerCase() === names[j].toLowerCase()) { return true; } }";
+// isLeftOut is written once (jitaShared): the tab asks it with JiTA.LEFT_OUT, the worker with the cfg.LEFT_OUT it is handed.
+const SHL = '    function isLeftOut(rec, names) {\n        function has(list, wanted) {\n            for (var i = 0; i < (list || []).length; i++) {\n';
+const SAME = "                for (var j = 0; j < wanted.length; j++) { if (String(list[i]).toLowerCase() === wanted[j].toLowerCase()) { return true; } }";
+const RET = 'return !!rec && (has(rec.labels, names.labels) || has(rec.components, names.components));';
 const muts = [
     // ---- what is left out ----
-    [H, 'the tab ignores the labels', 'return !!rec && (has(rec.labels, JiTA.LEFT_OUT.labels) || has(rec.components, JiTA.LEFT_OUT.components));', 'return !!rec && has(rec.components, JiTA.LEFT_OUT.components);'],
-    [H, 'the tab ignores the components', 'return !!rec && (has(rec.labels, JiTA.LEFT_OUT.labels) || has(rec.components, JiTA.LEFT_OUT.components));', 'return !!rec && has(rec.labels, JiTA.LEFT_OUT.labels);'],
-    [H, 'the tab minds the case', TAB + SAME, TAB + SAME.replace(/\.toLowerCase\(\)/g, '')],
-    [H, 'the tab takes a label that only starts the same', TAB + SAME, TAB + SAME.replace('String(list[i]).toLowerCase() === names[j].toLowerCase()', 'String(list[i]).toLowerCase().indexOf(names[j].toLowerCase()) === 0')],
-    [H, 'the tab takes no report for one with nothing', 'return !!rec && (has(rec.labels, JiTA.LEFT_OUT.labels)', 'return (has(rec.labels, JiTA.LEFT_OUT.labels)'],
-    [H, 'the worker ignores the labels', 'return !!rec && (has(rec.labels, cfg.LEFT_OUT.labels) || has(rec.components, cfg.LEFT_OUT.components));', 'return !!rec && has(rec.components, cfg.LEFT_OUT.components);'],
-    [H, 'the worker ignores the components', 'return !!rec && (has(rec.labels, cfg.LEFT_OUT.labels) || has(rec.components, cfg.LEFT_OUT.components));', 'return !!rec && has(rec.labels, cfg.LEFT_OUT.labels);'],
-    [H, 'the worker minds the case', WK + SAME, WK + SAME.replace(/\.toLowerCase\(\)/g, '')],
+    [H, 'the labels are ignored', RET, 'return !!rec && has(rec.components, names.components);'],
+    [H, 'the components are ignored', RET, 'return !!rec && has(rec.labels, names.labels);'],
+    [H, 'the case is minded', SHL + SAME, SHL + SAME.replace(/\.toLowerCase\(\)/g, '')],
+    [H, 'a label that only starts the same is taken', SHL + SAME, SHL + SAME.replace('String(list[i]).toLowerCase() === wanted[j].toLowerCase()', 'String(list[i]).toLowerCase().indexOf(wanted[j].toLowerCase()) === 0')],
+    [H, 'no report is taken for one with nothing', 'return !!rec && (has(rec.labels, names.labels)', 'return (has(rec.labels, names.labels)'],
+    [H, 'the tab asks with names of its own', '    isLeftOut: function (rec) { return JITA_SH.isLeftOut(rec, JiTA.LEFT_OUT); },', "    isLeftOut: function (rec) { return JITA_SH.isLeftOut(rec, { labels: ['Vanguard'], components: ['Launcher'] }); },"],
+    [H, 'the worker asks with names of its own', '    function leftOut(rec) { return SH.isLeftOut(rec, cfg.LEFT_OUT); }', "    function leftOut(rec) { return SH.isLeftOut(rec, { labels: ['Launcher'], components: ['Launcher'] }); }"],
+    [H, 'the worker leaves nothing out', '    function leftOut(rec) { return SH.isLeftOut(rec, cfg.LEFT_OUT); }', '    function leftOut(rec) { return false; }'],
     [H, 'Vanguard no longer named', "    LEFT_OUT: { labels: ['Vanguard', 'Launcher'], components: ['Launcher'] },", "    LEFT_OUT: { labels: ['Launcher'], components: ['Launcher'] },"],
     [H, 'the Launcher component no longer named', "    LEFT_OUT: { labels: ['Vanguard', 'Launcher'], components: ['Launcher'] },", "    LEFT_OUT: { labels: ['Vanguard', 'Launcher'], components: [] },"],
     [H, 'the worker is not handed the names', ' GM_TEAM_ID: JiTA.GM_TEAM_ID, LEFT_OUT: JiTA.LEFT_OUT,', ' GM_TEAM_ID: JiTA.GM_TEAM_ID,'],
@@ -32,11 +33,12 @@ const muts = [
     [H, 'the gate leaves out the GM team\'s again', "        if (scope === 'ebr' && JiTA.util.isClosedStatus(d.status)) { continue; }", "        if (scope === 'ebr' && (JiTA.util.isClosedStatus(d.status) || /-38$/.test(d.team || ''))) { continue; }"],
     [H, 'the gate lets a closed report through', "        if (scope === 'ebr' && JiTA.util.isClosedStatus(d.status)) { continue; }", "        if (false) { continue; }"],
     [H, 'the translate pass translates them', 'if (JiTA.util.isClosedStatus(r.status) || JiTA.util.isLeftOut(r)) { continue; }  // not ranked -> skip', 'if (JiTA.util.isClosedStatus(r.status)) { continue; }  // not ranked -> skip'],
-    [H, 'the worker\'s indexes keep them', '            if (isEbr && (isClosedStatus(r.status) || leftOut(r))) { continue; }', '            if (isEbr && isClosedStatus(r.status)) { continue; }'],
-    [H, 'the worker\'s indexes leave out a defect in the Launcher component', '            if (isEbr && (isClosedStatus(r.status) || leftOut(r))) { continue; }', '            if ((isEbr && isClosedStatus(r.status)) || leftOut(r)) { continue; }'],
-    [H, 'the embed pass embeds them', "            if (r.project === 'EBR' && (isClosedStatus(r.status) || leftOut(r))) { continue; }", "            if (r.project === 'EBR' && isClosedStatus(r.status)) { continue; }"],
+    [H, 'the worker\'s indexes keep them', "        function ranked(r) { return r.project !== 'EBR' || !(SH.isClosedStatus(r.status) || leftOut(r)); }", "        function ranked(r) { return r.project !== 'EBR' || !SH.isClosedStatus(r.status); }"],
+    [H, 'the worker\'s indexes leave out a defect in the Launcher component', "        function ranked(r) { return r.project !== 'EBR' || !(SH.isClosedStatus(r.status) || leftOut(r)); }", "        function ranked(r) { return !leftOut(r) && (r.project !== 'EBR' || !SH.isClosedStatus(r.status)); }"],
+    [H, 'the worker\'s keyword index of bug reports takes every one', "            ebr: SH.keywordIndex(recs, function (r) { return r.project === 'EBR' && ranked(r); })", "            ebr: SH.keywordIndex(recs, function (r) { return r.project === 'EBR'; })"],
+    [H, 'the embed pass embeds them', "            if (r.project === 'EBR' && (SH.isClosedStatus(r.status) || leftOut(r))) { continue; }", "            if (r.project === 'EBR' && SH.isClosedStatus(r.status)) { continue; }"],
     // ---- the count on the status line (v3.52.1) ----
-    [H, 'the worker\'s query tells no index size', '        return { indexed: idx.N, results: bm25Score(', '        return { results: bm25Score('],
+    [H, 'the worker\'s query tells no index size', '        return { indexed: idx.N, results: SH.bm25Score(', '        return { results: SH.bm25Score('],
     [H, 'the count is of every report stored', "            ? JiTA.worker.call('rankKeyword', { text: '', scope: 'ebr', topN: 1 }).then(function (r) {", "            ? JiTA.db.countEbr().then(function (n) { return { indexed: n }; }).then(function (r) {"],
     [H, 'a worker giving no size is believed', "                if (!r || typeof r.indexed !== 'number') { throw new Error('no index size'); }\n", ''],
     [H, 'a failing worker leaves no count', '            }).catch(local)\n            : local();', '            })\n            : local();'],

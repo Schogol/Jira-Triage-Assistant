@@ -62,11 +62,12 @@ const quiet = { log() {}, warn() {} };
     // ================= the embed pass =================
     let recsList = [], batches = [], stored = [], dropped = 0, pipeDrops = 0, failText = null, reads = 0, gate = null;
     const later = [];
-    const mkPass = () => new Function('loadModel', 'allRecords', 'isClosedStatus', 'leftOut', 'cfg', 'effectiveText', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'dropPipe', 'self', 'setTimeout', 'clearTimeout', 'console',
+    const mkPass = () => new Function('loadModel', 'allRecords', 'SH', 'leftOut', 'cfg', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'dropPipe', 'self', 'setTimeout', 'clearTimeout', 'console',
         'var embedding = false, embedAgain = false, BATCH = 1;\n' + cut('    async function embedPass() {', '\n    function openDb() {') +
         '\nreturn { embedPass: embedPass, again: function () { return embedAgain; } };')(
-        () => Promise.resolve(), () => { reads++; return Promise.resolve(recsList.slice()); }, () => false, () => false, { MODEL_VERSION: 'm2' },
-        (r) => r.text,
+        () => Promise.resolve(), () => { reads++; return Promise.resolve(recsList.slice()); },
+        { isClosedStatus: () => false, effectiveText: (r) => r.text },   // jitaShared's, stubbed: each record's text as given
+        () => false, { MODEL_VERSION: 'm2' },
         (texts) => {
             batches.push(texts[0]);
             if (gate && texts[0] === gate.text) { return gate.d.promise.then(() => [new Float32Array([0.5])]); }

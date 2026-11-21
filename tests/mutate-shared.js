@@ -24,7 +24,22 @@ const muts = [
     [H, 'the page keeps a lookup of its own', '    _siblingsLocal: function (key) { return JiTA.logsig.ensure().then(function (idx) { return JITA_SH.siblings(idx, key); }); },',
         '    _siblingsLocal: function (key) { return JiTA.logsig.ensure().then(function (idx) { return (idx.keyToSigs[key] || []).length ? JITA_SH.siblings(idx, key) : []; }); },'],
     [H, 'a parsed log\'s related ones not tagged', '                    o.related = true;\n', ''],
-    [H, 'a parsed log lists the related ones alone', 'return JITA_SH.siblings(idx, defect).concat(rel);', 'return rel;']
+    [H, 'a parsed log lists the related ones alone', 'return JITA_SH.siblings(idx, defect).concat(rel);', 'return rel;'],
+    // ---- the text the ranking compares, and the keyword ranking (refactor 1 PR 3) ----
+    [H, 'the shared copy leaves the keyword ranking out', 'keywordIndex: keywordIndex, passesGate: passesGate, bm25Score: bm25Score', 'keywordIndex: keywordIndex, passesGate: passesGate'],
+    [H, 'the worker keeps a tokenizer of its own', '    // test (SH.matchTerms) and the session filters (SH.passesGate) are written once in jitaShared, as the tab runs them.\n',
+        '    // test (SH.matchTerms) and the session filters (SH.passesGate) are written once in jitaShared, as the tab runs them.\n    function tokenize(text) { return SH.tokenize(text); }\n'],
+    [H, 'the worker narrows by the filter box with a copy', '            if (hasTerms && !SH.matchTerms(e.hay, filterTerms)) { continue; }',
+        '            if (hasTerms && !matchTerms(e.hay, filterTerms)) { continue; }\n            function matchTerms(h, t) { return SH.matchTerms(h, t); }'],
+    [H, 'the worker leaves out by names of its own', '    function leftOut(rec) { return SH.isLeftOut(rec, cfg.LEFT_OUT); }', '    function leftOut(rec) { return SH.isLeftOut(rec, { labels: cfg.LEFT_OUT.labels, components: [] }); }'],
+    [H, 'the worker builds its bug report keyword index another way', "            ebr: SH.keywordIndex(recs, function (r) { return r.project === 'EBR' && ranked(r); })",
+        "            ebr: SH.keywordIndex(recs, function (r) { return r.project === 'EBR' && ranked(r) && !r.resolution; })"],
+    [H, 'the tab\'s keyword fallback shows what the user hid', '        return !JiTA.hidden.isHidden(doc.key) && JITA_SH.passesGate(doc, gate);', '        return JITA_SH.passesGate(doc, gate);'],
+    [H, 'the tab\'s keyword fallback ignores the session filters', '        return !JiTA.hidden.isHidden(doc.key) && JITA_SH.passesGate(doc, gate);', '        return !JiTA.hidden.isHidden(doc.key);'],
+    [H, 'the tab keeps a tokenizer of its own', '    _tokenize: JITA_SH.tokenize,   // jitaShared', '    _tokenize: function (text) { return JITA_SH.tokenize(text); },'],
+    [H, 'the tab keeps a text helper of its own', '    cleanForCompare: JITA_SH.cleanForCompare,   // jitaShared', '    cleanForCompare: function (s, d) { return JITA_SH.cleanForCompare(s, d); },'],
+    [H, 'a stale note is left on a piece written once', '    // A bug report the matching lists leave out (cfg.LEFT_OUT = JiTA.LEFT_OUT), so it is neither indexed nor embedded.',
+        '    // Mirror of JiTA.util.isLeftOut: a bug report the matching lists leave out (cfg.LEFT_OUT = JiTA.LEFT_OUT).']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

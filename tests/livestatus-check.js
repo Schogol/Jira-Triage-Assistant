@@ -6,6 +6,8 @@
 require('./clock').install();   // timers run on a clock of their own, so the waits below cost no real time (clock.js)
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const shu = (name) => '\n' + require('./source').member(src, 'JiTA.util', name) + '\n,';   // a JiTA.util member that is a piece of jitaShared
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it, which JiTA.util's text helpers are
 const member = (head) => {
     const s = src.indexOf(head);
     if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + head.trim().slice(0, 50)); }
@@ -57,7 +59,7 @@ global.gmSet = () => {};
 global.confirm = () => true;
 global.JiTA = { HOST: 'https://jira', sched: { tabId: 't1' }, rank: {}, link: {}, ui: {}, db: {}, sync: {}, util: {} };
 require('./logstub')(JiTA);
-Object.assign(JiTA.util, eval('({' + member('    isClosedStatus: function (status) {') + '})'));
+Object.assign(JiTA.util, eval('({' + shu('isClosedStatus') + '})'));
 JiTA.sync._apiPost = (path, body) => { posts.push(body); return postAnswer(body); };
 JiTA.db.deleteDefects = (keys) => { deleted.push(keys.join()); return keys.some((k) => deleteFails[k]) ? Promise.reject(new Error('QuotaExceededError')) : Promise.resolve(); };
 JiTA.sync._ebrRemoved = (keys) => { removed.push(keys.join()); return removedD ? removedD.promise : Promise.resolve(); };

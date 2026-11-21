@@ -15,8 +15,8 @@ const muts = [
     ['a counter left behind unused', '        var stored = 0, changed = 0;\n', '        var stored = 0, changed = 0, pages = 0;\n'],
     ['a variable declared twice', '        var stored = 0, changed = 0;\n', '        var stored = 0, changed = 0;\n        var stored = 0;\n'],
     ['an object key written twice', '    DATA_VERSION: 3,', '    DATA_VERSION: 3, DATA_VERSION: 4,'],
-    ['code after a return', '        return !!rec && (has(rec.labels, JiTA.LEFT_OUT.labels) || has(rec.components, JiTA.LEFT_OUT.components));\n',
-        '        return !!rec && (has(rec.labels, JiTA.LEFT_OUT.labels) || has(rec.components, JiTA.LEFT_OUT.components));\n        rec = null;\n'],
+    ['code after a return', '        return !!rec && (has(rec.labels, names.labels) || has(rec.components, names.components));\n',
+        '        return !!rec && (has(rec.labels, names.labels) || has(rec.components, names.components));\n        rec = null;\n'],
     ['a typeof compared with a misspelt type', "try { text = (typeof GM_getResourceText === 'function' &&", "try { text = (typeof GM_getResourceText === 'fucntion' &&"]
 ];
 function check(text) {

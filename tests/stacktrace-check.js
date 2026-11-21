@@ -7,6 +7,8 @@
 // search's matching and the ranking boost's kinds.
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
+const shu = (name) => '\n' + require('./source').member(src, 'JiTA.util', name) + '\n,';   // a JiTA.util member that is a piece of jitaShared
+global.JITA_SH = require('./source').shared(src);   // jitaShared, the page's run of it, which JiTA.util's text helpers are
 const once = (head) => {
     const s = src.indexOf(head);
     if (s < 0 || src.indexOf(head, s + 1) >= 0) { throw new Error('could not slice ' + head.trim().slice(0, 60)); }
@@ -32,11 +34,10 @@ global.GM_addStyle = () => {};
 global.JiTA = { HOST: 'https://jira', EBR_SCOPE: 'project = EBR AND statusCategory != Done', PAGE_SIZE: 100, util: {}, logsig: {}, ocr: {}, db: {}, sync: {}, ui: {}, menu: {},
     hidden: { isHidden: () => false }, worker: { usable: () => false }, rank: {} };
 require('./logstub')(JiTA);
-Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + member('    isClosedStatus: function (status) {') + '})'));
+Object.assign(JiTA.util, eval('({' + member('    toPlainText: function (d) {') + shu('isClosedStatus') + '})'));
 JiTA.ocr._langFromLabels = () => null;
 const L = JiTA.logsig;
 Object.assign(L, require('./source').logsigShared(src));   // jitaShared
-global.JITA_SH = require('./source').shared(src);   // the page's run of it, which its lookups call
 Object.assign(L, eval(require('./source').members(src, 'JiTA.logsig', ['ensure', 'applyToTable', 'rematch', '_matchTextLocal', '_defectsLocal', '_holdingLocal',
     '_sigsOfLocal', 'sigsOf', 'defectsForSigs'])));
 L._index = null; L._dirty = true; L._building = null;
