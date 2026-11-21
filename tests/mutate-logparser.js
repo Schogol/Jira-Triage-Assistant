@@ -6,14 +6,14 @@ const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirna
 const H = 'logparser-check.js';
 const muts = [
     // ---- the main log ----
-    [H, 'excTime starts undefined', 'var excTime = "", sttTime = "";', 'var excTime, sttTime = "";'],
-    [H, 'a logging error after an exception is one again', 'if (excTime && table[i][0] == excTime) {', 'if (table[i][0] == excTime) {'],
-    [H, 'a short line is not padded', "        if (cols.length < 4) { cols = cols.length > 1 ? [cols[0], '', '', cols.slice(1).join(' ')] : ['', '', '', rows[i]]; }\n", ''],
-    [H, 'a short line loses its time', "cols = cols.length > 1 ? [cols[0], '', '', cols.slice(1).join(' ')] : ['', '', '', rows[i]];", "cols = ['', '', '', rows[i]];"],
+    [H, 'excTime starts undefined', '            start: function () { return { exc: \'\', stt: \'\' }; },', '            start: function () { return { stt: \'\' }; },'],
+    [H, 'a logging error after an exception is one again', 'if (st.exc && time === st.exc) {', 'if (time === st.exc) {'],
+    [H, 'a short line is not padded', '                if (cols.length < 4) { cols = cols.length > 1 ? [cols[0], \'\', \'\', cols.slice(1).join(\' \')] : [\'\', \'\', \'\', line]; }\n', ''],
+    [H, 'a short line loses its time', 'cols = cols.length > 1 ? [cols[0], \'\', \'\', cols.slice(1).join(\' \')] : [\'\', \'\', \'\', line];', 'cols = [\'\', \'\', \'\', line];'],
     [H, 'a message loses the tail after its own tab', "cols.slice(3).join('\\t')", 'cols[3]'],
     // ---- a parser that throws ----
-    [H, 'a mounted parser runs unguarded', '    setTimeout(function () { jitaRunParse(parseFn); }, 250);', '    setTimeout(parseFn, 250);'],
-    [H, 'the viewer parse runs unguarded', '        setTimeout(function () { jitaRunParse(ParseLogs); }, 250);', '        setTimeout(ParseLogs, 250);'],
+    [H, 'a mounted parser runs unguarded', '    setTimeout(function () { jitaRunParse(function () { JiTA.logparser.draw(type, rows); }); }, 250);', '    setTimeout(function () { JiTA.logparser.draw(type, rows); }, 250);'],
+    [H, 'the viewer parse runs unguarded', '        setTimeout(function () { jitaRunParse(function () { JiTA.logparser.draw(\'log\', rows); }); }, 250);', '        setTimeout(function () { JiTA.logparser.draw(\'log\', rows); }, 250);'],
     [H, 'a failed parse leaves the spinner going', "        if (l) { l.style.display = 'none'; }\n", ''],
     [H, 'a failed parse is not said', '            tc.tBodies[0].appendChild(tr);\n', ''],
     // ---- Method Calls ----
@@ -21,13 +21,13 @@ const muts = [
     [H, 'no GetTime call peaks at 0ms', "(count ? peak + 'ms' : 'n/a')", "peak + 'ms'"],
     [H, 'the peak keeps the line\'s carriage return', 'peak = Number(cols[2]);', 'peak = cols[2];'],
     [H, 'the peak click is not guarded', "var p = $('.peakMachoCell')[0]; if (p) { p.scrollIntoView(", "var p = $('.peakMachoCell')[0]; { p.scrollIntoView("],
-    [H, 'Method Calls keeps blank lines', '        if (!rows[i].trim()) { continue; }   // a blank line is not a call\n', ''],
-    [H, 'Method Calls drops its last row', '    logs.showRow(logs.tableInfo.length);   // every call read; rows.length - 2 dropped the last one', '    logs.showRow((rows.length - 2));'],
+    [H, 'Method Calls keeps blank lines', '                if (!line.trim()) { return null; }   // a blank line is not a call\n', ''],
+    [H, 'Method Calls drops its last row', '        for (var i = T.from; i < lines.length; i++) {', '        for (var i = T.from; i < lines.length - (type === \'mc\' ? 1 : 0); i++) {'],
     // ---- Process Health ----
-    [H, 'sessions compared as text', 'if (Number(table[i][16]) >= 2) {', 'if (table[i][16] >= "2") {'],
-    [H, 'time dilation compared as text (0.2)', 'if (Number(table[i][17]) <= 0.2) {', 'if (table[i][17] <= "0.2") {'],
-    [H, 'time dilation compared as text (0.8)', 'else if (Number(table[i][17]) <= 0.8) {', 'else if (table[i][17] <= "0.8") {'],
-    [H, 'Process Health drops its last row', '    logs.showRow(logs.tableInfo.length);   // every sample read; rows.length - 2 dropped the last one', '    logs.showRow((rows.length - 2));'],
+    [H, 'sessions compared as text', 'if (num(16) >= 2) { sessions = \'red\'; }', 'if (c[16] >= "2") { sessions = \'red\'; }'],
+    [H, 'time dilation compared as text (0.2)', 'if (num(17) <= 0.2) { tidi = \'red\'; }', 'if (c[17] <= "0.2") { tidi = \'red\'; }'],
+    [H, 'time dilation compared as text (0.8)', 'else if (num(17) <= 0.8) { tidi = \'yellow\'; }', 'else if (c[17] <= "0.8") { tidi = \'yellow\'; }'],
+    [H, 'Process Health drops its last row', '        for (var i = T.from; i < lines.length; i++) {', '        for (var i = T.from; i < lines.length - (type === \'ph\' ? 1 : 0); i++) {'],
     // ---- PDM ----
     [H, 'a PDM value is cut at its second colon', '            var key = line.slice(0, at).trim();\n            var value = line.slice(at + 1).trim();',
         '            var key = line.split(":")[0].trim();\n            var value = line.split(":")[1].trim();'],

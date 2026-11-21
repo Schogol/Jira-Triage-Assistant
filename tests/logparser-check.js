@@ -40,9 +40,10 @@ global.JiTA = require('./logstub')({});   // these functions log through JiTA.lo
 console.log = ((log) => (...a) => { if (a[0] !== '[JiTA] log parser failed:') { log(...a); } })(console.log);
 console.warn = () => {};
 
-['prepLogRows', 'finishParserView', 'ParseLogs', 'ParseMcLogs', 'ParsePhLogs', 'convertTextToObject', 'jitaRunParse', 'mountParser',
+['convertTextToObject', 'jitaRunParse', 'mountParser',
     'readCodeBlock', 'jitaInEditable', 'SwapUI', 'jitaRunParserWhenLoaded', 'jitaWireLogControls', 'jitaApplyLogFilter'].forEach((n) => load(n));
-const realParseLogs = global.ParseLogs;
+eval(require('./source').top(src, 'JiTA.logparser'));   // the table builder and its types
+const realDraw = JiTA.logparser.draw;
 
 // ---- a fake parsed table ----
 function Cell() { return { innerHTML: '', className: '', colSpan: 1, set textContent(v) { this.innerHTML = String(v); }, get textContent() { return this.innerHTML; } }; }
@@ -100,7 +101,7 @@ function J(list, sel) {
 let route = () => [];
 global.$ = (sel) => (typeof sel === 'string' ? J(route(sel) || [], sel) : J([sel], '(node)'));
 
-// ============ ParseLogs ============
+// ============ the game log ============
 mountTable();
 rows = [LOG_HDR,
     '12:00:00\tnet\tnotice\tconnected',
@@ -113,7 +114,7 @@ rows = [LOG_HDR,
     '12:00:03\tnet\tinfo\tkey\tvalue',
     '12:00:04\tnet\tnotice\tthe last line'].join('\r\n') + '\r\n';
 let threw = null;
-try { realParseLogs(); } catch (e) { threw = e; }
+try { JiTA.logparser.draw('log', rows); } catch (e) { threw = e; }
 const msg = (r) => (r.cells[3] ? r.cells[3].innerHTML : '');
 const byMsg = (re) => tbody.rows.filter((r) => re.test(msg(r)))[0];
 ok('a log with short lines parses without throwing', !threw, threw && threw.message);
@@ -141,8 +142,10 @@ jitaRunParse(() => {});
 ok('...a parser that does not throw adds nothing (control)', tbody.rows.length === 0 && loader.style.display === 'block');
 mountTable(); timers = [];
 route = () => [];
-mountParser('<chrome>', () => { throw new Error('late'); });
+JiTA.logparser.draw = () => { throw new Error('late'); };
+mountParser('<chrome>', 'log');
 runTimers();
+JiTA.logparser.draw = realDraw;
 ok('a mounted parser runs guarded, so its failure ends the spinner too', loader.style.display === 'none' && tbody.rows.length === 1);
 
 // ============ Method Calls ============
@@ -151,7 +154,7 @@ mountTable(); timers = [];
 route = (sel) => (sel === '.peakMachoCell' ? [] : null);
 rows = [mcHdr, '12:00:00\tfoo\t20', '12:00:01\tbar\t600', '   ', '12:00:02\tbaz\t1600'].join('\r\n') + '\r\n';
 threw = null;
-try { ParseMcLogs(); } catch (e) { threw = e; }
+try { JiTA.logparser.draw('mc', rows); } catch (e) { threw = e; }
 ok('Method Calls without a GetTime call parses', !threw, threw && threw.message);
 ok('...says n/a for the average and the peak instead of NaN', /: n\/a /.test(htmlOf['#averageMacho'] || '') && /: n\/a /.test(htmlOf['#peakMacho'] || '') && !/NaN/.test(htmlOf['#averageMacho']),
     (htmlOf['#averageMacho'] || '').slice(0, 50));
@@ -161,7 +164,7 @@ try { handlers['#peakMacho click'](); } catch (e) { threw = e; }
 ok('...and a click on the peak with no peak row does nothing', !threw, threw && threw.message);
 mountTable();
 rows = [mcHdr, '12:00:00\tmachoNet::GetTime (RemoteServiceCall)\t100', '12:00:01\tmachoNet::GetTime (RemoteServiceCall)\t300', '12:00:02\tfoo\t5'].join('\r\n') + '\r\n';
-ParseMcLogs();
+JiTA.logparser.draw('mc', rows);
 ok('with GetTime calls the average and the peak are given in ms (control)', /: 200ms /.test(htmlOf['#averageMacho']) && /: 300ms /.test(htmlOf['#peakMacho']), htmlOf['#averageMacho'].slice(0, 50));
 ok('...and the last call is listed too', tbody.rows.length === 3 && tbody.rows[2].cells[1].innerHTML === 'foo', tbody.rows.length + ' rows');
 
@@ -171,7 +174,7 @@ const ph = (sessions, tidi) => ['12:00:00', '1', '10', '5', '100', '200', '5', '
 mountTable();
 route = () => null;
 rows = [phHdr, ph('10', '1.0'), ph('1', '.15'), ph('1', '0.5'), ph('1', '.9'), ph('1', '1.10'), ph('2', '1.0')].join('\r\n') + '\r\n';
-ParsePhLogs();
+JiTA.logparser.draw('ph', rows);
 const cls = (i, c) => (tbody.rows[i] ? tbody.rows[i].cells[c].className : 'no row');
 ok('Process Health keeps its last row', tbody.rows.length === 6, tbody.rows.length + ' rows');
 ok('ten sessions is red (as text, "10" sorts below "2")', cls(0, 16) === 'red', cls(0, 16));
@@ -268,8 +271,7 @@ let comment, viewer, cmText = '', cbNodes = [], reveals = 0, parsedWith = [], dx
 global.html = 'LOG'; global.phHtml = 'PH'; global.McHtml = 'MC'; global.ocHtml = 'OC'; global.lcHtml = 'LC'; global.dxdiagHtml = 'DX'; global.pdmHtml = 'PDM';
 global.getCmDocText = () => cmText;
 global.jitaRevealLogs = () => { reveals++; };
-global.ParseLogs = () => { parsedWith.push('log'); };
-global.ParseOcLogs = () => { parsedWith.push('oc'); };
+JiTA.logparser.draw = (type) => { parsedWith.push(type); };   // which table a file is drawn as
 global.renderDxdiag = () => { dxRuns++; };
 global.renderRequirements = () => {};
 const CB = SELECTORS.CODE_BLOCK;
@@ -300,11 +302,11 @@ ok('with a log open as well, the log viewer is parsed and the comment box left a
 scene({ viewer: true, cmText: LOG_TEXT });
 mountTable();
 document.getElementById = (id) => (id === 'tableContent' ? table : id === 'loader' ? loader : null);
-global.ParseLogs = () => { throw new Error('bad line'); };
+JiTA.logparser.draw = () => { throw new Error('bad line'); };
 threw = null;
 try { SwapUI(); runTimers(); } catch (e) { threw = e; }
 ok('a log in the viewer that fails to parse ends the spinner with the reason', !threw && loader.style.display === 'none' && tbody.rows.length === 1, threw ? threw.message : loader.style.display);
-global.ParseLogs = () => { parsedWith.push('log'); };
+JiTA.logparser.draw = (type) => { parsedWith.push(type); };
 scene({ viewer: true, cmText: '' });
 SwapUI(); runTimers();
 ok('a viewer that hands over no text is left as it is, not emptied', !viewer.ed.mounted && parsedWith.length === 0, String(viewer.ed.mounted));

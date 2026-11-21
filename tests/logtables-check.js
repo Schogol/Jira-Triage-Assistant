@@ -103,8 +103,12 @@ global.JiTA = require('./logstub')({});   // no logsig: the known-exception pass
 global.rows = '';
 
 // ---- the parsers as the script has them ----
-['prepLogRows', 'finishParserView', 'ParseLogs', 'ParseMcLogs', 'ParseOcLogs', 'ParsePhLogs', 'jitaBuildLogGroups', 'jitaRegroupLog'].forEach((n) => { (0, eval)(S.fn(src, n)); });
-const PARSERS = { log: () => ParseLogs(), mc: () => ParseMcLogs(), oc: () => ParseOcLogs(), lc: () => ParseOcLogs(), ph: () => ParsePhLogs() };
+// The table builder and its types (JiTA.logparser), and Group Repeats, which the game log runs once drawn. Last Crashes
+// is drawn as Outstanding Calls are, as SwapUI mounts it.
+['jitaBuildLogGroups', 'jitaRegroupLog'].forEach((n) => { (0, eval)(S.fn(src, n)); });
+eval(S.top(src, 'JiTA.logparser'));
+const draw = (type) => () => JiTA.logparser.draw(type, rows);
+const PARSERS = { log: draw('log'), mc: draw('mc'), oc: draw('oc'), lc: draw('oc'), ph: draw('ph') };
 
 // What a drawing is: every row (its class, whether it is hidden, its grouping marks) and every cell (its HTML, its class,
 // a badge in it), the loader and the table, and the side lines (Method Calls' average and peak, the headers).
@@ -271,6 +275,13 @@ const t1 = P.clicks[0], t2 = P.clicks[1];
 ok('...a click on the FPS header shows seconds a frame, and the header says spf', /^FPS /.test(P.first.heads[9]) && /^spf /.test(t1.heads[9]) && txt(t1.rows[0].cells[9]) === '0.016',
     t1.heads[9] + ' / ' + JSON.stringify(t1.rows[0].cells[9]));
 ok('...and a second click frames a second again', /^FPS /.test(t2.heads[9]) && txt(t2.rows[0].cells[9]) === '62.5', t2.heads[9] + ' / ' + JSON.stringify(t2.rows[0].cells[9]));
+// One builder draws every file (refactor 2): no parser of its own is left, and SwapUI mounts each file as its type.
+const swap = S.fn(src, 'SwapUI');
+const MOUNTS = { html: 'log', phHtml: 'ph', McHtml: 'mc', ocHtml: 'oc', lcHtml: 'oc' };
+const offMount = Object.keys(MOUNTS).filter((v) => swap.indexOf('mountParser(' + v + ", '" + MOUNTS[v] + "');") < 0);
+ok('every file is drawn by the one table builder, as its type', !/\nfunction (Parse(Mc|Oc|Ph)?Logs|prepLogRows|finishParserView)\(/.test(src) && !offMount.length &&
+    ['log', 'mc', 'oc', 'ph'].every((k) => typeof JiTA.logparser.TYPES[k].row === 'function') && /jitaRunParse\(function \(\) \{ JiTA\.logparser\.draw\('log', rows\); \}\)/.test(swap),
+    offMount.join());
 // Kept as they were, in the saved drawings rather than by name: a method holding " - " is cut at it, a line without
 // one shows "undefined" as its method, a stacktrace's rows are not grouped as one block, an exception block cut off by
 // the next second runs on to the next END for Group Repeats, and the last column keeps the line's \r.
