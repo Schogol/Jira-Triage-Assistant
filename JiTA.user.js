@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.10
+// @version     3.53.11
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.10
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.11
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -15568,9 +15568,11 @@ JiTA.excfind = {
     // The text an edit starts from: the message as written. One cut short (a profile reading keeps MSG_CUT characters) ends
     // in a *, for the rest of it.
     _editText: function (t) {
-        var w = String(t.msg || '').replace(/\s+/g, ' ').trim();
+        var raw = String(t.msg || ''), w = raw.replace(/\s+/g, ' ').trim();
         if (!w) { return JiTA.excfind._exc(t.sig).m; }
-        return w.length >= JiTA.excfind.MSG_CUT ? w + '*' : w;
+        // Cut short or not by the message as kept, as _asWritten tells it: one cut at a space ends in that space, which the
+        // trim takes off, and so lost its * for the rest. The edit then matched no report, not even the one it came from.
+        return raw.length >= JiTA.excfind.MSG_CUT ? w + '*' : w;
     },
     // What an exception is looked for by, as the window shows it: its edit, or its message as written.
     _shown: function (t) { return t.pat != null ? t.pat : (t.msg || '(no message)'); },

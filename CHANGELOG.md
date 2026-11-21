@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.11 (2026-11-20)
+
+### Fixed issues
+
+- Exception search: an edited long exception message now still finds the reports that hold it when the part JiTA keeps of it ended at a space.
+
 ## 3.53.10 (2026-11-20)
 
 ### Fixed issues
