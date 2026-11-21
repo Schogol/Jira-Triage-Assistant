@@ -14,7 +14,10 @@ const SRC1 = fs.readFileSync(process.env.JITA_SRC || path.join(__dirname, '..', 
 const MD1 = fs.readFileSync(process.env.JITA_CHANGELOG || path.join(__dirname, '..', 'CHANGELOG.md'), 'utf8');
 // The copies start at 7.8.9, whatever the real version: no digit 0, so a bump that forgets to start one at 0 shows.
 const REAL = (/^\/\/ @version\s+(\S+)/m.exec(SRC1) || [])[1] || '';
-const SRC0 = SRC1.replace(/^(\/\/ @version\s+)\S+/m, '$17.8.9').replace(/^(\/\/ @resource\s+changelog\s+\S+\?v=)\S+/m, '$17.8.9');
+const SRC0 = SRC1.replace(/^(\/\/ @version\s+)\S+/m, '$17.8.9').replace(/^(\/\/ @resource\s+\S+\s+\S+\?v=)\S+/gm, '$17.8.9');
+// Every file Tampermonkey fetches with the script (CHANGELOG.md, settings-window.json): each @resource line's ?v=.
+const resAll = (s) => (s.match(/^\/\/ @resource\s+\S+\s+\S+\?v=\S+\s*$/gm) || []).map((l) => l.trim().split('?v=')[1]);
+const NRES = resAll(SRC0).length;
 const MD0 = MD1.replace('\n## ' + REAL + ' (', '\n## 7.8.9 (');
 
 let fail = 0;
@@ -83,7 +86,8 @@ const P = [cur[0], cur[1], cur[2] + 1].join('.');
 ok('patch raises the last digit', r.status === 0 && ver(r.src) && ver(r.src).join('.') === P, r.out);
 ok('...and the changelog @resource asks for the same version', res(r.src) === P, String(res(r.src)));
 const d1 = changed(SRC0, r.src);
-ok('...changing no other line of the script', d1.length === 2 && /^\/\/ @version/.test(d1[0][2]) && /^\/\/ @resource/.test(d1[1][2]), JSON.stringify(d1.slice(0, 3)).slice(0, 300));
+ok('...and so does every other @resource, so none keeps an older copy', NRES >= 2 && resAll(r.src).every((x) => x === P), resAll(r.src).join(' '));
+ok('...changing no other line of the script', d1.length === 1 + NRES && /^\/\/ @version/.test(d1[0][2]) && d1.slice(1).every((d) => /^\/\/ @resource/.test(d[2])), JSON.stringify(d1.slice(0, 4)).slice(0, 300));
 const at = MD0.indexOf('## ' + CUR + ' ('), i1 = r.md.indexOf('## ' + P + ' ('), i2 = r.md.indexOf('## ' + CUR + ' (');
 ok('...and only adding its entry to the changelog, right above the newest one', at > 0 && i1 === at && i2 > i1 && r.md.slice(0, i1) + r.md.slice(i2) === MD0, i1 + ' / ' + at + ' / ' + i2);
 let c = checkClean(r);

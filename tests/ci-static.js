@@ -54,6 +54,15 @@ if (want('eol')) {
     const badEol = eol.filter((e) => e.index !== 'lf' && e.index !== 'none' && e.index !== '-text');
     ok('every text file is committed with LF endings (' + eol.length + ' files)', badEol.length === 0,
         badEol.map((e) => e.file + ' is stored as ' + e.index).join('\n          '));
+    // Unicode's line and paragraph separators: editors take them for line breaks (VS Code asks to remove them each time
+    // the file is opened), so a string needing one writes String.fromCharCode(0x2028) / (0x2029) instead.
+    const SEPS = [String.fromCharCode(0x2028), String.fromCharCode(0x2029)], separated = [];
+    eol.filter((e) => e.index !== '-text').forEach((e) => {
+        fs.readFileSync(path.join(ROOT, e.file), 'utf8').split('\n').forEach((l, i) => {
+            if (SEPS.some((s) => l.indexOf(s) >= 0)) { separated.push(e.file + ':' + (i + 1)); }
+        });
+    });
+    ok('no Unicode line or paragraph separator (U+2028, U+2029) in any tracked file', separated.length === 0, separated.slice(0, 20).join('\n          '));
 }
 
 // ---- no em dashes ----

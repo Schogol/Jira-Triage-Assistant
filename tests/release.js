@@ -1,6 +1,7 @@
-// release.js - a release's version and changelog changes in one go. It raises @version in JiTA.user.js, gives the
-// @resource line the same ?v=, and puts the new entry at the top of CHANGELOG.md, each item escaped the way GitHub
-// needs it. changelog-check.js and ci-static.js check the result as they would a hand-made one.
+// release.js - a release's version and changelog changes in one go. It raises @version in JiTA.user.js, gives every
+// @resource line (CHANGELOG.md, settings-window.json) the same ?v=, and puts the new entry at the top of CHANGELOG.md,
+// each item escaped the way GitHub needs it. changelog-check.js and ci-static.js check the result as they would a
+// hand-made one.
 //
 //   node tests/release.js patch --fix "What no longer goes wrong."
 //   node tests/release.js minor --feature "What a user can now do." --fix "What no longer goes wrong."
@@ -19,6 +20,7 @@ const ACTIVE = '\\`*_[]<>#~|&';                       // what Markdown would act
 const DASHES = String.fromCharCode(0x2013, 0x2014);   // en and em dash, which no text of JiTA's carries
 const VERSION_RE = /^(\/\/ @version[ \t]+)(\d+)\.(\d+)\.(\d+)[ \t]*$/m;
 const RESOURCE_RE = /^(\/\/ @resource[ \t]+changelog[ \t]+\S+\?v=)(\S+)[ \t]*$/m;
+const RESOURCES_RE = /^(\/\/ @resource[ \t]+\S+[ \t]+\S+\?v=)(\S+)[ \t]*$/gm;   // every file Tampermonkey fetches with the script
 const HEADING_RE = /^## (\d+(?:\.\d+)+) \((\d{4}-\d{2}-\d{2})\)\r?$/m;
 
 function stop(msg) { const e = new Error(msg); e.refused = true; throw e; }
@@ -111,9 +113,9 @@ function release(argv, files) {
     const entry = lines.join(eol) + eol;
     const mdOut = md.slice(0, top.index) + entry + md.slice(top.index);
 
-    // ---- JiTA.user.js: @version and the changelog's ?v= ----
+    // ---- JiTA.user.js: @version and every @resource's ?v= (a resource left at the old ?v= stays the old copy) ----
     if (!RESOURCE_RE.test(src)) { stop(path.basename(SRC) + ' has no "// @resource changelog ...?v=" line'); }
-    const srcOut = src.replace(VERSION_RE, (m, head) => head + v).replace(RESOURCE_RE, (m, head) => head + v);
+    const srcOut = src.replace(VERSION_RE, (m, head) => head + v).replace(RESOURCES_RE, (m, head) => head + v);
 
     const what = [features.length && features.length + ' feature' + (features.length > 1 ? 's' : ''),
         fixes.length && fixes.length + ' fix' + (fixes.length > 1 ? 'es' : '')].filter(Boolean).join(' and ');
@@ -124,7 +126,7 @@ function release(argv, files) {
     }
     fs.writeFileSync(SRC, srcOut);
     fs.writeFileSync(MD, mdOut);
-    said.push(path.basename(SRC) + ': @version ' + cur.join('.') + ' -> ' + v + ', and the changelog @resource asks for ?v=' + v);
+    said.push(path.basename(SRC) + ': @version ' + cur.join('.') + ' -> ' + v + ', and every @resource asks for ?v=' + v);
     said.push(path.basename(MD) + ': ## ' + v + ' (' + date + ') at the top, ' + what);
     return said;
 }

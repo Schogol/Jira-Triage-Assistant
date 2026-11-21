@@ -1,0 +1,97 @@
+char:
+  autoreload: {}
+  notepad:
+    note1: !!python/tuple [134394214740687666, !!python/unicode 'secret note text']
+  ui:
+    enableInventoryBadging: !!python/tuple [134394214740687666, true]
+    global_font_shadow_enabled: !!python/tuple [134394214740687666, false]
+    only_tint_active_window: !!python/tuple [134394214740687666, true]
+    shiptheme: !!python/tuple [134394214740687666, false]
+    someCharSetting: !!python/tuple [134394214740687666, 5]
+  windows:
+    windowSizesAndPositions_1: !!python/tuple
+    - 134394214740687666
+    - &id001 !!python/tuple [10, 20, 300, 400]
+    wndColorThemeID: !!python/tuple [134394214740687666, !!python/unicode 'UI/ColorThemes/Caldari']
+    zOtherWindow: !!python/tuple [134394214740687666, *id001]
+public:
+  !!python/unicode 'audio':
+    !!python/unicode 'audioEnabled': !!python/tuple [134394214740687666, 0]
+    !!python/unicode 'masterVolume': !!python/tuple [134394214740687666, 0.7376543209876543]
+    !!python/unicode 'useOldJukeboxOverride': !!python/tuple [134394214740687666, 1]
+  !!python/unicode 'device':
+    !!python/unicode 'FixedWindowSettings': !!python/tuple
+    - 134394052202721043
+    - {adapter: 0, height: 2160, presentInterval: 1, width: 3840}
+    !!python/unicode 'FullScreenSettings': !!python/tuple
+    - 134394052202721043
+    - {adapter: 1, height: 1440, presentInterval: 0, width: 2560}
+    !!python/unicode 'UIScaleFullscreen': !!python/tuple [134394214740687666, 1.1]
+    !!python/unicode 'UIScaleFullscreenSetAutomatically': !!python/tuple [134394214740687666,
+      false]
+    !!python/unicode 'WindowMode': !!python/tuple [134394052202721043, 0]
+    !!python/unicode 'antiAliasing': !!python/tuple [134394219922884535, 0]
+    !!python/unicode 'brightness': !!python/tuple [134394052424927569, 1.25]
+    !!python/unicode 'dofEnabled': !!python/tuple [134394219922884535, false]
+    !!python/unicode 'lodQuality': !!python/tuple [134394219908649071, 2]
+    !!python/unicode 'shaderQuality': !!python/tuple [134394223713362255, 1]
+    !!python/unicode 'textureQuality': !!python/tuple [134394219908649071, 2]
+    !!python/unicode 'upscalingSetting': !!python/tuple [134394219908649071, 4]
+    !!python/unicode 'upscalingTechnique': !!python/tuple [134394219908649071, 4]
+  !!python/unicode 'ui':
+    !!python/unicode 'CalculatorHistory':
+    - 134393818240409175
+    - [!!python/unicode '24', !!python/unicode '5000']
+    !!python/unicode 'clientFontSize': !!python/tuple [134394223836868352, 3]
+user:
+  audio:
+    soundLevel_advancedSettings: !!python/tuple [134394214740687666, 0]
+    soundLevel_custom_turrets: !!python/tuple [134394214740687666, 0.25]
+  cmd:
+    customCmds: !!python/tuple
+    - 134394199694836691
+    - CmdAlignToItem: null
+      CmdFleetBroadcast_HealArmor: !!python/tuple [65]
+      CmdOpenBroadcastRadialMenu: !!python/tuple [4]
+      CmdToggleCameraTracking: null
+  overview:
+    ? !!python/tuple [overviewScroll2, 2]
+    : !!python/tuple [DISTANCE, true]
+    columns: !!python/tuple
+    - 134394214740687666
+    - - ICON
+      - DISTANCE
+      - NAME
+    tupleKeys: !!python/tuple
+    - 134394214740687666
+    - shortcuts: true
+      ? !!python/tuple
+      - !!python/unicode 'Engineering'
+      - !!python/tuple []
+      : false
+  suppress:
+    suppress.AgtShare: !!python/tuple
+    - 134275767153766502
+    - !!python/tuple [1, radioboxOption2Selected]
+    suppress.AskQuitGame: !!python/tuple [134393820644998315, 6]
+    suppress.SomethingUnknownXyz: !!python/tuple [134393820644998315, 7]
+    suppress.MultiplePilotTraining: !!python/tuple [134284305588957300, null]
+  ui:
+    bigNumber: !!python/tuple [134394214740687666, !!python/long '1234567890123456789']
+    cameraShakeEnabled: !!python/tuple [134394214740687666, 1]
+    chat_font_size_default: !!python/tuple [134394214740687666, 14]
+    colorBlindMode: !!python/tuple [134394214740687666, 0]
+    editHistory: !!python/tuple
+    - 134394223713362255
+    - ? ''
+      : [!!python/unicode 'typed secret']
+    escaped: !!python/tuple [134394214740687666, "Ayuda en Espa\xF1ol ✓ \
+      joined"]
+    html: !!python/tuple [134394214740687666, !!python/unicode '<img src=x onerror=alert(1)>']
+    kv: !!python/tuple [134394214740687666, !!python/object:utillib.KeyVal {charID: 2121935319,
+        name: x}]
+    longText: !!python/tuple [134394214740687666, !!python/unicode 'a long string that the
+        client folded over two lines']
+    quoteIn: !!python/tuple [134394214740687666, !!python/unicode 'it''s here']
+    tagSet: !!python/tuple [134394214740687666, !!set {3446: null, 3447: null}]
+    turretsEnabled: !!python/tuple [134394214740687666, 0]
