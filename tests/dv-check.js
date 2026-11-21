@@ -1047,6 +1047,32 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     jqlPosts()[0].resolve({ issues: issues(['EBR-40']) });
     await settle();
     eq(pushed, ['/browse/EBR-40'], 'a filter clicked in Jira\'s sidebar opens its first issue too');
+
+    // A saved filter is read before its list: a list click made meanwhile is the user's own move.
+    reset(); scriptPost(); D._mounted = true;
+    const get20 = D._get, reads20 = [];
+    D._get = () => new Promise((resolve, reject) => { reads20.push({ resolve, reject }); });
+    const p20 = D._openLink({ id: '10404' }, '', 'h');
+    location.pathname = '/browse/EBR-7';   // picked from the list while the filter is read
+    reads20[0].resolve({ name: 'Slow', jql: 'project = EDR ORDER BY created DESC' });
+    await p20;
+    jqlPosts()[0].resolve({ issues: issues(['EDR-5']) });
+    await settle();
+    eq(pushed, [], 'someone who moved on while a saved filter was read is not sent to its first issue');
+    D._get = get20;
+
+    // A collapse in this tab, after another tab picked a filter: the other tab's pick stays the remembered list.
+    reset();
+    D._load();   // this tab's list, read at load
+    store[D.STATE_KEY] = { mode: 'jql', jql: 'project = MINE ORDER BY created DESC', basic: null, scope: null, filterName: 'Mine', filterId: '7', collapsed: false };
+    const mine = D._load().jql;
+    D._toggleCollapse();
+    eq([store[D.STATE_KEY].jql, store[D.STATE_KEY].filterName, store[D.STATE_KEY].collapsed], ['project = MINE ORDER BY created DESC', 'Mine', true],
+        'a collapse writes the collapse alone, not this tab\'s older list over a filter picked in another tab');
+    eq([D._load().jql, D._load().collapsed], [mine, true], '...while this tab keeps its own list, collapsed');
+    store[D.STATE_KEY] = null;
+    D._toggleCollapse();
+    ok(store[D.STATE_KEY] && store[D.STATE_KEY].jql === mine && store[D.STATE_KEY].collapsed === false, '...and with nothing stored yet it stores this tab\'s state (control)');
     }
 
     // ---- 21. "Open filters in the detail view": filter clicks taken on every Jira page ------------------------------
@@ -1171,6 +1197,23 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     jqlPosts()[0].resolve({ issues: issues(['EBR-1']) });
     await settle();
     eq([pushed, assigned], [[], []], '...and someone who went to another issue meanwhile is left there');
+    offPage(true);
+    D._openLink({ id: '-1' }, '', HREF);
+    location.pathname = '/jira/software/projects/EBR/boards/1';   // went to a board while page one loaded
+    jqlPosts()[0].resolve({ issues: issues(['EBR-1']) });
+    await settle();
+    eq([pushed, assigned], [[], []], 'someone who went to a board meanwhile is left there too, not only one who reached an issue');
+    offPage(true);
+    const get21 = D._get, reads21 = [];
+    D._get = () => new Promise((resolve, reject) => { reads21.push({ resolve, reject }); });
+    D._openLink({ id: '10323' }, 'BH Filter List', 'https://example.invalid/issues/?filter=10323');
+    location.pathname = '/jira/dashboards/1';   // while the saved filter is read
+    reads21[0].resolve({ id: '10323', name: 'BH Filter List', jql: 'project = EBR ORDER BY created DESC' });
+    await settle();
+    jqlPosts()[0].resolve({ issues: issues(['EBR-1']) });
+    await settle();
+    eq([pushed, assigned], [[], []], '...as is one who left while the saved filter was read');
+    D._get = get21;
 
     offPage(true);
     D._openLink({ id: '-1' }, '', HREF);

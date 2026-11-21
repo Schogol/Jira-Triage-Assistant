@@ -14,6 +14,15 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.26 (2026-11-21)
+
+### Fixed issues
+
+- Detail view: a filter clicked while another page or issue was loading no longer pulls you to its first issue after you have moved on, also while a saved filter is still being read.
+- Detail view: collapsing the list in one tab no longer brings back the list another tab had replaced.
+- Translate text: when a bug report's labels cannot be read, the card says so and the next box tries again, instead of reading the whole image as English.
+- Translate text: a text reader that stopped responding while starting is closed if it finishes later, instead of staying in memory.
+
 ## 3.53.25 (2026-11-21)
 
 ### Fixed issues

@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.25
+// @version     3.53.26
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.25
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.26
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -17243,6 +17243,8 @@ JiTA.dv = {
     _collapsed: function () { return !!JiTA.dv._load().collapsed; },
 
     // ---- where we are -----------------------------------------------------------------------------------------
+    // The page as its address names it, path and query: a board, the search page and an issue each differ.
+    _here: function () { return String(location.pathname || '') + String(location.search || ''); },
     _locKey: function () {
         var m = /^\/browse\/([A-Za-z][A-Za-z0-9_]*-\d+)(?:\/|$)/.exec(location.pathname || '');
         return m ? m[1].toUpperCase() : null;
@@ -17456,7 +17458,9 @@ JiTA.dv = {
     _toggleCollapse: function () {
         var D = JiTA.dv, s = D._load();
         s.collapsed = !s.collapsed;
-        D._save();
+        // Only the collapse: the whole state, as this tab read it at load, wrote its query over a filter picked in another tab.
+        var stored = gmGet(D.STATE_KEY, null);
+        if (stored && typeof stored === 'object' && typeof stored.jql === 'string') { stored.collapsed = s.collapsed; gmSet(D.STATE_KEY, stored); } else { D._save(); }
         D._closePop();
         D._placed = '';
         D._place();
@@ -18274,7 +18278,8 @@ JiTA.dv = {
             });
         }, function (e) { if (D._pop === pop) { msg.textContent = (e && e.message) || 'Could not load your filters.'; } });
     },
-    _useFilter: function (f) {
+    // `from`: the issue open when the filter was clicked (_openLink), else the one open now.
+    _useFilter: function (f, from) {
         var D = JiTA.dv, s = D._load();
         if (!f || !f.jql) { return; }
         s.jql = String(f.jql).trim();
@@ -18289,7 +18294,7 @@ JiTA.dv = {
         D._renderHead();
         D._markSidebar();
         var p = D._run(false, true);
-        D._firstFor = { gen: D._gen, from: D._locKey() };   // page one answers asynchronously, so this is in time
+        D._firstFor = { gen: D._gen, from: from !== undefined ? from : D._locKey() };   // page one answers asynchronously, so this is in time
         return p;
     },
 
@@ -18358,14 +18363,16 @@ JiTA.dv = {
     // id; one that cannot be read (deleted, or not shared with you) still gets an answer - Jira's navigator, which
     // is where the click was going and which can say why. A newer click always wins over an older one's read.
     _openLink: function (link, name, href) {
-        var D = JiTA.dv, seq = ++D._linkSeq;
+        // Where the user is now, at the click: a saved filter is read first (and a 429 waits), and a move made meanwhile is
+        // the user's own, which the filter's first issue must not undo (_take, _useFilter).
+        var D = JiTA.dv, seq = ++D._linkSeq, at = { key: D._locKey(), where: D._here() };
         if (D._collapsed()) { D._toggleCollapse(); }   // a filter was asked for, so show the list it lands in
-        if (link.jql) { D._take({ jql: link.jql, name: '' }, href, seq); return Promise.resolve(); }
+        if (link.jql) { D._take({ jql: link.jql, name: '' }, href, seq, at); return Promise.resolve(); }
         var sys = D.SYSTEM_FILTERS[link.id];
-        if (sys) { D._take({ jql: sys[1], name: sys[0], id: link.id }, href, seq); return Promise.resolve(); }
+        if (sys) { D._take({ jql: sys[1], name: sys[0], id: link.id }, href, seq, at); return Promise.resolve(); }
         return D._get('/rest/api/3/filter/' + encodeURIComponent(link.id)).then(function (f) {
             if (!f || !f.jql) { throw new Error('no JQL'); }
-            if (seq === D._linkSeq) { D._take({ jql: f.jql, name: f.name || name, id: (f.id != null) ? f.id : link.id }, href, seq); }
+            if (seq === D._linkSeq) { D._take({ jql: f.jql, name: f.name || name, id: (f.id != null) ? f.id : link.id }, href, seq, at); }
         }).catch(function () {
             if (seq === D._linkSeq) { location.assign(href); }
         });
@@ -18375,19 +18382,20 @@ JiTA.dv = {
     // Off an issue page - the option above - there is no list to load it into, so page one is fetched here, its first
     // issue opened, and the detail view mounts beside it with the list already in memory. A filter with nothing in
     // it has no issue to open, so that one goes to Jira's search page after all, as does one that fails to load.
-    _take: function (f, href, seq) {
+    _take: function (f, href, seq, at) {
         var D = JiTA.dv;
-        if (D._mounted) { D._useFilter(f); return; }
+        at = at || { key: D._locKey(), where: D._here() };
+        if (D._mounted) { D._useFilter(f, at.key); return; }
         D._activeKey = null;   // the issue last open belongs to no list now: never go paging for it
-        // The issue page the click came from, if any: the view never mounts on Jira's page for a deleted issue, or one this
-        // user cannot see. Such a click is no move of the user's own, and taken as one it opened nothing and fell back to nothing.
-        var at = D._locKey();
+        // The page the click came from (at): the view never mounts on Jira's page for a deleted issue, or one this user cannot
+        // see. Staying there is no move of the user's own, and taken as one it opened nothing and fell back to nothing. A page
+        // left since (a board, another issue) is: the first issue is not opened over it.
         var slow = setTimeout(function () {
             if (seq === D._linkSeq && JiTA.ui && JiTA.ui.toast) { JiTA.ui.toast('Opening "' + (f.name || 'the filter') + '" in the detail view…'); }
         }, D.TAKE_TOAST_MS);
         Promise.resolve(D._useFilter(f)).then(function () {
             clearTimeout(slow);
-            if (seq !== D._linkSeq || D._mounted || D._locKey() !== at) { return; }   // a newer click, or the user reached an issue on their own
+            if (seq !== D._linkSeq || D._mounted || D._here() !== at.where) { return; }   // a newer click, or the user moved on
             var first = D._issues[0];
             if (!first) { location.assign(href); return; }
             D._activeKey = first.key;   // _nav records the key as already seen, so the highlight is set here
@@ -25003,14 +25011,15 @@ JiTA.ocr = {
         p.then(null, function () { delete O._labelCache[key]; });   // don't cache a failure
         return p;
     },
-    // -> { code, why: 'label' | 'none' | 'picked', label }
+    // -> { code, why: 'label' | 'none' | 'picked' | 'failed', label }. 'failed': the labels could not be read (a 429, a lapsed
+    // session), read as English but never kept for the image (_enter, _run), so the next box asks again.
     _resolveLang: function () {
         var O = JiTA.ocr, key = O._issueKey();
         if (key && O._langOverride[key]) { return Promise.resolve({ code: O._langOverride[key], why: 'picked' }); }
-        return O._labels().then(null, function () { return []; }).then(function (labels) {
+        return O._labels().then(function (labels) {
             var L = O._langFromLabels(labels);
             return L ? { code: L.code, why: 'label', label: L.label } : { code: 'eng', why: 'none' };
-        });
+        }, function () { return { code: 'eng', why: 'failed' }; });
     },
 
     // ---- engine (Tesseract.js) ------------------------------------------------------------------------------
@@ -25032,8 +25041,10 @@ JiTA.ocr = {
     _langList: function (code) { return code === 'eng' ? ['eng'] : [code, 'eng']; },
     // One worker for the page, re-initialised when the language changes. Only ever called from inside the
     // _enqueue chain, so two initialisations can never race.
+    // A start _engineTimed gave up on bumps _engineGen: the worker it makes later is closed, never installed over a newer one.
+    _engineGen: 0,
     _engine: function (code) {
-        var O = JiTA.ocr, langs = O._langList(code), key = langs.join('+');
+        var O = JiTA.ocr, langs = O._langList(code), key = langs.join('+'), gen = O._engineGen;
         clearTimeout(O._idleT);
         if (O._worker && O._workerKey === key) { return Promise.resolve(O._worker); }
         return O._lib().then(function (T) {
@@ -25045,8 +25056,12 @@ JiTA.ocr = {
             var opts = $.extend({ logger: function (m) { O._engineBeat = Date.now(); if (O._progress) { try { O._progress(m); } catch (e) { /* ignore */ } } } }, O._workerOpts());
             return T.createWorker(langs, 1, opts);   // 1 = OEM.LSTM_ONLY
         }).then(function (w) {
+            if (gen !== O._engineGen) { try { w.terminate(); } catch (e) { /* ignore */ } throw new Error('the text reader start was given up'); }
             O._worker = w;
-            return w.setParameters({ tessedit_pageseg_mode: '6' }).then(function () { O._workerKey = key; return w; });   // 6 = one uniform block
+            return w.setParameters({ tessedit_pageseg_mode: '6' }).then(function () {   // 6 = one uniform block
+                if (gen !== O._engineGen) { throw new Error('the text reader start was given up'); }   // closed by _resetEngine since
+                O._workerKey = key; return w;
+            });
         });
     },
     // _engine, given up once it has gone ENGINE_STALL_MS without a word. The engine and its language model download
@@ -25059,6 +25074,7 @@ JiTA.ocr = {
             var iv = setInterval(function () {
                 if (Date.now() - O._engineBeat < O.ENGINE_STALL_MS) { return; }
                 clearInterval(iv);
+                O._engineGen++;   // what this start still makes is closed, not kept (_engine)
                 reject(new Error('the text reader stopped responding while it was starting - try again'));
             }, 5000);
             O._engine(code).then(function (w) { clearInterval(iv); resolve(w); }, function (e) { clearInterval(iv); reject(e); });
@@ -25338,9 +25354,10 @@ JiTA.ocr = {
         var cur = O._tgt;
         O._resolveLang().then(function (lang) {
             if (O._tgt !== cur) { return; }
-            if (!O._lang) { O._lang = lang; }
+            if (!O._lang && lang.why !== 'failed') { O._lang = lang; }
+            var code = (O._lang || lang).code;
             O._enqueue(function () {
-                return O._engineTimed(O._lang.code).then(function () { O._armIdle(); }, function (e) { O._resetEngine(); throw e; });
+                return O._engineTimed(code).then(function () { O._armIdle(); }, function (e) { O._resetEngine(); throw e; });
             }).then(null, function () { /* surfaced on the real run */ });
         });
     },
@@ -25468,8 +25485,8 @@ JiTA.ocr = {
         O._status('Reading text…', 'busy');
         O._setText('', '');
         var langP = O._lang ? Promise.resolve(O._lang) : O._resolveLang().then(function (L) {
-            if (!O._lang) { O._lang = L; }   // picked from the dropdown meanwhile: that wins
-            return O._lang;
+            if (!O._lang && L.why !== 'failed') { O._lang = L; }   // picked from the dropdown meanwhile: that wins
+            return O._lang || L;
         });
         langP.then(function (lang) {
             if (runId !== O._runId) { return null; }
@@ -25606,7 +25623,8 @@ JiTA.ocr = {
         c.querySelector('.jo-lang').value = lang.code;
         c.querySelector('.jo-src').setAttribute('lang', O._langByCode(lang.code).bcp);
         c.querySelector('.jo-why').textContent = lang.why === 'label' ? 'from the "' + lang.label + '" label'
-            : lang.why === 'picked' ? 'picked by you' : 'no language label - English';
+            : lang.why === 'picked' ? 'picked by you' : lang.why === 'failed' ? 'its labels could not be read - English, or pick the language'
+            : 'no language label - English';
     },
     _status: function (msg, kind) {
         var c = JiTA.ocr._card;
