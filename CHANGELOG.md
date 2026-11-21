@@ -14,6 +14,13 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.12 (2026-11-20)
+
+### Fixed issues
+
+- Detail view: a filter clicked on an issue page that did not load (a deleted issue, or one you cannot see) opens the filter's first issue instead of doing nothing.
+- Detail view: switching straight back to the issue still on screen no longer loads that issue again 15 seconds later.
+
 ## 3.53.11 (2026-11-20)
 
 ### Fixed issues

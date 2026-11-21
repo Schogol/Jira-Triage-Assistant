@@ -345,6 +345,39 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     reset();
     domSel.CRUMB = { textContent: 'EBR-1' };
     D._nav('EBR-2');
+    D._nav('EBR-1');   // Down, then Up before EBR-2 showed: Jira still shows EBR-1, the issue switched from
+    advance(D.NAV_FALLBACK_MS);
+    eq([pushed, assigned, D._spaFails(), timers.length], [['/browse/EBR-2', '/browse/EBR-1'], [], 0, 0],
+        'back on the issue still on screen before the first switch showed: the switch worked, no page load, nothing counted');
+    reset();
+    domSel.CRUMB = { textContent: 'EBR-1' };
+    D._nav('EBR-2');
+    domSel.CRUMB = null;   // EBR-2 is loading
+    D._nav('EBR-3');
+    domSel.CRUMB = { textContent: 'EBR-2' };   // ...and shows, though the address asks for EBR-3 now
+    advance(D.NAV_FALLBACK_MS);
+    eq([assigned, D._spaFails()], [['/browse/EBR-3'], 1], 'an earlier switch that shows late is not this one: still on it at the deadline, a page load, counted');
+    reset();
+    domSel.CRUMB = { textContent: 'EBR-1' };
+    D._nav('EBR-2');
+    domSel.CRUMB = null;
+    D._nav('EBR-3');
+    domSel.CRUMB = { textContent: 'EBR-2' };
+    advance(3000);
+    domSel.CRUMB.textContent = 'EBR-3';
+    advance(1000);
+    eq([assigned, D._spaFails(), timers.length], [[], 0, 0], '...and once this one shows, the switch worked');
+    reset();
+    domSel.CRUMB = { textContent: 'EBR-1' };
+    D._nav('EBR-2');
+    domSel.CRUMB = null;
+    D._nav('EBR-3');
+    domSel.CRUMB = { textContent: 'EO-9' };
+    advance(D.NAV_FALLBACK_MS);
+    eq([assigned, D._spaFails()], [[], 0], '...a moved issue after a skeleton shows its new key: the switch worked');
+    reset();
+    domSel.CRUMB = { textContent: 'EBR-1' };
+    D._nav('EBR-2');
     location.pathname = '/browse/EBR-7';
     advance(D.NAV_FALLBACK_MS);
     eq(assigned, [], 'the user moved on before the deadline: nothing to rescue');
@@ -768,7 +801,8 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
 
     // resolving what was clicked
     let used = [];
-    const spyUse = () => { used = []; D._useFilter = (f) => { used.push(f); }; };
+    // With the view on screen, as a sidebar click is taken there: the spy loads no list, which off it would fall back to Jira's page.
+    const spyUse = () => { used = []; D._mounted = true; D._useFilter = (f) => { used.push(f); }; };
     const scriptGet = () => { const gets = []; D._get = (path) => new Promise((resolve, reject) => { gets.push({ path, resolve, reject }); }); return gets; };
 
     reset(); spyUse();
@@ -1116,6 +1150,27 @@ const issues = (keys) => keys.map((k) => ({ key: k, fields: { summary: 'S ' + k 
     jqlPosts()[0].resolve({ issues: issues(['EBR-1']) });
     await settle();
     eq([pushed, assigned], [[], []], 'someone who reached an issue on their own is left there');
+
+    // An issue page the view never mounted on: Jira's page for a deleted issue, or one this user cannot see.
+    offPage(true);
+    location.pathname = '/browse/BAD-1';
+    D._openLink({ id: '-1' }, '', HREF);
+    jqlPosts()[0].resolve({ issues: issues(['EBR-60']) });
+    await settle();
+    eq([pushed, assigned], [['/browse/EBR-60'], []], 'a click on an issue page the view never mounted on opens the filter\'s first issue');
+    offPage(true);
+    location.pathname = '/browse/BAD-1';
+    D._openLink({ id: '-1' }, '', HREF);
+    jqlPosts()[0].resolve({ issues: [] });
+    await settle();
+    eq([pushed, assigned], [[], [HREF]], '...an empty filter from there goes to the Jira search page');
+    offPage(true);
+    location.pathname = '/browse/BAD-1';
+    D._openLink({ id: '-1' }, '', HREF);
+    location.pathname = '/browse/EBR-9';
+    jqlPosts()[0].resolve({ issues: issues(['EBR-1']) });
+    await settle();
+    eq([pushed, assigned], [[], []], '...and someone who went to another issue meanwhile is left there');
 
     offPage(true);
     D._openLink({ id: '-1' }, '', HREF);
