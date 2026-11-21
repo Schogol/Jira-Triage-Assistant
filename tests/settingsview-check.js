@@ -108,6 +108,23 @@ x = shows(doc, 'user.ui', 'cameraShakeEnabled');
 ok('a checkbox stored as 1 against a default of 1 is not changed', !x.chg && x.text === 'On');
 ok('a checkbox stored as False against a default of true is changed (text shadow)', shows(doc, 'char.ui', 'global_font_shadow_enabled').chg);
 ok('a slider value that differs (brightness 1.25 against 1.0)', shows(doc, 'public.device', 'brightness').chg);
+const withVal = (s, key, v) => SP('public:\n  device:\n    ' + key + ': [134394223713362255, ' + v + ']\n');
+const ao = C('public.device', 'aoQuality'), aoTip = SV.defaultText(ao, SV.read(doc, ao));
+ok('a default by graphics card names each class EVE rates cards in, and a Mac\'s own', /rated high \(or not on its list\)/.test(aoTip) && /rated medium/.test(aoTip) && /rated low/.test(aoTip) &&
+    /On a Mac with a card rated high: /.test(aoTip) && !/macOS|high-end/.test(aoTip), aoTip);
+ok('...the Mac\'s default is one of them (AO 1 not changed), the common fallback no class uses is not (AO 2 changed)',
+    !SV.differs(ao, SV.read(withVal('public.device', 'aoQuality', 1), ao)) && SV.differs(ao, SV.read(withVal('public.device', 'aoQuality', 2), ao)));
+const dof = C('public.device', 'dofEnabled');
+ok('...and a checkbox\'s Mac default reads On / Off (Depth Of Field)', / Off\.$/.test(SV.defaultText(dof, SV.read(doc, dof))) && dof.dc.mac === false, SV.defaultText(dof, SV.read(doc, dof)));
+x = shows(doc, 'public.ui', 'clientFontSize');
+ok('a default by client language: Large is the default on a Chinese, Japanese or Korean client, so not changed', x.text === 'Large' && !x.chg, JSON.stringify(x.r));
+ok('...said in its hover', SV.defaultText(x.c, x.r) === 'Default: Medium (Large on a Chinese, Japanese or Korean client).', SV.defaultText(x.c, x.r));
+ok('...and Small differs from both', SV.differs(x.c, SV.read(SP('public:\n  ui:\n    clientFontSize: [134394223836868352, 1]\n'), x.c)));
+x = C('user.ui', 'chat_font_size_default');
+ok('the chat font\'s default for a client font of Huge, which this build moves to Large: 14', SV.read(SP('public:\n  ui:\n    clientFontSize: [134394223836868352, 5]\n'), x).d === 14, JSON.stringify(SV.read(SP('public:\n  ui:\n    clientFontSize: [134394223836868352, 5]\n'), x)));
+const LS = String.fromCharCode(0x2028), PS = String.fromCharCode(0x2029);
+ok('the escapes for a line and a paragraph separator read as those characters', SP('a: "x\\Ly\\Pz"\n').a === 'x' + LS + 'y' + PS + 'z', JSON.stringify(SP('a: "x\\Ly\\Pz"\n').a));
+ok('...though the script holds neither character itself (editors take them for line breaks)', src.indexOf(LS) < 0 && src.indexOf(PS) < 0);
 ok('a float with a rounding tail is the same value', SV.same(0.30000000000000004, 0.3) && !SV.same(0.31, 0.3) && SV.same(true, 1) && SV.same(false, 0) && SV.same(null, undefined));
 ok('the colour theme shows the file\'s preset (Caldari), changed from Photon', shows(doc, 'char.windows', 'wndColorThemeID').chg);
 ok('a value no option holds shows the game\'s "nothing selected" text', SV.show(C('public.device', 'reflectionQuality'), 0) === 'Disabled');
@@ -180,6 +197,10 @@ ok('...every rule reads a setting some control shows (so its default is known)',
 ok('...every command row: name, label, sub-tab, keys', T.shortcuts.cmds.every((r) => typeof r[0] === 'string' && typeof r[1] === 'string' && r[1] && typeof r[2] === 'string' && (r[3] === null || Array.isArray(r[3]))));
 ok('...the key names for the modifiers and the mouse', ['17', '18', '16', '4', '5', '6'].every((k) => T.shortcuts.vk[k]) && T.shortcuts.vk['17'] === 'CTRL');
 ok('...no em or en dash in it', !/[\u2013\u2014]/.test(TABLE_TEXT));
+const dcs = ctrls.filter((c) => c.dc);
+ok('...every default by graphics card a value for each class, and no other (no notes, no fallback no class uses)', dcs.length >= 8 && dcs.every((c) =>
+    ['high', 'medium', 'low'].every((k) => k in c.dc) && Object.keys(c.dc).every((k) => ['high', 'medium', 'low', 'mac'].indexOf(k) >= 0 && typeof c.dc[k] !== 'string')),
+    dcs.filter((c) => !['high', 'medium', 'low'].every((k) => k in c.dc) || Object.keys(c.dc).some((k) => typeof c.dc[k] === 'string' || ['high', 'medium', 'low', 'mac'].indexOf(k) < 0)).map((c) => c.key + ' ' + JSON.stringify(c.dc)).join('; '));
 
 // ---- the script around it ----
 const hv = (/^\/\/ @version\s+(\S+)\s*$/m.exec(src) || [])[1];

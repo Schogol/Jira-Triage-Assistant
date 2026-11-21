@@ -3227,7 +3227,7 @@ JiTA.settingsview = {
             }
         }
         var ESC = { '0': '\0', 'a': '\x07', 'b': '\b', 't': '\t', '\t': '\t', 'n': '\n', 'v': '\x0b', 'f': '\f', 'r': '\r', 'e': '\x1b',
-            ' ': ' ', '"': '"', '/': '/', '\\': '\\', 'N': '\x85', '_': '\xa0', 'L': ' ', 'P': ' ' };
+            ' ': ' ', '"': '"', '/': '/', '\\': '\\', 'N': '\x85', '_': '\xa0', 'L': String.fromCharCode(0x2028), 'P': String.fromCharCode(0x2029) };   // codes, not the characters: editors read those as line breaks
         function dbl() {
             var out = '', c, len, code;
             p++;
@@ -3501,13 +3501,15 @@ JiTA.settingsview = {
         return String(a) === String(b);
     },
     // Whether a control's value differs from its default. Only a value the file holds; never one whose default is not
-    // known. A graphics setting whose default depends on the graphics card counts as changed only when it is none of them.
+    // known. A setting with more than one default counts as changed only when it is none of them: a graphics setting whose
+    // default depends on the graphics card (dc: one per class EVE rates cards in, and a Mac's), or one whose default depends
+    // on the client's language (alt: [value, where it is the default]).
     differs: function (c, r) {
         var SV = JiTA.settingsview, ds;
         if (!r.set) { return false; }
         if (c.dc) { ds = Object.keys(c.dc).map(function (k) { return c.dc[k]; }).concat([c.d]); }
         else if (r.d === undefined) { return false; }
-        else { ds = [r.d]; }
+        else { ds = [r.d].concat((c.alt || []).map(function (a) { return a[0]; })); }
         if (c.k === 'check') { return ds.every(function (d) { return !!SV.truthy(d) !== !!SV.truthy(r.v); }); }
         return ds.every(function (d) { return !SV.same(r.v, d); });
     },
@@ -3541,14 +3543,17 @@ JiTA.settingsview = {
         return SV.valueText(v);
     },
     // What a control's hover says about its default.
+    // EVE rates graphics cards high, medium or low from a list of their models; a card not on the list counts as high.
     defaultText: function (c, r) {
         var SV = JiTA.settingsview;
         if (c.dc) {
-            var by = [['high', 'a high-end'], ['medium', 'a mid-range'], ['low', 'a low-end']].filter(function (x) { return x[0] in c.dc; })
-                .map(function (x) { return SV.show(c, c.dc[x[0]]) + ' on ' + x[1]; });
-            return 'Default depends on the graphics card: ' + by.join(', ') + ' graphics card.';
+            var by = [['high', 'a card rated high (or not on its list)'], ['medium', 'one rated medium'], ['low', 'one rated low']].filter(function (x) { return x[0] in c.dc; })
+                .map(function (x) { return SV.show(c, c.dc[x[0]]) + ' for ' + x[1]; });
+            return 'Default depends on how EVE rates the graphics card: ' + by.join(', ') + '.' +
+                ('mac' in c.dc ? ' On a Mac with a card rated high: ' + SV.show(c, c.dc.mac) + '.' : '');
         }
-        return r.d === undefined ? 'Default not known.' : 'Default: ' + SV.show(c, r.d) + '.';
+        if (r.d === undefined) { return 'Default not known.'; }
+        return 'Default: ' + SV.show(c, r.d) + (c.alt || []).map(function (a) { return ' (' + SV.show(c, a[0]) + ' ' + a[1] + ')'; }).join('') + '.';
     },
     // Any value as short text (Everything else, and what has no label): lists and maps in brackets.
     valueText: function (v, depth) {
@@ -3679,7 +3684,6 @@ JiTA.settingsview = {
         }
         return '<div id="jita-setv" class="jsv">\n<style>' + SV.CSS + '</style>\n' +
             '<div class="jsv-top"><span class="jsv-title">' + H(T ? T.title : 'Settings') + '</span>' +
-            '<span class="jsv-sub">as the client had them when the report was sent</span>' +
             (err ? '' : '<label class="jsv-onlylbl" title="Show only the settings that differ from the game\'s default"><input type="checkbox" class="jsv-only"> Only changed from default (' + total + ')</label>' +
                 '<input type="search" class="jsv-q" placeholder="Search settings">') +
             '<button type="button" class="jsv-btn jsv-rawbtn">Show raw</button><button type="button" class="jsv-btn jsv-copy" title="Copy settings.yaml as it is">Copy</button>' +
@@ -3875,7 +3879,6 @@ JiTA.settingsview = {
 #jita-setv * { box-sizing: border-box; font-family: inherit; }
 #jita-setv .jsv-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid #1f2529; background: #0f1215; }
 #jita-setv .jsv-title { font-size: 17px; color: #e6e6e6; letter-spacing: 0.3px; }
-#jita-setv .jsv-sub { color: #7f8a90; }
 #jita-setv .jsv-onlylbl { margin-left: auto; color: #c8ced2; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
 #jita-setv .jsv-q { background: #15191c; border: 1px solid #2a3136; color: #e6e6e6; padding: 4px 8px; width: 200px; border-radius: 2px; }
 #jita-setv .jsv-btn { background: #15191c; border: 1px solid #2a3136; color: #c8ced2; padding: 4px 12px; cursor: pointer; border-radius: 2px; }
