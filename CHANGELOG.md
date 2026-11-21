@@ -14,6 +14,16 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.53.21 (2026-11-21)
+
+### Fixed issues
+
+- Similar defects: a bug report whose log scan failed for a moment is matched once the scan goes through, instead of going unmatched until the next sync.
+- Similar defects: a bug report with a log too big to read in the background still has the defects its logs hold raised.
+- Known defects in attached log: a log that did not download is read again on the next look, not taken for an empty one, and the section no longer appears over the trending, similar reports or reporter lists.
+- A bug report whose logs could not be read again keeps its known exceptions until a read goes through.
+- Background log reading: one report whose log never downloads no longer makes every pass read all open reports again, and a pass cut short by the network no longer marks the newest crash as common.
+
 ## 3.53.20 (2026-11-21)
 
 ### Fixed issues

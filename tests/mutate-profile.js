@@ -170,8 +170,8 @@ const muts = [
     [H, 'reads of one report side by side', '        if (!before) { p = P._readNow(issue, rec, zip); } else {', '        if (true) { p = P._readNow(issue, rec, zip); } else {'],
     [H, 'the read under way is never noted', '        P._readQ[key] = p;\n', ''],
     [H, 'a read after another starts from what it was given', '                if (!s) { return P._readNow(issue, rec, zip); }\n', '                return P._readNow(issue, rec, zip);\n'],
-    [H, 'a stored reading for other logs is taken as it is', '                if (s.logs && s.logSig != null && s.logSig !== P._logSig(att)) { s = P._dropLogs(JSON.parse(JSON.stringify(s))); }', '                if (false) { s = P._dropLogs(JSON.parse(JSON.stringify(s))); }'],
-    [H, 'a read with nothing left to do reads and stores again', '                if (s.logs && P._logsCurrent(s, att, zip) && (!zip || s.zip)) { return s; }', '                if (false) { return s; }'],
+    [H, 'a stored reading for other logs is taken as it is', '                if (P._current(s, att, zip) && (!zip || s.zip)) { return s; }', '                if (s.logs && P._logsCurrent(s, att, zip) && (!zip || s.zip)) { return s; }'],
+    [H, 'a read with nothing left to do reads and stores again', '                if (P._current(s, att, zip) && (!zip || s.zip)) { return s; }', '                if (false) { return s; }'],
     [H, 'a zip wanted counts as read', '&& (!zip || s.zip)) { return s; }', ') { return s; }'],
     [H, 'a read that threw stops the next', "            p = before.then(null, function () { /* it failed: this one reads for itself */ }).then(function () {", '            p = before.then(function () {'],
     [H, 'a finished read stays noted', 'var done = function () { if (P._readQ[key] === p) { delete P._readQ[key]; } };', 'var done = function () {};'],
@@ -183,7 +183,10 @@ const muts = [
     [H, 'every build counts as the first', 'var nth = P._buildN[key] = (P._buildN[key] || 0) + 1;', 'var nth = P._buildN[key] = 1;'],
     // profile-logic-4: a reading of other logs than the report has now
     [H, 'the profile never reads a reading of other logs again', ' || JiTA.profile._otherLogs(rec, att); },', '; },'],
-    [H, 'a reading of other logs is kept as it is', '        if (rec.logs && (!P._logsCurrent(rec, att, zip) || P._otherLogs(rec, att))) {', '        if (rec.logs && !P._logsCurrent(rec, att, zip)) {'],
+    [H, 'a reading of other logs is kept as it is', '        if (rec.logs && !P._current(rec, att, zip)) {', '        if (rec.logs && !P._logsCurrent(rec, att, zip)) {'],
+    [H, 'a re-read that fails stores the reading stripped', "            if (kept && !rec.logs) { P.LOG_PART.forEach(", "            if (false) { P.LOG_PART.forEach("],
+    [H, 'a re-read that fails keeps only part of what it had', "LOG_PART: ['logs', 'hasLog', 'exc', 'build', 'version', 'lv', 'logSig', 'skippedLogs', 'excCut'],", "LOG_PART: ['logs', 'hasLog', 'build', 'version', 'lv', 'logSig', 'skippedLogs', 'excCut'],"],
+    [H, 'a re-read that fails passes for a current reading', "LOG_PART: ['logs', 'hasLog', 'exc', 'build', 'version', 'lv', 'logSig', 'skippedLogs', 'excCut'],", "LOG_PART: ['logs', 'hasLog', 'exc', 'build', 'version', 'skippedLogs', 'excCut'],"],
     [H, 'a reading that names no logs counts as of other logs', 'return !!rec && !!rec.logs && rec.logSig != null && rec.logSig !== JiTA.profile._logSig(att);', 'return !!rec && !!rec.logs && rec.logSig !== JiTA.profile._logSig(att);'],
     // profile-robust-1: a reading cut short
     [H, 'a reading cut short by the cap is not marked', '} else { into.excCut = true; }', '}'],

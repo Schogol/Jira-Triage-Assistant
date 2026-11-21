@@ -153,14 +153,16 @@ const log0 = console.log;
     // ================= attachments and the log scan =================
     Object.assign(JiTA.ui, ui(['_fetchText', '_logScanCache', '_logExc', 'scanIssueLog', '_scanIssueLog']));
     global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onload({ status: 403, responseText: '<html>Forbidden</html>' }));
-    ok('an attachment fetch that 403s is no text, not the error page', (await JiTA.ui._fetchText('https://media/x')) === '');
+    ok('an attachment fetch that 403s is no text, not the error page: null, told apart from an empty log', (await JiTA.ui._fetchText('https://media/x')) === null);
     let asked = null;
     global.GM_xmlhttpRequest = (o) => { asked = o; setImmediate(() => { if (typeof o.ontimeout === 'function') { o.ontimeout(); } }); };
     const hung = await Promise.race([JiTA.ui._fetchText('https://media/slow'), new Promise((r) => setTimeout(() => r('hung'), 500))]);
-    ok('...one that hangs gives up after a minute, as no text', asked && asked.timeout === 60000 && hung === '', (asked && asked.timeout) + ' / ' + JSON.stringify(hung));
+    ok('...one that hangs gives up after a minute, as no text', asked && asked.timeout === 60000 && hung === null, (asked && asked.timeout) + ' / ' + JSON.stringify(hung));
     global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onerror());
     const failed = await Promise.race([JiTA.ui._fetchText('https://media/x'), new Promise((r) => setTimeout(() => r('hung'), 500))]);
-    ok('...and one that fails is no text either', failed === '', JSON.stringify(failed));
+    ok('...and one that fails is no text either', failed === null, JSON.stringify(failed));
+    global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onload({ status: 200, responseText: '' }));
+    ok('...while an empty log is an empty text', (await JiTA.ui._fetchText('https://media/empty')) === '');
     global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onload({ status: 200, responseText: 'the log' }));
     ok('...while a good one is its text (control)', (await JiTA.ui._fetchText('https://media/x')) === 'the log');
     let matched = 0;
@@ -181,6 +183,25 @@ const log0 = console.log;
     await JiTA.ui.scanIssueLog('EBR-8');
     console.log = log0;
     ok('a scan whose attachment list failed is no hits, and the next look tries again', Object.keys(f1).length === 0 && ajaxCalls.length === 2, ajaxCalls.length + ' reads');
+    // a log that did not download: drawn as far as it goes, kept for neither the session nor the boost (review 2026-11-20 boost-logic-4)
+    console.log = () => {};
+    ajaxCalls = []; matched = 0;
+    const twoLogs = { ok: true, data: { fields: { attachment: [{ filename: 'logs.txt', content: 'https://media/a' }, { filename: 'big_log.txt', content: 'https://media/b' }] } } };
+    ajaxScript = [twoLogs, twoLogs];
+    global.GM_xmlhttpRequest = (o) => setImmediate(() => (/\/b$/.test(o.url) ? o.ontimeout() : o.onload({ status: 200, responseText: 'log text' })));
+    delete JiTA.ui._logExc['EBR-9'];
+    const part1 = await JiTA.ui.scanIssueLog('EBR-9');
+    const kept9 = Object.prototype.hasOwnProperty.call(JiTA.ui._logExc, 'EBR-9');
+    await JiTA.ui.scanIssueLog('EBR-9');
+    console.log = log0;
+    ok('a scan with a log that did not download draws what it found, keeps it for nothing, and the next look scans again', !!part1['EDR-7'] && !kept9 && ajaxCalls.length === 2,
+        ajaxCalls.length + ' reads, kept ' + kept9);
+    global.GM_xmlhttpRequest = (o) => setImmediate(() => o.onload({ status: 200, responseText: 'log text' }));
+    ajaxScript = [twoLogs]; delete JiTA.ui._logScanCache['EBR-9'];
+    console.log = () => {};
+    await JiTA.ui.scanIssueLog('EBR-9');
+    console.log = log0;
+    ok('...while one that read every log is kept, for the boost too', Object.prototype.hasOwnProperty.call(JiTA.ui._logExc, 'EBR-9') && !!JiTA.ui._logScanCache['EBR-9']);
 
     // ================= the Original Reporter ID =================
     Object.assign(JiTA.ui, ui(['_getReporterId']));

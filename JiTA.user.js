@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.20
+// @version     3.53.21
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.20
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.21
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -9072,23 +9072,23 @@ JiTA.ui = {
     // no hits (the section stays hidden), never an error.
     // Fetch an attachment's text. Prefer GM_xmlhttpRequest, which bypasses the CORS block a same-origin XHR
     // hits when Jira's attachment-content endpoint 30x-redirects to its media host. Falls back to $.ajax if
-    // GM_xmlhttpRequest isn't granted. Always resolves to a string ('' on any failure) so a hung/blocked
-    // fetch can never stall the scan: a request gives up after a minute, and an error page (a 403) is no text,
-    // never matched as if it were a log.
+    // GM_xmlhttpRequest isn't granted. Always resolves, so a hung/blocked fetch can never stall the scan: a request gives up
+    // after a minute. A log read resolves its text ('' for an empty one); a failure (an error page such as a 403, the
+    // network, the minute running out) resolves null, never matched as if it were a log, and never taken for an empty one.
     _fetchText: function (url) {
         return new Promise(function (resolve) {
             if (typeof GM_xmlhttpRequest === 'function') {
                 GM_xmlhttpRequest({
                     method: 'GET', url: url, timeout: 60000,
-                    onload: function (r) { resolve((r.status >= 200 && r.status < 300) ? (r.responseText || '') : ''); },
-                    onerror: function () { resolve(''); },
-                    ontimeout: function () { resolve(''); }
+                    onload: function (r) { resolve((r.status >= 200 && r.status < 300) ? (r.responseText || '') : null); },
+                    onerror: function () { resolve(null); },
+                    ontimeout: function () { resolve(null); }
                 });
                 return;
             }
             $.ajax({ url: url, dataType: 'text' })
                 .done(function (t) { resolve(t || ''); })
-                .fail(function () { resolve(''); });
+                .fail(function () { resolve(null); });
         });
     },
 
@@ -9101,7 +9101,8 @@ JiTA.ui = {
         var cache = JiTA.ui._logScanCache;
         if (cache[key]) { return cache[key]; }
         var p = cache[key] = JiTA.ui._scanIssueLog(key);
-        p.then(null, function () { if (cache[key] === p) { delete cache[key]; } });
+        var drop = function () { if (cache[key] === p) { delete cache[key]; } };
+        p.then(function (m) { if (m && m._partial) { drop(); } }, drop);   // a scan that missed a log is made again next time
         return p.then(null, function () { return {}; });   // to the caller a failed scan is no hits, as before
     },
     _scanIssueLog: function (key) {
@@ -9116,7 +9117,7 @@ JiTA.ui = {
                     }
                     if (!logs.length) { JiTA.ui._logExc[key] = []; resolve({}); return; }
                     JiTA.log('[JiTA] log scan ' + key + ': ' + logs.length + ' log attachment(s)');
-                    var merged = {}, pending = logs.length, exc = [], seen = {};
+                    var merged = {}, pending = logs.length, exc = [], seen = {}, failed = 0;
                     // The report's own exceptions, each once, fingerprinted as the profile does: the ranking boosts the
                     // defects that hold one (JiTA.repexc).
                     function keepExc(txt) {
@@ -9142,17 +9143,20 @@ JiTA.ui = {
                             }
                         });
                         if (--pending === 0) {
-                            JiTA.log('[JiTA] log scan ' + key + ': ' + Object.keys(merged).length + ' known defect(s) matched');
-                            JiTA.ui._logExc[key] = exc;
+                            JiTA.log('[JiTA] log scan ' + key + ': ' + Object.keys(merged).length + ' known defect(s) matched' + (failed ? ', ' + failed + ' log(s) not read' : ''));
+                            // A log that did not download leaves the scan incomplete: what was found is drawn, but kept for
+                            // neither the session (scanIssueLog) nor the boost (_logExc), so the next look reads it again.
+                            if (failed) { Object.defineProperty(merged, '_partial', { value: true }); } else { JiTA.ui._logExc[key] = exc; }
                             resolve(merged);
                         }
                     }
                     logs.forEach(function (att) {
                         JiTA.ui._fetchText(att.content).then(function (txt) {
+                            if (txt === null) { failed++; mergeFound({}); return; }   // not read: the scan is not complete
                             if (!txt) { mergeFound({}); return; }
                             keepExc(txt);
                             JiTA.logsig.matchText(txt).then(mergeFound, function () { mergeFound({}); });
-                        }, function () { mergeFound({}); });
+                        }, function () { failed++; mergeFound({}); });
                     });
                 })
                 .fail(function (xhr) { reject(new Error('attachment list HTTP ' + (xhr && xhr.status))); });
@@ -9191,7 +9195,9 @@ JiTA.ui = {
         JiTA.db.countDefectsOnly().then(function (n) {
             if (!n) { $box.removeClass('has-hits').empty(); return; }   // no defects to match the log against yet -> make sure it's clear
             JiTA.ui.scanIssueLog(key).then(function (scanned) {
-                if (JiTA.ui.currentKey !== key) { return; }   // navigated to another issue meanwhile
+                // Navigated to another issue meanwhile, or switched the panel to another list (trending, similar reports, the
+                // reporter's), whose view has no such section: render() paints it on the default view only.
+                if (JiTA.ui.currentKey !== key || JiTA.ui.reporterMode || JiTA.ui.simReportsMode || JiTA.ui.trendMode) { return; }
                 var found = JiTA.ui._counting(scanned);
                 var keys = Object.keys(found || {});
                 keys = keys.filter(function (k) { return !JiTA.hidden.isHidden(k); });   // drop user-hidden defects from the list
@@ -13772,9 +13778,8 @@ JiTA.profile = {
                 return JiTA.db.getMeta(P.CACHE_PREFIX + key).then(P._usable, function () { return null; });
             }).then(function (s) {
                 if (!s) { return P._readNow(issue, rec, zip); }
-                if (s.logs && s.logSig != null && s.logSig !== P._logSig(att)) { s = P._dropLogs(JSON.parse(JSON.stringify(s))); }   // read for other logs
-                if (s.logs && P._logsCurrent(s, att, zip) && (!zip || s.zip)) { return s; }   // that one read everything this one wants
-                return P._readNow(issue, s, zip);
+                if (P._current(s, att, zip) && (!zip || s.zip)) { return s; }   // that one read everything this one wants
+                return P._readNow(issue, s, zip);   // which reads the logs again when they were read for other logs, keeping what they said
             });
         }
         P._readQ[key] = p;
@@ -13788,8 +13793,10 @@ JiTA.profile = {
         var hint = (JiTA.ocr._langFromLabels(f.labels || []) || {}).code;   // the client language, for Windows' own code page
         rec = rec ? JSON.parse(JSON.stringify(rec)) : { v: P.V, key: issue.key, logs: false, zip: false };
         // Logs read before the reader read them as it does now, or other logs than the report has now, are read again, and
-        // a log out of the zip with the zip.
-        if (rec.logs && (!P._logsCurrent(rec, att, zip) || P._otherLogs(rec, att))) {
+        // a log out of the zip with the zip. What they said is kept until the new reading is in (kept).
+        var kept = null;
+        if (rec.logs && !P._current(rec, att, zip)) {
+            kept = JSON.parse(JSON.stringify(rec));
             if (P._zipLog(rec, att)) { rec.zip = false; }
             P._dropLogs(rec);
         }
@@ -13853,6 +13860,10 @@ JiTA.profile = {
             });
         }
         return jobs.then(function () {
+            // The logs could not be read again (a download failed): what they said before stays, marked as read the old way
+            // (its lv, its logSig), so the next read tries again, and the report is still matched meanwhile. Stored stripped,
+            // it was matched by nothing until a re-read went through.
+            if (kept && !rec.logs) { P.LOG_PART.forEach(function (k) { if (Object.prototype.hasOwnProperty.call(kept, k)) { rec[k] = kept[k]; } else { delete rec[k]; } }); }
             rec.at = Date.now();
             // The ranking's copy of this report's exceptions is out of date once this is stored, here and in the other tabs (JiTA.repexc).
             var stored = function () { JiTA.repexc.readStored(issue.key); return rec; };
@@ -14035,6 +14046,10 @@ JiTA.profile = {
     // exception search reads it again (excfind._read).
     _needs: function (rec, zip, att) { return !rec || !rec.logs || (zip && !rec.zip) || !JiTA.profile._logsCurrent(rec, att, zip) || JiTA.profile._otherLogs(rec, att); },
     _otherLogs: function (rec, att) { return !!rec && !!rec.logs && rec.logSig != null && rec.logSig !== JiTA.profile._logSig(att); },
+    // Whether a reading holds the report's logs as they are now, read as the reader reads them now: nothing to read again.
+    _current: function (rec, att, zip) { return !!rec && !!rec.logs && JiTA.profile._logsCurrent(rec, att, zip) && !JiTA.profile._otherLogs(rec, att); },
+    // A reading's log part: what a re-read that fails leaves as it was (_readNow), so the report is still matched meanwhile.
+    LOG_PART: ['logs', 'hasLog', 'exc', 'build', 'version', 'lv', 'logSig', 'skippedLogs', 'excCut'],
     // Remember a defect's latest state, dropping the defect looked at longest ago once KEEP are remembered. Defect keys
     // are not array indices, so the object keeps them in the order they were (re)inserted.
     _keep: function (key, s) {
@@ -16219,19 +16234,19 @@ JiTA.excfind = {
     _read: function (item) {
         var P = JiTA.profile, att = item.fields.attachment;
         return Promise.resolve().then(function () { return JiTA.db.getMeta(P.CACHE_PREFIX + item.key); }).then(P._usable, function () { return null; }).then(function (rec) {
-            if (rec && rec.logs && (rec.logSig == null || rec.logSig === P._logSig(att)) && P._logsCurrent(rec, att, false)) { return { rec: rec, cached: true }; }
-            if (rec && rec.logs) { rec = JiTA.excfind._unread(rec); }   // a log was added or replaced since it was read, or the reader has changed
+            if (P._current(rec, att, false)) { return { rec: rec, cached: true }; }
+            // A log was added or replaced since it was read, or the reader has changed: _readFiles reads the logs again, and keeps
+            // what they said should that fail (so a stale reading is handed on all the same: _current tells it).
             return P._readFiles(item, rec, false).then(function (r) { return { rec: r, cached: false }; });
         });
     },
-    // A reading with its log part taken out, so _readFiles reads the logs again. What it has from the zip stays.
-    _unread: function (rec) { return JiTA.profile._dropLogs(JSON.parse(JSON.stringify(rec))); },
 
     _add: function (st, item, r) {
         var X = JiTA.excfind, rep = X._entry(item, r && r.rec, st.pool);
         st.read++;
         if (r && r.cached) { st.cached++; }
-        if (!(r && r.rec && r.rec.logs)) { st.failed++; }   // a log that did not download is read again next time
+        // A log that did not download is read again next time; a reading kept from before such a failure is still matched.
+        if (!JiTA.profile._current(r && r.rec, item.fields.attachment, false)) { st.failed++; }
         st.reports.push(rep);
         rep.m = X.match(rep, X._chosen(st));
         X._soon(st, rep.m.length > 0);
@@ -16605,6 +16620,7 @@ JiTA.repexc = {
                 rec = P._usable(rec);
                 if (!(rec && rec.logs && (rec.hasLog || (rec.exc && rec.exc.length)))) { c.empty = true; return null; }   // exceptions come from a log
                 R._keep(key, rec.exc);
+                c.skipped = !!rec.skippedLogs;   // a log it did not read: the bug report's own boost joins the scan (_reportSigs)
                 var sigs = (rec.exc || []).map(function (e) { return e.sig; });
                 if (!sigs.length) { c.empty = true; }
                 return sigs;
@@ -16615,13 +16631,25 @@ JiTA.repexc = {
 
     // A bug report's own exceptions: its cached reading, else what the panel's log scan read in its logs. The scan is
     // shared with "Known defects in attached log", so this downloads nothing the panel does not.
+    // A reading that skipped a log (too big, more than MAX_LOGS, or not there) is joined with the scan, which reads every
+    // log: on its own it hid what the scan found in the log it skipped. A scan that could not be made (the attachment list,
+    // a log download) rejects, so forReport keeps nothing and the next draw asks again; taken for no exceptions, the report
+    // went unboosted until the next defect sync.
     _reportSigs: function (key) {
-        return JiTA.repexc._reading(key).then(function (sigs) {
-            if (sigs) { return sigs; }
+        var R = JiTA.repexc;
+        return R._reading(key).then(function (sigs) {
+            var c = R._reads[key];
+            if (sigs && !(c && c.skipped)) { return sigs; }
             return JiTA.ui.scanIssueLog(key).then(function () {
-                var exc = JiTA.ui._logExc[key] || [];
-                JiTA.repexc._keep(key, exc);
-                return exc.map(function (e) { return e.sig; });
+                if (!Object.prototype.hasOwnProperty.call(JiTA.ui._logExc, key)) {
+                    if (sigs) { return sigs; }   // what the reading has, as before the scan was asked
+                    throw new Error('the log scan could not read ' + key);
+                }
+                var exc = (JiTA.ui._logExc[key] || []).slice(), had = {};
+                (sigs || []).forEach(function (s) { had[s] = true; });
+                if (sigs) { Object.keys(R._msgs[key] || {}).forEach(function (s) { exc.push({ sig: s, msg: R._msgs[key][s] }); }); }
+                R._keep(key, exc);
+                return (sigs || []).concat(exc.map(function (e) { return e.sig; }).filter(function (s) { if (had[s]) { return false; } had[s] = true; return true; }));
             });
         });
     },
@@ -16826,6 +16854,7 @@ JiTA.logread = {
     CONCURRENCY: 2,
     GAP_MS: 300,                 // between one lane's downloads
     START_MS: 45 * 1000,         // after a page load, before the first pass
+    FAIL_SHARE: 0.05,            // a pass that could not read more of the reports it listed than this leaves the common count as it was
     FIELDS: ['status', 'labels', 'attachment'],
     _running: null,
 
@@ -16892,8 +16921,10 @@ JiTA.logread = {
                     var item = queue[next];
                     queue[next++] = null;   // let the listed report go once it is read
                     return JiTA.excfind._read(item).then(function (r) {
-                        if (!(r && r.rec && r.rec.logs)) { failed++; }   // a log that did not download
-                        if (tally && r && r.rec && r.rec.logs && r.rec.hasLog) { N.count(tally, r.rec.exc); }
+                        // A log that did not download (the reading then holds what was read before, if anything: not counted)
+                        var ok = JiTA.profile._current(r && r.rec, item.fields.attachment, false);
+                        if (!ok) { failed++; }
+                        if (tally && ok && r.rec.hasLog) { N.count(tally, r.rec.exc); }
                         // Only a download counts and is spaced out: reading a report with no log file attached fetches nothing.
                         if (r && !r.cached && JiTA.profile._logFiles(item.fields.attachment).length) { read++; return JiTA.util.delay(LR.GAP_MS); }
                     }, function () { failed++; }).then(lane);
@@ -16904,11 +16935,15 @@ JiTA.logread = {
             var lanes = [listing];
             for (var i = 0; i < LR.CONCURRENCY; i++) { lanes.push(lane()); }
             return Promise.all(lanes).then(function () {
-                // Only a pass that listed and read everything moves the mark on: what one missed is listed again next time.
-                var whole = listOk && !failed && LR.on() && next >= queue.length;
-                // One that listed every report leaves the count of the common ones, though some could not be read: one that never
-                // can would otherwise keep the count from ever being renewed.
-                var counted = (tally && listOk && LR.on() && next >= queue.length) ? N.table(tally, now) : null;
+                // A pass that listed every report it was to read, and went through them, moves the mark on. A report it could not
+                // read is read again by the next pass that lists them all (the count of the common ones, at least every
+                // JiTA.excnoise.FREQ_MS), or once it changes: one whose log never downloads kept the mark from ever moving, and
+                // every pass listed every report again.
+                var whole = listOk && LR.on() && next >= queue.length;
+                // One that listed every report leaves the count of the common ones, though a few could not be read: one that never
+                // can would otherwise keep the count from ever being renewed. Not when more than FAIL_SHARE of them could not be
+                // read (the network gone, the laptop asleep): a count of the few read made the newest crash look common.
+                var counted = (tally && listOk && LR.on() && next >= queue.length && failed <= LR.FAIL_SHARE * queue.length) ? N.table(tally, now) : null;
                 if (counted) { JiTA.db.setMeta(N.FREQ_KEY, counted).then(function () { N._setFreq(counted); }, none); }
                 return (whole ? JiTA.db.setMeta(LR.AT_KEY, { at: began, lv: JiTA.profile.LOG_V }).then(null, function () { /* listed again next time */ }) : Promise.resolve()).then(function () {
                     if (read) {
