@@ -53,9 +53,13 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     calls = []; script = [resp(503), resp(503), resp(503), resp(503)];
     r = await run(W.search('x', ['key']));
     ok('...and an outage fails once the retries are spent', /HTTP 503/.test(r.err || '') && calls.length === 4, calls.length + ' calls');
+    calls = []; script = [resp(400, {})];
+    const st400 = await W.search('bad jql', ['key']).then(() => null, (e) => e.status);
+    ok('...each failure carrying its HTTP status', st400 === 400, String(st400));
 
     // ================= old-domain accounts =================
     const exists = { 'john@old': 'A-JOHN', 'jsmith@old': null, 'johnsmith@old': null, 'jdoe@old': null, 'johndoe@old': null };
+    let failing = {};   // handle -> the HTTP status its lookup fails with, past the retries
     const resolve = async (delays, members) => {
         let queries = [], jqls = [];
         const R = new Function('crc', 'crSearch', 'crTick',
@@ -68,7 +72,8 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
                 const hops = delays[h] || 0;
                 return new Promise((res, rej) => {
                     let n = 0;
-                    (function hop() { if (n++ < hops) { setImmediate(hop); return; } exists[h] ? res({ issues: [{ fields: { reporter: { accountId: exists[h] } } }] }) : (h in exists ? rej(new Error('400')) : res({ issues: [] })); })();
+                    (function hop() { if (n++ < hops) { setImmediate(hop); return; } failing[h] ? rej(Object.assign(new Error('HTTP ' + failing[h]), { status: failing[h] })) :
+                        exists[h] ? res({ issues: [{ fields: { reporter: { accountId: exists[h] } } }] }) : (h in exists ? rej(Object.assign(new Error('HTTP 400'), { status: 400 })) : res({ issues: [] })); })();
                 });
             }, () => {});
         const out = await R(members || [{ displayName: 'John Smith', emailAddress: 'jsmith@new' }, { displayName: 'John Doe', emailAddress: 'jdoe@new' }]);
@@ -78,6 +83,12 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     const b = await resolve({ 'johnsmith@old': 5 });
     ok('a handle two members share goes to one of them, the first in name order', Object.keys(a.out.oldIds).join() === 'A-JOHN' && a.out.oldNames['A-JOHN'] === 'John Doe', JSON.stringify(a.out.oldNames));
     ok('...the same one, whichever lookups finish first', b.out.oldNames['A-JOHN'] === a.out.oldNames['A-JOHN'], a.out.oldNames['A-JOHN'] + ' vs ' + b.out.oldNames['A-JOHN']);
+    // A lookup that fails for a while (429s past the retries, a 5xx): no answer about the account, so the count fails.
+    failing = { 'jsmith@old': 503 };
+    const failed = await resolve({}).then((x) => ({ out: x.out }), (e) => ({ err: e }));
+    ok('a handle whose lookup fails, not with "no such user", fails the count instead of moving on to the next handle', !!failed.err && failed.err.status === 503,
+        failed.err ? failed.err.message : JSON.stringify(failed.out && failed.out.oldNames));
+    failing = {};
     ok('...and it is asked about once', a.queries.filter((q) => q === 'john@old').length === 1, a.queries.join());
     exists['johnxavier@old'] = 'A-JX'; exists['jw@old'] = null; exists['johnw@old'] = null;
     const w = await resolve({ 'jw@old': 4, 'johnw@old': 4 }, [{ displayName: 'John Xavier', emailAddress: 'john@new' }, { displayName: 'John W', emailAddress: 'jw@new' }]);
@@ -271,6 +282,25 @@ const flush = async () => { for (let i = 0; i < 12; i++) { await new Promise((r)
     C.sched.tick();
     await flush();
     ok('...and only once', refreshed.length === 1, refreshed.join());
+    // Another count began while the cache was read (the Members tab's Count, a Refresh): refresh() answers null, counting nothing.
+    store = {}; store[C.sched.LAST_FULL_KEY] = Date.now(); store[C.sched.LAST_SELF_KEY] = Date.now(); refreshed = [];
+    let readD = null;
+    C.getCached = (ym) => (ym === '2026-09' ? new Promise((res) => { readD = res; }) : Promise.resolve(null));
+    C.sched.tick();
+    await flush();
+    C.running = true;   // started meanwhile
+    readD({ computedAt: '2026-09-29T12:00:00.000Z' });
+    await flush();
+    ok('a recount another count got ahead of is not marked done', refreshed.length === 0 && store[C.sched.PREV_DONE_KEY] === undefined, refreshed.join() + ' / ' + store[C.sched.PREV_DONE_KEY]);
+    C.running = false;
+    const refresh0 = C.refresh;
+    C.refresh = (y, m) => { refreshed.push(y + '-' + m); return Promise.resolve(null); };   // refused: one was already running
+    C.getCached = (ym) => Promise.resolve(ym === '2026-09' ? { computedAt: '2026-09-29T12:00:00.000Z' } : null);
+    store[C.sched.FULL_LEASE_KEY] = null;
+    C.sched.tick();
+    await flush();
+    ok('...nor one refresh() refused', refreshed.join() === '2026-9' && store[C.sched.PREV_DONE_KEY] === undefined, refreshed.join() + ' / ' + store[C.sched.PREV_DONE_KEY]);
+    C.refresh = refresh0;
     store = {}; store[C.sched.LAST_FULL_KEY] = Date.now(); store[C.sched.LAST_SELF_KEY] = Date.now(); refreshed = [];
     C.getCached = () => Promise.resolve({ computedAt: '2026-10-01T03:00:00.000Z' });
     C.sched.tick();

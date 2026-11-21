@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.53.28
+// @version     3.53.29
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,7 +11,7 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.28
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.53.29
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -11413,10 +11413,13 @@ JiTA.credits = {
                 var hbp = setInterval(function () { gmSet(S.FULL_LEASE_KEY, { tabId: JiTA.sched.tabId, ts: Date.now() }); }, S.HEARTBEAT_MS);
                 var end = function () { clearInterval(hbp); S._release(S.FULL_LEASE_KEY); };
                 JiTA.credits.getCached(prev.ym).then(function (res) {
-                    if (!res || JiTA.credits.countsAll(res, prev.y, prev.m)) { return; }   // never computed, or already after its end
+                    if (!res || JiTA.credits.countsAll(res, prev.y, prev.m)) { return true; }   // never computed, or already after its end
+                    // Another count began while the cache was read (the Members tab's Count, a Refresh): refresh() would answer
+                    // null without counting, and the month was marked final all the same. It is asked again next tick.
+                    if (JiTA.credits.running) { return false; }
                     JiTA.credits._quiet = true;
-                    return JiTA.credits.refresh(prev.y, prev.m);
-                }).then(function () { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); end(); },
+                    return JiTA.credits.refresh(prev.y, prev.m).then(function (r) { return r != null; });
+                }).then(function (done) { if (done) { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); } end(); },
                     function () { gmSet(S.FAIL_PREV_KEY, Date.now()); end(); });
                 return;   // one job per tick
             }
@@ -12104,7 +12107,7 @@ function jitaWorkerBody(cfg) {
                         again(resp.status === 429 ? (isNaN(ra) ? 5 : ra) * 1000 : (cfg.MAX_RETRIES - retries + 1) * 1000);
                         return;
                     }
-                    if (!resp.ok) { reject(new Error(label + ' -> HTTP ' + resp.status)); return; }
+                    if (!resp.ok) { var err = new Error(label + ' -> HTTP ' + resp.status); err.status = resp.status; reject(err); return; }
                     resp.json().then(resolve, function () { reject(new Error(label + ' -> non-JSON (HTTP ' + resp.status + ', ' + (resp.headers.get('content-type') || '?') + '); likely an unauthenticated response')); });
                 }, function (e) {
                     if (retries > 0) { again((cfg.MAX_RETRIES - retries + 1) * 1000); return; }
@@ -12217,7 +12220,10 @@ function jitaWorkerBody(cfg) {
             var issues = d.issues || [];
             if (!issues.length) { return ''; }
             return ((issues[0].fields || {}).reporter || {}).accountId || '';
-        }, function () { return null; });
+        // null only when Jira knows no such reporter (400). Anything else (429s past the retries, a 5xx, the connection) fails
+        // the count, which is made again: taken for "no such account", it went on to the member's next handle, perhaps
+        // someone else's old account, and a month counted that way was kept for every Lead (the Members tab).
+        }, function (e) { if (e && e.status === 400) { return null; } throw e; });
     }
     // Each member's old-domain account: the first of their candidate handles that exists and no one before them in
     // name order has. Two Johns both resolved john@<old domain>, and it went to whichever lookup finished last, so its

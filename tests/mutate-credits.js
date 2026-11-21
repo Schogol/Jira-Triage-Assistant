@@ -47,8 +47,8 @@ const muts = [
     [H, 'a redraw says "Loading…" first', '            if (!quiet) { $scroll.empty()', '            if (true) { $scroll.empty()'],
     [H, 'a redraw jumps to the top', '                $scroll.scrollTop(top);\n', ''],
     [H, 'last month is never finished', "            if (gmGet(S.PREV_DONE_KEY, '') !== prev.ym && ", '            if (false && '],
-    [H, 'last month is recomputed every poll', '                }).then(function () { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); end(); },', '                }).then(function () { gmSet(S.FAIL_PREV_KEY, 0); end(); },'],
-    [H, 'a month already final is recomputed', '                    if (!res || JiTA.credits.countsAll(res, prev.y, prev.m)) { return; }', '                    if (!res) { return; }'],
+    [H, "last month is recomputed every poll", "                }).then(function (done) { if (done) { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); } end(); },", "                }).then(function (done) { if (done) { gmSet(S.FAIL_PREV_KEY, 0); } end(); },"],
+    [H, "a month already final is recomputed", "                    if (!res || JiTA.credits.countsAll(res, prev.y, prev.m)) { return true; }", "                    if (!res) { return true; }"],
     [H, 'Refresh flips the quiet flag over a running crawl', "            if (C.running) { JiTA.ui.toast('A credit computation is already running…'); return; }\n", ''],
     [H, 'a manual Refresh leaves the scheduler to repeat it', '                gmSet(C.sched.LAST_FULL_KEY, Date.now()); gmSet(C.sched.FAIL_FULL_KEY, 0);\n', ''],
     // ---- for the Members tab (v3.48.0) ----
@@ -93,8 +93,14 @@ const muts = [
     // ---- a month ends in this browser's time zone (review 2026-11-20 worker-logic-1) ----
     [H, 'a month ends at UTC midnight', '    _endMs: function (y, m) { return new Date(y, m, 1).getTime(); },', '    _endMs: function (y, m) { return Date.UTC(y, m, 1); },'],
     [H, 'a month ends on its own first day', '    _endMs: function (y, m) { return new Date(y, m, 1).getTime(); },', '    _endMs: function (y, m) { return new Date(y, m - 1, 1).getTime(); },'],
-    [H, 'last month is judged final as text', '                    if (!res || JiTA.credits.countsAll(res, prev.y, prev.m)) { return; }', "                    if (!res || String(res.computedAt || '') >= now.ym + '-01') { return; }"],
-    [H, 'any count with a time is final', "    countsAll: function (res, y, m) { return Date.parse((res && res.computedAt) || '') >= JiTA.credits._endMs(y, m); },", "    countsAll: function (res, y, m) { return !!(res && res.computedAt); },"]
+    [H, "last month is judged final as text", "                    if (!res || JiTA.credits.countsAll(res, prev.y, prev.m)) { return true; }", "                    if (!res || String(res.computedAt || '') >= now.ym + '-01') { return true; }"],
+    [H, 'any count with a time is final', "    countsAll: function (res, y, m) { return Date.parse((res && res.computedAt) || '') >= JiTA.credits._endMs(y, m); },", "    countsAll: function (res, y, m) { return !!(res && res.computedAt); },"],
+    [H, "a failed request carries no status", "var err = new Error(label + ' -> HTTP ' + resp.status); err.status = resp.status; reject(err);", "var err = new Error(label + ' -> HTTP ' + resp.status); reject(err);"],
+    [H, "any failed lookup is \"no such account\"", "}, function (e) { if (e && e.status === 400) { return null; } throw e; });", "}, function () { return null; });"],
+    [H, "\"no such account\" fails the count too", "}, function (e) { if (e && e.status === 400) { return null; } throw e; });", "}, function (e) { throw e; });"],
+    [H, "a recount another count got ahead of is marked done", "                    if (JiTA.credits.running) { return false; }\n", ""],
+    [H, "a recount refresh() refused is marked done", "return JiTA.credits.refresh(prev.y, prev.m).then(function (r) { return r != null; });", "return JiTA.credits.refresh(prev.y, prev.m).then(function () { return true; });"],
+    [H, "the previous month is marked done whatever happened", "}).then(function (done) { if (done) { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); } end(); },", "}).then(function (done) { gmSet(S.PREV_DONE_KEY, prev.ym); gmSet(S.FAIL_PREV_KEY, 0); end(); },"]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
