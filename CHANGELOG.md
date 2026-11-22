@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.55.0 (2026-11-22)
+
+### New features
+
+- An igbr.zip has a new entry above logs.txt, Player actions: what the player did, oldest first, read out of logs.txt and methodcalls.txt (jumps, warps, docking, logins, idle time, what the game refused), with a search and Copy.
+
 ## 3.54.1 (2026-11-21)
 
 ### Fixed issues

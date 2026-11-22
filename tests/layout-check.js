@@ -556,6 +556,122 @@ function setvChecks(m) {
     ok('Settings window: Copy copies the file exactly as it is', m.copiedSame && m.status === 'Copied.', m.status);
 }
 
+// ================= 7. Player actions in the igbr.zip viewer =================
+// The viewer as Jira drew it in November 2026 (a snapshot, rebuilt with its sizes): the file name and size in the top bar,
+// archive-layout holding the 300 px file list (a row a file: its button, and a download button beside it) and the pane
+// beside it, the open file from 75 px down. JiTA.acts puts its entry in (the script's own poller, and ensure() called
+// again), a click opens the list (load() handing over a made-up logs.txt and methodcalls.txt), the search and Copy are
+// tried, then a click on a file of the archive, and on the arrow to the next attachment, puts the viewer back. Last, an
+// archive with another name, and one without logs.txt, lose the entry.
+async function actsView(files) {
+    const { box } = window.__lc, wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const row = (name) => '<div class="row" style="display: flex; align-items: center; height: 46px; padding-bottom: 6px; box-sizing: border-box; cursor: pointer;">' +
+        '<div style="width: 85%;"><button type="button" style="display: flex; align-items: center; width: 100%; height: 40px; padding: 8px; background: none; border: 0; color: inherit; font: inherit; text-align: left;">' +
+        '<span style="display: flex; align-items: center; gap: 12px;"><span data-item-elem-before="true" style="display: flex; width: 24px; height: 24px;"><span data-testid="file-type-icon">' +
+        '<span role="img" aria-label="media-type"><svg width="24" height="24"></svg></span></span></span><div><span data-item-title="true">' + name + '</span></div></span></button></div>' +
+        '<button aria-label="Download Media" data-testid="media-archiveDownloadButton" style="width: 39px; height: 40px;"><span role="img" aria-label="Download"></span></button></div>';
+    const names = ['logs.txt', 'processHealth.txt', 'methodcalls.txt', 'outstandingcalls.txt', 'fitting.txt', 'settings.yaml', 'dxdiag.txt'];
+    document.body.insertAdjacentHTML('beforeend', '<div data-testid="media-viewer-popup" role="dialog" style="position: fixed; inset: 0; background: #1d2125; color: #c7d1db;">' +
+        '<div style="position: absolute; top: 0; left: 0; right: 0; height: 98px; z-index: 2; pointer-events: none;"><h1 data-testid="media-viewer-file-name" style="position: absolute; left: 368px; top: 24px; margin: 0; font-size: 14px;">igbr.zip</h1>' +
+        '<div data-testid="media-viewer-file-metadata-text" style="position: absolute; left: 368px; top: 44px;"><span>archive</span>· 128 KB</div></div>' +
+        '<div data-testid="archive-layout" style="position: absolute; inset: 0; display: flex;">' +
+        '<div class="side" style="position: absolute; left: 0; top: 0; bottom: 0; width: 300px; padding: 22px 20px; box-sizing: border-box;">' +
+        '<button type="button" class="home" style="width: 260px; height: 40px;"><span><div><span data-item-title="true"><span role="img" aria-label="Home"></span></span></div></span></button>' +
+        '<div style="height: 2px; margin: 16px 0; background: #333;"></div><div data-testid="archive-sidebar-folder-wrapper">' + names.map(row).join('') + '</div></div>' +
+        '<div class="pane" style="position: absolute; top: 0; left: 300px; right: 0; bottom: 0; display: flex; align-items: center;"><div class="inner" style="width: 100%; height: 100%;">' +
+        '<div style="height: 75px;"></div><span data-testid="code-block" style="display: block;">fitting.txt as Jira shows it</span></div></div></div>' +
+        '<div id="media-viewer-navigation"><button type="button" class="next" data-testid="media-viewer-navigation-next">next</button></div></div>');
+    let copied = null;
+    JiTA.util.copy = (t) => { copied = t; return Promise.resolve(); };
+    JiTA.acts.load = () => Promise.resolve(files);
+    const list = document.querySelector('[data-testid="archive-sidebar-folder-wrapper"]'), pane = document.querySelector('.pane'), inner = document.querySelector('.inner');
+    const title = (r) => r.querySelector('[data-item-title]');
+    await wait(700);   // the script's own poller has found the list by now
+    JiTA.acts.ensure();
+    JiTA.acts.ensure();
+    const entries = list.querySelectorAll('.jita-acts-entry'), entry = entries[0];
+    if (!entry) { return { entry: false }; }
+    const logsRow = Array.prototype.find.call(list.children, (r) => r !== entry && title(r).textContent === 'logs.txt');
+    const look = { count: entries.length, first: list.firstElementChild === entry, beforeLogs: entry.nextElementSibling === logsRow, name: title(entry).textContent,
+        icon: (entry.querySelector('.jita-acts-ico') || {}).textContent || '', buttons: entry.querySelectorAll('button').length, download: entry.querySelectorAll('[data-testid="media-archiveDownloadButton"]').length,
+        rows: list.children.length, box: box(entry), logsBox: box(logsRow), titleL: box(title(entry)).l, logsTitleL: box(title(logsRow)).l };
+    entry.querySelector('button').click();
+    await wait(150);
+    const el = document.getElementById('jita-acts');
+    if (!el) { return { entry: true, look: look, opened: false }; }
+    const all = (sel) => Array.prototype.slice.call(el.querySelectorAll(sel));
+    const shownRows = () => all('tbody tr.jpa-r').filter((r) => getComputedStyle(r).display !== 'none');
+    const open = { inPane: el.parentNode === pane, box: box(el), pane: box(pane), vw: window.innerWidth, vh: window.innerHeight, rows: all('tbody tr.jpa-r').length,
+        innerHidden: getComputedStyle(inner).visibility, codeHidden: getComputedStyle(document.querySelector('[data-testid="code-block"]')).visibility,
+        on: entry.classList.contains('jita-acts-on'), bodyScrolls: getComputedStyle(el.querySelector('.jpa-body')).overflowY, top: box(el.querySelector('.jpa-top')) };
+    const q = el.querySelector('.jpa-q');
+    q.value = 'stargate';
+    q.dispatchEvent(new Event('input', { bubbles: true }));
+    await wait(400);
+    const searched = shownRows().map((r) => r.textContent);
+    q.value = '';
+    q.dispatchEvent(new Event('input', { bubbles: true }));
+    await wait(400);
+    el.querySelector('.jpa-copy').click();
+    await wait(50);
+    title(logsRow).closest('button').click();
+    await wait(50);
+    const back = { gone: !document.getElementById('jita-acts'), paneClass: pane.classList.contains('jita-acts-open'), innerShown: getComputedStyle(inner).visibility, on: entry.classList.contains('jita-acts-on') };
+    entry.querySelector('button').click();
+    await wait(150);
+    const reopened = !!document.getElementById('jita-acts');
+    document.querySelector('.next').click();
+    await wait(50);
+    const nav = !document.getElementById('jita-acts');
+    document.querySelector('[data-testid="media-viewer-file-name"]').textContent = 'other.zip';
+    JiTA.acts.ensure();
+    const otherZip = list.querySelectorAll('.jita-acts-entry').length;
+    document.querySelector('[data-testid="media-viewer-file-name"]').textContent = 'igbr.zip';
+    JiTA.acts.ensure();
+    const backAgain = list.querySelectorAll('.jita-acts-entry').length;
+    logsRow.parentNode.removeChild(logsRow);
+    JiTA.acts.ensure();
+    const noLogs = list.querySelectorAll('.jita-acts-entry').length;
+    return { entry: true, look: look, opened: true, open: open, searched: searched, copied: copied, status: el.querySelector('.jpa-status').textContent, back: back, reopened: reopened, nav: nav,
+        otherZip: otherZip, backAgain: backAgain, noLogs: noLogs };
+}
+function actsChecks(m) {
+    ok('Player actions: the entry is put into an igbr.zip\'s file list', m.entry, 'no .jita-acts-entry');
+    if (!m.entry) { return; }
+    const l = m.look;
+    ok('Player actions: one entry, first, above logs.txt, however often the list is looked at', l.count === 1 && l.first && l.beforeLogs && l.rows === 8, JSON.stringify(l));
+    ok('Player actions: named, with its own symbol, and no download button', l.name === 'Player actions' && l.icon === '☰' && l.buttons === 1 && l.download === 0, JSON.stringify(l));
+    ok('Player actions: the entry sits like the other rows (as tall, the name where theirs is)', near(l.box.h, l.logsBox.h) && near(l.box.l, l.logsBox.l) && near(l.titleL, l.logsTitleL),
+        JSON.stringify({ box: l.box, logs: l.logsBox, titleL: l.titleL, logsTitleL: l.logsTitleL }));
+    ok('Player actions: a click opens the list in the pane', m.opened, 'no #jita-acts after the click');
+    if (!m.opened) { return; }
+    const o = m.open;
+    ok('Player actions: the list fills the pane from below the viewer\'s top bar (75 px) to the screen\'s edges', o.inPane && near(o.box.l, o.pane.l) && near(o.box.t, 75) && near(o.box.r, o.vw) && near(o.box.b, o.vh),
+        JSON.stringify(o.box) + ' in ' + JSON.stringify(o.pane));
+    ok('Player actions: what the pane showed is hidden meanwhile, and the entry is marked', o.innerHidden === 'hidden' && o.codeHidden === 'hidden' && o.on, JSON.stringify(o));
+    ok('Player actions: its rows are drawn, and they scroll on their own below its top bar (which sits at its top, under a 1 px line)', o.rows >= 5 && o.bodyScrolls === 'auto' && near(o.top.t, o.box.t + 1),
+        o.rows + ' rows, ' + o.bodyScrolls + ', top bar at ' + r1(o.top.t));
+    ok('Player actions: the search leaves the rows it names', m.searched.length >= 1 && m.searched.every((t) => /stargate/i.test(t)), JSON.stringify(m.searched));
+    ok('Player actions: Copy hands out the list as text', /^Player actions, from logs\.txt and methodcalls\.txt/.test(m.copied || '') && m.status === 'Copied.', String(m.copied).slice(0, 80));
+    ok('Player actions: a click on a file of the archive puts the viewer back', m.back.gone && !m.back.paneClass && m.back.innerShown === 'visible' && !m.back.on, JSON.stringify(m.back));
+    ok('Player actions: ...and so does the arrow to the next attachment', m.reopened && m.nav, JSON.stringify({ reopened: m.reopened, nav: m.nav }));
+    ok('Player actions: an archive with another name has no entry, and gets it back as igbr.zip', m.otherZip === 0 && m.backAgain === 1, m.otherZip + ' / ' + m.backAgain);
+    ok('Player actions: an archive without logs.txt has no entry', m.noLogs === 0, String(m.noLogs));
+}
+const ACTS_FILES = {
+    logs: ['Time\tFacility\tType\tMessage',
+        '10:00:00\t::General\tnotice\tEVE Client version 24.02 build 3724492 started 11/21/2026 10:00:00',
+        '10:01:00\tsvc::gameui\tnotice\tGameUI::OnSessionChanged, Heading for character selection True <Session: (sid:1)> {}',
+        '10:02:10\tsvc::space\tnotice\tStopWarpIndication Destination: Jita<br> autopilot = 0',
+        '10:02:15\tsvc::gatejump\tnotice\tStargate Jump from 30000142 to 50001248',
+        "10:02:20\tsvc::gameui\tnotice\tGameUI::OnSessionChanged, Heading for inflight with a valid ego True <Session: (sid:1)> {'solarsystemid2': (30000142, 30000144)}",
+        '10:03:00\tsvc::gameui\tnotice\tI am now AFK after being idle for 300 seconds.',
+        '10:04:00\tsvc::bugReporting\tnotice\tOpening bug reporting'].join('\n'),
+    mc: ['Time\tMethod\tDuration [ms]',
+        '2026.11.21 10:01:50\tRemote Object Call::ConeScan (ObjectCall' + String.fromCharCode(92) + 'Client)\t100',
+        '2026.11.21 10:01:55\tRemote Object Call::CmdWarpToStuff (ObjectCall' + String.fromCharCode(92) + 'Client)\t100'].join('\n')
+};
+
 const SETV_FIXTURE = fs.readFileSync(path.join(__dirname, 'settings-fixture.yaml'), 'utf8').replace(/\r\n/g, '\n');
 const VIEWS = [
     { title: 'Members', page: membersView, check: membersChecks },
@@ -563,7 +679,8 @@ const VIEWS = [
     { title: 'Settings', page: settingsView, check: settingsChecks },
     { title: 'Quality control', page: qcView, check: qcChecks },
     { title: 'Lead duties tabs', page: ldTabsView, check: ldTabsChecks },
-    { title: 'Settings window', page: setvView, check: setvChecks, data: SETV_FIXTURE }
+    { title: 'Settings window', page: setvView, check: setvChecks, data: SETV_FIXTURE },
+    { title: 'Player actions', page: actsView, check: actsChecks, data: ACTS_FILES }
 ];
 // The files Tampermonkey fetches with the script (@resource), as the page's GM_getResourceText hands them out.
 const RESOURCES = { settingswindow: fs.readFileSync(path.join(__dirname, '..', 'settings-window.json'), 'utf8') };
