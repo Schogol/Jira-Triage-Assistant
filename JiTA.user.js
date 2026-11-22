@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.55.0
+// @version     3.55.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,8 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.55.0
-// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.55.0
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.55.1
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.55.1
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -4456,17 +4456,20 @@ JiTA.acts = {
 .jita-acts-entry .jita-acts-ico { display: inline-flex; width: 24px; height: 24px; align-items: center; justify-content: center; font-size: 17px; color: #58a7bf; }
 .jita-acts-entry.jita-acts-on { background: var(--ds-background-selected, rgba(88, 167, 191, 0.16)); border-radius: 3px; }
 `,
-    // The list's look: the dark panels of the Settings window. Scoped to #jita-acts.
+    // The list's look: the dark panels of the Settings window. Scoped to #jita-acts, and shut off from the page's own CSS: every
+    // property of the list and its elements starts from the browser's default (all: revert), so only the rules below apply.
+    // The pane keeps what it showed before, hidden, and that can bring page-wide rules: the log parser's view of logs.txt sets
+    // td { font-size: 11px; border-right: ... } for every table, which shrank the list's rows and drew lines between its columns.
     CSS: `
-#jita-acts { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; flex-direction: column; box-sizing: border-box; background: #0b0d0f; color: #c8ced2;
+#jita-acts { all: revert; position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; flex-direction: column; box-sizing: border-box; background: #0b0d0f; color: #c8ced2;
     font: 12px/1.45 "Segoe UI", Roboto, Arial, sans-serif; text-align: left; white-space: normal; border-top: 1px solid #1f2529; }
-#jita-acts * { box-sizing: border-box; font-family: inherit; }
+#jita-acts * { all: revert; box-sizing: border-box; font-family: inherit; }
 #jita-acts .jpa-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid #1f2529; background: #0f1215; }
 #jita-acts .jpa-title { font-size: 17px; color: #e6e6e6; }
 #jita-acts .jpa-src { color: #7f8a90; cursor: help; }
-#jita-acts .jpa-q { margin-left: auto; background: #15191c; border: 1px solid #2a3136; color: #e6e6e6; padding: 4px 8px; width: 200px; border-radius: 2px; }
+#jita-acts .jpa-q { margin-left: auto; background: #15191c; border: 1px solid #2a3136; color: #e6e6e6; padding: 4px 8px; width: 200px; border-radius: 2px; font: inherit; }
 #jita-acts .jpa-errlbl { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-#jita-acts .jpa-btn { background: #15191c; border: 1px solid #2a3136; color: #c8ced2; padding: 4px 12px; cursor: pointer; border-radius: 2px; }
+#jita-acts .jpa-btn { background: #15191c; border: 1px solid #2a3136; color: #c8ced2; padding: 4px 12px; cursor: pointer; border-radius: 2px; font: inherit; }
 #jita-acts .jpa-btn:hover { border-color: #58a7bf; color: #e6e6e6; }
 #jita-acts .jpa-status { color: #7fdca4; }
 #jita-acts .jpa-body { flex: 1; min-height: 0; overflow: auto; padding: 0 14px 24px; }
