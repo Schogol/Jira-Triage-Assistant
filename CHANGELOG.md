@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.55.1 (2026-11-22)
+
+### Fixed issues
+
+- Player actions keeps its look after logs.txt was opened: the text no longer shrinks, and no lines appear between the columns.
+
 ## 3.55.0 (2026-11-22)
 
 ### New features

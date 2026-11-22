@@ -39,7 +39,8 @@ const muts = [
     [LC, 'the Player actions list covers the viewer\'s top bar', "        el.style.top = A.TOP + 'px';\n", "        el.style.top = '0px';\n"],
     [LC, 'what the pane showed shows through the Player actions list', '.jita-acts-open > :not(#jita-acts) { visibility: hidden !important; }\n', ''],
     [LC, 'a click on a file of the archive leaves the Player actions list open', "if ((b.querySelector('[data-item-title]') && b.closest('[data-testid=\"archive-sidebar-folder-wrapper\"]')) || b.closest('#media-viewer-navigation')) {",
-        "if (b.closest('#media-viewer-navigation')) {"]
+        "if (b.closest('#media-viewer-navigation')) {"],
+    [LC, 'the log parser\'s view of logs.txt left in the pane restyles the Player actions list', '#jita-acts * { all: revert; box-sizing', '#jita-acts * { box-sizing']
 ];
 // The check's output on a copy: { out, fails, passed, skip }. Only a check that ran to its end says passed or FAILURE.
 function check(text) {

@@ -604,6 +604,19 @@ async function actsView(files) {
     const open = { inPane: el.parentNode === pane, box: box(el), pane: box(pane), vw: window.innerWidth, vh: window.innerHeight, rows: all('tbody tr.jpa-r').length,
         innerHidden: getComputedStyle(inner).visibility, codeHidden: getComputedStyle(document.querySelector('[data-testid="code-block"]')).visibility,
         on: entry.classList.contains('jita-acts-on'), bodyScrolls: getComputedStyle(el.querySelector('.jpa-body')).overflowY, top: box(el.querySelector('.jpa-top')) };
+    // The list as drawn, measured on its own elements. Then logs.txt as opened before: the log parser's view stays in the pane,
+    // hidden, with its page-wide CSS (td { font-size: 11px; border-right: ... }), and so do rules any page could have. The list
+    // must look the same.
+    const looks = () => {
+        const cs = (n) => getComputedStyle(n), r = all('tbody tr.jpa-r')[0], a = r.querySelector('.jpa-a'), th = el.querySelector('.jpa-t th'), copy = el.querySelector('.jpa-copy');
+        return { rowH: Math.round(r.getBoundingClientRect().height * 10) / 10, aFont: cs(a).fontSize, aLine: cs(a).borderRightWidth + ' ' + cs(a).borderRightStyle, aWrap: cs(a).whiteSpace,
+            thWeight: cs(th).fontWeight, thBg: cs(th).backgroundColor, label: cs(el.querySelector('.jpa-errlbl')).color, copy: cs(copy).fontSize + ' ' + cs(copy).color };
+    };
+    const clean = looks();
+    document.querySelector('[data-testid="code-block"]').insertAdjacentHTML('beforeend', JiTA.logparser.view('log') +
+        '<style>td, th { font-size: 9px; border: 2px solid red; padding: 9px; } button, input, label { font-size: 20px; color: red; } * { color: red; }</style>');
+    await wait(50);
+    const leaked = looks();
     const q = el.querySelector('.jpa-q');
     q.value = 'stargate';
     q.dispatchEvent(new Event('input', { bubbles: true }));
@@ -632,7 +645,7 @@ async function actsView(files) {
     logsRow.parentNode.removeChild(logsRow);
     JiTA.acts.ensure();
     const noLogs = list.querySelectorAll('.jita-acts-entry').length;
-    return { entry: true, look: look, opened: true, open: open, searched: searched, copied: copied, status: el.querySelector('.jpa-status').textContent, back: back, reopened: reopened, nav: nav,
+    return { entry: true, look: look, opened: true, open: open, clean: clean, leaked: leaked, searched: searched, copied: copied, status: el.querySelector('.jpa-status').textContent, back: back, reopened: reopened, nav: nav,
         otherZip: otherZip, backAgain: backAgain, noLogs: noLogs };
 }
 function actsChecks(m) {
@@ -651,6 +664,9 @@ function actsChecks(m) {
     ok('Player actions: what the pane showed is hidden meanwhile, and the entry is marked', o.innerHidden === 'hidden' && o.codeHidden === 'hidden' && o.on, JSON.stringify(o));
     ok('Player actions: its rows are drawn, and they scroll on their own below its top bar (which sits at its top, under a 1 px line)', o.rows >= 5 && o.bodyScrolls === 'auto' && near(o.top.t, o.box.t + 1),
         o.rows + ' rows, ' + o.bodyScrolls + ', top bar at ' + r1(o.top.t));
+    ok('Player actions: its rows are as drawn: 12 px text, no lines between the columns', m.clean.aFont === '12px' && /^0px/.test(m.clean.aLine) && m.clean.aWrap === 'nowrap', JSON.stringify(m.clean));
+    ok('Player actions: the page\'s CSS does not reach the list (logs.txt\'s parsed view left in the pane, and rules for every td, button and *)',
+        JSON.stringify(m.leaked) === JSON.stringify(m.clean), JSON.stringify({ clean: m.clean, leaked: m.leaked }));
     ok('Player actions: the search leaves the rows it names', m.searched.length >= 1 && m.searched.every((t) => /stargate/i.test(t)), JSON.stringify(m.searched));
     ok('Player actions: Copy hands out the list as text', /^Player actions, from logs\.txt and methodcalls\.txt/.test(m.copied || '') && m.status === 'Copied.', String(m.copied).slice(0, 80));
     ok('Player actions: a click on a file of the archive puts the viewer back', m.back.gone && !m.back.paneClass && m.back.innerShown === 'visible' && !m.back.on, JSON.stringify(m.back));
