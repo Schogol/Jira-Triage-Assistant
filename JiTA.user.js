@@ -4304,8 +4304,7 @@ JiTA.acts = {
             'logs.txt the last 4096 log lines, methodcalls.txt the last 1000 server calls. Times are EVE time.">' + H(src.join(' · ')) + '</span>' +
             '<input type="search" class="jpa-q" placeholder="Search"><label class="jpa-errlbl" title="Hide the errors the client logged"><input type="checkbox" class="jpa-noerr"> Hide errors</label>' +
             '<button type="button" class="jpa-btn jpa-copy" title="Copy the list as text">Copy</button><span class="jpa-status"></span></div>' +
-            (none ? '<div class="jpa-msg">' + H(none) + '</div>' : '<div class="jpa-body"><table class="jpa-t"><thead><tr><th>Time</th><th>Action</th><th>Details</th></tr></thead><tbody>' + rows + '</tbody></table>' +
-                '<div class="jpa-foot">Places are ID numbers: the logs name none, except where a warp ended. Hover a row for the lines it was read from.</div></div>');
+            (none ? '<div class="jpa-msg">' + H(none) + '</div>' : '<div class="jpa-body"><table class="jpa-t"><thead><tr><th>Time</th><th>Action</th><th>Details</th></tr></thead><tbody>' + rows + '</tbody></table></div>');
     },
     // The list as text, as Copy hands it out: a line a row, dated where the files date it.
     text: function (data) {
@@ -4488,7 +4487,6 @@ JiTA.acts = {
 #jita-acts .jpa-day td { padding: 14px 0 4px; color: #e6e6e6; font-weight: 600; border-bottom: 1px solid #2a3136; }
 #jita-acts .jpa-hid { display: none; }
 #jita-acts .jpa-msg { padding: 16px; color: #9aa4a9; }
-#jita-acts .jpa-foot { padding: 12px 0 0; color: #5d676c; }
 `
 };
 
