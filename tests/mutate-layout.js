@@ -1,6 +1,7 @@
 // mutate-layout.js - breaks what keeps each view in line, in turn, and requires layout-check (a real headless Chromium) to
 // go red: the Members tab's note columns (the v3.49.1 fix) and month numbers, the Quality control columns, the cards'
-// footers and grid, Settings' and the Lead duties window's fixed size and steady tabs, and the Settings window's width. Every breakage starts a browser,
+// footers and grid, Settings' and the Lead duties window's fixed size and steady tabs, the Settings window's width, and the Player actions entry and
+// list in the igbr.zip viewer. Every breakage starts a browser,
 // so there are only a few.
 //
 // The check runs on the unbroken script first: a breakage proves nothing in a browser that fails anyway. Only a FAIL line
@@ -31,7 +32,14 @@ const muts = [
     // ---- the Settings window of a settings.yaml: one width on every tab (v3.54.1) ----
     [LC, 'the Settings window is as wide as its widest line again', '#jita-setv { display: flex; flex-direction: column; box-sizing: border-box; width: 950px;',
         '#jita-setv { display: flex; flex-direction: column; box-sizing: border-box;'],
-    [LC, 'the Settings window runs past the right edge of a small screen', "            el.style.maxWidth = Math.max(480, window.innerWidth - r.left - 12) + 'px';\n", '']
+    [LC, 'the Settings window runs past the right edge of a small screen', "            el.style.maxWidth = Math.max(480, window.innerWidth - r.left - 12) + 'px';\n", ''],
+    // ---- Player actions in the igbr.zip viewer (v3.55.0) ----
+    [LC, 'the Player actions entry keeps its download button', "if (!b.querySelector('[data-item-title]') && b.parentNode) { b.parentNode.removeChild(b); }", "if (!b.querySelector('[data-item-title]') && b.parentNode) { /* kept */ }"],
+    [LC, 'the Player actions entry goes in again on every look', '        if (own) {\n            if (own.nextElementSibling !== logs) { list.insertBefore(own, logs); }\n            return;\n        }\n', ''],
+    [LC, 'the Player actions list covers the viewer\'s top bar', "        el.style.top = A.TOP + 'px';\n", "        el.style.top = '0px';\n"],
+    [LC, 'what the pane showed shows through the Player actions list', '.jita-acts-open > :not(#jita-acts) { visibility: hidden !important; }\n', ''],
+    [LC, 'a click on a file of the archive leaves the Player actions list open', "if ((b.querySelector('[data-item-title]') && b.closest('[data-testid=\"archive-sidebar-folder-wrapper\"]')) || b.closest('#media-viewer-navigation')) {",
+        "if (b.closest('#media-viewer-navigation')) {"]
 ];
 // The check's output on a copy: { out, fails, passed, skip }. Only a check that ran to its end says passed or FAILURE.
 function check(text) {

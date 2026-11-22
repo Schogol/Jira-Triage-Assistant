@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.54.1
+// @version     3.55.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,8 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.54.1
-// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.54.1
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.55.0
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.55.0
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -3947,6 +3947,553 @@ JiTA.settingsview = {
 #jita-setv .jsv-raw { flex: 1; overflow: auto; margin: 0; padding: 10px 14px; font: 11px/1.4 Consolas, "Courier New", monospace; color: #c8ced2; white-space: pre; background: #0b0d0f; }
 `
 };
+
+/* ---- Player actions: what the player did, read out of logs.txt and methodcalls.txt in igbr.zip ----
+ * The igbr.zip viewer gets one more entry above logs.txt, "Player actions". A click downloads the report's igbr.zip once,
+ * reads logs.txt and methodcalls.txt out of it (JiTA.profile.unzip) and lists what the player did, oldest first, in the
+ * viewer's right-hand pane. A click on any file of the archive puts the viewer back.
+ * Both files keep only the end of a session: logs.txt the client's last 4096 log entries (hours when little is logged),
+ * methodcalls.txt its last 1000 server calls (often only the last 15 minutes). logs.txt has the moves (a new system, docking
+ * and undocking, gate and wormhole jumps, where a warp ended), the client's start, character selection, logoffs, idle time,
+ * and what the game refused; methodcalls.txt adds the commands sent to the server (warp starts, d-scan, target locks,
+ * modules). A warp's start is only in methodcalls.txt: the client logs a warp when it ends, never when it starts. A row
+ * marks where methodcalls.txt begins, so the list says when it starts holding more. Places are ID numbers: the logs name
+ * none, except where a warp ended.
+ * Both files run on one clock (EVE time). logs.txt's times have no date: it comes from a line that carries one (an
+ * exception's "logged at", the client's start), else from methodcalls.txt. Lines inside an exception or stacktrace block are
+ * never read as actions: a block can quote a session change.
+ */
+JiTA.acts = {
+    TOP: 75,                 // px: where the viewer starts a file, below its top bar; the list fills the pane from there
+    SYMBOL: '☰',             // the entry's symbol in the file list (a text symbol, coloured by CSS)
+    WARP_MAX: 15 * 60000,    // a warp longer than this is not paired with a landing
+    NEAR: 60000,             // a jump, dock or bridge request this close before what it led to is shown as one row with it
+    ZIP: /^igbr.*\.zip$/i,   // the client names its archive igbr.zip
+    _cache: {},              // { attachment id: promise of { logs, mc } }, for the page's life
+
+    // The commands in methodcalls.txt shown as actions: a service call by service::method, an object call by its method.
+    // [category, what the row says]; warp, gate and bridge commands are paired with what they led to (_pair).
+    CALLS: {
+        'charUnboundMgr::SelectCharacterID': ['session', 'Selected a character'],
+        'CmdWarpToStuff': ['warp'],
+        'CmdWarpToStuffAutopilot': ['warp'],
+        'CmdStargateJump': ['gatecmd'],
+        'structureJumpBridgeMgr::CmdJumpThroughStructureStargate': ['bridgecmd'],
+        'CmdAlignTo': ['move', 'Aligned'],
+        'CmdStop': ['move', 'Stopped the ship'],
+        'CmdDock': ['move', 'Asked to dock'],
+        'structureDocking::Undock': ['move', 'Asked to undock'],
+        'CmdFollowBall': ['move', 'Approached or kept at range'],
+        'CmdOrbit': ['move', 'Orbited'],
+        'CmdMovementOrbit': ['move', 'Orbited'],
+        'CmdGotoDirection': ['move', 'Flew in a direction'],
+        'CmdGotoPoint': ['move', 'Flew to a point'],
+        'CmdSetSpeedFraction': ['move', 'Changed speed'],
+        'ConeScan': ['act', 'Used the directional scanner'],
+        'AddTarget': ['act', 'Locked a target'],
+        'Activate': ['act', 'Turned a module on'],
+        'Deactivate': ['act', 'Turned a module off'],
+        'CmdEngage': ['act', 'Sent drones to attack'],
+        'CmdReturnBay': ['act', 'Recalled drones'],
+        'CmdReturnAndOrbit': ['act', 'Called drones back'],
+        'CmdAbandonDrone': ['act', 'Abandoned a drone'],
+        'Invite': ['act', 'Invited someone to the fleet'],
+        'fleetObjectHandler::CreateFleet': ['act', 'Created a fleet'],
+        'contractProxy::AcceptContract': ['act', 'Accepted a contract'],
+        'accessGroupBookmarkMgr::UpdateBookmark': ['act', 'Edited a bookmark']
+    },
+
+    // ---- reading the files ----
+    // logs.txt as entries, oldest first: { s: seconds into its day, d: days after the first entry's, fac, type, msg, line }.
+    // A multi-line entry repeats its time and facility on every line. The header and lines with no time are skipped.
+    _logLines: function (text) {
+        var out = [], prev = -1, day = 0;
+        String(text || '').split(/\r?\n/).forEach(function (line) {
+            var c = line.split('\t'), m = c.length >= 4 && /^(\d\d):(\d\d):(\d\d)$/.exec(c[0]);
+            if (!m) { return; }
+            var s = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+            if (prev >= 0 && s < prev - 3600) { day++; }   // the clock went back by more than an hour: midnight passed
+            prev = s;
+            out.push({ s: s, d: day, fac: c[1], type: c[2], msg: c.slice(3).join('\t'), line: line });
+        });
+        return out;
+    },
+    // methodcalls.txt as calls sorted by start: { t: the start, ms, name: 'service::method', or the method of an object call,
+    // line }. The client lists a service call as "(ServiceCall\Client)", sometimes twice, and again as "(RemoteServiceCall)",
+    // and an object call once, as "Remote Object Call::Method (ObjectCall\Client)": the RemoteServiceCall row and the object
+    // call row are kept, one a call. A row is written when its call ends, under the time it started.
+    _calls: function (text) {
+        var out = [], OBJ = 'Remote Object Call::';
+        String(text || '').split(/\r?\n/).forEach(function (line, i) {
+            var c = line.split('\t'), m = c.length >= 3 && /^(\d{4})\.(\d\d)\.(\d\d) (\d\d):(\d\d):(\d\d)$/.exec(c[0]);
+            if (!m) { return; }
+            var meth = c[1], k = meth.lastIndexOf(' ('), kind = k > 0 ? meth.slice(k + 2, -1) : '', base = k > 0 ? meth.slice(0, k) : meth, name = '';
+            if (kind === 'RemoteServiceCall' && base.indexOf(OBJ) !== 0) { name = base; }
+            else if (kind.indexOf('ObjectCall') === 0 && base.indexOf(OBJ) === 0) { name = base.slice(OBJ.length); }
+            if (!name) { return; }
+            out.push({ t: Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])), ms: Number(c[2]) || 0, name: name, line: line, o: i });
+        });
+        return out.sort(function (a, b) { return a.t - b.t || a.o - b.o; });
+    },
+    // A line's own date and time: { y, mo, d, tod }, or null. The network's start says it as 2026.11.21 14:39:38; the
+    // client's start as 11/21/2026; an exception's "logged at" in the PC's own way (21/11/26 on one, 11/17/2026 on another),
+    // so it counts only where the day is told from the month by being over 12.
+    _dateOf: function (msg) {
+        var m = / accept connections at (\d{4})\.(\d\d)\.(\d\d) (\d\d):(\d\d):(\d\d)/.exec(msg), a, b, y;
+        if (m) { return { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]), tod: Number(m[4]) * 3600 + Number(m[5]) * 60 + Number(m[6]) }; }
+        var start = / started (\d\d?)\/(\d\d?)\/(\d{4}) (\d\d):(\d\d):(\d\d)/.exec(msg);
+        m = start || /^EXCEPTION #\d+ logged at (\d\d?)\/(\d\d?)\/(\d{2,4}) (\d\d):(\d\d):(\d\d)/.exec(msg);
+        if (!m) { return null; }
+        a = Number(m[1]); b = Number(m[2]); y = Number(m[3]) < 100 ? 2000 + Number(m[3]) : Number(m[3]);
+        var tod = Number(m[4]) * 3600 + Number(m[5]) * 60 + Number(m[6]);
+        if (a > 12 && b <= 12) { return { y: y, mo: b, d: a, tod: tod }; }
+        if (b > 12 && a <= 12) { return { y: y, mo: a, d: b, tod: tod }; }
+        return start && a <= 12 ? { y: y, mo: a, d: b, tod: tod } : null;   // the client's start writes the month first
+    },
+    // The time logs.txt's first day starts at (ms), or null when nothing dates it. A line that carries a date dates its own
+    // day (_dateOf); else the last call in methodcalls.txt does, the log ending within an hour after it or before it.
+    _base: function (L, C) {
+        for (var i = 0; i < L.length; i++) {
+            var w = JiTA.acts._dateOf(L[i].msg);
+            if (!w) { continue; }
+            var day = Date.UTC(w.y, w.mo - 1, w.d);
+            if (w.tod - L[i].s > 43200) { day += 86400000; }        // dated just before midnight, logged just after
+            else if (L[i].s - w.tod > 43200) { day -= 86400000; }
+            return day - L[i].d * 86400000;
+        }
+        if (!L.length || !C.length) { return null; }
+        var last = C[C.length - 1].t, end = L[L.length - 1], base = Math.floor(last / 86400000) * 86400000 - end.d * 86400000;
+        var t = base + (end.d * 86400 + end.s) * 1000;
+        if (t > last + 3600000) { base -= 86400000; } else if (t < last - 82800000) { base += 86400000; }
+        return base;
+    },
+
+    // ---- what a log line or a call says ----
+    // A place as the logs give it: an ID number, with what kind of place it is.
+    _sys: function (id) {
+        var n = Number(id);
+        if (n >= 31000000 && n < 32000000) { return 'wormhole system ' + id; }
+        if (n >= 32000000 && n < 33000000) { return 'Abyssal space ' + id; }
+        return 'system ' + id;
+    },
+    _dur: function (sec) {
+        sec = Math.max(0, Math.round(sec));
+        if (sec < 90) { return sec + ' s'; }
+        if (sec < 5400) { return Math.round(sec / 60) + ' min'; }
+        return Math.floor(sec / 3600) + ' h ' + Math.round((sec % 3600) / 60) + ' min';
+    },
+    // A session change's { key: [old, new] } as the line prints it ({'stationid': (None, 60011851), ...}).
+    _change: function (msg) {
+        var ch = {}, re = /'(\w+)': \((None|-?\d+)L?, (None|-?\d+)L?\)/g, m;
+        while ((m = re.exec(msg))) { ch[m[1]] = [m[2] === 'None' ? null : m[2], m[3] === 'None' ? null : m[3]]; }
+        return ch;
+    },
+    // A warp's destination as the landing line has it: the game's own "Destination: X<br>", in the client's language.
+    _dest: function (text) {
+        return String(text || '').replace(/<br\s*\/?>/gi, ' ').replace(/^\s+|\s+$/g, '').replace(/^[^:：]{1,30}[:：]\s*/, '');
+    },
+    _row: function (t, cat, a, x, raw, hint) {
+        return { t: t, k: 'row', cat: cat, a: a, x: x || '', raw: raw ? [raw] : [], hint: hint || '' };
+    },
+    // The events of one log entry, into ev. st carries an open exception or stacktrace block and what was seen once.
+    _fromLog: function (e, ev, st) {
+        var A = JiTA.acts, m = e.msg, t = e.t, raw = 'logs.txt  ' + e.line.slice(0, 400), r, ch;
+        if (st.blk) {
+            if (e.s === st.blk.s && e.d === st.blk.d && !/^(EXCEPTION|STACKTRACE) #\d+/.test(m)) {
+                if (st.blk.exc && !st.blk.info && (r = /^Formatted exception info:\s*(.*)$/.exec(m))) { st.blk.info = r[1]; }
+                if (/^(EXCEPTION|STACKTRACE) END/.test(m)) { A._endBlock(st, ev); }
+                return;
+            }
+            A._endBlock(st, ev);
+        }
+        if ((r = /^(EXCEPTION|STACKTRACE) #\d+/.exec(m))) {   // first: the block's own line, less its number and time
+            st.blk = { s: e.s, d: e.d, t: t, exc: r[1] === 'EXCEPTION', info: '', raw: raw, first: m.replace(/^EXCEPTION #\d+ logged at \S+ \S+ :\s*/, '') };
+            return;
+        }
+        var once = function (key) { key = key + '|' + e.d + '|' + e.s; if (st.seen[key]) { return false; } st.seen[key] = true; return true; };
+        if ((r = /^EVE Client version (\S+) build (\d+) started/.exec(m))) {
+            if (once('start')) { ev.push(A._row(t, 'session', 'Started the client', 'Version ' + r[1] + ', build ' + r[2], raw)); }
+        } else if (/GameUI::OnSessionChanged, Heading for character selection/.test(m)) {
+            ev.push(A._row(t, 'session', 'At the character selection', '', raw));
+        } else if (/GameUI::OnSessionChanged/.test(m)) {
+            ch = A._change(m);
+            if (ch.charid && !ch.charid[0] && ch.charid[1]) {   // logged in: where, in one row
+                var at = [];
+                if (ch.stationid && ch.stationid[1]) { at.push('station ' + ch.stationid[1]); }
+                if (ch.structureid && ch.structureid[1]) { at.push('structure ' + ch.structureid[1]); }
+                if (ch.solarsystemid2 && ch.solarsystemid2[1]) { at.push(A._sys(ch.solarsystemid2[1])); }
+                ev.push(A._row(t, 'session', 'Logged in', at.length ? 'In ' + at.join(', ') : '', raw));
+                return;
+            }
+            if (ch.stationid && !ch.stationid[0] && ch.stationid[1]) { ev.push(A._row(t, 'move', 'Docked', 'Station ' + ch.stationid[1], raw)); ev[ev.length - 1].dock = ch.stationid[1]; }
+            if (ch.stationid && ch.stationid[0] && !ch.stationid[1]) { ev.push(A._row(t, 'move', 'Undocked', 'Station ' + ch.stationid[0], raw)); }
+            if (ch.structureid && !ch.structureid[0] && ch.structureid[1]) { ev.push(A._row(t, 'move', 'Docked', 'Structure ' + ch.structureid[1], raw)); }
+            if (ch.structureid && ch.structureid[0] && !ch.structureid[1]) { ev.push(A._row(t, 'move', 'Undocked', 'Structure ' + ch.structureid[0], raw)); }
+            var sy = ch.solarsystemid2;
+            if (sy && sy[1] && sy[0] !== sy[1]) { ev.push({ t: t, k: 'sys', from: sy[0], to: sy[1], raw: [raw] }); }
+        } else if ((r = /^_HandleSessionChangeInStructure:\s+Postponing ego assignment to (\d+)/.exec(m))) {
+            ev.push(A._row(t, 'move', 'In a structure', 'Structure ' + r[1], raw,
+                'The client logs this when it puts the player in a structure: docking, logging in there, or a ship change while docked.'));
+        } else if ((r = /^(?:Changing|Postponing) ego: (\d+) -> (\d+)/.exec(m))) {
+            if (r[1] !== r[2]) { ev.push(A._row(t, 'move', 'Changed ship', 'Ship ' + r[1] + ' to ship ' + r[2], raw, 'In space: boarded another ship, ejected, or lost the ship and sits in its capsule.')); }
+        } else if ((r = /^I am now AFK after being idle for ([\d.]+) seconds/.exec(m))) {
+            ev.push(A._row(t, 'session', 'Went idle', 'No input for ' + A._dur(Number(r[1])), raw));
+        } else if ((r = /^I am no longer AFK after being idle for ([\d.]+) seconds/.exec(m))) {
+            ev.push(A._row(t, 'session', 'Active again', 'After ' + A._dur(Number(r[1])) + ' without input', raw));
+        } else if (/^Logging out character /.test(m)) {
+            ev.push(A._row(t, 'session', 'Logged off', 'Back to the character selection', raw));
+        } else if (/^Character logoff denied/.test(m)) {
+            ev.push(A._row(t, 'session', 'Log off refused', '', raw));
+        } else if (/^Starting safe logoff countdown/.test(m)) {
+            ev.push(A._row(t, 'session', 'Started a safe log off', '', raw));
+        } else if (/^Safe logoff countdown for character .* complete\. Exiting client/.test(m)) {
+            ev.push(A._row(t, 'session', 'Safe log off done', 'The client closed', raw));
+        } else if (/^Safe logoff countdown for character .* complete\. Returning to character selection/.test(m)) {
+            ev.push(A._row(t, 'session', 'Safe log off done', 'Back to the character selection', raw));
+        } else if ((r = /^Stargate Jump from (\d+) to (\d+)/.exec(m))) {
+            ev.push({ t: t, k: 'gate', from: r[1], raw: [raw] });
+        } else if ((r = /^Wormhole Jump from (\d+) to (\d+)/.exec(m))) {
+            ev.push({ t: t, k: 'wh', from: r[1], raw: [raw] });
+        } else if ((r = /^Docking (\d+)\s*$/.exec(m))) {
+            ev.push({ t: t, k: 'docking', id: r[1], raw: [raw] });
+        } else if ((r = /^StopWarpIndication(.*?)autopilot = (\d)/.exec(m))) {
+            ev.push({ t: t, k: 'land', dest: A._dest(r[1]), auto: r[2] !== '0', raw: [raw] });
+        } else if (/^CreateContract\b/.test(m)) {
+            r = /'price': (\d+(?:\.\d+)?)/.exec(m);
+            ev.push(A._row(t, 'act', 'Created a contract', r && Number(r[1]) > 0 ? 'Price ' + Number(r[1]).toLocaleString('en-US') + ' ISK' : '', raw));
+        } else if (/^Opening bug reporting/.test(m)) {
+            if (once('report')) { ev.push(A._row(t, 'mark', 'Opened the bug report window', '', raw)); }
+        } else if ((r = /Fitting item as a result from item change <DBRow object \[(\d+)L?, (\d+)/.exec(m))) {
+            ev.push(A._row(t, 'act', 'Fitting changed', 'Item type ' + r[2], raw));
+        }
+    },
+    // An exception block's row: what the game refused (a UserError, the message box the player saw), or an error.
+    _endBlock: function (st, ev) {
+        var b = st.blk, r;
+        st.blk = null;
+        if (!b.exc) { return; }
+        if ((r = /^UserError: .*?msg=(\w+)(?:, dict=(.*))?$/.exec(b.info))) {
+            ev.push(JiTA.acts._row(b.t, 'no', 'The game refused', r[1], b.raw, r[2] ? 'With ' + r[2].slice(0, 300) : ''));
+        } else {
+            ev.push(JiTA.acts._row(b.t, 'err', 'Error logged', (b.info || b.first).slice(0, 200), b.raw));
+        }
+    },
+    // The event of one call, into ev, when the call is one of CALLS.
+    _fromCall: function (c, ev) {
+        var def = JiTA.acts.CALLS[c.name], raw = 'methodcalls.txt  ' + c.line + ' ms';
+        if (!def) { return; }
+        if (def.length === 1) { ev.push({ t: c.t, k: def[0], raw: [raw] }); return; }
+        ev.push(JiTA.acts._row(c.t, def[0], def[1], '', raw));
+    },
+
+    // ---- the list ----
+    // Every event of both files, sorted, with commands paired with what they led to, repeats folded, and the marks where
+    // a file starts: { rows, logFrom, logTo, mcFrom, mcTo, dated, logs: has logs.txt, mc: has methodcalls.txt }.
+    build: function (logsText, mcText) {
+        var A = JiTA.acts, L = A._logLines(logsText), C = A._calls(mcText), base = A._base(L, C), ev = [], st = { blk: null, seen: {} };
+        L.forEach(function (e) { e.t = (base || 0) + (e.d * 86400 + e.s) * 1000; A._fromLog(e, ev, st); });
+        if (st.blk) { A._endBlock(st, ev); }
+        C.forEach(function (c) { A._fromCall(c, ev); });
+        var out = { logs: L.length > 0, mc: C.length > 0, dated: base !== null || (!L.length && C.length > 0),
+            logFrom: L.length ? L[0].t : null, logTo: L.length ? L[L.length - 1].t : null, mcFrom: C.length ? C[0].t : null, mcTo: C.length ? C[C.length - 1].t : null };
+        if (out.mc && out.logs) {
+            ev.push(A._row(out.mcFrom, 'mark', 'methodcalls.txt starts here', 'From here on the server calls are listed too: warp starts, d-scan, target locks, modules.'));
+            ev[ev.length - 1].first = true;
+            if (out.logFrom > out.mcFrom) { ev.push(A._row(out.logFrom, 'mark', 'logs.txt starts here', 'Before this, only the server calls are listed.')); ev[ev.length - 1].first = true; }
+        }
+        ev.forEach(function (e, i) { e.o = i; });
+        ev.sort(function (a, b) { return a.t - b.t || (b.first ? 1 : 0) - (a.first ? 1 : 0) || a.o - b.o; });
+        out.rows = A._fold(A._pair(ev, out.mcFrom));
+        return out;
+    },
+    // Commands with what they led to: a warp start with its landing, a jump request and the jump with the new system, a
+    // docking with the dock. What is left of a pair stays a row of its own.
+    _pair: function (ev, mcFrom) {
+        var A = JiTA.acts, starts = [], i, j, e;
+        for (i = 0; i < ev.length; i++) {
+            e = ev[i];
+            if (e.k === 'warp') { starts.push(e); continue; }
+            if (e.k !== 'land') { continue; }
+            var s = starts.length && e.t - starts[starts.length - 1].t <= A.WARP_MAX ? starts.pop() : null;
+            starts.forEach(function (o) {   // warp commands with no landing of their own: stopped, refused or replaced
+                A._turn(o, 'move', 'Tried to warp', 'No landing was logged after it: the warp was stopped, refused, or replaced by another warp.');
+            });
+            starts = [];
+            var where = e.dest ? ' to ' + e.dest : '';
+            if (s) {
+                A._turn(s, 'move', 'Warped' + where, 'Landed after ' + A._dur((e.t - s.t) / 1000) + (e.auto ? ', on autopilot' : ''));
+                s.raw = s.raw.concat(e.raw);
+                e.k = 'gone';
+            } else {
+                var late = mcFrom !== null && e.t >= mcFrom;
+                A._turn(e, 'move', 'Landed from a warp' + (e.dest ? ' at ' + e.dest : ''), late ? 'No warp command from this client before it' + (e.auto ? ', on autopilot' : '')
+                    : (e.auto ? 'On autopilot' : ''), late ? 'A fleet warp has none, nor a warp that was under way when the player logged in.'
+                    : 'When the warp started is not known: the client logs a warp when it ends, and methodcalls.txt, which has the starts, begins later.');
+            }
+        }
+        starts.forEach(function (o) { A._turn(o, 'move', 'Warp started', 'No landing logged after it'); });
+        for (i = 0; i < ev.length; i++) {
+            e = ev[i];
+            if (e.k === 'sys' && !e.from) {   // the session's first system: after logging in
+                A._turn(e, 'move', 'Arrived in a system', 'In ' + A._sys(e.to), 'The first system of this session: after logging in, for example.');
+            } else if (e.k === 'sys') {
+                var how = null, cmd = null;
+                for (j = i - 1; j >= 0 && e.t - ev[j].t <= A.NEAR; j--) {
+                    var p = ev[j];
+                    if (!how && (p.k === 'gate' || p.k === 'wh') && p.from === e.from) { how = p; }
+                    else if (!how && p.k === 'bridgecmd') { how = p; }
+                    else if (!cmd && p.k === 'gatecmd') { cmd = p; }   // a request in the same second can sort after the jump line
+                }
+                var what = 'Arrived in another system';
+                var gate = !!how && how.k === 'gate';
+                if (how) { what = gate ? 'Jumped through a stargate' : how.k === 'wh' ? 'Jumped through a wormhole' : 'Jumped through a jump bridge'; e.raw = how.raw.concat(e.raw); how.k = 'gone'; }
+                if (gate && cmd) { e.raw = cmd.raw.concat(e.raw); cmd.k = 'gone'; }   // the request first: the hover reads oldest first
+                A._turn(e, 'move', what, 'From ' + (e.from ? A._sys(e.from) : 'nowhere logged') + ' to ' + A._sys(e.to),
+                    how ? '' : 'No stargate or wormhole jump was logged before it: a jump bridge, a jump drive or a jump clone, for example.');
+            } else if (e.k === 'docking') {
+                var dock = null;
+                for (j = i + 1; j < ev.length && ev[j].t - e.t <= A.NEAR; j++) { if (ev[j].dock === e.id) { dock = ev[j]; break; } }
+                if (dock) { dock.raw = e.raw.concat(dock.raw); e.k = 'gone'; } else { A._turn(e, 'move', 'Docking', 'Station ' + e.id); }
+            }
+        }
+        ev.forEach(function (x) {   // what is left over
+            if (x.k === 'gate' || x.k === 'wh') { A._turn(x, 'move', x.k === 'gate' ? 'Jumped through a stargate' : 'Jumped through a wormhole', 'From ' + A._sys(x.from) + ', no arrival logged'); }
+            else if (x.k === 'gatecmd') { A._turn(x, 'move', 'Asked to jump through a stargate', 'No jump was logged after it'); }
+            else if (x.k === 'bridgecmd') { A._turn(x, 'move', 'Asked to jump through a jump bridge', 'No jump was logged after it'); }
+        });
+        return ev.filter(function (x) { return x.k === 'row'; });
+    },
+    _turn: function (e, cat, a, x, hint) { e.k = 'row'; e.cat = cat; e.a = a; e.x = x || ''; e.hint = hint || ''; },
+    // A run of the same row folded into its first, with how many there were (n) and when the last was (end).
+    _fold: function (rows) {
+        var out = [];
+        rows.forEach(function (r) {
+            var p = out[out.length - 1];
+            if (p && p.cat !== 'mark' && p.a === r.a && p.x === r.x && r.t - (p.end || p.t) <= 300000) {
+                p.n = (p.n || 1) + 1;
+                p.end = r.t;
+                if (p.raw.length < 12) { p.raw = p.raw.concat(r.raw); }
+                return;
+            }
+            out.push(r);
+        });
+        return out;
+    },
+
+    // ---- the view ----
+    DAYS: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+    MONTHS: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+    _two: function (n) { return (n < 10 ? '0' : '') + n; },
+    _time: function (t) { var d = new Date(t), T = JiTA.acts._two; return T(d.getUTCHours()) + ':' + T(d.getUTCMinutes()) + ':' + T(d.getUTCSeconds()); },
+    _day: function (t) { var d = new Date(t), A = JiTA.acts; return A.DAYS[d.getUTCDay()] + ' ' + d.getUTCDate() + ' ' + A.MONTHS[d.getUTCMonth()] + ' ' + d.getUTCFullYear(); },
+    _what: function (r) { return r.a + (r.n > 1 ? ' (' + r.n + ' times)' : ''); },
+    // The list as HTML: its top bar (what it was read from, the search, Hide errors, Copy) and the table.
+    view: function (data) {
+        var A = JiTA.acts, H = JiTA.settingsview.esc, b = data, rows = '', lastDay = '', src = [];
+        if (b.logs) { src.push('logs.txt ' + A._time(b.logFrom) + ' to ' + A._time(b.logTo)); }
+        if (b.mc) { src.push('methodcalls.txt ' + A._time(b.mcFrom) + ' to ' + A._time(b.mcTo)); }
+        b.rows.forEach(function (r) {
+            var day = b.dated ? A._day(r.t) : '';
+            if (day && day !== lastDay) { rows += '<tr class="jpa-day"><td colspan="3">' + H(day) + '</td></tr>'; lastDay = day; }
+            var hint = (r.hint ? r.hint + '\n\n' : '') + (r.n > 1 ? 'The last at ' + A._time(r.end) + '\n\n' : '') + r.raw.join('\n');
+            rows += '<tr class="jpa-r jpa-c-' + r.cat + '" title="' + H(hint) + '"><td class="jpa-time">' + A._time(r.t) + '</td><td class="jpa-a">' + H(r.a) +
+                (r.n > 1 ? '<span class="jpa-n">' + r.n + ' times</span>' : '') + '</td><td class="jpa-x">' + H(r.x) + '</td></tr>';
+        });
+        var none = !b.logs && !b.mc ? 'This igbr.zip holds no logs.txt and no methodcalls.txt.' : !b.rows.length ? 'Nothing the player did is in these files.' : '';
+        return '<style>' + A.CSS + '</style><div class="jpa-top"><span class="jpa-title">Player actions</span><span class="jpa-src" title="Each file keeps only the end of the session: ' +
+            'logs.txt the last 4096 log lines, methodcalls.txt the last 1000 server calls. Times are EVE time.">' + H(src.join(' · ')) + '</span>' +
+            '<input type="search" class="jpa-q" placeholder="Search"><label class="jpa-errlbl" title="Hide the errors the client logged"><input type="checkbox" class="jpa-noerr"> Hide errors</label>' +
+            '<button type="button" class="jpa-btn jpa-copy" title="Copy the list as text">Copy</button><span class="jpa-status"></span></div>' +
+            (none ? '<div class="jpa-msg">' + H(none) + '</div>' : '<div class="jpa-body"><table class="jpa-t"><thead><tr><th>Time</th><th>Action</th><th>Details</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+                '<div class="jpa-foot">Places are ID numbers: the logs name none, except where a warp ended. Hover a row for the lines it was read from.</div></div>');
+    },
+    // The list as text, as Copy hands it out: a line a row, dated where the files date it.
+    text: function (data) {
+        var A = JiTA.acts, lastDay = '', out = ['Player actions, from ' + (data.logs ? 'logs.txt' : '') + (data.logs && data.mc ? ' and ' : '') + (data.mc ? 'methodcalls.txt' : '') + ' (EVE time)'];
+        data.rows.forEach(function (r) {
+            var day = data.dated ? A._day(r.t) : '';
+            if (day && day !== lastDay) { out.push('', day); lastDay = day; }
+            out.push(A._time(r.t) + '  ' + A._what(r) + (r.x ? '  ' + r.x : ''));
+        });
+        return out.join('\n');
+    },
+    // The top bar's controls: the search, Hide errors (rows, then the day rows with none left), Copy.
+    wire: function (el, data) {
+        var A = JiTA.acts, $el = $(el), timer = 0;
+        function filter() {
+            var q = $.trim(String($el.find('.jpa-q').val() || '')).toLowerCase(), noerr = $el.find('.jpa-noerr').prop('checked'), day = null, any = false;
+            $el.find('tbody tr').each(function () {
+                if (this.classList.contains('jpa-day')) { if (day) { day.classList.toggle('jpa-hid', !any); } day = this; any = false; return; }
+                var hit = (!noerr || !this.classList.contains('jpa-c-err')) && (!q || (this.textContent + ' ' + (this.getAttribute('title') || '')).toLowerCase().indexOf(q) >= 0);
+                this.classList.toggle('jpa-hid', !hit);
+                if (hit) { any = true; }
+            });
+            if (day) { day.classList.toggle('jpa-hid', !any); }
+        }
+        $el.on('input', '.jpa-q', function () { clearTimeout(timer); timer = setTimeout(filter, 150); });
+        $el.on('change', '.jpa-noerr', filter);
+        $el.on('click', '.jpa-copy', function () {
+            var $st = $el.find('.jpa-status');
+            Promise.resolve().then(function () { return JiTA.util.copy(A.text(data)); }).then(function () { $st.text('Copied.'); }, function () { $st.text('Could not reach the clipboard.'); });
+        });
+    },
+
+    // ---- the entry and the pane ----
+    // The viewer's file list rows that are files (each holds its name in [data-item-title]), less the entry.
+    _rows: function (list) {
+        return Array.prototype.filter.call(list.children, function (c) { return !c.classList.contains('jita-acts-entry') && !!c.querySelector('[data-item-title]'); });
+    },
+    _name: function (row) { var t = row.querySelector('[data-item-title]'); return t ? $.trim(t.textContent || '') : ''; },
+    // The pane beside the file list: archive-layout's other child.
+    _pane: function (lay) {
+        return lay ? Array.prototype.filter.call(lay.children, function (c) { return !c.querySelector('[data-item-title]'); })[0] || null : null;
+    },
+    // Put the entry above logs.txt when the viewer shows an igbr.zip, and take it away when it shows something else. A copy of
+    // a file row Jira drew, so it looks like the others: renamed, its own symbol, no download button. Run every 300 ms
+    // while the viewer is open (start), since Jira draws its list again whenever it likes.
+    ensure: function () {
+        var A = JiTA.acts, lay = document.querySelector('[data-testid="archive-layout"]');
+        var list = lay && lay.querySelector('[data-testid="archive-sidebar-folder-wrapper"]');
+        if (!list) { return; }
+        var own = list.querySelector('.jita-acts-entry'), rows = A._rows(list), logs = rows.filter(function (r) { return A._name(r) === 'logs.txt'; })[0];
+        var nameEl = document.querySelector('[data-testid="media-viewer-file-name"]'), zipName = nameEl ? $.trim(nameEl.textContent || '') : 'igbr.zip';
+        if (!logs || !A.ZIP.test(zipName) || !flagOn('parser')) {
+            if (own) { own.parentNode.removeChild(own); A.close(); }
+            return;
+        }
+        if (own) {
+            if (own.nextElementSibling !== logs) { list.insertBefore(own, logs); }
+            return;
+        }
+        var src = rows.filter(function (r) { return !r.querySelector('[aria-current="true"]'); })[0] || logs, row = src.cloneNode(true);
+        row.classList.add('jita-acts-entry');
+        Array.prototype.slice.call(row.querySelectorAll('button, a, [role="button"]')).forEach(function (b) {
+            if (!b.querySelector('[data-item-title]') && b.parentNode) { b.parentNode.removeChild(b); }   // the download button
+        });
+        Array.prototype.slice.call(row.querySelectorAll('[aria-current]')).forEach(function (x) { x.removeAttribute('aria-current'); });
+        var title = row.querySelector('[data-item-title]'), icon = row.querySelector('[data-item-elem-before]'), btn = title.closest('button');
+        title.textContent = 'Player actions';
+        if (icon) { icon.innerHTML = '<span class="jita-acts-ico">' + A.SYMBOL + '</span>'; }
+        if (btn) { btn.title = 'What the player did, from logs.txt and methodcalls.txt (JiTA)'; }
+        row.addEventListener('click', function (ev) { ev.preventDefault(); ev.stopPropagation(); A.open(); });
+        list.insertBefore(row, logs);
+    },
+    // Show the list in the pane, over what the viewer shows there, which is hidden meanwhile and comes back on close().
+    open: function () {
+        var A = JiTA.acts, lay = document.querySelector('[data-testid="archive-layout"]'), pane = A._pane(lay);
+        if (!pane) { return; }
+        A.close();
+        var el = document.createElement('div');
+        el.id = 'jita-acts';
+        el.style.top = A.TOP + 'px';
+        el.innerHTML = '<style>' + A.CSS + '</style><div class="jpa-msg">Reading igbr.zip…</div>';
+        if (window.getComputedStyle(pane).position === 'static') { pane.style.position = 'relative'; }   // the list is placed inside it
+        pane.classList.add('jita-acts-open');
+        pane.appendChild(el);
+        $(lay).find('.jita-acts-entry').addClass('jita-acts-on');
+        A.load().then(function (data) {
+            if (!document.body.contains(el)) { return; }
+            var built = A.build(data.logs, data.mc);
+            el.innerHTML = A.view(built);
+            A.wire(el, built);
+        }).then(null, function (e) {
+            if (document.body.contains(el)) { el.innerHTML = '<style>' + A.CSS + '</style><div class="jpa-msg">Could not read igbr.zip: ' + JiTA.settingsview.esc(e && e.message || e) + '</div>'; }
+        });
+    },
+    close: function () {
+        var el = document.getElementById('jita-acts');
+        if (el && el.parentNode) { el.parentNode.classList.remove('jita-acts-open'); el.parentNode.removeChild(el); }
+        $('.jita-acts-on').removeClass('jita-acts-on');
+    },
+    // The size the viewer shows for the open archive ("· 128 KB"), in bytes, or 0.
+    _shownSize: function () {
+        var el = document.querySelector('[data-testid="media-viewer-file-metadata-text"]');
+        var m = el && /([\d.,]+)\s*(B|KB|MB|GB)\b/i.exec(el.textContent || '');
+        if (!m) { return 0; }
+        return Number(m[1].replace(',', '.')) * Math.pow(1024, ['B', 'KB', 'MB', 'GB'].indexOf(m[2].toUpperCase()));
+    },
+    // The report's igbr.zip among its attachments: the only one, or the one nearest the size the viewer shows, or the newest.
+    pick: function (att, shown) {
+        var zips = (att || []).filter(function (a) { return JiTA.acts.ZIP.test(a.filename || '') && a.content; });
+        if (zips.length < 2) { return zips[0] || null; }
+        return zips.slice().sort(function (a, b) {
+            return (shown ? Math.abs((a.size || 0) - shown) - Math.abs((b.size || 0) - shown) : 0) || String(b.created || '').localeCompare(String(a.created || ''));
+        })[0];
+    },
+    // logs.txt and methodcalls.txt of the open report's igbr.zip: { logs, mc }, read once a page.
+    load: function () {
+        var A = JiTA.acts, P = JiTA.profile, key = JiTA.ocr._issueKey();
+        if (!key) { return Promise.reject(new Error('no report on this page')); }
+        return fetch('/rest/api/3/issue/' + encodeURIComponent(key) + '?fields=attachment', { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+            .then(function (r) { if (!r.ok) { throw new Error('Jira answered ' + r.status); } return r.json(); })
+            .then(function (j) {
+                var a = A.pick((j && j.fields && j.fields.attachment) || [], A._shownSize());
+                if (!a) { throw new Error('the report has no igbr.zip'); }
+                if ((a.size || 0) > P.MAX_ZIP_BYTES) { throw new Error('it is too large to read here'); }
+                if (!A._cache[a.id]) {
+                    A._cache[a.id] = P._fetchBytes(a.content).then(function (buf) { return P.unzip(buf, ['logs.txt', 'methodcalls.txt'], P.MAX_LOG_BYTES); })
+                        .then(function (f) { return { logs: f['logs.txt'] || '', mc: f['methodcalls.txt'] || '' }; });
+                    A._cache[a.id].then(null, function () { delete A._cache[a.id]; });   // a failure is tried again on the next click
+                }
+                return A._cache[a.id];
+            });
+    },
+    // At load: look for the viewer's file list every 300 ms while it is open; a click on one of its files, or on the arrows to
+    // another attachment, puts the viewer back.
+    start: function () {
+        if (JITA_NO_JIRA_UI) { return; }
+        try { GM_addStyle(JiTA.acts.PAGE_CSS); } catch (e) { /* ignore */ }
+        waitForKeyElements('[data-testid="archive-sidebar-folder-wrapper"]', function () { JiTA.acts.ensure(); return true; });
+        document.addEventListener('click', function (e) {
+            var b = e.target && e.target.closest ? e.target.closest('button') : null;
+            if (!b || !document.getElementById('jita-acts') || b.closest('.jita-acts-entry')) { return; }
+            if ((b.querySelector('[data-item-title]') && b.closest('[data-testid="archive-sidebar-folder-wrapper"]')) || b.closest('#media-viewer-navigation')) { JiTA.acts.close(); }
+        }, true);
+    },
+
+    // The entry and the pane while the list is open: the pane's own content hidden, so nothing of it shows through.
+    PAGE_CSS: `
+.jita-acts-open > :not(#jita-acts) { visibility: hidden !important; }
+.jita-acts-entry .jita-acts-ico { display: inline-flex; width: 24px; height: 24px; align-items: center; justify-content: center; font-size: 17px; color: #58a7bf; }
+.jita-acts-entry.jita-acts-on { background: var(--ds-background-selected, rgba(88, 167, 191, 0.16)); border-radius: 3px; }
+`,
+    // The list's look: the dark panels of the Settings window. Scoped to #jita-acts.
+    CSS: `
+#jita-acts { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; flex-direction: column; box-sizing: border-box; background: #0b0d0f; color: #c8ced2;
+    font: 12px/1.45 "Segoe UI", Roboto, Arial, sans-serif; text-align: left; white-space: normal; border-top: 1px solid #1f2529; }
+#jita-acts * { box-sizing: border-box; font-family: inherit; }
+#jita-acts .jpa-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-bottom: 1px solid #1f2529; background: #0f1215; }
+#jita-acts .jpa-title { font-size: 17px; color: #e6e6e6; }
+#jita-acts .jpa-src { color: #7f8a90; cursor: help; }
+#jita-acts .jpa-q { margin-left: auto; background: #15191c; border: 1px solid #2a3136; color: #e6e6e6; padding: 4px 8px; width: 200px; border-radius: 2px; }
+#jita-acts .jpa-errlbl { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+#jita-acts .jpa-btn { background: #15191c; border: 1px solid #2a3136; color: #c8ced2; padding: 4px 12px; cursor: pointer; border-radius: 2px; }
+#jita-acts .jpa-btn:hover { border-color: #58a7bf; color: #e6e6e6; }
+#jita-acts .jpa-status { color: #7fdca4; }
+#jita-acts .jpa-body { flex: 1; min-height: 0; overflow: auto; padding: 0 14px 24px; }
+#jita-acts .jpa-t { border-collapse: collapse; width: 100%; }
+#jita-acts .jpa-t th { position: sticky; top: 0; background: #0f1215; color: #7f8a90; font-weight: normal; text-align: left; padding: 6px 18px 6px 0; border-bottom: 1px solid #2a3136; }
+#jita-acts .jpa-t td { padding: 3px 18px 3px 0; vertical-align: top; border-bottom: 1px solid #13181b; }
+#jita-acts .jpa-r:hover td { background: #12171a; }
+#jita-acts .jpa-time { width: 1%; white-space: nowrap; color: #9aa4a9; font-family: Consolas, "Courier New", monospace; font-size: 11px; padding-top: 4px; }
+#jita-acts .jpa-a { width: 1%; white-space: nowrap; color: #e6e6e6; }
+#jita-acts .jpa-x { color: #9aa4a9; overflow-wrap: anywhere; }
+#jita-acts .jpa-c-move .jpa-a { color: #8fd3e8; }
+#jita-acts .jpa-c-session .jpa-a { color: #c9b6f2; }
+#jita-acts .jpa-c-no .jpa-a { color: #f3c058; }
+#jita-acts .jpa-c-err .jpa-a { color: #ff8a80; }
+#jita-acts .jpa-c-mark td { color: #7f8a90; font-style: italic; background: #0e1316; }
+#jita-acts .jpa-c-mark .jpa-a { color: #9aa4a9; }
+#jita-acts .jpa-n { margin-left: 8px; color: #f39058; font-size: 11px; }
+#jita-acts .jpa-day td { padding: 14px 0 4px; color: #e6e6e6; font-weight: 600; border-bottom: 1px solid #2a3136; }
+#jita-acts .jpa-hid { display: none; }
+#jita-acts .jpa-msg { padding: 16px; color: #9aa4a9; }
+#jita-acts .jpa-foot { padding: 12px 0 0; color: #5d676c; }
+`
+};
+
+// The file list's entry watches for the viewer from here on: it needs the module above.
+JiTA.acts.start();
 
 /* ---- Shared with the worker: written once, run by the page and by the worker ------------------------------------------
  * The shared worker (jitaWorkerBody) runs from its own source text (JiTA.worker._src) and sees nothing of the page, so
