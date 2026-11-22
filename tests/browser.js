@@ -13,6 +13,9 @@
 // and --remote-debugging-port=0, and the port it picked is read from DevToolsActivePort in that profile: nothing is read
 // from its stdout, which on Windows (headless Edge from Git Bash) did not come reliably. Every host name resolves to
 // nothing, so the page cannot reach the network.
+// Edge hands its tabs to Windows' Alt+Tab list (Windows.UI.Shell.WindowTabManager, Edge's feature msWindowTabManagerPublic),
+// headless too, and Windows kept the entry once the browser had gone: every local run left a "JiTA layout check" in Alt+Tab
+// until Explorer restarted. The feature is switched off; Chrome and Chromium know no such feature and ignore the name.
 const fs = require('fs'), path = require('path'), os = require('os');
 const { spawn, spawnSync } = require('child_process');
 
@@ -213,7 +216,8 @@ async function launch(opts) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jita-browser-' + process.pid + '-'));
     const args = ['--headless=new', '--remote-debugging-port=0', '--user-data-dir=' + dir, '--remote-allow-origins=*',
         '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions', '--disable-sync', '--disable-background-networking',
-        '--disable-component-update', '--disable-default-apps', '--mute-audio', '--host-resolver-rules=MAP * ~NOTFOUND', '--window-size=1400,1000'];
+        '--disable-component-update', '--disable-default-apps', '--mute-audio', '--host-resolver-rules=MAP * ~NOTFOUND', '--window-size=1400,1000',
+        '--disable-features=msWindowTabManagerPublic'];
     if (process.platform === 'linux') { args.push('--no-sandbox', '--disable-dev-shm-usage'); }   // CI's containers and AppArmor
     args.push('about:blank');
     const proc = spawn(exe, args, { stdio: 'ignore', windowsHide: true });
