@@ -53,14 +53,18 @@ jobs:
         run: node tests/run-checks.js
 
   breakages:
-    name: breakages ${{ matrix.part }}
+    name: breakages, part ${{ matrix.n }} of 3
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false   # each part reports everything it found, not just the first part to fail
       matrix:
-        part: ['0/3', '1/3', '2/3']
+        # part is what run-breakages.js reads (k/n, k counted from 0); n is the same part counted from 1, for the job's name
+        include:
+          - { part: '0/3', n: 1 }
+          - { part: '1/3', n: 2 }
+          - { part: '2/3', n: 3 }
     env:
       JITA_LAYOUT_REQUIRED: '1'
       JITA_LINT_REQUIRED: '1'   # mutate-lint.js
@@ -74,7 +78,7 @@ jobs:
         with:
           node-version: 24
 
-      - name: Deliberate breakages, part ${{ matrix.part }}
+      - name: Deliberate breakages, part ${{ matrix.n }} of 3
         run: node tests/run-breakages.js
 
   checks:
