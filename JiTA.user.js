@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.55.1
+// @version     3.55.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,8 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.55.1
-// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.55.1
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.55.2
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.55.2
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -4390,6 +4390,7 @@ JiTA.acts = {
         pane.classList.add('jita-acts-open');
         pane.appendChild(el);
         $(lay).find('.jita-acts-entry').addClass('jita-acts-on');
+        A._logPanel();
         A.load().then(function (data) {
             if (!document.body.contains(el)) { return; }
             var built = A.build(data.logs, data.mc);
@@ -4403,6 +4404,11 @@ JiTA.acts = {
         var el = document.getElementById('jita-acts');
         if (el && el.parentNode) { el.parentNode.classList.remove('jita-acts-open'); el.parentNode.removeChild(el); }
         $('.jita-acts-on').removeClass('jita-acts-on');
+        JiTA.acts._logPanel();
+    },
+    // The "Defects in log" panel of a logs.txt opened before: out of sight while the list covers that log, back with it.
+    _logPanel: function () {
+        try { JiTA.logsig.updateVisibility(); } catch (e) { JiTA.caught('logsig.updateVisibility', e); }
     },
     // The size the viewer shows for the open archive ("· 128 KB"), in bytes, or 0.
     _shownSize: function () {
@@ -5437,10 +5443,16 @@ JiTA.logsig = {
         return row;
     },
 
-    // Remove the panel once the log viewer is gone (closed / navigated away). Called from the global observer.
+    // Remove the panel once the log viewer is gone (closed / navigated away), and keep it out of sight while Player actions
+    // covers the log (JiTA.acts hides what the pane shows, the parsed log stays in the page): it came along onto the list.
+    // It shows again with the log. Called from the global observer, by renderPanel, and by JiTA.acts as its list opens and
+    // closes, so the panel goes and comes back with the list, not 300 ms later.
     updateVisibility: function () {
         var panel = document.getElementById('jita-logmatch-panel');
-        if (panel && !document.getElementById('tableContent')) { panel.parentNode.removeChild(panel); }
+        if (!panel) { return; }
+        var table = document.getElementById('tableContent');
+        if (!table) { panel.parentNode.removeChild(panel); return; }
+        panel.style.display = table.closest && table.closest('.jita-acts-open') ? 'none' : '';
     },
 
     renderPanel: function (found) {
@@ -5584,6 +5596,7 @@ JiTA.logsig = {
 
         JiTA.logsig._applyPos(panel);
         JiTA.logsig._makeDraggable(panel, head, collapse);
+        JiTA.logsig.updateVisibility();   // drawn while Player actions covers the log (a sync's rematch): it stays out of sight
     },
 
     // Hover preview for a panel entry: look up the defect in the local DB and show the SAME styled card the
