@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.55.2 (2026-11-23)
+
+### Fixed issues
+
+- The "Defects in log" box no longer stays on screen when you switch from logs.txt to Player actions. It comes back when you open logs.txt again.
+
 ## 3.55.1 (2026-11-22)
 
 ### Fixed issues

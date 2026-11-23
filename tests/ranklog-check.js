@@ -2,6 +2,8 @@
 //  - a late ranking result redraws only when it is a Hybrid upgrade (a late Keyword fallback looped the panel), and
 //    goes to whoever asked
 //  - the panel cycles only through occurrences on screen, and a second render reuses it
+//  - the panel hides while Player actions covers the log (a render meanwhile too), shows again with the log, and goes
+//    with the log viewer (v3.55.2)
 //  - the tab and worker fingerprint copies agree, end a block at EXCEPTION END and strip every log-column prefix
 //  - a sync write that lands while the tab builds its own index leaves that index dirty
 const fs = require('fs');
@@ -57,7 +59,7 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
 
     // ================= the "Defects in log" panel =================
     function El(tag) {
-        const e = { tag: tag, children: [], parentNode: null, listeners: {}, style: {}, attrs: {}, id: '', className: '', textContent: '', innerHTML: '' };
+        const e = { tag: tag, children: [], parentNode: null, listeners: {}, style: { display: '' }, attrs: {}, id: '', className: '', textContent: '', innerHTML: '' };
         e.appendChild = (c) => { if (c.parentNode) { c.parentNode.removeChild(c); } c.parentNode = e; e.children.push(c); return c; };
         e.removeChild = (c) => { e.children = e.children.filter((x) => x !== c); c.parentNode = null; return c; };
         e.addEventListener = (t, f) => { (e.listeners[t] = e.listeners[t] || []).push(f); };
@@ -76,6 +78,10 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
         logsig: { COLLAPSE_KEY: 'c', _injectCss() {}, _injectClusterCss() {}, _fitVertical() {}, _applyPos() {}, _makeDraggable() {}, _showDefectTip() {}, _panelIdx: {} }
     };
     Object.assign(JiTA.logsig, eval('({' + cut('    renderPanel: function (found) {', '\n    },\n') + '\n    }})'));
+    const LOG_VIS = "    updateVisibility: function () {\n        var panel = document.getElementById('jita-logmatch-panel');";   // JiTA.ui has one too
+    Object.assign(JiTA.logsig, eval('({' + cut('    updateVisibility: function () {', '\n    },\n', Math.max(0, src.indexOf(LOG_VIS))) + '\n    }})'));
+    let covered = false;   // Player actions' list over the pane the parsed log is in (JiTA.acts marks the pane .jita-acts-open)
+    table.closest = (sel) => (sel === '.jita-acts-open' && covered ? {} : null);
     const row = (visible) => { const r = { isConnected: true, offsetParent: visible ? {} : null, shown: 0, classList: { add() {}, remove() {} } }; r.scrollIntoView = () => { r.shown++; }; return r; };
     const rows = [row(false), row(true), row(true)];
     body.appendChild(table);
@@ -92,6 +98,22 @@ const deferred = () => { const d = {}; d.promise = new Promise((a, b) => { d.res
     JiTA.logsig.renderPanel({ 'EDR-1': { count: 1, rows: [row(true)], raw: 'KeyError' } });
     const panels = body.children.filter((c) => c.id === 'jita-logmatch-panel');
     ok('a second render fills the same panel, never a second one', panels.length === 1 && panels[0] === panel, panels.length + ' panels');
+    ok('the panel shows with the log (control)', panel.style.display === '', JSON.stringify(panel.style.display));
+    covered = true;
+    JiTA.logsig.updateVisibility();
+    ok('Player actions over the log hides the panel, and keeps it on the page', panel.style.display === 'none' && panel.parentNode === body, JSON.stringify(panel.style.display));
+    JiTA.logsig.renderPanel({ 'EDR-1': { count: 1, rows: [row(true)], raw: 'KeyError' } });
+    ok('...a render meanwhile (a sync\'s rematch) leaves it hidden', panel.style.display === 'none', JSON.stringify(panel.style.display));
+    body.removeChild(panel);
+    JiTA.logsig.renderPanel({ 'EDR-1': { count: 1, rows: [row(true)], raw: 'KeyError' } });
+    const fresh = find(body, 'jita-logmatch-panel');
+    ok('...and so does a first one', !!fresh && fresh.style.display === 'none', fresh ? JSON.stringify(fresh.style.display) : 'no panel');
+    covered = false;
+    JiTA.logsig.updateVisibility();
+    ok('the log back on screen shows the panel again', fresh.style.display === '', JSON.stringify(fresh.style.display));
+    body.removeChild(table);
+    JiTA.logsig.updateVisibility();
+    ok('the log viewer closed takes the panel off the page', !find(body, 'jita-logmatch-panel'), 'still there');
 
     // ================= the fingerprint, in both copies =================
     global.JiTA = { logsig: { MIN_FRAMES: 2, CRASH_FRAMES: 2 } };
