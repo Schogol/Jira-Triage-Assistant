@@ -757,7 +757,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
         st.on[own.sig] === true && ain.value === '' && addMsg() === '', JSON.stringify(own));
     ok('...looked for at any stack', own.fr === null && own.re.test(um(UE, FA)));
     const ownRow = rowsT()[1];
-    ok('...its row says so, with only a remove, its * marked as any text', /added by you, at any stack/.test(ownRow.textContent) && editsOf(ownRow).map((n) => n.textContent).join() === 'remove' &&
+    ok('...its row says so, with an edit and a remove, its * marked as any text', /added by you, at any stack/.test(ownRow.textContent) && editsOf(ownRow).map((n) => n.textContent).join() === 'edit,remove' &&
         phs(ownRow) === '*=any text' && ownRow.getAttribute('title') === 'Looked for by this message alone, at any stack', ownRow.textContent);
     ain.value = 'IndustryError: Industry error, msg=IndustryValidationError*';
     keyOn(ain, 'Enter');
@@ -766,6 +766,43 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     await painted();
     ok('a report with that message at another stack is found, as the same message',
         !!hasRow('EBR-60') && /same messageIndustryError: Industry error, msg=IndustryValidationError\*/.test(hasRow('EBR-60').textContent), hasRow('EBR-60') && hasRow('EBR-60').textContent);
+    // Editing a typed message changes the message itself, in its place, still ticked.
+    const ownAt = () => st.targets.findIndex((t) => t.typed), ownId = own.sig, IND = own.pat, OTHER = 'IndustryError: Industry error, msg=Other*';
+    const linksAt = (i) => editsOf(rowsT()[i]).map((n) => n.textContent).join();
+    click(editsOf(rowsT()[ownAt()])[0]);
+    ok('edit on a typed message opens a box with its message, and a hint with no stack in it', st.editing === ownId && !!box() && box().value === IND &&
+        /the rest must match as written, at any stack/.test(tgt().textContent) && !/and the stack/.test(tgt().textContent), box() && box().value);
+    box().value = '  IndustryError:  Industry error, msg=Other* ';
+    keyOn(box(), 'Enter');
+    const own2 = st.targets[ownAt()];
+    ok('Enter changes the message in place, still ticked, with no edit kept beside it', !st.editing && ownAt() === 1 && own2.sig === ownId && own2.pat === OTHER && own2.re.test(um(UE.replace('IndustryValidationError', 'Other'), FA)) &&
+        st.added.typed.length === 1 && st.added.typed[0].text === OTHER && st.on[ownId] === true && st.edit[ownId] === undefined, JSON.stringify(st.added.typed));
+    ok('...its row shows the new message, with an edit and a remove', byCls(rowsT()[ownAt()], 'jx-tmsg')[0].textContent === OTHER && linksAt(ownAt()) === 'edit,remove', linksAt(ownAt()));
+    ok('...and the reports are matched by it: one only the old message found leaves the results', !hasRow('EBR-60'));
+    click(editsOf(rowsT()[ownAt()])[0]);
+    box().value = '   ';
+    keyOn(box(), 'Enter');
+    ok('emptied, it stays as it was, nothing said (remove takes it out)', st.added.typed.length === 1 && st.added.typed[0].text === OTHER && st.targets[ownAt()].sig === ownId && addMsg() === '', addMsg());
+    ain.value = IND;   // the old message typed again: a second typed message, unticked below
+    keyOn(ain, 'Enter');
+    const second = st.added.typed[1] && st.added.typed[1].id;
+    st.on[second] = false;
+    X._retarget(st);
+    click(editsOf(rowsT()[ownAt()])[0]);
+    box().value = ' * ';
+    keyOn(box(), 'Enter');
+    ok('...and so with no letter in it, which is said', st.added.typed[0].text === OTHER && /^Not changed: .*on its own finds every exception/.test(addMsg()), addMsg());
+    click(editsOf(rowsT()[ownAt()])[0]);
+    box().value = 'KeyError: #';
+    keyOn(box(), 'Escape');
+    ok('Esc changes nothing', !st.editing && st.added.typed[0].text === OTHER);
+    click(editsOf(rowsT()[ownAt()])[0]);
+    box().value = IND;
+    keyOn(box(), 'Enter');
+    ok('changed to another typed message\'s text, the two are one: that one stays, ticked as this one was, the message said cleared',
+        st.added.typed.length === 1 && st.added.typed[0].id === second && st.on[second] === true && st.on[ownId] === undefined && st.targets.filter((t) => t.typed).length === 1 && addMsg() === '',
+        JSON.stringify(st.added.typed) + ' ' + addMsg());
+    ok('...and what that message finds is found again', !!hasRow('EBR-60'));
     ain.value = descBlock('ValueError: bad', FB);
     keyOn(ain, 'Enter');
     let pasted = st.targets.filter((t) => t.sig === B.sig)[0];
@@ -867,7 +904,7 @@ const A = fp('KeyError: 2', FA), A2 = fp('KeyError: 2', FA2), B = fp('ValueError
     ain2.value = 'UserError: User error, msg=ThrottleGeneric*';
     keyOn(ain2, 'Enter');
     const tz = st.targets.filter((t) => t.typed)[0];
-    ok('a typed message is never set apart, whatever it says', !!tz && !tz.left && apartRows().indexOf(rowOfSig(tz.sig)) < 0 && linksOf(rowOfSig(tz.sig)) === 'remove');
+    ok('a typed message is never set apart, whatever it says', !!tz && !tz.left && apartRows().indexOf(rowOfSig(tz.sig)) < 0 && linksOf(rowOfSig(tz.sig)) === 'edit,remove');
     ROOT.removeChild(st.node);
     X._edits = {}; X._added = {};
     X._load = realLoad;

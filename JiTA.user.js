@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.55.1
+// @version     3.56.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,8 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.55.1
-// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.55.1
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.56.0
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.56.0
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -16771,11 +16771,26 @@ JiTA.excfind = {
         return t;
     },
     // Keep what an exception is looked for by, or drop the edit: for no text, or text that says no more than the
-    // exception itself.
+    // exception itself. A message the user typed (its id starts typed:, see _addOwn) is changed itself instead (_retype).
     _keepEdit: function (st, sig, text) {
         var X = JiTA.excfind, t = st.targets.filter(function (x) { return x.sig === sig; })[0];
         var v = text == null ? '' : String(text).replace(/\s+/g, ' ').trim();
+        if (/^typed:/.test(sig)) { X._retype(st, sig, v); return; }
         if (!v || (t && v === X._editText(t))) { delete st.edit[sig]; } else { st.edit[sig] = v; }
+    },
+    // A typed message changed to v, in its place and ticked as it was. Emptied, it stays as it was (remove takes it out);
+    // left with no letter in it, too, as the box refuses that, and says why. Changed to another typed message's text, the
+    // two are one: that one stays, ticked if either was.
+    _retype: function (st, sig, v) {
+        var X = JiTA.excfind, A = st.added, a = A.typed.filter(function (x) { return x.id === sig; })[0];
+        if (!a || !v || v === a.text) { return; }
+        if (!/[a-z]/i.test(v)) { X._addSay(st, 'Not changed: type at least part of the message, since * on its own finds every exception.'); return; }
+        X._addSay(st, '');
+        var same = A.typed.filter(function (x) { return x.id !== sig && x.text === v; })[0];
+        if (!same) { a.text = v; return; }
+        if (st.on[sig]) { st.on[same.id] = true; }
+        A.typed = A.typed.filter(function (x) { return x.id !== sig; });
+        delete st.on[sig];
     },
     // Open the editor on an exception, keeping what was typed in one already open.
     _startEdit: function (st, sig) {
@@ -16811,7 +16826,8 @@ JiTA.excfind = {
     },
     // Add what the user typed or pasted in the box below the list, ticked. A whole exception or stacktrace pasted from a log
     // (EXCEPTION # or STACKTRACE # on, or at least its message and stack) is looked for as the others are: at its stack,
-    // and editable. Text without a stack is a message, looked for at any stack, # any number and * any text.
+    // and editable. Text without a stack is a message, looked for at any stack, # any number and * any text; edit changes
+    // the message itself (_retype).
     _addOwn: function (st, box) {
         var X = JiTA.excfind, A = st.added, text = String(box.value || '').trim(), fps = [];
         var whole = text.indexOf('EXCEPTION #') >= 0 || text.indexOf('STACKTRACE #') >= 0, stack = whole || /\.pyx?\(\d+\)/.test(text);
@@ -17272,13 +17288,16 @@ JiTA.excfind = {
             if (t.left) { $('<span class="jx-left"></span>').text(JiTA.excnoise.label(t.left, t.sig)).appendTo($row); }
             $('<span class="jx-tsrc"></span>').text(X._src(t)).appendTo($row);
             if (editing) {
-                $('<div class="jx-pathint"></div>').text('Put # where any number will do and * where any text will; the rest, and the stack, must match as written. ' +
+                // A typed message has no stack: the message is all it is looked for by.
+                $('<div class="jx-pathint"></div>').text((t.typed ? 'Put # where any number will do and * where any text will; the rest must match as written, at any stack. '
+                    : 'Put # where any number will do and * where any text will; the rest, and the stack, must match as written. ') +
                     'A # also matches a # and a * a *, so nothing needs escaping. Enter keeps it, Esc cancels.').appendTo($into);
                 return;
             }
-            if (t.typed) { X._removeLink(st, t, $row); return; }   // a typed message is removed and typed again, not edited
             $('<span class="jx-tedit"></span>').text('edit').attr('title', 'Change what it is looked for by: # stands for any number, * for any text')
                 .on('click', function (e) { e.preventDefault(); X._startEdit(st, t.sig); }).appendTo($row);
+            // A typed message is its own edit, so it has no reset, and it is never set apart, so no ignore: only remove.
+            if (t.typed) { X._removeLink(st, t, $row); return; }
             if (t.pat != null) {
                 $('<span class="jx-tedit"></span>').text('reset').attr('title', 'Look for the exception as it is again')
                     .on('click', function (e) { e.preventDefault(); X._keepEdit(st, t.sig, null); st.tsig = null; X._retarget(st); }).appendTo($row);
