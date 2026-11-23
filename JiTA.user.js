@@ -3975,7 +3975,8 @@ JiTA.acts = {
     TIP_MS: 250,             // the hover card shows once the mouse has rested on a row this long
     TIP_LINES: 6,            // lines a hover card shows; more are counted
     TIP_CHARS: 1200,         // a line's message is cut here in a hover card
-    GO_MS: 15000,            // how long a click on a row waits for its file to be drawn in the viewer
+    GO_MS: 20000,            // how long a click on a row waits for its file to be drawn in the viewer, and watches its line
+    GO_STALE: 1500,          // a table from before that click is taken only after this, Jira not having drawn the file again
     GO_POLL: 150,
     _cache: {},              // { attachment id: promise of { logs, mc } }, for the page's life
     _shown: null,            // the { logs, mc } the list shows now
@@ -4454,6 +4455,10 @@ JiTA.acts = {
     // Open the file a line (src) is in, at that line: a click on that file's entry in the file list, as the user would make
     // it, which closes the list too (start), or, when the pane shows that file already, under the list, closing the list.
     // Then wait for the log parser's view of it and show the line there (seek, _mark). Where the list was is kept (_back).
+    // Jira can draw a file again after a click on it, the one shown included, and the log parser then draws a new table at
+    // its start: the table from before the click is taken only once GO_STALE has passed with no new one, and until GO_MS a
+    // marked line whose table was drawn again is looked for again and marked in the new one. A line not found is said only
+    // at GO_MS, since a table can still be drawn again with it.
     go: function (src, el) {
         var A = JiTA.acts, list = document.querySelector('[data-testid="archive-sidebar-folder-wrapper"]');
         if (!src) { return; }
@@ -4461,16 +4466,41 @@ JiTA.acts = {
         if (!btn) { JiTA.ui.toast('This igbr.zip shows no ' + src.f + ' to open.'); return; }
         var b = el && el.querySelector('.jpa-body');
         A._back = b ? { data: A._shown, top: b.scrollTop, q: String($(el).find('.jpa-q').val() || ''), noerr: !!$(el).find('.jpa-noerr').prop('checked') } : null;
-        var gen = ++A._goGen, until = Date.now() + A.GO_MS;
-        if (row.querySelector('[aria-current="true"]') && A._viewOf(document.getElementById('tableContent')) === src.f) { A.close(); } else { btn.click(); }
+        var gen = ++A._goGen, t0 = Date.now(), before = document.getElementById('tableContent'), stale = null, done = null, marks = 0, missing = false, touched = false;
+        var shown = !!(row.matches('[aria-current="true"]') || row.querySelector('[aria-current="true"]')) && A._viewOf(before) === src.f;
+        // Until the user scrolls, clicks or types, a marked line that went out of view (scrolled while the pane was still
+        // being laid out, or scrolled back) is scrolled to again.
+        var USER = ['wheel', 'mousedown', 'keydown', 'touchstart'], onUser = function () { touched = true; };
+        var unwatch = function () { USER.forEach(function (n) { window.removeEventListener(n, onUser, true); }); };
+        if (shown) { A.close(); } else { stale = before; btn.click(); }
+        USER.forEach(function (n) { window.addEventListener(n, onUser, true); });
         (function poll() {
-            if (gen !== A._goGen) { return; }
-            var tr = A.seek(src);
-            if (tr) { A._mark(tr); return; }
-            if (tr === false) { JiTA.ui.toast('That line is not in ' + src.f + ' as it is shown.'); return; }
-            if (Date.now() > until) { JiTA.ui.toast(src.f + ' did not open as a table, so its line could not be shown.'); return; }
-            setTimeout(poll, A.GO_POLL);
+            if (gen !== A._goGen) { unwatch(); return; }
+            var late = Date.now() - t0;
+            if (done && done.isConnected && !touched && !A._inView(done)) { done.scrollIntoView({ block: 'center' }); }
+            if (!done || !done.isConnected) {
+                var tr = A.seek(src);
+                if (tr && stale && stale.contains(tr) && late < A.GO_STALE) { tr = null; }   // Jira may draw the file again yet
+                missing = tr === false;
+                if (tr) {
+                    done = A._mark(tr);
+                    marks++;
+                    JiTA.log('[JiTA] Player actions: ' + src.f + ' line ' + (marks > 1 ? 'marked again in the table drawn again' : 'marked') + ' after ' + late + ' ms' +
+                        (shown ? ' (the file was shown)' : stale && stale.contains(done) ? ' (the table from before the click)' : ''));
+                }
+            }
+            if (late < A.GO_MS) { setTimeout(poll, A.GO_POLL); return; }
+            unwatch();
+            if (!done) {
+                JiTA.log('[JiTA] Player actions: ' + src.f + ' line not shown after ' + late + ' ms: ' + (missing ? 'not in the table' : 'no table of ' + src.f));
+                JiTA.ui.toast(missing ? 'That line is not in ' + src.f + ' as it is shown.' : src.f + ' did not open as a table, so its line could not be shown.');
+            }
         })();
+    },
+    // Whether a row is in view: inside what scrolls it (the log parser's #table) and the window, and laid out at all.
+    _inView: function (tr) {
+        var r = tr.getBoundingClientRect(), sc = tr.closest('#table'), s = sc ? sc.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+        return r.height > 0 && r.top >= Math.max(0, s.top) && r.bottom <= Math.min(window.innerHeight, s.bottom);
     },
     // Which file the log parser's view (its #tableContent) shows, by the view's title: 'logs.txt', 'methodcalls.txt' or ''.
     _viewOf: function (tc) {

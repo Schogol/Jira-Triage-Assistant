@@ -728,15 +728,17 @@ async function actsJumpView(files) {
         if (!t || !text[t.textContent]) { return; }
         b.addEventListener('click', () => setTimeout(() => {
             Array.prototype.forEach.call(list.querySelectorAll('[aria-current]'), (x) => x.removeAttribute('aria-current'));
-            b.setAttribute('aria-current', 'true');
+            if (!window.__noCurrent) { b.setAttribute('aria-current', 'true'); }
             const old = document.querySelector('[data-testid="code-block"]'), cb = document.createElement('span');
             cb.setAttribute('data-testid', 'code-block');
             cb.style.display = 'block';
             cb.textContent = text[t.textContent];
             old.parentNode.replaceChild(cb, old);
             loads++;
-        }, 100));
+        }, window.__loadMs || 100));
     });
+    const said = [], log0 = JiTA.log;
+    JiTA.log = function (s) { if (/Player actions/.test(String(s))) { said.push(String(s)); } return log0.apply(this, arguments); };
     await wait(700);
     JiTA.acts.ensure();
     const entry = list.querySelector('.jita-acts-entry');
@@ -825,7 +827,38 @@ async function actsJumpView(files) {
     await wait(300);
     const again = { gate: m3 ? seen(m3).text : null, hiddenBefore: hiddenBefore, loads: loads - loadsBefore, listGone: !document.getElementById('jita-acts'),
         noticeOff: notice().classList.contains('toggle'), row: m4 ? seen(m4) : null, display: m4 ? m4.style.display : null };
-    return { entry: true, opened: true, hover: hover, cardGone: cardGone, flipped: flipped, chooser: chooser, afterEsc: afterEsc, inLogs: inLogs, reopened: reopened, inMc: inMc, again: again, toasts: toasts };
+    // Jira as it may be: the file shown not marked current, so its entry is clicked, and Jira draws it again. Quickly: the
+    // table from before the click is never marked. Slowly (after GO_STALE): that table is marked, then the line is marked
+    // again in the table drawn again, and scrolled to.
+    window.__noCurrent = true;
+    Array.prototype.forEach.call(list.querySelectorAll('[aria-current]'), (x) => x.removeAttribute('aria-current'));
+    JiTA.acts._goGen++;   // the watch of the jumps above ends here
+    let n0 = loads;
+    said.length = 0;
+    window.__loadMs = 300;
+    el = await openList();
+    rowNamed(el, /^Jumped through a stargate/).cells[1].click();
+    const q5 = await until(() => (loads > n0 && marked()[0] && /Stargate Jump from/.test(marked()[0].textContent) ? marked()[0] : null), 6000);
+    await wait(1800);
+    const quick = { loads: loads - n0, row: q5 && q5.isConnected ? seen(q5) : null, said: said.slice() };
+    n0 = loads;
+    said.length = 0;
+    window.__loadMs = 2600;
+    el = await openList();
+    rowNamed(el, /^Went idle/).cells[1].click();
+    const m5 = await until(() => (loads > n0 && marked()[0] && /I am now AFK/.test(marked()[0].textContent) ? marked()[0] : null), 9000);
+    const slow = { loads: loads - n0, row: m5 ? seen(m5) : null, said: said.slice() };
+    // scrolled away by something else than the user: back in view; scrolled by the user: left there
+    const tbl = document.getElementById('table');
+    if (tbl) { tbl.scrollTop = 0; }
+    await wait(500);
+    const back = m5 ? seen(m5) : null;
+    window.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
+    if (tbl) { tbl.scrollTop = 0; }
+    await wait(500);
+    const left = m5 ? seen(m5) : null;
+    const redraw = { quick: quick, slow: slow, back: back, left: left };
+    return { entry: true, opened: true, hover: hover, cardGone: cardGone, flipped: flipped, chooser: chooser, afterEsc: afterEsc, inLogs: inLogs, reopened: reopened, inMc: inMc, again: again, redraw: redraw, toasts: toasts };
 }
 function actsJumpChecks(m) {
     ok('Player actions, rows to lines: the list opens', m.entry && m.opened, JSON.stringify(m));
@@ -850,6 +883,13 @@ function actsJumpChecks(m) {
     const a = m.again;
     ok('Player actions: a row opened in the file already shown under the list: nothing loaded again, the list closed', /Stargate Jump from/.test(a.gate || '') && a.hiddenBefore === 'none' && a.loads === 0 && a.listGone, JSON.stringify(a));
     ok('Player actions: ...a line its hidden notices kept out of sight is shown, the notices on again, and marked', !!a.row && a.display !== 'none' && !a.noticeOff && a.row.onScreen && a.row.atRow, JSON.stringify(a));
+    const d = m.redraw, q5 = d.quick, s5 = d.slow;
+    ok('Player actions: the file shown, not marked current by Jira and drawn again on the click: the line is marked in the table drawn again, visible, the table from before never marked',
+        q5.loads === 1 && !!q5.row && /Stargate Jump from/.test(q5.row.text) && q5.row.onScreen && q5.row.atRow && q5.said.length === 1 && !/again|from before/.test(q5.said[0]), JSON.stringify(q5));
+    ok('Player actions: ...drawn again only after a while: the table from before is marked, then the line again in the new table, scrolled to', s5.loads === 1 && !!s5.row &&
+        /I am now AFK/.test(s5.row.text) && s5.row.onScreen && s5.row.atRow && s5.said.length === 2 && /marked again in the table drawn again/.test(s5.said[1]), JSON.stringify(s5));
+    ok('Player actions: a marked line scrolled away by something else is scrolled back to', !!d.back && d.back.onScreen, JSON.stringify(d.back));
+    ok('Player actions: ...but not once the user has scrolled', !!d.left && !d.left.onScreen, JSON.stringify(d.left));
     ok('Player actions: nothing went wrong on the way', !m.toasts.length, JSON.stringify(m.toasts));
 }
 const JUMP_FILES = {
