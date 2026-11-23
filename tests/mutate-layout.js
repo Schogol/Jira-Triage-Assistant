@@ -1,7 +1,7 @@
 // mutate-layout.js - breaks what keeps each view in line, in turn, and requires layout-check (a real headless Chromium) to
 // go red: the Members tab's note columns (the v3.49.1 fix) and month numbers, the Quality control columns, the cards'
 // footers and grid, Settings' and the Lead duties window's fixed size and steady tabs, the Settings window's width, and the Player actions entry and
-// list in the igbr.zip viewer. Every breakage starts a browser,
+// list in the igbr.zip viewer, with the "Defects in log" panel hidden under the list. Every breakage starts a browser,
 // so there are only a few.
 //
 // The check runs on the unbroken script first: a breakage proves nothing in a browser that fails anyway. Only a FAIL line
@@ -40,7 +40,10 @@ const muts = [
     [LC, 'what the pane showed shows through the Player actions list', '.jita-acts-open > :not(#jita-acts) { visibility: hidden !important; }\n', ''],
     [LC, 'a click on a file of the archive leaves the Player actions list open', "if ((b.querySelector('[data-item-title]') && b.closest('[data-testid=\"archive-sidebar-folder-wrapper\"]')) || b.closest('#media-viewer-navigation')) {",
         "if (b.closest('#media-viewer-navigation')) {"],
-    [LC, 'the log parser\'s view of logs.txt left in the pane restyles the Player actions list', '#jita-acts * { all: revert; box-sizing', '#jita-acts * { box-sizing']
+    [LC, 'the log parser\'s view of logs.txt left in the pane restyles the Player actions list', '#jita-acts * { all: revert; box-sizing', '#jita-acts * { box-sizing'],
+    // ---- the "Defects in log" panel and Player actions (v3.55.2) ----
+    [LC, 'the "Defects in log" panel stays up as the Player actions list opens', "        $(lay).find('.jita-acts-entry').addClass('jita-acts-on');\n        A._logPanel();\n", "        $(lay).find('.jita-acts-entry').addClass('jita-acts-on');\n"],
+    [LC, 'the "Defects in log" panel stays away when the Player actions list closes', "        $('.jita-acts-on').removeClass('jita-acts-on');\n        JiTA.acts._logPanel();\n", "        $('.jita-acts-on').removeClass('jita-acts-on');\n"]
 ];
 // The check's output on a copy: { out, fails, passed, skip }. Only a check that ran to its end says passed or FAILURE.
 function check(text) {

@@ -12,6 +12,11 @@ const muts = [
     [H, 'hidden occurrences are cycled through', 'var rowsArr = entry.rows.filter(function (r) { return r.isConnected && r.offsetParent !== null; });', 'var rowsArr = entry.rows;'],
     [H, 'all hidden goes unsaid', "                    if (entry.rows.length) { try { JiTA.ui.toast('Every occurrence is hidden by the filters or Group Repeats.'); } catch (e) { /* ignore */ } }\n", ''],
     [H, 'a second render adds a second panel', '        var panel = existing;\n        if (!panel) {', '        var panel = null;\n        if (!panel) {'],
+    // ---- the panel and Player actions (v3.55.2) ----
+    [H, 'the panel stays over Player actions', "        panel.style.display = table.closest && table.closest('.jita-acts-open') ? 'none' : '';", "        panel.style.display = '';"],
+    [H, 'the panel stays hidden once the log shows again', "        panel.style.display = table.closest && table.closest('.jita-acts-open') ? 'none' : '';",
+        "        if (table.closest && table.closest('.jita-acts-open')) { panel.style.display = 'none'; }"],
+    [H, 'a panel drawn while Player actions covers the log shows', '        JiTA.logsig.updateVisibility();   // drawn while Player actions covers the log', '        // drawn while Player actions covers the log'],
     [H, "the tab reads past EXCEPTION END", "    function splitBlocks(text) {\n        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\\s\\S]*?(?:\\1 END|(?=(?:EXCEPTION|STACKTRACE) #)|$)/gi, m, c;",
         "    function splitBlocks(text) {\n        var blocks = [], re = /(EXCEPTION|STACKTRACE) #[\\s\\S]*?(?=(?:EXCEPTION|STACKTRACE) #|$)/gi, m, c;"],
     [H, 'the tab strips only line-start prefixes', "        text = text.replace(/(^|\\s)\\d{1,2}:\\d{2}:\\d{2}\\t[^\\t\\n]*\\t[^\\t\\n]*\\t/g, '$1');",

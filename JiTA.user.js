@@ -4390,6 +4390,7 @@ JiTA.acts = {
         pane.classList.add('jita-acts-open');
         pane.appendChild(el);
         $(lay).find('.jita-acts-entry').addClass('jita-acts-on');
+        A._logPanel();
         A.load().then(function (data) {
             if (!document.body.contains(el)) { return; }
             var built = A.build(data.logs, data.mc);
@@ -4403,6 +4404,11 @@ JiTA.acts = {
         var el = document.getElementById('jita-acts');
         if (el && el.parentNode) { el.parentNode.classList.remove('jita-acts-open'); el.parentNode.removeChild(el); }
         $('.jita-acts-on').removeClass('jita-acts-on');
+        JiTA.acts._logPanel();
+    },
+    // The "Defects in log" panel of a logs.txt opened before: out of sight while the list covers that log, back with it.
+    _logPanel: function () {
+        try { JiTA.logsig.updateVisibility(); } catch (e) { JiTA.caught('logsig.updateVisibility', e); }
     },
     // The size the viewer shows for the open archive ("· 128 KB"), in bytes, or 0.
     _shownSize: function () {
@@ -5437,10 +5443,16 @@ JiTA.logsig = {
         return row;
     },
 
-    // Remove the panel once the log viewer is gone (closed / navigated away). Called from the global observer.
+    // Remove the panel once the log viewer is gone (closed / navigated away), and keep it out of sight while Player actions
+    // covers the log (JiTA.acts hides what the pane shows, the parsed log stays in the page): it came along onto the list.
+    // It shows again with the log. Called from the global observer, by renderPanel, and by JiTA.acts as its list opens and
+    // closes, so the panel goes and comes back with the list, not 300 ms later.
     updateVisibility: function () {
         var panel = document.getElementById('jita-logmatch-panel');
-        if (panel && !document.getElementById('tableContent')) { panel.parentNode.removeChild(panel); }
+        if (!panel) { return; }
+        var table = document.getElementById('tableContent');
+        if (!table) { panel.parentNode.removeChild(panel); return; }
+        panel.style.display = table.closest && table.closest('.jita-acts-open') ? 'none' : '';
     },
 
     renderPanel: function (found) {
@@ -5584,6 +5596,7 @@ JiTA.logsig = {
 
         JiTA.logsig._applyPos(panel);
         JiTA.logsig._makeDraggable(panel, head, collapse);
+        JiTA.logsig.updateVisibility();   // drawn while Player actions covers the log (a sync's rematch): it stays out of sight
     },
 
     // Hover preview for a panel entry: look up the defect in the local DB and show the SAME styled card the

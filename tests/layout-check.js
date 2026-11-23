@@ -561,7 +561,8 @@ function setvChecks(m) {
 // archive-layout holding the 300 px file list (a row a file: its button, and a download button beside it) and the pane
 // beside it, the open file from 75 px down. JiTA.acts puts its entry in (the script's own poller, and ensure() called
 // again), a click opens the list (load() handing over a made-up logs.txt and methodcalls.txt), the search and Copy are
-// tried, then a click on a file of the archive, and on the arrow to the next attachment, puts the viewer back. Last, an
+// tried, then a click on a file of the archive, and on the arrow to the next attachment, puts the viewer back. The "Defects
+// in log" panel of a logs.txt opened before hides while the list shows and comes back with the log (v3.55.2). Last, an
 // archive with another name, and one without logs.txt, lose the entry.
 async function actsView(files) {
     const { box } = window.__lc, wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -617,6 +618,11 @@ async function actsView(files) {
         '<style>td, th { font-size: 9px; border: 2px solid red; padding: 9px; } button, input, label { font-size: 20px; color: red; } * { color: red; }</style>');
     await wait(50);
     const leaked = looks();
+    // The "Defects in log" panel of that logs.txt, drawn now (as a sync's rematch would), stays out of sight; and as on the
+    // screenshot of November 2026 (opened with logs.txt, then the list), goes and comes back with the list, at once.
+    const logPanel = () => { const p = document.getElementById('jita-logmatch-panel'); return p ? getComputedStyle(p).display : 'gone'; };
+    JiTA.logsig.renderPanel({ 'EDR-1': { count: 1, rows: [], raw: 'KeyError' } });
+    const panelDrawn = logPanel();
     const q = el.querySelector('.jpa-q');
     q.value = 'stargate';
     q.dispatchEvent(new Event('input', { bubbles: true }));
@@ -630,7 +636,9 @@ async function actsView(files) {
     title(logsRow).closest('button').click();
     await wait(50);
     const back = { gone: !document.getElementById('jita-acts'), paneClass: pane.classList.contains('jita-acts-open'), innerShown: getComputedStyle(inner).visibility, on: entry.classList.contains('jita-acts-on') };
+    const panelBack = logPanel();
     entry.querySelector('button').click();
+    const panelOpen = logPanel();
     await wait(150);
     const reopened = !!document.getElementById('jita-acts');
     document.querySelector('.next').click();
@@ -646,7 +654,7 @@ async function actsView(files) {
     JiTA.acts.ensure();
     const noLogs = list.querySelectorAll('.jita-acts-entry').length;
     return { entry: true, look: look, opened: true, open: open, clean: clean, leaked: leaked, searched: searched, copied: copied, status: el.querySelector('.jpa-status').textContent, back: back, reopened: reopened, nav: nav,
-        otherZip: otherZip, backAgain: backAgain, noLogs: noLogs };
+        otherZip: otherZip, backAgain: backAgain, noLogs: noLogs, panel: { drawn: panelDrawn, back: panelBack, open: panelOpen } };
 }
 function actsChecks(m) {
     ok('Player actions: the entry is put into an igbr.zip\'s file list', m.entry, 'no .jita-acts-entry');
@@ -671,6 +679,8 @@ function actsChecks(m) {
     ok('Player actions: Copy hands out the list as text', /^Player actions, from logs\.txt and methodcalls\.txt/.test(m.copied || '') && m.status === 'Copied.', String(m.copied).slice(0, 80));
     ok('Player actions: a click on a file of the archive puts the viewer back', m.back.gone && !m.back.paneClass && m.back.innerShown === 'visible' && !m.back.on, JSON.stringify(m.back));
     ok('Player actions: ...and so does the arrow to the next attachment', m.reopened && m.nav, JSON.stringify({ reopened: m.reopened, nav: m.nav }));
+    ok('Player actions: the "Defects in log" panel of a logs.txt opened before is hidden while the list shows, even one drawn meanwhile', m.panel.drawn === 'none', JSON.stringify(m.panel));
+    ok('Player actions: ...comes back with logs.txt, and goes again the moment the list opens', m.panel.back === 'flex' && m.panel.open === 'none', JSON.stringify(m.panel));
     ok('Player actions: an archive with another name has no entry, and gets it back as igbr.zip', m.otherZip === 0 && m.backAgain === 1, m.otherZip + ' / ' + m.backAgain);
     ok('Player actions: an archive without logs.txt has no entry', m.noLogs === 0, String(m.noLogs));
 }

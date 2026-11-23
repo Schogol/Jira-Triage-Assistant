@@ -20,6 +20,12 @@ node tests/release.js patch --fix "..." (or minor --feature "...") does the firs
 
 - Exceptions you type into the exception search (double-tap + on a defect) now have an edit link: it changes the message in place, and the message stays ticked.
 
+## 3.55.2 (2026-11-23)
+
+### Fixed issues
+
+- The "Defects in log" box no longer stays on screen when you switch from logs.txt to Player actions. It comes back when you open logs.txt again.
+
 ## 3.55.1 (2026-11-22)
 
 ### Fixed issues
