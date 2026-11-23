@@ -1,8 +1,8 @@
 // mutate-layout.js - breaks what keeps each view in line, in turn, and requires layout-check (a real headless Chromium) to
 // go red: the Members tab's note columns (the v3.49.1 fix) and month numbers, the Quality control columns, the cards'
 // footers and grid, Settings' and the Lead duties window's fixed size and steady tabs, the Settings window's width, and the Player actions entry and
-// list in the igbr.zip viewer, with the "Defects in log" panel hidden under the list. Every breakage starts a browser,
-// so there are only a few.
+// list in the igbr.zip viewer, with the "Defects in log" panel hidden under the list, its rows' hover cards, and a row opened
+// at its line in logs.txt or methodcalls.txt. Every breakage starts a browser, so there are only a few.
 //
 // The check runs on the unbroken script first: a breakage proves nothing in a browser that fails anyway. Only a FAIL line
 // counts as red here, not a crash: no breakage below can crash the check, so a crash is the browser, and it is reported.
@@ -41,6 +41,20 @@ const muts = [
     [LC, 'a click on a file of the archive leaves the Player actions list open', "if ((b.querySelector('[data-item-title]') && b.closest('[data-testid=\"archive-sidebar-folder-wrapper\"]')) || b.closest('#media-viewer-navigation')) {",
         "if (b.closest('#media-viewer-navigation')) {"],
     [LC, 'the log parser\'s view of logs.txt left in the pane restyles the Player actions list', '#jita-acts * { all: revert; box-sizing', '#jita-acts * { box-sizing'],
+    // ---- Player actions: the hover card, and a row opened at its line (v3.57.0) ----
+    [LC, "the hover card takes the mouse", " pointer-events: none;\n    padding: 10px 12px;", "\n    padding: 10px 12px;"],
+    [LC, "the hover card covers its row", "y = rect.bottom - o.top + 4;", "y = rect.top - o.top;"],
+    [LC, "the hover card stays under a row at the bottom", "        if (y + h > el.clientHeight - 8 && rect.top - o.top - h - 4 >= 8) { y = rect.top - o.top - h - 4; }\n", ""],
+    [LC, "the hover card stays when the mouse leaves the row", "        $el.on('mouseleave', 'tr.jpa-r', unCard);\n", ""],
+    [LC, "the hover card's message is small", "font-family: Consolas, \"Courier New\", monospace; font-size: 12px; white-space: pre-wrap;", "font-family: Consolas, \"Courier New\", monospace; font-size: 10px; white-space: pre-wrap;"],
+    [LC, "a row read from both files opens the first without asking", "            if (files.length === 1) { A.go(A._firstIn(r, files[0]), el); return; }", "            if (files.length) { A.go(A._firstIn(r, files[0]), el); return; }"],
+    [LC, "the viewer hears the Esc that closes the chooser", "if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); unPick(); }", "if (e.key === 'Escape') { unPick(); }"],
+    [LC, "the file shown under the list is loaded again", "if (row.querySelector('[aria-current=\"true\"]') && A._viewOf(document.getElementById('tableContent')) === src.f) { A.close(); } else { btn.click(); }", "btn.click();"],
+    [LC, "a line the log's notices hide stays hidden", "            $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');\n            $('#jita-log-search').val('');\n            JiTA.logparser.filter();\n", ""],
+    [LC, "the marked line is not scrolled to", "        at.scrollIntoView({ block: 'center' });\n", ""],
+    [LC, "the marked line has no look of its own", "#tableContent tr.jita-jump > td { background-image:", "#tableContent tr.jita-nojump > td { background-image:"],
+    [LC, "the list opens again at its start", "            A._restore(el, data);\n", ""],
+    [LC, "the search does not look through the lines in the card", "(this.textContent + ' ' + (this.getAttribute('data-q') || ''))", "(this.textContent + ' ' + (this.getAttribute('title') || ''))"],
     // ---- the "Defects in log" panel and Player actions (v3.55.2) ----
     [LC, 'the "Defects in log" panel stays up as the Player actions list opens', "        $(lay).find('.jita-acts-entry').addClass('jita-acts-on');\n        A._logPanel();\n", "        $(lay).find('.jita-acts-entry').addClass('jita-acts-on');\n"],
     [LC, 'the "Defects in log" panel stays away when the Player actions list closes', "        $('.jita-acts-on').removeClass('jita-acts-on');\n        JiTA.acts._logPanel();\n", "        $('.jita-acts-on').removeClass('jita-acts-on');\n"]

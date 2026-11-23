@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.56.0
+// @version     3.57.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,8 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.56.0
-// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.56.0
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.57.0
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.57.0
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -3962,6 +3962,9 @@ JiTA.settingsview = {
  * Both files run on one clock (EVE time). logs.txt's times have no date: it comes from a line that carries one (an
  * exception's "logged at", the client's start), else from methodcalls.txt. Lines inside an exception or stacktrace block are
  * never read as actions: a block can quote a session change.
+ * Hovering a row shows a card: why the row says what it says, then each line it was read from, by its parts. A click on a
+ * row opens the file of its line in the viewer at that line, marked (go); a row read from both files asks which first. The
+ * list opens again where it was left.
  */
 JiTA.acts = {
     TOP: 75,                 // px: where the viewer starts a file, below its top bar; the list fills the pane from there
@@ -3969,7 +3972,15 @@ JiTA.acts = {
     WARP_MAX: 15 * 60000,    // a warp longer than this is not paired with a landing
     NEAR: 60000,             // a jump, dock or bridge request this close before what it led to is shown as one row with it
     ZIP: /^igbr.*\.zip$/i,   // the client names its archive igbr.zip
+    TIP_MS: 250,             // the hover card shows once the mouse has rested on a row this long
+    TIP_LINES: 6,            // lines a hover card shows; more are counted
+    TIP_CHARS: 1200,         // a line's message is cut here in a hover card
+    GO_MS: 15000,            // how long a click on a row waits for its file to be drawn in the viewer
+    GO_POLL: 150,
     _cache: {},              // { attachment id: promise of { logs, mc } }, for the page's life
+    _shown: null,            // the { logs, mc } the list shows now
+    _back: null,             // where the list was when a click opened a file: { data, top, q, noerr }, for open() to put back
+    _goGen: 0,               // clicks that opened a file so far: a newer one stops an older one's wait
 
     // The commands in methodcalls.txt shown as actions: a service call by service::method, an object call by its method.
     // [category, what the row says]; warp, gate and bridge commands are paired with what they led to (_pair).
@@ -4004,34 +4015,40 @@ JiTA.acts = {
     },
 
     // ---- reading the files ----
-    // logs.txt as entries, oldest first: { s: seconds into its day, d: days after the first entry's, fac, type, msg, line }.
-    // A multi-line entry repeats its time and facility on every line. The header and lines with no time are skipped.
+    // logs.txt as entries, oldest first: { s: seconds into its day, d: days after the first entry's, fac, type, msg, line, k }.
+    // A multi-line entry repeats its time and facility on every line. The header and lines with no time are skipped. k counts
+    // the lines before it that read the same: the parsed view has those too, and seek() tells them apart by it.
     _logLines: function (text) {
-        var out = [], prev = -1, day = 0;
+        var out = [], prev = -1, day = 0, same = Object.create(null);
         String(text || '').split(/\r?\n/).forEach(function (line) {
             var c = line.split('\t'), m = c.length >= 4 && /^(\d\d):(\d\d):(\d\d)$/.exec(c[0]);
             if (!m) { return; }
             var s = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
             if (prev >= 0 && s < prev - 3600) { day++; }   // the clock went back by more than an hour: midnight passed
             prev = s;
-            out.push({ s: s, d: day, fac: c[1], type: c[2], msg: c.slice(3).join('\t'), line: line });
+            var k = same[line] || 0;
+            same[line] = k + 1;
+            out.push({ s: s, d: day, fac: c[1], type: c[2], msg: c.slice(3).join('\t'), line: line, k: k });
         });
         return out;
     },
     // methodcalls.txt as calls sorted by start: { t: the start, ms, name: 'service::method', or the method of an object call,
     // line }. The client lists a service call as "(ServiceCall\Client)", sometimes twice, and again as "(RemoteServiceCall)",
     // and an object call once, as "Remote Object Call::Method (ObjectCall\Client)": the RemoteServiceCall row and the object
-    // call row are kept, one a call. A row is written when its call ends, under the time it started.
+    // call row are kept, one a call. A row is written when its call ends, under the time it started. k counts the rows before
+    // it that read the same, every row of the file, as _logLines does.
     _calls: function (text) {
-        var out = [], OBJ = 'Remote Object Call::';
+        var out = [], OBJ = 'Remote Object Call::', same = Object.create(null);
         String(text || '').split(/\r?\n/).forEach(function (line, i) {
             var c = line.split('\t'), m = c.length >= 3 && /^(\d{4})\.(\d\d)\.(\d\d) (\d\d):(\d\d):(\d\d)$/.exec(c[0]);
             if (!m) { return; }
+            var n = same[line] || 0;
+            same[line] = n + 1;
             var meth = c[1], k = meth.lastIndexOf(' ('), kind = k > 0 ? meth.slice(k + 2, -1) : '', base = k > 0 ? meth.slice(0, k) : meth, name = '';
             if (kind === 'RemoteServiceCall' && base.indexOf(OBJ) !== 0) { name = base; }
             else if (kind.indexOf('ObjectCall') === 0 && base.indexOf(OBJ) === 0) { name = base.slice(OBJ.length); }
             if (!name) { return; }
-            out.push({ t: Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])), ms: Number(c[2]) || 0, name: name, line: line, o: i });
+            out.push({ t: Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])), ms: Number(c[2]) || 0, name: name, line: line, o: i, k: n });
         });
         return out.sort(function (a, b) { return a.t - b.t || a.o - b.o; });
     },
@@ -4095,9 +4112,10 @@ JiTA.acts = {
     _row: function (t, cat, a, x, raw, hint) {
         return { t: t, k: 'row', cat: cat, a: a, x: x || '', raw: raw ? [raw] : [], hint: hint || '' };
     },
-    // The events of one log entry, into ev. st carries an open exception or stacktrace block and what was seen once.
+    // The events of one log entry, into ev. st carries an open exception or stacktrace block and what was seen once. A row's
+    // raw holds the lines it was read from: { f: the file, line, k } (see _logLines).
     _fromLog: function (e, ev, st) {
-        var A = JiTA.acts, m = e.msg, t = e.t, raw = 'logs.txt  ' + e.line.slice(0, 400), r, ch;
+        var A = JiTA.acts, m = e.msg, t = e.t, raw = { f: 'logs.txt', line: e.line, k: e.k }, r, ch;
         if (st.blk) {
             if (e.s === st.blk.s && e.d === st.blk.d && !/^(EXCEPTION|STACKTRACE) #\d+/.test(m)) {
                 if (st.blk.exc && !st.blk.info && (r = /^Formatted exception info:\s*(.*)$/.exec(m))) { st.blk.info = r[1]; }
@@ -4180,7 +4198,7 @@ JiTA.acts = {
     },
     // The event of one call, into ev, when the call is one of CALLS.
     _fromCall: function (c, ev) {
-        var def = JiTA.acts.CALLS[c.name], raw = 'methodcalls.txt  ' + c.line + ' ms';
+        var def = JiTA.acts.CALLS[c.name], raw = { f: 'methodcalls.txt', line: c.line, k: c.k };
         if (!def) { return; }
         if (def.length === 1) { ev.push({ t: c.t, k: def[0], raw: [raw] }); return; }
         ev.push(JiTA.acts._row(c.t, def[0], def[1], '', raw));
@@ -4287,16 +4305,18 @@ JiTA.acts = {
     _time: function (t) { var d = new Date(t), T = JiTA.acts._two; return T(d.getUTCHours()) + ':' + T(d.getUTCMinutes()) + ':' + T(d.getUTCSeconds()); },
     _day: function (t) { var d = new Date(t), A = JiTA.acts; return A.DAYS[d.getUTCDay()] + ' ' + d.getUTCDate() + ' ' + A.MONTHS[d.getUTCMonth()] + ' ' + d.getUTCFullYear(); },
     _what: function (r) { return r.a + (r.n > 1 ? ' (' + r.n + ' times)' : ''); },
-    // The list as HTML: its top bar (what it was read from, the search, Hide errors, Copy) and the table.
+    // The list as HTML: its top bar (what it was read from, the search, Hide errors, Copy) and the table. A row carries its
+    // place in data.rows (data-i), for its hover card and its click, and what the search looks through besides its text
+    // (data-q: why it says what it says, and its lines). A row with lines to open is marked jpa-go.
     view: function (data) {
         var A = JiTA.acts, H = JiTA.settingsview.esc, b = data, rows = '', lastDay = '', src = [];
         if (b.logs) { src.push('logs.txt ' + A._time(b.logFrom) + ' to ' + A._time(b.logTo)); }
         if (b.mc) { src.push('methodcalls.txt ' + A._time(b.mcFrom) + ' to ' + A._time(b.mcTo)); }
-        b.rows.forEach(function (r) {
+        b.rows.forEach(function (r, i) {
             var day = b.dated ? A._day(r.t) : '';
             if (day && day !== lastDay) { rows += '<tr class="jpa-day"><td colspan="3">' + H(day) + '</td></tr>'; lastDay = day; }
-            var hint = (r.hint ? r.hint + '\n\n' : '') + (r.n > 1 ? 'The last at ' + A._time(r.end) + '\n\n' : '') + r.raw.join('\n');
-            rows += '<tr class="jpa-r jpa-c-' + r.cat + '" title="' + H(hint) + '"><td class="jpa-time">' + A._time(r.t) + '</td><td class="jpa-a">' + H(r.a) +
+            var q = [r.hint].concat(r.raw.map(function (s) { return s.f + ' ' + s.line; })).join(' ');
+            rows += '<tr class="jpa-r jpa-c-' + r.cat + (r.raw.length ? ' jpa-go' : '') + '" data-i="' + i + '" data-q="' + H(q) + '"><td class="jpa-time">' + A._time(r.t) + '</td><td class="jpa-a">' + H(r.a) +
                 (r.n > 1 ? '<span class="jpa-n">' + r.n + ' times</span>' : '') + '</td><td class="jpa-x">' + H(r.x) + '</td></tr>';
         });
         var none = !b.logs && !b.mc ? 'This igbr.zip holds no logs.txt and no methodcalls.txt.' : !b.rows.length ? 'Nothing the player did is in these files.' : '';
@@ -4323,7 +4343,7 @@ JiTA.acts = {
             var q = $.trim(String($el.find('.jpa-q').val() || '')).toLowerCase(), noerr = $el.find('.jpa-noerr').prop('checked'), day = null, any = false;
             $el.find('tbody tr').each(function () {
                 if (this.classList.contains('jpa-day')) { if (day) { day.classList.toggle('jpa-hid', !any); } day = this; any = false; return; }
-                var hit = (!noerr || !this.classList.contains('jpa-c-err')) && (!q || (this.textContent + ' ' + (this.getAttribute('title') || '')).toLowerCase().indexOf(q) >= 0);
+                var hit = (!noerr || !this.classList.contains('jpa-c-err')) && (!q || (this.textContent + ' ' + (this.getAttribute('data-q') || '')).toLowerCase().indexOf(q) >= 0);
                 this.classList.toggle('jpa-hid', !hit);
                 if (hit) { any = true; }
             });
@@ -4335,6 +4355,180 @@ JiTA.acts = {
             var $st = $el.find('.jpa-status');
             Promise.resolve().then(function () { return JiTA.util.copy(A.text(data)); }).then(function () { $st.text('Copied.'); }, function () { $st.text('Could not reach the clipboard.'); });
         });
+        // The hover card (tip), drawn into the list once the mouse has rested on a row: under the row, or above it at the
+        // bottom of the list. It takes no mouse events, so it never stands in the way of the next row.
+        var card = null, cardT = 0, pick = null;
+        function rowOf(tr) { return data.rows[Number(tr.getAttribute('data-i'))] || null; }
+        function unCard() { clearTimeout(cardT); if (card && card.parentNode) { card.parentNode.removeChild(card); } card = null; }
+        $el.on('mouseenter', 'tr.jpa-r', function () {
+            var tr = this;
+            unCard();
+            if (pick) { return; }
+            cardT = setTimeout(function () {
+                var r = rowOf(tr), html = r ? A.tip(r) : '';
+                if (!html || !el.contains(tr)) { return; }
+                card = document.createElement('div');
+                card.className = 'jpa-tip';
+                card.innerHTML = html;
+                el.appendChild(card);
+                A._place(el, card, tr.getBoundingClientRect(), (tr.querySelector('.jpa-a') || tr).getBoundingClientRect().left);
+            }, A.TIP_MS);
+        });
+        $el.on('mouseleave', 'tr.jpa-r', unCard);
+        // A click on a row opens its file at its line (go). A row read from both files asks which first (pickHtml), in a
+        // chooser at the click: Esc (kept from the viewer, which would close) or a press anywhere else closes it.
+        function onKey(e) { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); unPick(); } }
+        function onDown(e) { if (pick && !pick.contains(e.target)) { unPick(); } }
+        function unPick() {
+            if (pick && pick.parentNode) { pick.parentNode.removeChild(pick); }
+            pick = null;
+            window.removeEventListener('keydown', onKey, true);
+            document.removeEventListener('mousedown', onDown, true);
+        }
+        $el.find('.jpa-body').on('scroll', function () { unCard(); unPick(); });
+        $el.on('click', 'tr.jpa-go', function (ev) {
+            if (String(window.getSelection ? window.getSelection() : '')) { return; }   // text selected with the mouse, not a click
+            var r = rowOf(this), files = r ? A._files(r) : [];
+            unCard();
+            unPick();
+            if (files.length === 1) { A.go(A._firstIn(r, files[0]), el); return; }
+            if (!files.length) { return; }
+            pick = document.createElement('div');
+            pick.className = 'jpa-pick';
+            pick.innerHTML = A.pickHtml(r, files);
+            el.appendChild(pick);
+            A._place(el, pick, { top: ev.clientY, bottom: ev.clientY }, ev.clientX);
+            window.addEventListener('keydown', onKey, true);
+            document.addEventListener('mousedown', onDown, true);
+            $(pick).on('click', 'button', function () { var f = this.getAttribute('data-f'); unPick(); A.go(A._firstIn(r, f), el); });
+        });
+    },
+
+    // ---- a row's lines: its hover card, and opening them in the viewer ----
+    // The files a row was read from, in the order of its lines, and its first line in one of them.
+    _files: function (r) {
+        var out = [];
+        (r.raw || []).forEach(function (s) { if (out.indexOf(s.f) < 0) { out.push(s.f); } });
+        return out;
+    },
+    _firstIn: function (r, f) { return (r.raw || []).filter(function (s) { return s.f === f; })[0] || null; },
+    // A line's time as the list writes it: a methodcalls.txt row's date left out.
+    _lineTime: function (s) { var c0 = String(s.line || '').split('\t')[0] || ''; return s.f === 'methodcalls.txt' ? c0.slice(-8) : c0; },
+    // A row's hover card: why it says what it says, how many there were, then each line it was read from by its parts (the
+    // file, the time, the facility and type, or how long the call took, then the message or the call), and what a click does.
+    tip: function (r) {
+        var A = JiTA.acts, H = JiTA.settingsview.esc, out = '', lines = r.raw || [], shown = lines.slice(0, A.TIP_LINES), files = A._files(r);
+        if (r.hint) { out += '<div class="jpa-tip-hint">' + H(r.hint) + '</div>'; }
+        if (r.n > 1) { out += '<div class="jpa-tip-hint">' + r.n + ' times, the last at ' + A._time(r.end) + '</div>'; }
+        if (shown.length) {
+            out += '<div class="jpa-tip-lines">' + shown.map(A._tipLine).join('') +
+                (lines.length > shown.length ? '<div class="jpa-tip-more">and ' + (lines.length - shown.length) + ' more</div>' : '') + '</div>';
+        }
+        if (files.length) { out += '<div class="jpa-tip-foot">' + (files.length > 1 ? 'Click to open it in ' + files.join(' or ') : 'Click to open this line in ' + files[0]) + '</div>'; }
+        return out;
+    },
+    _tipLine: function (s) {
+        var A = JiTA.acts, H = JiTA.settingsview.esc, c = String(s.line || '').split('\t'), mc = s.f === 'methodcalls.txt', type = mc ? '' : (c[2] || '');
+        var meta = mc ? (c[2] ? String(c[2]).trim() + ' ms' : '') : [c[1], c[2]].filter(function (x) { return !!x; }).join(' · ');
+        var msg = mc ? (c[1] || '') : c.slice(3).join('\t');
+        if (msg.length > A.TIP_CHARS) { msg = msg.slice(0, A.TIP_CHARS) + '…'; }
+        return '<div class="jpa-tip-line' + (mc ? ' jpa-tip-mc' : '') + '"><div class="jpa-tip-head"><span class="jpa-tip-file">' + H(s.f) + '</span><span class="jpa-tip-time">' +
+            H(A._lineTime(s)) + '</span><span class="jpa-tip-meta' + (/^(warning|error)$/.test(type) ? ' jpa-tip-' + type : '') + '">' + H(meta) + '</span></div>' +
+            '<div class="jpa-tip-msg">' + H(msg) + '</div></div>';
+    },
+    // The chooser of a row read from both files: a button a file, with the time of the row's first line in it.
+    pickHtml: function (r, files) {
+        var A = JiTA.acts, H = JiTA.settingsview.esc;
+        return '<div class="jpa-pick-h">Open in</div>' + files.map(function (f) {
+            return '<button type="button" data-f="' + H(f) + '"><span>' + H(f) + '</span><span class="jpa-pick-t">' + H(A._lineTime(A._firstIn(r, f))) + '</span></button>';
+        }).join('');
+    },
+    // Put a card (box) of the list (el) under a row's rect, from `left` on, or above it when there is no room under it, never
+    // past the list's edges.
+    _place: function (el, box, rect, left) {
+        var o = el.getBoundingClientRect(), w = box.offsetWidth, h = box.offsetHeight, x = Math.max(8, Math.min(left - o.left, el.clientWidth - w - 8)), y = rect.bottom - o.top + 4;
+        if (y + h > el.clientHeight - 8 && rect.top - o.top - h - 4 >= 8) { y = rect.top - o.top - h - 4; }
+        box.style.left = Math.round(x) + 'px';
+        box.style.top = Math.round(y) + 'px';
+    },
+    // Open the file a line (src) is in, at that line: a click on that file's entry in the file list, as the user would make
+    // it, which closes the list too (start), or, when the pane shows that file already, under the list, closing the list.
+    // Then wait for the log parser's view of it and show the line there (seek, _mark). Where the list was is kept (_back).
+    go: function (src, el) {
+        var A = JiTA.acts, list = document.querySelector('[data-testid="archive-sidebar-folder-wrapper"]');
+        if (!src) { return; }
+        var row = list ? A._rows(list).filter(function (x) { return A._name(x) === src.f; })[0] : null, t = row && row.querySelector('[data-item-title]'), btn = t && t.closest('button');
+        if (!btn) { JiTA.ui.toast('This igbr.zip shows no ' + src.f + ' to open.'); return; }
+        var b = el && el.querySelector('.jpa-body');
+        A._back = b ? { data: A._shown, top: b.scrollTop, q: String($(el).find('.jpa-q').val() || ''), noerr: !!$(el).find('.jpa-noerr').prop('checked') } : null;
+        var gen = ++A._goGen, until = Date.now() + A.GO_MS;
+        if (row.querySelector('[aria-current="true"]') && A._viewOf(document.getElementById('tableContent')) === src.f) { A.close(); } else { btn.click(); }
+        (function poll() {
+            if (gen !== A._goGen) { return; }
+            var tr = A.seek(src);
+            if (tr) { A._mark(tr); return; }
+            if (tr === false) { JiTA.ui.toast('That line is not in ' + src.f + ' as it is shown.'); return; }
+            if (Date.now() > until) { JiTA.ui.toast(src.f + ' did not open as a table, so its line could not be shown.'); return; }
+            setTimeout(poll, A.GO_POLL);
+        })();
+    },
+    // Which file the log parser's view (its #tableContent) shows, by the view's title: 'logs.txt', 'methodcalls.txt' or ''.
+    _viewOf: function (tc) {
+        var body = tc && tc.closest ? tc.closest('#body') : null, h = body && body.querySelector('h1'), T = JiTA.logparser.TYPES, t = h ? String(h.textContent || '').trim() : '';
+        return t === T.log.title ? 'logs.txt' : t === T.mc.title ? 'methodcalls.txt' : '';
+    },
+    // The row of a line (src) in the log parser's view of its file: null while that view is not drawn yet, false when it is
+    // and the line is not in it. The k-th row that reads like the line (see _logLines), the cells' text compared with
+    // spacing squeezed and less what JiTA adds to a cell (a defect's link, a count of repeats). Failing that (a line the view
+    // shows otherwise), the row of its time that starts most like it, the first of those that start alike.
+    seek: function (src) {
+        var A = JiTA.acts, tc = document.getElementById('tableContent');
+        if (!tc || tc.style.display !== 'table' || !tc.tBodies || !tc.tBodies[0] || A._viewOf(tc) !== src.f) { return null; }
+        var rows = tc.tBodies[0].rows, want = A._squeeze(src.line), time = A._squeeze(String(src.line).split('\t')[0]) + ' ', n = 0, last = null, like = null, most = -1;
+        for (var i = 0; i < rows.length; i++) {
+            var text = A._rowText(rows[i]);
+            if (text === want) {
+                if (n++ === (src.k || 0)) { return rows[i]; }
+                last = rows[i];
+            } else if ((text + ' ').indexOf(time) === 0) {
+                for (var c = 0; c < text.length && text.charAt(c) === want.charAt(c); c++) { /* how far the two start alike */ }
+                if (c > most) { most = c; like = rows[i]; }
+            }
+        }
+        return last || like || false;
+    },
+    _squeeze: function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); },
+    _rowText: function (tr) {
+        var out = [];
+        Array.prototype.forEach.call(tr.cells, function (td) {
+            var t = '';
+            Array.prototype.forEach.call(td.childNodes, function (n) {
+                if (n.nodeType === 1 && n.classList && (n.classList.contains('jita-sig-link') || n.classList.contains('jita-rep-badge'))) { return; }
+                t += n.textContent || '';
+            });
+            out.push(t);
+        });
+        return JiTA.acts._squeeze(out.join(' '));
+    },
+    // Show a row of the log parser's view and mark it. One the log's type buttons or its search hide: those are cleared, as
+    // Show All and an empty search would. One Group Repeats folded into the same lines above it: the first row of those.
+    _mark: function (tr) {
+        var at = tr, p;
+        if (at.style.display === 'none') {
+            $('#gnav a#notice, #gnav a#warning, #gnav a#error, #gnav a#exception').removeClass('toggle');
+            $('#jita-log-search').val('');
+            JiTA.logparser.filter();
+        }
+        if (at.style.display === 'none') {
+            for (p = tr.previousElementSibling; p && p.style.display === 'none'; p = p.previousElementSibling) { /* the nearest row shown above */ }
+            var g = p && p.getAttribute('data-jita-grp');
+            at = p || tr;
+            while (g !== null && g !== undefined && at.previousElementSibling && at.previousElementSibling.getAttribute('data-jita-grp') === g) { at = at.previousElementSibling; }
+        }
+        $('#tableContent tr.jita-jump').removeClass('jita-jump');
+        at.classList.add('jita-jump');
+        at.scrollIntoView({ block: 'center' });
+        return at;
     },
 
     // ---- the entry and the pane ----
@@ -4396,9 +4590,21 @@ JiTA.acts = {
             var built = A.build(data.logs, data.mc);
             el.innerHTML = A.view(built);
             A.wire(el, built);
+            A._shown = data;
+            A._restore(el, data);
         }).then(null, function (e) {
             if (document.body.contains(el)) { el.innerHTML = '<style>' + A.CSS + '</style><div class="jpa-msg">Could not read igbr.zip: ' + JiTA.settingsview.esc(e && e.message || e) + '</div>'; }
         });
+    },
+    // The list as it was when a click on a row opened a file (go): its search, Hide errors and scroll, once, and only for the
+    // same igbr.zip.
+    _restore: function (el, data) {
+        var k = JiTA.acts._back, b = el.querySelector('.jpa-body');
+        JiTA.acts._back = null;
+        if (!k || k.data !== data || !b) { return; }
+        $(el).find('.jpa-q').val(k.q);
+        $(el).find('.jpa-noerr').prop('checked', k.noerr).trigger('change');   // the filter runs on its change (wire)
+        b.scrollTop = k.top;
     },
     close: function () {
         var el = document.getElementById('jita-acts');
@@ -4461,6 +4667,7 @@ JiTA.acts = {
 .jita-acts-open > :not(#jita-acts) { visibility: hidden !important; }
 .jita-acts-entry .jita-acts-ico { display: inline-flex; width: 24px; height: 24px; align-items: center; justify-content: center; font-size: 17px; color: #58a7bf; }
 .jita-acts-entry.jita-acts-on { background: var(--ds-background-selected, rgba(88, 167, 191, 0.16)); border-radius: 3px; }
+#tableContent tr.jita-jump > td { background-image: linear-gradient(rgba(88, 167, 191, 0.4), rgba(88, 167, 191, 0.4)) !important; box-shadow: inset 0 2px 0 #58a7bf, inset 0 -2px 0 #58a7bf !important; }
 `,
     // The list's look: the dark panels of the Settings window. Scoped to #jita-acts, and shut off from the page's own CSS: every
     // property of the list and its elements starts from the browser's default (all: revert), so only the rules below apply.
@@ -4496,6 +4703,28 @@ JiTA.acts = {
 #jita-acts .jpa-day td { padding: 14px 0 4px; color: #e6e6e6; font-weight: 600; border-bottom: 1px solid #2a3136; }
 #jita-acts .jpa-hid { display: none; }
 #jita-acts .jpa-msg { padding: 16px; color: #9aa4a9; }
+#jita-acts .jpa-go { cursor: pointer; }
+#jita-acts .jpa-tip { position: absolute; z-index: 3; width: max-content; max-width: min(760px, calc(100% - 16px)); max-height: 70%; overflow: hidden; pointer-events: none;
+    padding: 10px 12px; background: #161b1f; border: 1px solid #34404a; border-radius: 4px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55); color: #c8ced2; font-size: 13px; line-height: 1.5; }
+#jita-acts .jpa-tip-hint { display: block; margin: 0 0 8px; color: #e6e6e6; white-space: pre-wrap; overflow-wrap: anywhere; }
+#jita-acts .jpa-tip-lines { display: flex; flex-direction: column; gap: 8px; }
+#jita-acts .jpa-tip-line { display: block; padding-left: 9px; border-left: 2px solid #2f6f86; }
+#jita-acts .jpa-tip-line.jpa-tip-mc { border-left-color: #6f58a8; }
+#jita-acts .jpa-tip-head { display: flex; align-items: baseline; gap: 10px; font-size: 11px; color: #7f8a90; }
+#jita-acts .jpa-tip-file { color: #8fd3e8; font-weight: 600; }
+#jita-acts .jpa-tip-mc .jpa-tip-file { color: #c9b6f2; }
+#jita-acts .jpa-tip-time { color: #9aa4a9; font-family: Consolas, "Courier New", monospace; }
+#jita-acts .jpa-tip-warning { color: #f3c058; }
+#jita-acts .jpa-tip-error { color: #ff8a80; }
+#jita-acts .jpa-tip-msg { display: block; margin-top: 2px; color: #dfe4e7; font-family: Consolas, "Courier New", monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+#jita-acts .jpa-tip-more { color: #7f8a90; font-style: italic; }
+#jita-acts .jpa-tip-foot { display: block; margin-top: 8px; padding-top: 6px; border-top: 1px solid #262e34; color: #7f8a90; font-size: 11px; }
+#jita-acts .jpa-pick { position: absolute; z-index: 4; display: flex; flex-direction: column; min-width: 210px; padding: 4px; background: #161b1f; border: 1px solid #34404a; border-radius: 4px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55); }
+#jita-acts .jpa-pick-h { padding: 4px 8px; color: #7f8a90; font-size: 11px; }
+#jita-acts .jpa-pick button { display: flex; justify-content: space-between; gap: 18px; padding: 6px 8px; background: none; border: 0; border-radius: 3px; color: #e6e6e6; font: inherit; text-align: left; cursor: pointer; }
+#jita-acts .jpa-pick button:hover, #jita-acts .jpa-pick button:focus { background: #1f2a31; outline: none; }
+#jita-acts .jpa-pick-t { color: #9aa4a9; font-family: Consolas, "Courier New", monospace; font-size: 11px; }
 `
 };
 
