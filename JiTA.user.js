@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.57.0
+// @version     3.58.0
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,8 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.57.0
-// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.57.0
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.58.0
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.58.0
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -7547,9 +7547,9 @@ JiTA.sync = {
                     return saved
                         .then(function () { return JiTA.db.setMeta(hwKey, maxUpdated); })
                         .then(function () {
-                            // A background catch-up stays off the panel's status line, where its count used to stay until
-                            // the next redraw. A full crawl, or a sync someone asked for, shows how far it has got.
-                            if (opts.resume || !JiTA.sync._quiet) { JiTA.ui.setStatus('Syncing… ' + stored + ' issues fetched'); }
+                            // A background catch-up is short and says nothing. A full crawl, or a sync someone asked for,
+                            // shows how far it has got, in the toast (JiTA.ui.work), until the run ends (settled).
+                            if (opts.resume || !JiTA.sync._quiet) { JiTA.ui.work('sync', (opts.isEbr ? 'Syncing bug reports… ' : 'Syncing defects… ') + stored + ' fetched'); }
                             if (last) { return { stored: stored, changed: changed, highWater: maxUpdated }; }
                             if (nextToken === token) { throw new Error('nextPageToken did not advance - stopping (Jira API quirk).'); }
                             token = nextToken;
@@ -7565,8 +7565,10 @@ JiTA.sync = {
         // full crawl is hundreds of pages. (embedPass drops them as well, but a sync that only changed statuses, or
         // pruned closed reports, gave it nothing to embed, and it used to return before dropping anything.)
         // The other tabs hear it too (_tellChanged): their own indexes were built from what this run replaced.
+        // Its progress goes out of the toast once it ends, done or failed (JiTA.ui.work above).
         function settled() { if (changed > 0) { JiTA.sync._invalidateWorker(); JiTA.sync._tellChanged(!opts.isEbr, !!opts.isEbr); } }
-        return nextPage().then(function (res) { settled(); return res; }, function (e) {
+        return nextPage().then(function (res) { JiTA.ui.workDone('sync'); settled(); return res; }, function (e) {
+            JiTA.ui.workDone('sync');
             settled();
             if (e && typeof e === 'object') { e.syncChanged = changed; }   // what the failed run wrote (see _fullRun)
             throw e;
@@ -7683,7 +7685,6 @@ JiTA.sync = {
         if (JiTA.sync.running) { JiTA.ui.toast('A sync is already running…'); return Promise.resolve(); }
         JiTA.sync.running = true;
         JiTA.ui.toast('Starting defect sync…');
-        JiTA.ui.setStatus('Starting sync…');
         return JiTA.db.countDefectsOnly().then(function (n) {
             return n === 0 ? JiTA.sync.fullSync() : JiTA.sync.incrementalSync();
         }).then(function (res) {
@@ -7695,7 +7696,7 @@ JiTA.sync = {
             });
         }).catch(function (e) {
             JiTA.sync.running = false;
-            JiTA.ui.setStatus('Sync error: ' + (e && e.message || e));
+            JiTA.ui.toast('Defect sync failed: ' + (e && e.message || e));
             alert('Defect sync failed: ' + (e && e.message || e) + '\nReport issues to Schogol :).');
         });
     },
@@ -7719,7 +7720,7 @@ JiTA.sync = {
             })
             .catch(function (e) {
                 JiTA.sync.running = false;
-                JiTA.ui.setStatus('Rebuild error: ' + (e && e.message || e));
+                JiTA.ui.toast('Defect rebuild failed: ' + (e && e.message || e));
                 alert('Rebuild failed: ' + (e && e.message || e));
             });
     },
@@ -7746,7 +7747,7 @@ JiTA.sync = {
             })
             .catch(function (e) {
                 JiTA.sync.running = false;
-                JiTA.ui.setStatus('Bug report rebuild error: ' + (e && e.message || e));
+                JiTA.ui.toast('Bug report rebuild failed: ' + (e && e.message || e));
                 alert('Bug report rebuild failed: ' + (e && e.message || e));
             });
     },
@@ -7835,7 +7836,6 @@ JiTA.sync = {
         if (JiTA.sync.running) { JiTA.ui.toast('A sync is already running…'); return Promise.resolve(); }
         JiTA.sync.running = true;
         JiTA.ui.toast('Starting bug report sync…');
-        JiTA.ui.setStatus('Starting bug report sync…');
         return JiTA.db.countEbr().then(function (n) {
             return n === 0 ? JiTA.sync.fullSyncEbr() : JiTA.sync.incrementalSyncEbr();
         }).then(function (res) {
@@ -7846,7 +7846,7 @@ JiTA.sync = {
             });
         }).catch(function (e) {
             JiTA.sync.running = false;
-            JiTA.ui.setStatus('Bug report sync error: ' + (e && e.message || e));
+            JiTA.ui.toast('Bug report sync failed: ' + (e && e.message || e));
             alert('Bug report sync failed: ' + (e && e.message || e) + '\nReport issues to Schogol :).');
         });
     },
@@ -8122,8 +8122,9 @@ JiTA.translate = {
         } else {
             run = JiTA.translate.pass();
         }
-        JiTA.translate._running = run.then(function () { JiTA.translate._running = null; },
-            function (e) { JiTA.translate._running = null; JiTA.log('[JiTA] translate pass skipped:', e && e.message || e); });
+        // The pass's progress is in the toast (JiTA.ui.work) until it ends, however it ends.
+        var over = function () { JiTA.translate._running = null; if (JiTA.ui && JiTA.ui.workDone) { JiTA.ui.workDone('translate'); } };
+        JiTA.translate._running = run.then(over, function (e) { over(); JiTA.log('[JiTA] translate pass skipped:', e && e.message || e); });
         return JiTA.translate._running;
     },
 
@@ -8151,7 +8152,7 @@ JiTA.translate = {
                     if (JiTA.util.detectLang(text) === 'english') { enKeys.push(rec.key); }
                     else { foreign.push({ key: rec.key, text: text.slice(0, 3000) }); }   // cap now; translation only uses the head anyway
                 }
-                if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Checking reports for translation… ' + c + ' / ' + candidates.length); }
+                if (JiTA.ui && JiTA.ui.work) { JiTA.ui.work('translate', 'Checking reports for translation… ' + c + ' / ' + candidates.length); }
                 return (c < candidates.length) ? JiTA.util.delay(0).then(classify) : null;
             }
 
@@ -8159,7 +8160,7 @@ JiTA.translate = {
             function translateForeign() {
                 var total = foreign.length, next = 0, done = 0, translated = 0;
                 function report(extra) {
-                    if (JiTA.ui && JiTA.ui.setStatus) { JiTA.ui.setStatus('Translating foreign reports… ' + done + ' / ' + total + (extra || '')); }
+                    if (JiTA.ui && JiTA.ui.work) { JiTA.ui.work('translate', 'Translating foreign reports… ' + done + ' / ' + total + (extra || '')); }
                 }
                 // Two concurrent lanes, each PINNED to one endpoint (failover to the other per request), so both
                 // Google endpoints are in flight at once. Each lane waits BATCH_DELAY between its own calls, so each
@@ -8214,6 +8215,7 @@ JiTA.translate = {
                 }
                 function finish() {
                     if (translated > 0) {
+                        if (JiTA.ui && JiTA.ui.workDone) { JiTA.ui.workDone('translate', 'Translated ' + translated + ' foreign report' + (translated === 1 ? '' : 's') + '.'); }
                         JiTA.rank._dirtyEbr = true;                                   // tab-side BM25 rebuild off English
                         JiTA.embed.prepare();                                         // re-embed the cleared records, off English
                         if (JiTA.ui && JiTA.ui.currentKey && /^EBR-/.test(JiTA.ui.currentKey)) { JiTA.ui.scheduleRender(); }
@@ -8225,11 +8227,7 @@ JiTA.translate = {
 
             return Promise.resolve(classify())
                 .then(function () { return JiTA.db.mergeEach(enKeys, function (cc) { cc.lang = 'en'; cc.enText = null; }); })   // bulk-tag English (merge-safe)
-                .then(function () { return foreign.length ? translateForeign() : undefined; })
-                .then(function () {
-                    // "Checking reports for translation… 3 / 3" took the panel's status line and kept it: give the view its own back.
-                    if (JiTA.ui && JiTA.ui.scheduleRender) { JiTA.ui.scheduleRender(); }
-                });
+                .then(function () { return foreign.length ? translateForeign() : undefined; });
         });
     }
 };
@@ -8743,6 +8741,9 @@ JiTA.ui = {
 #jita-sd-panel.jita-sd-up { flex-direction: column-reverse; }\
 #jita-sd-toast { position: fixed; right: 18px; bottom: 18px; z-index: 9001; background: #333; color: #eee; padding: 8px 14px;\
   border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.45); font-family: -apple-system,Arial,sans-serif; font-size: 12px; max-width: 320px; }\
+#jita-sd-toast .jita-toast-h { color: #9aa4a9; font-size: 11px; font-weight: 600; margin-bottom: 2px; }\
+#jita-sd-toast .jita-toast-job { font-variant-numeric: tabular-nums; }\
+#jita-sd-toast .jita-toast-job + .jita-toast-msg { margin-top: 6px; padding-top: 6px; border-top: 1px solid #4a4f55; }\
 #jita-sd-tip { position: fixed; z-index: 10001; display: none; width: 420px; max-height: 60vh; overflow-y: auto;\
   background: #14181b; color: #e6e6e6; border: 1px solid #3a434d; border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.55);\
   padding: 10px 12px; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; font-size: 12px; line-height: 1.45; }\
@@ -8844,13 +8845,64 @@ JiTA.ui = {
     },
 
     // Brief transient message (e.g. sync started/finished), independent of the panel.
+    // ---- the toast at the bottom right ----
+    // A short notice that goes after TOAST_MS (toast), and the background work of this tab (work: a sync, the translation
+    // pass, embedding): each job keeps a line of its own under "Triage Assistant" while it runs, and the toast stays up
+    // until the last one has ended (workDone), a notice showing below the jobs meanwhile. A job shows once it has run for
+    // WORK_SHOW_MS, so one over at once never flashes up; one not heard from for WORK_STALE_MS (a pass whose end never
+    // came) is dropped. The Triage Assistant's status line keeps what the view found.
+    TOAST_MS: 4000,
+    WORK_SHOW_MS: 800,
+    WORK_STALE_MS: 180000,
+    _work: {},              // job id -> { msg, since: when it started, at: when it last said something }
+    _toastMsg: '',          // the notice on screen (its timer: _toastTimer, at the top)
+    _workTimer: null,
     toast: function (msg) {
-        JiTA.ui.injectCss();
+        var U = JiTA.ui;
+        U._toastMsg = String(msg == null ? '' : msg);
+        if (U._toastTimer) { clearTimeout(U._toastTimer); }
+        U._toastTimer = setTimeout(function () { U._toastTimer = null; U._toastMsg = ''; U._drawToast(); }, U.TOAST_MS);
+        U._drawToast();
+    },
+    // A background job's line, new or updated. Not in a frame inside the page: the toast belongs to the page itself.
+    work: function (id, msg) {
+        var U = JiTA.ui, now = Date.now(), w = U._work[id];
+        if (JITA_IS_SUBFRAME) { return; }
+        U._work[id] = { msg: String(msg), since: w ? w.since : now, at: now };
+        U._drawToast();
+    },
+    // A background job ended; msg, if any, is said as a notice.
+    workDone: function (id, msg) {
+        var U = JiTA.ui, had = !!U._work[id];
+        delete U._work[id];
+        if (msg) { U.toast(msg); } else if (had) { U._drawToast(); }
+    },
+    _drawToast: function () {
+        var U = JiTA.ui, now = Date.now(), jobs = [], next = 0;
+        Object.keys(U._work).forEach(function (id) {
+            var w = U._work[id];
+            if (now - w.at >= U.WORK_STALE_MS) { delete U._work[id]; return; }
+            var due = w.since + U.WORK_SHOW_MS - now;
+            if (due > 0) { next = next ? Math.min(next, due) : due; return; }
+            jobs.push(w.msg);
+        });
+        if (U._workTimer) { clearTimeout(U._workTimer); U._workTimer = null; }
+        // Look again when a job is due to show, or every so often while one runs, to drop it once it has gone quiet.
+        if (Object.keys(U._work).length) { U._workTimer = setTimeout(U._drawToast, next || U.WORK_STALE_MS / 6); }
         var $t = $('#jita-sd-toast');
+        if (!jobs.length && !U._toastMsg) { if ($t.length) { $t.stop(true).fadeOut(400); } return; }
+        U.injectCss();
         if (!$t.length) { $t = $('<div id="jita-sd-toast"></div>').appendTo(document.body); }
-        $t.text(msg).show();
-        if (JiTA.ui._toastTimer) { clearTimeout(JiTA.ui._toastTimer); }
-        JiTA.ui._toastTimer = setTimeout(function () { $('#jita-sd-toast').fadeOut(400); }, 4000);
+        $t.stop(true, true).empty();
+        if (jobs.length) {
+            $('<div class="jita-toast-h"></div>').text('Triage Assistant').appendTo($t);
+            jobs.forEach(function (m) { $('<div class="jita-toast-job"></div>').text(m).appendTo($t); });
+        }
+        if (U._toastMsg) { $('<div class="jita-toast-msg"></div>').text(U._toastMsg).appendTo($t); }
+        // The ISD credits progress box shares the corner: the toast goes above it.
+        var cp = document.getElementById('jita-credits-progress');
+        $t.css('bottom', cp ? (18 + cp.offsetHeight + 10) + 'px' : '');
+        $t.show();
     },
 
     setStatus: function (msg) { $('#jita-sd-status').text(msg); },
@@ -25765,24 +25817,28 @@ JiTA.worker = {
     },
     _applyEvent: function (d) {
         if (!d) { return; }
-        if (d.event === 'embedPassDone' && d.embedded > 0) {
-            JiTA.log('[JiTA worker] embed pass finished: ' + d.embedded + ' embedded');
-            try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // re-rank the open view now the new vectors exist
+        // A pass's end takes its progress out of the toast, whatever it embedded.
+        if (d.event === 'embedPassDone') {
+            try { JiTA.ui.workDone('embed'); } catch (e) { /* ignore */ }
+            if (d.embedded > 0) {
+                JiTA.log('[JiTA worker] embed pass finished: ' + d.embedded + ' embedded');
+                try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // re-rank the open view now the new vectors exist
+            }
             return;
         }
         // A failed pass used to be dropped here, so nothing was logged and its last "Embedding N / M" stayed on screen.
         if (d.event === 'embedPassError') {
             JiTA.log('[JiTA worker] embed pass failed:', d.error);
-            try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // the view's own status replaces the progress line
+            try { JiTA.ui.workDone('embed', 'Embedding stopped: ' + d.error); } catch (e) { /* ignore */ }
             return;
         }
-        // Live re-embed progress (worker embedPass posts this ~every 50 records). Show it in the panel status so a
-        // long pass is visible; embedPassDone's re-render replaces it with real results when the pass finishes.
+        // Live re-embed progress (worker embedPass posts this ~every 50 records), in the toast (JiTA.ui.work) of every
+        // tab, so a long pass is visible; embedPassDone takes it out.
         if (d.event === 'embedPassProgress') {
             try {
                 var pctDone = d.total ? Math.round(d.done / d.total * 100) : 0;
-                JiTA.ui.setStatus('Embedding ' + d.done + ' / ' + d.total + ' (' + pctDone + '%)…');
-            } catch (e) { /* panel may not be mounted */ }
+                JiTA.ui.work('embed', 'Embedding ' + d.done + ' / ' + d.total + ' (' + pctDone + '%)…');
+            } catch (e) { /* ignore */ }
             return;
         }
         // Credits crawl progress from the worker. Broadcast to every tab, but only the tab that started THIS

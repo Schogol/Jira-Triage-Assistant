@@ -10,7 +10,10 @@ const muts = [
     [H, 'a refusing endpoint is retried forever', '                                if (backoff >= JiTA.translate.BACKOFF_MAX && ++capped >= JiTA.translate.MAX_CAPPED) {', '                                if (false) {'],
     [H, 'the lane gives up before the cap', '                                if (backoff >= JiTA.translate.BACKOFF_MAX && ++capped >= JiTA.translate.MAX_CAPPED) {', '                                if (++capped >= JiTA.translate.MAX_CAPPED) {'],
     [H, 'a success does not reset the count', '                            backoff = JiTA.translate.BACKOFF0; capped = 0;', '                            backoff = JiTA.translate.BACKOFF0;'],
-    [H, 'the status line is kept', '                    if (JiTA.ui && JiTA.ui.scheduleRender) { JiTA.ui.scheduleRender(); }\n                });', '                    void 0;\n                });']
+    [H, "the pass's progress is not in the toast", "JiTA.ui.work('translate', 'Translating foreign reports… '", "JiTA.ui.work('x', 'Translating foreign reports… '"],
+    [H, "a pass that translated does not say how many", "if (JiTA.ui && JiTA.ui.workDone) { JiTA.ui.workDone('translate', 'Translated ' + translated", "if (false) { JiTA.ui.workDone('translate', 'Translated ' + translated"],
+    [H, "a pass that ends leaves its progress in the toast", "var over = function () { JiTA.translate._running = null; if (JiTA.ui && JiTA.ui.workDone) { JiTA.ui.workDone('translate'); } };", "var over = function () { JiTA.translate._running = null; };"],
+    [H, "a failed pass leaves its progress in the toast", "run.then(over, function (e) { over(); JiTA.log(", "run.then(over, function (e) { JiTA.translate._running = null; JiTA.log("]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.58.0 (2026-11-24)
+
+### New features
+
+- The Triage Assistant's background work (syncing, translating foreign reports, embedding) shows in the toast at the bottom right while it runs, instead of taking over the panel's status line.
+
 ## 3.57.0 (2026-11-23)
 
 ### New features

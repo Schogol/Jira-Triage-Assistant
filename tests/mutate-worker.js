@@ -15,9 +15,12 @@ const muts = [
     // ---- embedPass ----
     [H, 'embedPass keeps the indexes', '            dropIndexes();\n        }\n    }', '        }\n    }'],
     // ---- a sync run ----
+    [H, "an embed pass's progress is not in the toast", "JiTA.ui.work('embed', 'Embedding '", "JiTA.ui.work('x', 'Embedding '"],
+    [H, "a pass that embedded nothing leaves its progress in the toast", "            try { JiTA.ui.workDone('embed'); } catch (e) { /* ignore */ }\n", ""],
+    [H, "a pass that embedded nothing redraws the view", "            if (d.embedded > 0) {\n                JiTA.log('[JiTA worker] embed pass finished", "            if (true) {\n                JiTA.log('[JiTA worker] embed pass finished"],
     [H, 'a run never tells the worker', 'function settled() { if (changed > 0) { JiTA.sync._invalidateWorker(); JiTA.sync._tellChanged(!opts.isEbr, !!opts.isEbr); } }', 'function settled() {}'],
     [H, 'a run that stored nothing tells it anyway', 'function settled() { if (changed > 0) {', 'function settled() { if (true) {'],
-    [H, 'a failed run does not tell it', 'function (e) {\n            settled();\n', 'function (e) {\n'],
+    [H, 'a failed run does not tell it', "            JiTA.ui.workDone('sync');\n            settled();\n", "            JiTA.ui.workDone('sync');\n"],
     // ---- the leader changes ----
     [H, 'a call no leader took is failed too', '            if (ackedOnly && p.ackTimer) { return; }\n', ''],
     [H, 'followers ignore a new leader', "            JiTA.worker._failTabPending('the ranking leader changed - try again', true);", '            void 0;'],
