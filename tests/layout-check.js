@@ -19,6 +19,11 @@ const browser = require('./browser.js');
 
 const SRC_FILE = process.env.JITA_SRC || path.join(__dirname, '..', 'JiTA.user.js');
 const REQUIRED = process.env.JITA_LAYOUT_REQUIRED === '1';
+// JITA_LAYOUT_ONLY names the views to run, by their titles in VIEWS, split by |: mutate-layout.js runs only the view a
+// breakage is about. A name that is no view fails the run, so a renamed view never leaves a breakage checked by nothing.
+// JITA_LAYOUT_TIMES=1 says how long each view took.
+const ONLY = (process.env.JITA_LAYOUT_ONLY || '').split('|').map((s) => s.trim()).filter(Boolean);
+const TIMES = process.env.JITA_LAYOUT_TIMES === '1';
 const W = 1400, H = 1000;   // the viewport: Lead duties is its full 1180 px wide on it, Settings its full 620 px high
 const PX = 0.5;             // two edges this close count as one (layout is in fractions of a pixel)
 
@@ -703,12 +708,16 @@ const ACTS_FILES = {
 // The same viewer, and Jira's part played by the page: a click on logs.txt or methodcalls.txt in the file list marks that
 // row current and, a moment later, puts the file's text into a fresh code-block, which the log parser draws as its table
 // (the script's own poller finds it). logs.txt has 300 lines between the client's start and the warp's landing, so the
-// landing is far down. Measured: the hover card (where it sits, its text, that it takes no mouse events), the chooser of a
-// row read from both files (Esc closes it, and the viewer never hears the Esc), a row opened in logs.txt and in
-// methodcalls.txt (the line marked, scrolled to, visible), the list opened again as it was left, and a row opened in the
-// file already shown under the list, its notices hidden: nothing loaded again, the line shown and marked.
-async function actsJumpView(files) {
-    const { box } = window.__lc, wait = (ms) => new Promise((r) => setTimeout(r, ms));
+// landing is far down. Three views, each as short as it can be, since mutate-layout.js runs a view for each breakage of it:
+//  - card: the hover card (where it sits, its text, that it takes no mouse events, above its row at the bottom), and the
+//    chooser of a row read from both files (Esc closes it, and the viewer never hears the Esc);
+//  - jump: a row opened in logs.txt and in methodcalls.txt (the line marked, scrolled to, visible), the list opened again as
+//    it was left, its search through the lines, and a row opened in the file already shown under the list, its notices
+//    hidden: nothing loaded again, the line shown and marked;
+//  - redraw: Jira not marking the file shown current, and drawing it again on a click on it, quickly and slowly, and a
+//    marked line scrolled away by something else, then by the user.
+async function actsJumpView(data) {
+    const { box } = window.__lc, wait = (ms) => new Promise((r) => setTimeout(r, ms)), files = data.files, part = data.part;
     const row = (name) => '<div class="row" style="display: flex; align-items: center; height: 46px;"><div style="width: 85%;"><button type="button" style="display: flex; width: 100%; height: 40px; background: none; border: 0; color: inherit; font: inherit;">' +
         '<span style="display: flex; gap: 12px;"><span data-item-elem-before="true" style="display: flex; width: 24px; height: 24px;"></span><div><span data-item-title="true">' + name + '</span></div></span></button></div>' +
         '<button aria-label="Download Media" data-testid="media-archiveDownloadButton" style="width: 39px; height: 40px;"></button></div>';
@@ -739,130 +748,129 @@ async function actsJumpView(files) {
     });
     const said = [], log0 = JiTA.log;
     JiTA.log = function (s) { if (/Player actions/.test(String(s))) { said.push(String(s)); } return log0.apply(this, arguments); };
-    await wait(700);
     JiTA.acts.ensure();
     const entry = list.querySelector('.jita-acts-entry');
     if (!entry) { return { entry: false }; }
-    const openList = async () => { entry.querySelector('button').click(); await wait(200); return document.getElementById('jita-acts'); };
-    const rowNamed = (el, re) => Array.prototype.find.call(el.querySelectorAll('tbody tr.jpa-r'), (r) => re.test(r.querySelector('.jpa-a').textContent));
     const until = async (f, ms) => { for (let i = 0; i < (ms || 5000) / 50; i++) { const v = f(); if (v) { return v; } await wait(50); } return null; };
+    const openList = async () => {
+        entry.querySelector('button').click();
+        return until(() => { const e = document.getElementById('jita-acts'); return e && e.querySelector('.jpa-t') ? e : null; }, 3000);
+    };
+    const rowNamed = (el, re) => Array.prototype.find.call(el.querySelectorAll('tbody tr.jpa-r'), (r) => re.test(r.querySelector('.jpa-a').textContent));
+    const search = async (el, q) => { el.querySelector('.jpa-q').value = q; el.querySelector('.jpa-q').dispatchEvent(new Event('input', { bubbles: true })); await wait(200); };
     const marked = () => document.querySelectorAll('#tableContent tr.jita-jump');
+    const markedLike = (re) => { const m = marked()[0]; return m && re.test(m.textContent) ? m : null; };
     const seen = (tr) => {   // on screen, and what is at its middle is that row
         const r = tr.getBoundingClientRect(), at = document.elementFromPoint(r.left + Math.min(r.width / 2, 200), r.top + r.height / 2);
         return { top: Math.round(r.top), bottom: Math.round(r.bottom), vh: window.innerHeight, onScreen: r.top >= 0 && r.bottom <= window.innerHeight, atRow: !!at && tr.contains(at), text: tr.textContent.replace(/\s+/g, ' ').trim().slice(0, 90) };
     };
+    const clickAt = (r) => r.cells[1].dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: box(r).l + 200, clientY: box(r).t + 8 }));
     let el = await openList();
     if (!el) { return { entry: true, opened: false }; }
-    // the hover card
-    const warpRow = rowNamed(el, /^Warped to Jita/);
-    warpRow.cells[1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    await wait(JiTA.acts.TIP_MS + 150);
-    const card = el.querySelector('.jpa-tip'), cs = (n) => getComputedStyle(n);
-    const hover = card ? { box: box(card), list: box(el), row: box(warpRow), pe: cs(card).pointerEvents, size: cs(card).fontSize, msgSize: cs(card.querySelector('.jpa-tip-msg')).fontSize,
-        msgFont: cs(card.querySelector('.jpa-tip-msg')).fontFamily, wrap: cs(card.querySelector('.jpa-tip-msg')).whiteSpace, lines: card.querySelectorAll('.jpa-tip-line').length,
-        files: Array.prototype.map.call(card.querySelectorAll('.jpa-tip-file'), (n) => n.textContent).join(), foot: (card.querySelector('.jpa-tip-foot') || {}).textContent || '',
-        title: warpRow.getAttribute('title') } : null;
-    warpRow.cells[1].dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }));
-    await wait(50);
-    const cardGone = !el.querySelector('.jpa-tip');
-    // a card with no room under its row goes above it
-    const probe = document.createElement('div');
-    probe.className = 'jpa-tip';
-    probe.style.height = '200px';
-    el.appendChild(probe);
-    const lb = el.getBoundingClientRect();
-    JiTA.acts._place(el, probe, { top: lb.bottom - 40, bottom: lb.bottom - 20 }, lb.left + 50);
-    const flipped = { top: box(probe).t, bottom: box(probe).b, rowTop: lb.bottom - 40 };
-    probe.parentNode.removeChild(probe);
-    // the chooser, and Esc
-    warpRow.cells[1].dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: box(warpRow).l + 200, clientY: box(warpRow).t + 8 }));
-    await wait(50);
-    const pick = el.querySelector('.jpa-pick');
-    const chooser = pick ? { buttons: Array.prototype.map.call(pick.querySelectorAll('button'), (b) => b.textContent).join(' | '), box: box(pick), list: box(el) } : null;
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    await wait(50);
-    const afterEsc = { pick: !!el.querySelector('.jpa-pick'), list: !!document.getElementById('jita-acts'), escSeen: escSeen };
-    // opened in logs.txt, from the chooser, with a search on the list
-    const q = el.querySelector('.jpa-q');
-    q.value = 'warp';
-    q.dispatchEvent(new Event('input', { bubbles: true }));
-    await wait(300);
-    warpRow.cells[1].dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: box(warpRow).l + 200, clientY: box(warpRow).t + 8 }));
-    await wait(50);
-    const pickLogs = el.querySelector('.jpa-pick button[data-f="logs.txt"]');
-    if (pickLogs) { pickLogs.click(); }
-    const m1 = pickLogs ? await until(() => marked()[0]) : null;
-    const inLogs = { listGone: !document.getElementById('jita-acts'), loads: loads, marks: marked().length, row: m1 ? seen(m1) : null, look: m1 ? getComputedStyle(m1.cells[0]).backgroundImage : '' };
-    // the list opened again as it was left; a search finds a row by its lines too
-    el = await openList();
-    const shownNow = () => Array.prototype.filter.call(el.querySelectorAll('tbody tr.jpa-r'), (r) => getComputedStyle(r).display !== 'none').map((r) => r.textContent);
-    const reopened = { q: el.querySelector('.jpa-q').value, shown: shownNow() };
-    el.querySelector('.jpa-q').value = 'conescan';
-    el.querySelector('.jpa-q').dispatchEvent(new Event('input', { bubbles: true }));
-    await wait(300);
-    reopened.byLine = shownNow();
-    // opened in methodcalls.txt: one file, so no chooser
-    q.value = '';
-    el.querySelector('.jpa-q').value = '';
-    el.querySelector('.jpa-q').dispatchEvent(new Event('input', { bubbles: true }));
-    await wait(300);
-    rowNamed(el, /^Used the directional scanner/).cells[1].click();
-    await wait(50);
-    const noPick = !el.querySelector('.jpa-pick');
-    const m2 = await until(() => { const m = marked()[0]; return m && /ConeScan/.test(m.textContent) ? m : null; });
-    const inMc = { noPick: noPick, loads: loads, row: m2 ? seen(m2) : null };
-    // logs.txt again, then its notices hidden, and a row opened in it while it is the file shown under the list
-    el = await openList();
+    const out = { entry: true, opened: true, toasts: toasts };
+    if (part === 'card') {
+        const warpRow = rowNamed(el, /^Warped to Jita/), cs = (n) => getComputedStyle(n);
+        warpRow.cells[1].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        const card = await until(() => el.querySelector('.jpa-tip'), 2000);
+        out.hover = card ? { box: box(card), list: box(el), row: box(warpRow), pe: cs(card).pointerEvents, size: cs(card).fontSize, msgSize: cs(card.querySelector('.jpa-tip-msg')).fontSize,
+            msgFont: cs(card.querySelector('.jpa-tip-msg')).fontFamily, wrap: cs(card.querySelector('.jpa-tip-msg')).whiteSpace, lines: card.querySelectorAll('.jpa-tip-line').length,
+            files: Array.prototype.map.call(card.querySelectorAll('.jpa-tip-file'), (n) => n.textContent).join(), foot: (card.querySelector('.jpa-tip-foot') || {}).textContent || '',
+            title: warpRow.getAttribute('title') } : null;
+        warpRow.cells[1].dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: document.body }));
+        out.cardGone = !el.querySelector('.jpa-tip');
+        // a card with no room under its row goes above it
+        const probe = document.createElement('div');
+        probe.className = 'jpa-tip';
+        probe.style.height = '200px';
+        el.appendChild(probe);
+        const lb = el.getBoundingClientRect();
+        JiTA.acts._place(el, probe, { top: lb.bottom - 40, bottom: lb.bottom - 20 }, lb.left + 50);
+        out.flipped = { top: box(probe).t, bottom: box(probe).b, rowTop: lb.bottom - 40 };
+        probe.parentNode.removeChild(probe);
+        // the chooser, and Esc
+        clickAt(warpRow);
+        const pick = el.querySelector('.jpa-pick');
+        out.chooser = pick ? { buttons: Array.prototype.map.call(pick.querySelectorAll('button'), (b) => b.textContent).join(' | '), box: box(pick), list: box(el) } : null;
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        out.afterEsc = { pick: !!el.querySelector('.jpa-pick'), list: !!document.getElementById('jita-acts'), escSeen: escSeen };
+        return out;
+    }
+    if (part === 'jump') {
+        // opened in logs.txt, from the chooser, with a search on the list
+        await search(el, 'warp');
+        clickAt(rowNamed(el, /^Warped to Jita/));
+        const pickLogs = el.querySelector('.jpa-pick button[data-f="logs.txt"]');
+        if (pickLogs) { pickLogs.click(); }
+        const m1 = pickLogs ? await until(() => marked()[0]) : null;
+        out.inLogs = { listGone: !document.getElementById('jita-acts'), loads: loads, marks: marked().length, row: m1 ? seen(m1) : null, look: m1 ? getComputedStyle(m1.cells[0]).backgroundImage : '' };
+        // the list opened again as it was left; a search finds a row by its lines too
+        el = await openList();
+        const shownNow = () => Array.prototype.filter.call(el.querySelectorAll('tbody tr.jpa-r'), (r) => getComputedStyle(r).display !== 'none').map((r) => r.textContent);
+        out.reopened = { q: el.querySelector('.jpa-q').value, shown: shownNow() };
+        await search(el, 'conescan');
+        out.reopened.byLine = shownNow();
+        // opened in methodcalls.txt: one file, so no chooser
+        await search(el, '');
+        rowNamed(el, /^Used the directional scanner/).cells[1].click();
+        const noPick = !el.querySelector('.jpa-pick');
+        const m2 = await until(() => markedLike(/ConeScan/));
+        out.inMc = { noPick: noPick, loads: loads, row: m2 ? seen(m2) : null };
+        // logs.txt again, then its notices hidden, and a row opened in it while it is the file shown under the list
+        el = await openList();
+        rowNamed(el, /^Jumped through a stargate/).cells[1].click();
+        const m3 = await until(() => markedLike(/Stargate Jump from/));
+        const notice = () => document.querySelector('#gnav a#notice') || { click() {}, classList: { contains: () => true } };   // none while the log is drawn again
+        notice().click();
+        const idleHidden = Array.prototype.find.call(document.querySelectorAll('#tableContent tbody tr'), (r) => /I am now AFK/.test(r.textContent));
+        const hiddenBefore = idleHidden ? idleHidden.style.display : 'none found';
+        const loadsBefore = loads;
+        el = await openList();
+        rowNamed(el, /^Went idle/).cells[1].click();
+        const m4 = await until(() => markedLike(/I am now AFK/));
+        await wait(200);
+        out.again = { gate: m3 ? seen(m3).text : null, hiddenBefore: hiddenBefore, loads: loads - loadsBefore, listGone: !document.getElementById('jita-acts'),
+            noticeOff: notice().classList.contains('toggle'), row: m4 ? seen(m4) : null, display: m4 ? m4.style.display : null };
+        return out;
+    }
+    // redraw. logs.txt shown first, as a jump leaves it; then Jira as it may be: the file shown not marked current, so its
+    // entry is clicked, and Jira draws it again. Quickly: the table from before the click is never marked. Slowly (after
+    // GO_STALE): that table is marked, then the line is marked again in the table drawn again, and scrolled to.
     rowNamed(el, /^Jumped through a stargate/).cells[1].click();
-    const m3 = await until(() => { const m = marked()[0]; return m && /Stargate Jump from/.test(m.textContent) ? m : null; });
-    const notice = () => document.querySelector('#gnav a#notice') || { click() {}, classList: { contains: () => true } };   // none while the log is drawn again
-    notice().click();
-    await wait(50);
-    const idleHidden = Array.prototype.find.call(document.querySelectorAll('#tableContent tbody tr'), (r) => /I am now AFK/.test(r.textContent));
-    const hiddenBefore = idleHidden ? idleHidden.style.display : 'none found';
-    const loadsBefore = loads;
-    el = await openList();
-    rowNamed(el, /^Went idle/).cells[1].click();
-    const m4 = await until(() => { const m = marked()[0]; return m && /I am now AFK/.test(m.textContent) ? m : null; });
-    await wait(300);
-    const again = { gate: m3 ? seen(m3).text : null, hiddenBefore: hiddenBefore, loads: loads - loadsBefore, listGone: !document.getElementById('jita-acts'),
-        noticeOff: notice().classList.contains('toggle'), row: m4 ? seen(m4) : null, display: m4 ? m4.style.display : null };
-    // Jira as it may be: the file shown not marked current, so its entry is clicked, and Jira draws it again. Quickly: the
-    // table from before the click is never marked. Slowly (after GO_STALE): that table is marked, then the line is marked
-    // again in the table drawn again, and scrolled to.
+    await until(() => markedLike(/Stargate Jump from/));
     window.__noCurrent = true;
     Array.prototype.forEach.call(list.querySelectorAll('[aria-current]'), (x) => x.removeAttribute('aria-current'));
-    JiTA.acts._goGen++;   // the watch of the jumps above ends here
     let n0 = loads;
     said.length = 0;
-    window.__loadMs = 300;
     el = await openList();
-    rowNamed(el, /^Jumped through a stargate/).cells[1].click();
-    const q5 = await until(() => (loads > n0 && marked()[0] && /Stargate Jump from/.test(marked()[0].textContent) ? marked()[0] : null), 6000);
-    await wait(1800);
-    const quick = { loads: loads - n0, row: q5 && q5.isConnected ? seen(q5) : null, said: said.slice() };
+    rowNamed(el, /^Opened the bug report window/).cells[1].click();
+    const t0 = Date.now();
+    const q5 = await until(() => (loads > n0 ? markedLike(/Opening bug reporting/) : null), 4000);
+    await wait(Math.max(0, JiTA.acts.GO_STALE + 200 - (Date.now() - t0)));   // past the time the table from before would be taken
+    out.quick = { loads: loads - n0, row: q5 && q5.isConnected ? seen(q5) : null, said: said.slice() };
     n0 = loads;
     said.length = 0;
-    window.__loadMs = 2600;
+    window.__loadMs = JiTA.acts.GO_STALE + 300;
     el = await openList();
     rowNamed(el, /^Went idle/).cells[1].click();
-    const m5 = await until(() => (loads > n0 && marked()[0] && /I am now AFK/.test(marked()[0].textContent) ? marked()[0] : null), 9000);
-    const slow = { loads: loads - n0, row: m5 ? seen(m5) : null, said: said.slice() };
+    const m5 = await until(() => (loads > n0 ? markedLike(/I am now AFK/) : null), 6000);
+    out.slow = { loads: loads - n0, row: m5 ? seen(m5) : null, said: said.slice() };
     // scrolled away by something else than the user: back in view; scrolled by the user: left there
     const tbl = document.getElementById('table');
     if (tbl) { tbl.scrollTop = 0; }
-    await wait(500);
-    const back = m5 ? seen(m5) : null;
+    await wait(JiTA.acts.GO_POLL * 2 + 50);
+    out.back = m5 ? seen(m5) : null;
     window.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
     if (tbl) { tbl.scrollTop = 0; }
-    await wait(500);
-    const left = m5 ? seen(m5) : null;
-    const redraw = { quick: quick, slow: slow, back: back, left: left };
-    return { entry: true, opened: true, hover: hover, cardGone: cardGone, flipped: flipped, chooser: chooser, afterEsc: afterEsc, inLogs: inLogs, reopened: reopened, inMc: inMc, again: again, redraw: redraw, toasts: toasts };
+    await wait(JiTA.acts.GO_POLL * 2 + 50);
+    out.left = m5 ? seen(m5) : null;
+    return out;
 }
-function actsJumpChecks(m) {
-    ok('Player actions, rows to lines: the list opens', m.entry && m.opened, JSON.stringify(m));
-    if (!m.opened) { return; }
+function actsOpened(m, title) {
+    ok(title + ': the list opens', m.entry && m.opened, JSON.stringify(m));
+    return !!m.opened;
+}
+function actsCardChecks(m) {
+    if (!actsOpened(m, 'Player actions, hover card')) { return; }
     const h = m.hover;
     ok('Player actions: hovering a row shows its card, under the row, inside the list, in place of the browser\'s own tooltip', !!h && h.box.t >= h.row.b - 1 && h.box.l >= h.list.l && h.box.r <= h.list.r + 0.5 &&
         h.box.b <= h.list.b && h.title === null, JSON.stringify(h));
@@ -873,6 +881,9 @@ function actsJumpChecks(m) {
     ok('Player actions: a click on a row read from both files asks which, at the click, inside the list', !!m.chooser && m.chooser.buttons === 'methodcalls.txt10:01:55 | logs.txt10:02:10' &&
         m.chooser.box.r <= m.chooser.list.r + 0.5 && m.chooser.box.b <= m.chooser.list.b + 0.5, JSON.stringify(m.chooser));
     ok('Player actions: ...Esc closes the chooser, not the list, and the viewer never hears it', !m.afterEsc.pick && m.afterEsc.list && m.afterEsc.escSeen === 0, JSON.stringify(m.afterEsc));
+}
+function actsJumpChecks(m) {
+    if (!actsOpened(m, 'Player actions, rows to lines')) { return; }
     const l = m.inLogs;
     ok('Player actions: picking logs.txt opens it, the list closed, and the line is marked, scrolled to and visible (300 lines down)', l.listGone && l.loads === 1 && l.marks === 1 && !!l.row &&
         /StopWarpIndication Destination: Jita/.test(l.row.text) && l.row.onScreen && l.row.atRow && /gradient/.test(l.look), JSON.stringify(l));
@@ -883,13 +894,17 @@ function actsJumpChecks(m) {
     const a = m.again;
     ok('Player actions: a row opened in the file already shown under the list: nothing loaded again, the list closed', /Stargate Jump from/.test(a.gate || '') && a.hiddenBefore === 'none' && a.loads === 0 && a.listGone, JSON.stringify(a));
     ok('Player actions: ...a line its hidden notices kept out of sight is shown, the notices on again, and marked', !!a.row && a.display !== 'none' && !a.noticeOff && a.row.onScreen && a.row.atRow, JSON.stringify(a));
-    const d = m.redraw, q5 = d.quick, s5 = d.slow;
+    ok('Player actions: nothing went wrong on the way', !m.toasts.length, JSON.stringify(m.toasts));
+}
+function actsRedrawChecks(m) {
+    if (!actsOpened(m, 'Player actions, drawn again')) { return; }
+    const q5 = m.quick, s5 = m.slow;
     ok('Player actions: the file shown, not marked current by Jira and drawn again on the click: the line is marked in the table drawn again, visible, the table from before never marked',
-        q5.loads === 1 && !!q5.row && /Stargate Jump from/.test(q5.row.text) && q5.row.onScreen && q5.row.atRow && q5.said.length === 1 && !/again|from before/.test(q5.said[0]), JSON.stringify(q5));
+        q5.loads === 1 && !!q5.row && /Opening bug reporting/.test(q5.row.text) && q5.row.onScreen && q5.row.atRow && q5.said.length === 1 && !/again|from before/.test(q5.said[0]), JSON.stringify(q5));
     ok('Player actions: ...drawn again only after a while: the table from before is marked, then the line again in the new table, scrolled to', s5.loads === 1 && !!s5.row &&
         /I am now AFK/.test(s5.row.text) && s5.row.onScreen && s5.row.atRow && s5.said.length === 2 && /marked again in the table drawn again/.test(s5.said[1]), JSON.stringify(s5));
-    ok('Player actions: a marked line scrolled away by something else is scrolled back to', !!d.back && d.back.onScreen, JSON.stringify(d.back));
-    ok('Player actions: ...but not once the user has scrolled', !!d.left && !d.left.onScreen, JSON.stringify(d.left));
+    ok('Player actions: a marked line scrolled away by something else is scrolled back to', !!m.back && m.back.onScreen, JSON.stringify(m.back));
+    ok('Player actions: ...but not once the user has scrolled', !!m.left && !m.left.onScreen, JSON.stringify(m.left));
     ok('Player actions: nothing went wrong on the way', !m.toasts.length, JSON.stringify(m.toasts));
 }
 const JUMP_FILES = {
@@ -917,7 +932,9 @@ const VIEWS = [
     { title: 'Lead duties tabs', page: ldTabsView, check: ldTabsChecks },
     { title: 'Settings window', page: setvView, check: setvChecks, data: SETV_FIXTURE },
     { title: 'Player actions', page: actsView, check: actsChecks, data: ACTS_FILES },
-    { title: 'Player actions, rows to lines', page: actsJumpView, check: actsJumpChecks, data: JUMP_FILES }
+    { title: 'Player actions, hover card', page: actsJumpView, check: actsCardChecks, data: { files: JUMP_FILES, part: 'card' } },
+    { title: 'Player actions, rows to lines', page: actsJumpView, check: actsJumpChecks, data: { files: JUMP_FILES, part: 'jump' } },
+    { title: 'Player actions, drawn again', page: actsJumpView, check: actsRedrawChecks, data: { files: JUMP_FILES, part: 'redraw' } }
 ];
 // The files Tampermonkey fetches with the script (@resource), as the page's GM_getResourceText hands them out.
 const RESOURCES = { settingswindow: fs.readFileSync(path.join(__dirname, '..', 'settings-window.json'), 'utf8') };
@@ -925,6 +942,9 @@ const RESOURCES = { settingswindow: fs.readFileSync(path.join(__dirname, '..', '
 (async () => {
     // A browser that stops answering must not hold up a CI run for its whole timeout.
     setTimeout(() => { ok('the layout checks finish', false, 'still running after 180 s'); finish(); }, 180000).unref();
+    const unknown = ONLY.filter((t) => !VIEWS.some((v) => v.title === t));
+    if (unknown.length) { ok('JITA_LAYOUT_ONLY names views there are', false, 'no view called ' + unknown.join(', ')); finish(); }
+    const views = ONLY.length ? VIEWS.filter((v) => ONLY.indexOf(v.title) >= 0) : VIEWS;
     const src = fs.readFileSync(SRC_FILE, 'utf8').replace(/\r\n/g, '\n');
     const exe = browser.find();
     if (!exe) { skip(process.env.JITA_BROWSER ? 'JITA_BROWSER is ' + process.env.JITA_BROWSER + ', which is no program here' : 'no Chrome, Chromium or Edge found (set JITA_BROWSER to one)'); }
@@ -937,8 +957,8 @@ const RESOURCES = { settingswindow: fs.readFileSync(path.join(__dirname, '..', '
     }
     if (!b) { ok('the browser starts (' + exe + ')', false, why); finish(); }
     console.log('  ----  ' + exe + ', ' + await b.version());
-    for (const v of VIEWS) {
-        let page = null, m = null;
+    for (const v of views) {
+        let page = null, m = null, t0 = Date.now();
         try {
             page = await scriptPage(b, jq.text, src, gmFor(src), RESOURCES);
             m = await page.evaluate('(' + v.page.toString() + ')(' + (v.data === undefined ? '' : JSON.stringify(v.data)) + ')', 30000);
@@ -947,6 +967,7 @@ const RESOURCES = { settingswindow: fs.readFileSync(path.join(__dirname, '..', '
         }
         if (m) { v.check(m); }
         if (page) { await page.close(); }
+        if (TIMES) { console.log('  ----  ' + v.title + ': ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s'); }
     }
     await b.close();
     finish();

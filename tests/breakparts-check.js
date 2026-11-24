@@ -33,8 +33,9 @@ const third = [0, 1, 2].map((k) => list(k + '/3'));
 const heavy = ['mutate-members.js', 'mutate-checklist.js'];
 ok('in 3 parts the shards of a big suite are spread, not all on one machine', heavy.every((s) => third.filter((p) => p.jobs.some((j) => j.split(' ')[0] === s)).length >= 2),
     J(third.map((p) => p.jobs.filter((j) => heavy.indexOf(j.split(' ')[0]) >= 0))));
-ok('the browser suite goes first in its part, not last (it takes many times its size)', third.some((p) => p.jobs.indexOf('mutate-layout.js') >= 0 && p.jobs.indexOf('mutate-layout.js') < 4),
-    J(third.map((p) => p.jobs.indexOf('mutate-layout.js'))));
+const layoutAt = third.map((p) => p.jobs.map((j, i) => (/^mutate-layout\.js /.test(j) ? i : -1)).filter((i) => i >= 0));
+ok('the browser suite\'s shards are spread over the parts, and go first in theirs, not last (they take many times their size)',
+    layoutAt.filter((a) => a.length).length >= 2 && layoutAt.every((a) => a.every((i, n) => i === n)), J(layoutAt));
 ok('the same deal every time, as each machine deals for itself', J(list('1/3').jobs) === J(third[1].jobs));
 // The same deal from a checkout with LF endings (CI) and one with CRLF (Windows), so a part that failed on CI can be run here.
 const fs = require('fs'), os = require('os');

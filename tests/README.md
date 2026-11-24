@@ -143,7 +143,7 @@ for the full counts. A suite run by hand, as above, runs its harnesses to their 
 CI splits the run over three machines with `JITA_BREAK_PART=k/n`: each makes part k of n of the jobs. Every part deals
 the jobs the same way, the costliest first, each to the part with the least so far, so together they make each job
 once (`breakparts-check.js` checks that). A suite's file size stands in for its time; `mutate-layout.js`, which starts
-a browser for every breakage, weighs 8 times its size. `JITA_BREAK_LIST=1` lists a run's jobs without making them.
+a browser for every breakage, weighs 25 times its size. `JITA_BREAK_LIST=1` lists a run's jobs without making them.
 
 To wait for pending promises, a harness should hop through `setImmediate` a few times, not use
 `setTimeout(r, 0)`. On Windows a timeout lasts a whole 15 ms timer tick, and a suite pays that for every wait of
@@ -158,14 +158,20 @@ time. The checklist harness waited about 0.8 s per run before, the members harne
 
 The harnesses draw into fake DOMs, so a column that shifts from row to row passes them all. `layout-check.js` loads
 the real script into a headless Chrome, Chromium or Edge, opens the Lead duties Members and Quality control tabs, the
-sidebar cards, Settings and the settings.yaml window (its tabs, filter, search, Show raw and Copy clicked) with fixture
-data, and measures them. `browser.js` drives the browser over the DevTools
+sidebar cards, Settings, the settings.yaml window (its tabs, filter, search, Show raw and Copy clicked) and Player
+actions in the igbr.zip viewer (its hover cards, and rows opened at their lines) with fixture data, and measures them.
+`browser.js` drives the browser over the DevTools
 protocol with Node's own WebSocket (Node 22 or later, no npm package); jQuery comes from the script's `@require`,
 checked against its sha256 and kept in the temp folder.
 
 - `JITA_BROWSER` names the browser to use. Otherwise it looks for Chrome, Chromium and Edge where each platform keeps them.
 - With no browser it prints `SKIP` and passes, unless `JITA_LAYOUT_REQUIRED=1`. CI sets it, so CI never skips.
-- `mutate-layout.js` breaks what those layouts rest on, one thing at a time, and requires the check to go red.
+- `JITA_LAYOUT_ONLY` runs only the views named (their titles in `VIEWS`, split by `|`); a name that is no view fails the
+  run. `JITA_LAYOUT_TIMES=1` says how long each view took.
+- `mutate-layout.js` breaks what those layouts rest on, one thing at a time, and requires the check to go red. Each
+  breakage names the view it breaks, and only that view runs for it; the control runs the views of the breakages made.
+  `run-breakages.js` splits it in 4 shards, each taking whole views (costed in `COST`), so a new view wants its time in
+  `COST` and as few seconds of waiting as it can do with: every breakage of it pays them again.
 
 ## Adding a test
 
