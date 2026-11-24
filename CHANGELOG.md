@@ -14,6 +14,13 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.57.0 (2026-11-23)
+
+### New features
+
+- Player actions: hovering a row shows a clearer card, with why the row says what it says, then each line it was read from, split into file, time, type and message.
+- Player actions: a click on a row opens logs.txt or methodcalls.txt at that line and marks it. A row read from both files asks which one. Player actions opens again where you left it.
+
 ## 3.56.0 (2026-11-23)
 
 ### New features

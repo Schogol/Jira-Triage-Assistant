@@ -31,13 +31,17 @@ const DIR = __dirname, REPO = path.join(DIR, '..');
 // Since the harnesses stop at their first failing check and the ones that slept run on clock.js, all of it is about 230
 // s of work, and the shards (members about 10 s each, checklist 6 s, excfind 11 s) mostly let CI's three parts come out
 // even: 18 to 20 s each on 4 workers.
-const SHARDS = { 'mutate-members.js': 4, 'mutate-checklist.js': 4, 'mutate-excfind.js': 2 };
+// Then the browser breakages grew to 41 (Player actions, v3.57.0), each running every view of layout-check.js: one job of
+// about 8 minutes, and the whole run took as long (CI's part 1 8m45s). Each breakage now runs only its view, and the suite
+// is split 4 by views (mutate-layout.js): shards of 40 to 55 s on 8 workers, and the run 100 s.
+const SHARDS = { 'mutate-members.js': 4, 'mutate-checklist.js': 4, 'mutate-excfind.js': 2, 'mutate-layout.js': 4 };
 const runners = fs.readdirSync(DIR).filter((f) => /^mutate-.*\.js$/.test(f));
 const needsRepo = (f) => /ci-static\.js|'git'/.test(fs.readFileSync(path.join(DIR, f), 'utf8'));
 // A suite's size stands in for its time (about half a second per KB), except for one that starts a real browser for each
-// breakage (mutate-layout.js): that takes about 8 times as long as its size says. The size is counted with LF endings,
-// so a Windows checkout (CRLF) deals the parts exactly as CI does, and a part that failed there can be run here.
-const BROWSER_WEIGHT = 8;
+// breakage (mutate-layout.js): that takes about 25 times as long as its size says (14 KB, about 190 s of work in its four
+// shards). The size is counted with LF endings, so a Windows checkout (CRLF) deals the parts exactly as CI does, and a
+// part that failed there can be run here.
+const BROWSER_WEIGHT = 25;
 const jobsOf = (f) => {
     const text = fs.readFileSync(path.join(DIR, f), 'utf8').replace(/\r\n/g, '\n'), browser = /layout-check\.js/.test(text);
     const n = SHARDS[f] || 1, size = text.length * (browser ? BROWSER_WEIGHT : 1), out = [];
