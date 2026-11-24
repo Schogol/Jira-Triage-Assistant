@@ -4,7 +4,7 @@
 //    record that matches its row is not written, a pruned closed report is deleted, and `changed` counts only new,
 //    different or pruned records (an incremental run re-fetches the last few minutes every time)
 //  - a run drops the worker's indexes only when it changed something, saves a full crawl's position with its query
-//    and schema, leaves the panel's status line alone in a background catch-up, and says what a failed run wrote
+//    and schema, shows its progress in the toast (nothing in a background catch-up) until it ends, and says what a failed run wrote
 //  - an interrupted full crawl is carried on (by the next full crawl, the incremental syncs and the upgrade refetch)
 //    and started over when Jira refuses the token
 //  - every sync ends in one tail: embed and translate only on a change, redraw the view the change feeds, and
@@ -102,11 +102,11 @@ const rec = (key, over) => Object.assign({
 
     // ================= a run =================
     const full = 'project in (EDR, EO, PLAT) ORDER BY updated ASC';
-    let pages = [], meta = {}, status = [], invalidates = 0, putChanged = [];
+    let pages = [], meta = {}, status = [], ended = [], invalidates = 0, putChanged = [];
     const R = {
         FIELDS: [], PAGE_SIZE: 100, PAGE_DELAY_MS: 0, NEAR_LIMIT_DELAY_MS: 0, DATA_VERSION: 3, DATA_VERSION_EBR: 4,
         rank: {}, logsig: {}, log() {},
-        ui: { setStatus: (s) => { status.push(s); } },
+        ui: { work: (id, s) => { status.push(id + ': ' + s); }, workDone: (id) => { ended.push(id); } },
         util: { delay: () => Promise.resolve() },
         db: {
             syncPut: (recs) => Promise.resolve({ changed: putChanged.length ? putChanged.shift() : recs.length }),
@@ -154,13 +154,18 @@ const rec = (key, over) => Object.assign({
     ok('a full crawl saves each next page with its query and schema', JSON.stringify(seenTokens[0]) === JSON.stringify({ jql: full, token: 't2', v: 3 }), JSON.stringify(seenTokens[0]));
     ok('...and clears it at the end', seenTokens.length === 3 && seenTokens[2] === null, JSON.stringify(seenTokens));
     R.db.setMeta = realSet;
-    ok('a full crawl shows its progress', status.length === 3, String(status.length));
+    ok('a full crawl shows its progress in the toast, as the sync, page by page', status.length === 3 && status[2] === 'sync: Syncing defects… 3 fetched', JSON.stringify(status));
+    ok('...and takes it out when the crawl ends', ended.length > 0 && ended.every((x) => x === 'sync'), JSON.stringify(ended));
+    status = [];
+    pages = [page(['EBR-1'])];
+    await R.sync._run(R.sync.FULL_JQL_EBR, { resume: true, isEbr: true, metaPrefix: 'Ebr' });
+    ok('...a bug report crawl says so', status.length === 1 && status[0] === 'sync: Syncing bug reports… 1 fetched', JSON.stringify(status));
 
     status = [];
     R.sync._quiet = true;
     pages = [page(['EDR-1'])];
     await R.sync._run('x', {});
-    ok('a background catch-up leaves the status line alone', status.length === 0, String(status.length));
+    ok('a background catch-up shows nothing', status.length === 0, String(status.length));
     pages = [page(['EDR-1'])];
     await R.sync._run(full, { resume: true });
     ok('...a background full build still shows it', status.length === 1, String(status.length));
@@ -308,7 +313,7 @@ const rec = (key, over) => Object.assign({
     const tails = [];
     const M = {
         DATA_VERSION: 3, rank: {}, log() {},
-        ui: { toast() {} },
+        ui: { toast() {}, workDone() {} },
         db: R.db,
         sync: { running: false, FULL_JQL: full, FULL_JQL_EBR: R.sync.FULL_JQL_EBR, _resumable: R.sync._resumable,
             fullSync: () => Promise.resolve({ changed: 4 }), fullSyncEbr: () => Promise.resolve({ changed: 0 }),
@@ -356,7 +361,7 @@ const rec = (key, over) => Object.assign({
 
     // ================= the paths into it =================
     const P = {
-        rank: {}, log() {}, ui: { toast() {}, setStatus() {}, currentKey: null },
+        rank: {}, log() {}, ui: { toast() {}, setStatus() {}, workDone() {}, currentKey: null },
         db: { clearEbr: () => Promise.resolve(), clearDefects: () => Promise.resolve(), setMeta: () => Promise.resolve(), countEbr: () => Promise.resolve(3), countDefectsOnly: () => Promise.resolve(5) },
         sync: { running: false, fullSyncEbr: () => Promise.resolve({ changed: 0 }), fullSync: () => Promise.resolve({ changed: 0 }),
             incrementalSync: () => Promise.resolve({ changed: 0 }), incrementalSyncEbr: () => Promise.resolve({ changed: 5 }) }

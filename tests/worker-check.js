@@ -49,7 +49,7 @@ let invalidates = 0, pages = [], tells = [];
 global.JiTA = {
     SCRIPT_VERSION: '3.38.6', FIELDS: [], PAGE_SIZE: 100, PAGE_DELAY_MS: 0, NEAR_LIMIT_DELAY_MS: 0,
     dlog() {}, sched: { tabId: 'tabF' },
-    rank: {}, logsig: {}, ui: { setStatus() {} },
+    rank: {}, logsig: {}, ui: { setStatus() {}, work() {}, workDone() {} },
     util: { isClosedStatus: (s) => /closed/i.test(s || ''), delay: () => Promise.resolve() },
     db: { syncPut: (recs) => Promise.resolve({ changed: recs.length }), setMeta: () => Promise.resolve() },
     sync: {}
@@ -228,11 +228,22 @@ const realSpawn = W._spawnWorker;
     window.console = console;
     console.log = (...a) => { logs.push(a.join(' ')); };
     JiTA.ui.scheduleRender = () => { renders++; };
+    const work = [], ended = [];
+    JiTA.ui.work = (id, m) => { work.push(id + ': ' + m); };
+    JiTA.ui.workDone = (id, m) => { ended.push(id + (m ? ': ' + m : '')); };
+    W._applyEvent({ event: 'embedPassProgress', done: 50, total: 200 });
+    ok('an embed pass shows its progress in the toast, as the embedding', work.length === 1 && work[0] === 'embed: Embedding 50 / 200 (25%)…', JSON.stringify(work));
     W._applyEvent({ event: 'embedPassError', error: 'GPU device lost' });
     console.log = log0;
     delete window.console;
-    ok('a failed embed pass is logged and the view redrawn over its progress line', logs.some((l) => /embed pass failed/.test(l) && /GPU device lost/.test(l)) && renders === 1,
-        logs.join(' | ') + ' / ' + renders);
+    ok('a failed embed pass is logged, and its progress taken out of the toast, saying why', logs.some((l) => /embed pass failed/.test(l) && /GPU device lost/.test(l)) &&
+        ended.length === 1 && ended[0] === 'embed: Embedding stopped: GPU device lost', logs.join(' | ') + ' / ' + JSON.stringify(ended));
+    ended.length = 0;
+    W._applyEvent({ event: 'embedPassDone', embedded: 0 });
+    ok('a pass that embedded nothing still takes its progress out, and leaves the view alone', ended.join() === 'embed' && renders === 0, JSON.stringify(ended) + ' / ' + renders);
+    ended.length = 0;
+    W._applyEvent({ event: 'embedPassDone', embedded: 7 });
+    ok('...one that embedded some redraws the view with the new vectors', ended.join() === 'embed' && renders === 1, JSON.stringify(ended) + ' / ' + renders);
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'worker checks passed.'));
     process.exit(fail ? 1 : 0);

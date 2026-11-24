@@ -122,10 +122,11 @@ const keys = (list) => list.map((r) => r.key).join(',');
     localFails = true;
     ok('...failing both, every report stored', (await pool()) === 5);
     const ui = src.slice(src.indexOf('\nJiTA.ui = {'));
-    const shown = (ui.match(/\+ ' open reports'\)/g) || []).length;
-    const fromPool = (ui.match(/\(' \+ open \+ ' open\)\.'\)|' · ' \+ open \+ ' open reports'\)/g) || []).length;
-    ok('both lists show that count, found and not found', shown === 3 && fromPool === 4 && (ui.match(/JiTA\.rank\.ebrPool\(\)/g) || []).length === 3 && !/' \+ n \+ ' open\)/.test(ui), shown + ' / ' + fromPool);
-    ok('...and so does the line after Attach slides the next report in', /function refreshCount\(\) \{\s*JiTA\.rank\.ebrPool\(\)\.then\(function \(n\) \{/.test(ui));
+    const fromPool = (ui.match(/\(' \+ open \+ ' open\)\.'\)/g) || []).length;
+    ok('both lists say that count when they find none', fromPool === 2 && (ui.match(/JiTA\.rank\.ebrPool\(\)/g) || []).length === 2 && !/' \+ n \+ ' open\)/.test(ui), String(fromPool));
+    ok('...and no list has a count line above its rows (v3.58.0), the line after Attach slides the next report in included',
+        !/' open reports'\)|' matches · '|' similar · '|' suggestions · '|function refreshCount\(\)/.test(ui));
+    ok('...the status line hiding while it has nothing to say', /#jita-sd-status:empty, #jita-side-group #jita-sd-status:empty \{ display: none; \}/.test(ui));
 
     const embedded = [];
     const ep = new Function('loadModel', 'allRecords', 'SH', 'leftOut', 'cfg', 'embedBatch', 'putEmbeddingsMerged', 'dropIndexes', 'dropPipe', 'self', 'setTimeout', 'clearTimeout', 'console',

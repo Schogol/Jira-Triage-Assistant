@@ -119,7 +119,7 @@ Object.assign(JiTA.ui, {
 
     await run('render', 'EBR-1', 'EDR-1', null);
     ok('render: the matches for the issue on screen are painted', list.kids.length === 1 && list.kids[0].key === 'EDR-1' && list.kids[0].onScreen === 'EBR-1', JSON.stringify(list.kids));
-    ok('...with its status and snapshot', statuses.join('|') === 'Finding similar defects…|1 suggestions · Keyword · 42 indexed' && snaps.join() === 'EBR-1', statuses.join('|'));
+    ok('...with its snapshot, and no count line above the list (the status line emptied, so hidden)', statuses.join('|') === 'Finding similar defects…|' && snaps.join() === 'EBR-1', statuses.join('|'));
     await run('render', 'EBR-1', 'EDR-1', 'text', away);
     ok('render: moving on while the text is read stops it there, before the DB is even counted', calls.count === 0 && nothingPainted(), JSON.stringify(calls));
     await run('render', 'EBR-1', 'EDR-1', 'count', away);
@@ -137,7 +137,7 @@ Object.assign(JiTA.ui, {
 
     await run('renderReports', 'EDR-1', 'EBR-9', null);
     ok('renderReports: the reports for the defect on screen are painted, attaching to it', list.kids.length === 1 && list.kids[0].key === 'EBR-9' && list.kids[0].defect === 'EDR-1', JSON.stringify(list.kids));
-    ok('...counting the reports ranked, not every one stored', statuses.indexOf('1 matches · Keyword · 40 open reports') >= 0, statuses.join('|'));
+    ok('...with no count line above the list (the status line emptied, so hidden)', statuses[statuses.length - 1] === '' && !statuses.some((m) => / matches · /.test(m)), statuses.join('|'));
     await run('renderReports', 'EDR-1', 'EBR-9', 'text', away);
     ok('renderReports: moving on while the text is read stops it there', calls.count === 0 && nothingPainted(), JSON.stringify(calls));
     await run('renderReports', 'EDR-1', 'EBR-9', 'count', away);

@@ -43,7 +43,7 @@ const muts = [
     [W, 'this tab\'s own switch rebuilds it too', 'if (remote) { JiTA.worker._backendChanged(); }', 'JiTA.worker._backendChanged();'],
     [W, 'only one backend setting is watched', "['sdTryWebgpu', 'sdForceCpu'].forEach(function (k) {", "['sdTryWebgpu'].forEach(function (k) {"],
     [W, 'a failed embed pass is dropped', "        if (d.event === 'embedPassError') {", "        if (d.event === 'embedPassError-x') {"],
-    [W, 'a failed embed pass leaves its progress line', "            try { JiTA.ui.scheduleRender(); } catch (e) { /* ignore */ }   // the view's own status replaces the progress line\n", '']
+    [W, 'a failed embed pass leaves its progress in the toast', "            try { JiTA.ui.workDone('embed', 'Embedding stopped: ' + d.error); } catch (e) { /* ignore */ }\n", '']
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {

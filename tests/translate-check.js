@@ -3,7 +3,8 @@
 //    rejected write ended one lane while the other went on, and the next prepare() started a second pass beside it)
 //  - an endpoint that refuses everything is given up after MAX_CAPPED waits at the backoff cap instead of being
 //    retried for as long as the tab is open; the other lane takes the rest, and with both refusing the pass still ends
-//  - the pass hands the panel's status line back when it is done
+//  - the pass shows its progress in the toast (JiTA.ui.work) and takes it out when it ends, however it ends, saying how many
+//    it translated; the view is not redrawn for it
 const fs = require('fs');
 const src = fs.readFileSync(process.env.JITA_SRC || require('path').join(__dirname, '..', 'JiTA.user.js'), 'utf8').replace(/\r\n/g, '\n');
 const s0 = src.indexOf('\nJiTA.translate = {'), e0 = src.indexOf('\n};\n', s0);
@@ -12,7 +13,7 @@ if (s0 < 0 || e0 < 0) { throw new Error('could not slice JiTA.translate'); }
 let fail = 0;
 const ok = (n, c, x) => { console.log((c ? '  PASS  ' : '  FAIL  ') + n + (c ? '' : '  -> ' + (x || ''))); if (!c) fail++; };
 
-let recs = [], stored = [], refuse = {}, waits = [], renders = 0, statuses = [], ep = null, logs = [];
+let recs = [], stored = [], refuse = {}, waits = [], renders = 0, statuses = [], dones = [], ep = null, logs = [];
 const log0 = console.log;
 global.navigator = {};
 global.JiTA = {
@@ -28,7 +29,7 @@ global.JiTA = {
         // A pass that never gives up would spin here for good: fail it instead of hanging the harness.
         delay: (ms) => { waits.push(ms); return waits.length > 1000 ? Promise.reject(new Error('runaway retries')) : new Promise((r) => setImmediate(r)); }
     },
-    ui: { setStatus: (m) => { statuses.push(m); }, scheduleRender: () => { renders++; }, currentKey: null },
+    ui: { work: (id, m) => { statuses.push(id + ': ' + m); }, workDone: (id, m) => { dones.push(id + (m ? ': ' + m : '')); }, scheduleRender: () => { renders++; }, currentKey: null },
     rank: {}, embed: { prepare() {} }
 };
 require('./logstub')(JiTA);
@@ -36,7 +37,7 @@ eval(src.slice(s0 + 1, e0) + '\n};');
 const T = JiTA.translate;
 const reports = (n) => Array.from({ length: n }, (_, i) => ({ key: 'EBR-' + (i + 1), project: 'EBR', status: 'Open', summary: 'texto ' + i, description: '' }));
 const run = async () => {
-    stored = []; waits = []; renders = 0; statuses = []; logs = [];
+    stored = []; waits = []; renders = 0; statuses = []; dones = []; logs = [];
     console.log = (...a) => { logs.push(a.join(' ')); };
     let outcome = 'pending';
     try { await T.pass(); outcome = 'done'; } catch (e) { outcome = 'threw ' + e.message; }
@@ -80,12 +81,21 @@ const run = async () => {
     outcome = await run();
     ok('a lane that reaches the cap again and again, with a success each time, starts its count again every time', outcome === 'done' && stored.length === 14, stored.length + ' of 14');
 
-    // ================= the status line =================
-    ok('the pass hands the status line back to the view when it is done', renders >= 1 && statuses.length > 0, renders + ' renders');
+    // ================= the toast =================
+    ok('the pass shows its progress in the toast, as the translation pass, to the last report', statuses.length > 0 && statuses.every((m) => /^translate: /.test(m)) &&
+        statuses[statuses.length - 1] === 'translate: Translating foreign reports… 14 / 14', statuses.slice(-2).join(' | '));
+    ok('...says how many it translated when it ends', dones.indexOf('translate: Translated 14 foreign reports.') >= 0, JSON.stringify(dones));
+    ok('...and leaves the view alone: its status line is its own', renders === 0, String(renders));
     recs = [];
-    renders = 0;
-    await run();
-    ok('...and leaves the view alone when it had nothing to do (control)', renders === 0, String(renders));
+    dones = [];
+    await T.prepare();
+    ok('a pass, however it ends, takes its progress out of the toast', dones.indexOf('translate') >= 0 && T._running === null, JSON.stringify(dones));
+    JiTA.db.allDefects = () => Promise.reject(new Error('the store is gone'));
+    dones = [];
+    console.log = () => {};
+    await T.prepare();
+    console.log = log0;
+    ok('...one that failed too', dones.indexOf('translate') >= 0 && T._running === null, JSON.stringify(dones));
 
     console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'translate checks passed.'));
     process.exit(fail ? 1 : 0);
