@@ -8799,6 +8799,7 @@ JiTA.ui = {
 #jita-side-group #jita-sd-filter { background: var(--ds-surface, #fff); color: var(--ds-text, #172b4d); border-color: var(--ds-border-input, #8590a2); }\
 #jita-side-group #jita-sd-filter:focus { border-color: var(--ds-border-focused, #388bff); }\
 #jita-side-group #jita-sd-status { padding: 4px 0; border-bottom: none; color: var(--ds-text-subtlest, #626f86); }\
+#jita-sd-status:empty, #jita-side-group #jita-sd-status:empty { display: none; }\
 #jita-side-group #jita-sd-loglink { display: none; padding: 6px 0; border-bottom: 1px solid var(--ds-border, #091e4224); background: transparent; }\
 #jita-side-group #jita-sd-loglink.has-hits { display: block; }\
 #jita-side-group #jita-sd-loglink .jita-sd-loglink-head { color: var(--ds-text-warning, #974f0c); }\
@@ -10326,9 +10327,9 @@ JiTA.ui = {
     },
 
     // Query the matching-reports ranking again and slide in the single best result that isn't already on
-    // screen (the keys in `shown`), filling the slot freed by the just-attached row. Also refreshes the
-    // status-line count + mode. No-op if nothing new ranks (e.g. fewer matches than slots) - the list just
-    // ends up one row shorter. Used by _fadeOutAndReplace so we don't rebuild the whole list.
+    // screen (the keys in `shown`), filling the slot freed by the just-attached row, and refreshes the mode.
+    // No-op if nothing new ranks (e.g. fewer matches than slots) - the list just ends up one row shorter. Used by
+    // _fadeOutAndReplace so we don't rebuild the whole list.
     _appendNextReport: function (defectKey, shown) {
         var terms = JiTA.ui._filterTerms();   // honor the active filter when picking the replacement row
         JiTA.ui.getIssueText(defectKey).then(function (text) {
@@ -10341,14 +10342,7 @@ JiTA.ui = {
                 for (var i = 0; i < results.length; i++) {
                     if (!shown[results[i].key]) { pick = results[i]; break; }   // first ranked result not already listed
                 }
-                function refreshCount() {
-                    JiTA.rank.ebrPool().then(function (n) {
-                        if (JiTA.ui.currentKey !== defectKey) { return; }
-                        var c = $('#jita-sd-list').children('li').length;
-                        JiTA.ui.setStatus(c + ' matches · ' + out.mode + ' · ' + n + ' open reports');
-                    });
-                }
-                if (!pick) { refreshCount(); return; }
+                if (!pick) { return; }
                 // Enrich with the report's full description + created date (for the hover preview / date row),
                 // then build the row and slide it in at the bottom.
                 return JiTA.db.getDefect(pick.key).then(function (rec) {
@@ -10356,7 +10350,6 @@ JiTA.ui = {
                 }, function () { /* ignore */ }).then(function () {
                     if (JiTA.ui.currentKey !== defectKey) { return; }
                     JiTA.ui._slideInRow(JiTA.ui._reportItem(pick), $('#jita-sd-list'));
-                    refreshCount();
                     JiTA.ui._checkReportRows(function () { return JiTA.ui.currentKey === defectKey; });
                 });
             });
@@ -10862,7 +10855,7 @@ JiTA.ui = {
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
                     if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar defects found (' + n + ' indexed).'); return; }   // clear a stale list if a refresh now finds nothing
-                    JiTA.ui.setStatus(results.length + ' suggestions · ' + out.mode + ' · ' + n + ' indexed');
+                    JiTA.ui.setStatus('');   // the list says it: no count line above it (the line hides when empty)
                     // Feature C: enrich the displayed results with each defect's full description (which
                     // includes the reproduction steps) for the hover tooltip. Only a handful of indexed-DB
                     // reads (just the shown results), so it's cheap.
@@ -10910,14 +10903,14 @@ JiTA.ui = {
                 }
                 if (!text) { JiTA.ui.setStatus('Could not read this defect’s text.'); return; }
                 // Reports whose logs hold this defect's exceptions rank higher (JiTA.repexc; their logs are read ahead by JiTA.logread).
-                // The count shown is of the reports ranked (ebrPool), not of every one stored (n).
+                // With none found, the count said is of the reports ranked (ebrPool), not of every one stored (n).
                 return Promise.all([JiTA.rank.suggestEbrBest(text, key, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(key)), JiTA.rank.ebrPool()]).then(function (got) {
                     var out = got[0], open = got[1];
                     if (stale()) { return; }
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
                     if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No matching bug reports found (' + open + ' open).'); return; }   // clear a stale list if a refresh now finds nothing
-                    JiTA.ui.setStatus(results.length + ' matches · ' + out.mode + ' · ' + open + ' open reports');
+                    JiTA.ui.setStatus('');   // the list says it: no count line above it (the line hides when empty)
                     // Enrich with each report's full description for the hover preview (a handful of reads).
                     return Promise.all(results.map(function (r) {
                         return JiTA.db.getDefect(r.key).then(function (rec) {
@@ -10980,7 +10973,7 @@ JiTA.ui = {
                     });
                 }
                 if (!rows.length) { JiTA.ui.setStatus('No other reports from this reporter.'); return; }
-                JiTA.ui.setStatus(rows.length + ' other report' + (rows.length === 1 ? '' : 's') + ' from this reporter');
+                JiTA.ui.setStatus('');   // the list says it: no count line above it (the line hides when empty)
                 var $list = $('#jita-sd-list');
                 $list.empty();
                 for (var j = 0; j < rows.length; j++) { $list.append(JiTA.ui._reporterRow(rows[j])); }
@@ -11024,7 +11017,7 @@ JiTA.ui = {
                     var results = out.results || [];
                     $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
                     if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar open reports found (' + open + ' open).'); return; }
-                    JiTA.ui.setStatus(results.length + ' similar · ' + out.mode + ' · ' + open + ' open reports');
+                    JiTA.ui.setStatus('');   // the list says it: no count line above it (the line hides when empty)
                     // Enrich with each report's full description for the hover preview (a handful of reads).
                     return Promise.all(results.map(function (r) {
                         return JiTA.db.getDefect(r.key).then(function (rec) {
@@ -11075,8 +11068,7 @@ JiTA.ui = {
                     : 'No defect got ' + T.MIN + ' or more reports in the last ' + T.WINDOW_DAYS + ' days') + ' · ' + when);
                 return;
             }
-            JiTA.ui.setStatus(rows.length + ' defect' + (rows.length === 1 ? '' : 's') + ' with ' + T.MIN + '+ reports in ' +
-                T.WINDOW_DAYS + ' days · ' + when);
+            JiTA.ui.setStatus('');   // the list says it: no count line above it (the line hides when empty)
             for (var i = 0; i < rows.length; i++) { $list.append(JiTA.ui._trendItem(rows[i])); }
             JiTA.ui._fitVertical();
         }).catch(function (e) {

@@ -44,10 +44,8 @@ const muts = [
     [H, 'a failing worker leaves no count', '            }).catch(local)\n            : local();', '            })\n            : local();'],
     [H, 'the worker asked when there is none', '        var p = (JiTA.worker && JiTA.worker.usable())\n', '        var p = (JiTA.worker)\n'],
     [H, 'no count when both fail', "        return p.catch(function () { return JiTA.db.countEbr(); });", '        return p;'],
-    [H, 'Matching bug reports counts every report stored', "JiTA.ui.setStatus(results.length + ' matches · ' + out.mode + ' · ' + open + ' open reports');", "JiTA.ui.setStatus(results.length + ' matches · ' + out.mode + ' · ' + n + ' open reports');"],
-    [H, '...when it finds none, too', "JiTA.ui.setStatus('No matching bug reports found (' + open + ' open).');", "JiTA.ui.setStatus('No matching bug reports found (' + n + ' open).');"],
-    [H, 'Similar open reports counts every report stored', "JiTA.ui.setStatus(results.length + ' similar · ' + out.mode + ' · ' + open + ' open reports');", "JiTA.ui.setStatus(results.length + ' similar · ' + out.mode + ' · ' + n + ' open reports');"],
-    [H, 'the line after Attach counts every report stored', '                function refreshCount() {\n                    JiTA.rank.ebrPool().then(', '                function refreshCount() {\n                    JiTA.db.countEbr().then(']
+    [H, '...when it finds none, too', "JiTA.ui.setStatus('No matching bug reports found (' + open + ' open).');", "JiTA.ui.setStatus('No matching bug reports found (' + n + ' open).');"],,
+    [H, "the status line stays up with nothing to say", "#jita-sd-status:empty, #jita-side-group #jita-sd-status:empty { display: none; }\\\n", ""]
 ];
 let allRed = true;
 muts.forEach(([h, name, a, b]) => {
