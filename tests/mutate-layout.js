@@ -16,7 +16,8 @@ const LC = 'layout-check.js';
 // Each breakage names the view of layout-check.js it breaks (a title in its VIEWS), and only that view runs for it
 // (JITA_LAYOUT_ONLY): run with every view, each breakage took 13 s or more, most of it in views it never touches.
 const MEM = 'Members', QC = 'Quality control', CARDS = 'Cards', SET = 'Settings', LDT = 'Lead duties tabs', SETV = 'Settings window',
-    PA = 'Player actions', PCARD = 'Player actions, hover card', PJUMP = 'Player actions, rows to lines', PDRAW = 'Player actions, drawn again';
+    PA = 'Player actions', PCARD = 'Player actions, hover card', PJUMP = 'Player actions, rows to lines', PDRAW = 'Player actions, drawn again',
+    SETVH = 'Settings window, highlighted file';
 const muts = [
     [MEM, 'the note columns are sized by their notes again (v3.49.0)', "'.jita-leadduty-view .ld-mnote { flex: 1 1 0;", "'.jita-leadduty-view .ld-mnote { flex: 1 1 auto;"],
     [MEM, 'the month numbers are not right-aligned', '.ld-mnum { flex: 0 0 46px; text-align: right;', '.ld-mnum { flex: 0 0 46px; text-align: left;'],
@@ -38,6 +39,8 @@ const muts = [
     [SETV, 'the Settings window is as wide as its widest line again', '#jita-setv { display: flex; flex-direction: column; box-sizing: border-box; width: 950px;',
         '#jita-setv { display: flex; flex-direction: column; box-sizing: border-box;'],
     [SETV, 'the Settings window runs past the right edge of a small screen', "            el.style.maxWidth = Math.max(480, window.innerWidth - r.left - 12) + 'px';\n", ''],
+    [SETVH, "a settings.yaml is read without its highlighted comments", "text = JiTA.logparser.readBlock(true)", "text = JiTA.logparser.readBlock()"],
+    [SETVH, "the code-block's comments are dropped whatever the reader asks", "        if (!keepComments) { $(SELECTORS.CODE_BLOCK).find('span > span.comment').remove(); }", "        $(SELECTORS.CODE_BLOCK).find('span > span.comment').remove();"],
     // ---- Player actions in the igbr.zip viewer (v3.55.0) ----
     [PA, 'the Player actions entry keeps its download button', "if (!b.querySelector('[data-item-title]') && b.parentNode) { b.parentNode.removeChild(b); }", "if (!b.querySelector('[data-item-title]') && b.parentNode) { /* kept */ }"],
     [PA, 'the Player actions entry goes in again on every look', '        if (own) {\n            if (own.nextElementSibling !== logs) { list.insertBefore(own, logs); }\n            return;\n        }\n', ''],
@@ -86,7 +89,7 @@ function check(text, views) {
 // go, the costliest first, each to the shard that costs least so far. A view costs a run of it (COST, in seconds, as
 // JITA_LAYOUT_TIMES=1 layout-check.js measured it with Edge, the browser's start included; 3 for a view not in it) for
 // each of its breakages and once for the control.
-const COST = { [MEM]: 1.2, [QC]: 1.2, [CARDS]: 1.1, [SET]: 1.1, [LDT]: 3.3, [SETV]: 2.5, [PA]: 3.2, [PCARD]: 1.5, [PJUMP]: 3.8, [PDRAW]: 6.7 };
+const COST = { [MEM]: 1.2, [QC]: 1.2, [CARDS]: 1.1, [SET]: 1.1, [LDT]: 3.3, [SETV]: 2.5, [PA]: 3.2, [PCARD]: 1.5, [PJUMP]: 3.8, [PDRAW]: 6.7, [SETVH]: 1.0 };
 const SHARD = /^(\d+)\/(\d+)$/.exec(process.env.JITA_BREAK_SHARD || '0/1'), K = SHARD ? +SHARD[1] : 0, N = SHARD ? +SHARD[2] : 0;
 if (!SHARD || N < 1 || K >= N) { console.log('JITA_BREAK_SHARD must be k/n with 0 <= k < n, not ' + process.env.JITA_BREAK_SHARD); process.exit(2); }
 const byView = {}, shardOf = {}, load = new Array(N).fill(0);

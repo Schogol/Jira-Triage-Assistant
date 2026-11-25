@@ -923,6 +923,46 @@ const JUMP_FILES = {
             '2026.11.21 10:01:55\tRemote Object Call::CmdWarpToStuff (ObjectCall' + String.fromCharCode(92) + 'Client)\t100']).join('\n')
 };
 
+// ================= 9. A settings.yaml as Jira shows it: highlighted =================
+// Jira's viewer highlights a .yaml file: a span a line, and the text its YAML highlighter takes for a comment in a span of
+// class comment, a # inside a quoted string too (a chat line's color="#bf' in the user's file of November 2026). The log
+// views drop those spans (readBlock); dropping this one broke the string's quoting, so the window said "This file could
+// not be read: a list missing its , or ]". The window reads the whole file: it opens, and Copy hands out the file exactly.
+async function setvHlView(fixture) {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const text = fixture.replace(/\n*$/, '\n') + "  !!python/unicode 'jitaTestGroup':\n" +
+        "    !!python/unicode 'searchHistory': [!!python/unicode 'wreath', !!python/unicode '[19:14:18]\n" +
+        "        EVE System > Channel MOTD: <font size=\"15\" color=\"#bf', !!python/unicode 'ee',\n" +
+        "      !!python/unicode 'ee-']\n";
+    const cb = document.createElement('code');
+    cb.setAttribute('data-testid', 'code-block');
+    cb.style.cssText = 'display: block; white-space: pre; font-family: monospace;';
+    text.split('\n').forEach((line, i, all) => {
+        const span = document.createElement('span'), at = line.indexOf('#');
+        span.appendChild(document.createTextNode(at < 0 ? line : line.slice(0, at)));
+        if (at >= 0) { const c = document.createElement('span'); c.className = 'comment'; c.textContent = line.slice(at); span.appendChild(c); }
+        cb.appendChild(span);
+        if (i < all.length - 1) { cb.appendChild(document.createTextNode('\n')); }
+    });
+    document.body.appendChild(cb);
+    const comments = cb.querySelectorAll('span > span.comment').length;
+    let copied = null;
+    JiTA.util.copy = (t) => { copied = t; return Promise.resolve(); };
+    JiTA.settingsview.mount();
+    const el = document.getElementById('jita-setv');
+    if (!el) { return { mounted: false, comments: comments }; }
+    const err = el.querySelector('.jsv-err');
+    const copy = Array.prototype.find.call(el.querySelectorAll('button'), (b) => /Copy/.test(b.textContent));
+    if (copy) { copy.click(); }
+    await wait(50);
+    return { mounted: true, comments: comments, error: err ? err.textContent : '', tabs: el.querySelectorAll('.jsv-tab').length, copiedSame: copied === text, copiedLen: copied ? copied.length : -1, len: text.length };
+}
+function setvHlChecks(m) {
+    ok('Settings window of a highlighted file: the test file has the highlighter\'s comment spans, the one in a quoted string among them', m.comments >= 1, JSON.stringify(m));
+    ok('Settings window of a highlighted file: it opens, a # inside a quoted string (marked a comment by the highlighter) read as text', m.mounted && !m.error && m.tabs > 0, JSON.stringify(m));
+    ok('Settings window of a highlighted file: ...and Copy hands out the file exactly, comment spans and all', m.copiedSame, JSON.stringify(m));
+}
+
 const SETV_FIXTURE = fs.readFileSync(path.join(__dirname, 'settings-fixture.yaml'), 'utf8').replace(/\r\n/g, '\n');
 const VIEWS = [
     { title: 'Members', page: membersView, check: membersChecks },
@@ -931,6 +971,7 @@ const VIEWS = [
     { title: 'Quality control', page: qcView, check: qcChecks },
     { title: 'Lead duties tabs', page: ldTabsView, check: ldTabsChecks },
     { title: 'Settings window', page: setvView, check: setvChecks, data: SETV_FIXTURE },
+    { title: 'Settings window, highlighted file', page: setvHlView, check: setvHlChecks, data: SETV_FIXTURE },
     { title: 'Player actions', page: actsView, check: actsChecks, data: ACTS_FILES },
     { title: 'Player actions, hover card', page: actsJumpView, check: actsCardChecks, data: { files: JUMP_FILES, part: 'card' } },
     { title: 'Player actions, rows to lines', page: actsJumpView, check: actsJumpChecks, data: { files: JUMP_FILES, part: 'jump' } },

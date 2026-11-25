@@ -217,7 +217,8 @@ ok('...asking for this very version, so it never keeps an older copy', !!resLine
 const swap = S.member(src, 'JiTA.logparser', 'swap'), igbr = S.member(src, 'JiTA.logparser', 'IGBR');
 ok('the log parser opens settings.yaml from the igbr.zip as the window', /'settings\.yaml': 'set'/.test(igbr) && /else if \(igbr === 'set' && flagOn\('parser'\)\) \{ JiTA\.settingsview\.mount\(\); \}/.test(swap), igbr);
 const mount = S.member(src, 'JiTA.settingsview', 'mount');
-ok('...reading the code-block\'s text, and leaving the raw text as it is should drawing fail', /JiTA\.logparser\.readBlock\(\)/.test(mount) && /try \{ html = SV\.view\(text\); \} catch \(e\) \{[^}]*return; \}/.test(mount));
+ok('...reading the code-block\'s text, comments kept (layout-check reads a highlighted file), and leaving the raw text as it is should drawing fail',
+    /JiTA\.logparser\.readBlock\(true\)/.test(mount) && /try \{ html = SV\.view\(text\); \} catch \(e\) \{[^}]*return; \}/.test(mount));
 
 console.log('\n' + (fail ? fail + ' FAILURE(S)' : 'Settings view checks passed.'));
 process.exit(fail ? 1 : 0);
