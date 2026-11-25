@@ -62,6 +62,7 @@ Object.assign(JiTA.ui, {
     currentKey: null, reporterMode: false, simReportsMode: false, trendMode: false, modeOverride: null,
     _ensurePanel() {}, _syncFilterBtn() {}, _filterTerms: () => [], renderLogLink() {}, renderExceptionCluster() {},
     _getCreated: () => Promise.resolve(null), _fitVertical() {}, _snap: (k) => { snaps.push(k); }, _hideTip() {},
+    _showMode: (out) => { modeText = out.mode; },   // stuckmodel-check.js covers the real one
     setStatus: (m) => { statuses.push(m); }, setStatusAction: (m) => { statuses.push(m); }, toast: (m) => { toasts.push(m); },
     _item: (r) => ({ row: 'defect', key: r.key, onScreen: JiTA.ui.currentKey }),
     _reportItem: (r) => ({ row: 'report', key: r.key, defect: JiTA.ui.currentKey }),

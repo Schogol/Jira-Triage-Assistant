@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.58.1
+// @version     3.58.2
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,8 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.58.1
-// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.58.1
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.58.2
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.58.2
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -8083,6 +8083,8 @@ JiTA.embed = {
                                 // the boilerplate, the budget holds real content (~380 tokens).
     WARM_WAIT_MS: 4200,        // on first render, how long the panel waits for the worker's hybrid ranking before
                                // showing keyword results (fast once the worker's model is loaded)
+    QUERY_MS: 10000,           // how long the worker's model may take over the open report's text before the worker takes
+                               // it for stuck, loads it again and asks once more (a query takes well under a second)
     _preparing: null,
 
     // Background entry point, after a sync or a translation: ask the shared worker to embed anything outstanding.
@@ -8329,17 +8331,23 @@ JiTA.rank._withBoost = function (demote, map) {
 // Shared HYBRID body for suggestBest / suggestEbrBest: pull semantic candidates from the shared worker, gate them
 // tab-side, then RRF-fuse with the local BM25 candidates (with optional `demote`, defect side only, and the optional
 // exception `boost`, both before the cut). If the worker is unavailable / errors / yields nothing usable, fall back to
-// keyword-only.
+// keyword-only, saying why (`why`, for the mode badge's hover: JiTA.ui._showMode). A failed worker is logged too, for
+// Copy diagnostics: it used to fall back without a word, and a stuck model went unseen until someone noticed the badge.
 JiTA.rank._hybridResults = function (text, key, filterTerms, scope, bmFn, keywordOnly, demote, boost) {
+    function fallback(why) { return keywordOnly().then(function (r) { r.why = why; return r; }); }
     return JiTA.rank._workerSemantic(text, scope, key, filterTerms).then(function (cands) {
         var sem = JiTA.rank._gateScored(cands, scope);
-        if (!sem.length) { return keywordOnly(); }
+        if (!sem.length) { return fallback('nothing was found by meaning: no ' + (scope === 'ebr' ? 'open report' : 'defect') + ' with an embedding passes the filters'); }
         return bmFn(text, key, JiTA.rank.CAND, filterTerms).then(function (bm) {
             return JiTA.rank._boostMap(boost, sem.slice(0, JiTA.rank.CAND).concat(bm)).then(function (map) {
                 return { mode: 'Hybrid', results: JiTA.rank._fuse(sem, bm, JiTA.rank._withBoost(demote, map)) };
             });
         });
-    }).catch(function () { return keywordOnly(); });
+    }).catch(function (e) {
+        var why = 'the ranking worker failed: ' + ((e && e.message) || e);
+        JiTA.log('[JiTA] ' + key + ' ranked by keywords only, ' + why);
+        return fallback(why);
+    });
 };
 
 // Shared mode-selection tail: honor a forced Keyword override, go straight to hybrid() when the model is ready,
@@ -8347,21 +8355,31 @@ JiTA.rank._hybridResults = function (text, key, filterTerms, scope, bmFn, keywor
 // (WARM_WAIT_MS) - resolving to hybrid() if it loads in time (skipping the keyword->hybrid flicker), else
 // keyword() now (prepare()'s later re-render upgrades it once the model is ready).
 // onUpgrade (optional) is told when a late Hybrid result arrives; without it the open panel is redrawn.
+// A Keyword result says why it is not Hybrid (`why`, for the mode badge's hover); `wait` marks the one drawn while the
+// worker had not answered yet, whose hover a late fallback then corrects (JiTA.ui._lateWhy).
 JiTA.rank._pickMode = function (forceMode, keywordOnly, hybrid, onUpgrade) {
-    if (forceMode === 'Keyword') { return keywordOnly(); }
-    if (!JiTA.worker || !JiTA.worker.usable()) { return keywordOnly(); }   // no shared worker -> keyword only
+    function kw(why, wait) { return keywordOnly().then(function (r) { r.why = why; if (wait) { r.wait = true; } return r; }); }
+    if (forceMode === 'Keyword') { return kw('switched to by hand'); }
+    if (!JiTA.worker || !JiTA.worker.usable()) { return kw('the ranking worker cannot run in this tab'); }   // no shared worker -> keyword only
     // Keyword-first: race the worker-backed hybrid against a short window. If the worker answers in time we show
     // Hybrid straight away; otherwise show Keyword now and, once the (cold-starting) worker finally responds,
     // re-render to upgrade to Hybrid. hybrid() itself keyword-falls-back if the worker errors.
     return new Promise(function (resolve) {
         var settled = false;
-        var timer = setTimeout(function () { if (settled) { return; } settled = true; resolve(keywordOnly()); }, JiTA.embed.WARM_WAIT_MS);
+        var timer = setTimeout(function () {
+            if (settled) { return; }
+            settled = true;
+            resolve(kw('the ranking worker had not answered after ' + (JiTA.embed.WARM_WAIT_MS / 1000) + ' s; the list switches to Hybrid when it does', true));
+        }, JiTA.embed.WARM_WAIT_MS);
         hybrid().then(function (res) {
             if (settled) {
                 // Late. Only an upgrade is worth a redraw: hybrid() falls back to Keyword by itself, and with no worker
                 // answering that fallback came back about every 12 s and redrew the panel each time, hover cards and all.
+                // A fallback only corrects the badge's hover, which still says the worker has not answered.
                 if (res && res.mode === 'Hybrid') {
                     try { if (onUpgrade) { onUpgrade(res); } else { JiTA.ui.scheduleRender(); } } catch (e) { /* ignore */ }
+                } else if (res && res.why && JiTA.ui && JiTA.ui._lateWhy) {
+                    try { JiTA.ui._lateWhy(res.why); } catch (e) { /* ignore */ }
                 }
                 return;
             }
@@ -9020,6 +9038,21 @@ JiTA.ui = {
             JiTA.ui.modeOverride = (shown.indexOf('hybrid') >= 0) ? 'Keyword' : 'Hybrid';
         }
         JiTA.ui._rerenderCurrent();
+    },
+    // The ranking-mode badge: the mode a list was ranked in, and in its hover why it is Keyword (out.why, from
+    // JiTA.rank._pickMode and _hybridResults). out.wait: drawn while the worker had not answered yet (see _lateWhy).
+    MODE_TIP: 'Click to switch ranking mode (resets to automatic on reload)',
+    _showMode: function (out) {
+        var why = out.mode === 'Keyword' ? out.why : '';
+        $('#jita-sd-mode').text(out.mode)
+            .attr('title', (why ? 'Keyword: ' + why + '.\n' : '') + JiTA.ui.MODE_TIP)
+            .attr('data-wait', why && out.wait ? '1' : null);
+    },
+    // A ranking that fell back to Keyword after its list was drawn waiting for the worker: the badge, if it still shows
+    // that wait, says what went wrong instead.
+    _lateWhy: function (why) {
+        var $m = $('#jita-sd-mode[data-wait]');
+        if ($m.length) { $m.removeAttr('data-wait').attr('title', 'Keyword: ' + why + '.\n' + JiTA.ui.MODE_TIP); }
     },
 
     // ---- session filters (funnel popover): Status (Open/Fixed/All) + Created-within-N-days ----
@@ -10340,7 +10373,7 @@ JiTA.ui = {
             return JiTA.rank.suggestEbrBest(text, defectKey, JiTA.ui.modeOverride, terms, undefined, JiTA.repexc.forDefect(defectKey)).then(function (out) {
                 if (JiTA.ui.currentKey !== defectKey) { return; }
                 var results = out.results || [];
-                $('#jita-sd-mode').text(out.mode);
+                JiTA.ui._showMode(out);
                 var pick = null;
                 for (var i = 0; i < results.length; i++) {
                     if (!shown[results[i].key]) { pick = results[i]; break; }   // first ranked result not already listed
@@ -10856,7 +10889,7 @@ JiTA.ui = {
                 return JiTA.rank.suggestBest(text, key, brCreated, JiTA.ui.modeOverride, terms, undefined, got[1]).then(function (out) {
                     if (stale()) { return; }
                     var results = out.results || [];
-                    $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
+                    JiTA.ui._showMode(out);   // 'Hybrid' or 'Keyword'
                     if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar defects found (' + n + ' indexed).'); return; }   // clear a stale list if a refresh now finds nothing
                     JiTA.ui.setStatus('');   // the list says it: no count line above it (the line hides when empty)
                     // Feature C: enrich the displayed results with each defect's full description (which
@@ -10911,7 +10944,7 @@ JiTA.ui = {
                     var out = got[0], open = got[1];
                     if (stale()) { return; }
                     var results = out.results || [];
-                    $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
+                    JiTA.ui._showMode(out);   // 'Hybrid' or 'Keyword'
                     if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No matching bug reports found (' + open + ' open).'); return; }   // clear a stale list if a refresh now finds nothing
                     JiTA.ui.setStatus('');   // the list says it: no count line above it (the line hides when empty)
                     // Enrich with each report's full description for the hover preview (a handful of reads).
@@ -11018,7 +11051,7 @@ JiTA.ui = {
                     var out = got[0], open = got[1];   // open: the reports ranked (ebrPool), not every one stored (n)
                     if (JiTA.ui.currentKey !== key || !JiTA.ui.simReportsMode) { return; }
                     var results = out.results || [];
-                    $('#jita-sd-mode').text(out.mode);   // 'Hybrid' or 'Keyword'
+                    JiTA.ui._showMode(out);   // 'Hybrid' or 'Keyword'
                     if (!results.length) { $('#jita-sd-list').empty(); JiTA.ui.setStatus('No similar open reports found (' + open + ' open).'); return; }
                     JiTA.ui.setStatus('');   // the list says it: no count line above it (the line hides when empty)
                     // Enrich with each report's full description for the hover preview (a handful of reads).
@@ -12868,6 +12901,7 @@ JiTA.credits = {
 function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiTA.worker._src)
     var pipe = null, backend = 'none', db = null, vecCache = null, kwCache = null, logsigCache = null, BATCH = 8, embedding = false;
     var pipeP = null, dbP = null, embedAgain = false;   // the model / DB being opened, and a pass asked for while one ran
+    var gpuOff = false;   // the graphics card failed the model twice running (qEmbed): it runs on the processor from then on
     // The text the ranking compares (SH.effectiveText), its tokenizer and the BM25 scoring (SH.bm25Score), the filter-box
     // test (SH.matchTerms) and the session filters (SH.passesGate) are written once in jitaShared, as the tab runs them.
 
@@ -12895,8 +12929,11 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         return pipeP;
     }
     // Drop the pipeline (it may be dead after a device loss), releasing its session rather than leaving it to the
-    // garbage collector; the next loadModel builds a fresh one.
-    function dropPipe() {
+    // garbage collector; the next loadModel builds a fresh one. `used` (optional) is the pipeline a failed call ran on: when a
+    // fresh one has already taken its place, that one stays. A lookup and an embed batch stuck on the same dead pipeline
+    // would otherwise each drop the fresh one the other had just loaded.
+    function dropPipe(used) {
+        if (used && used !== pipe) { return; }
         var p = pipe;
         pipe = null; backend = 'none';
         if (p && typeof p.dispose === 'function') {
@@ -12908,7 +12945,7 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         mod.env.allowLocalModels = false;
         mod.env.useBrowserCache = true;                                   // cache weights in CacheStorage after first download
         try { mod.env.backends.onnx.wasm.proxy = true; } catch (e) { /* older builds */ }
-        var attempts = cfg.tryGpu ? [{ device: 'webgpu', dtype: 'fp32' }, { device: 'wasm', dtype: 'q8' }] : [{ device: 'wasm', dtype: 'q8' }];
+        var attempts = (cfg.tryGpu && !gpuOff) ? [{ device: 'webgpu', dtype: 'fp32' }, { device: 'wasm', dtype: 'q8' }] : [{ device: 'wasm', dtype: 'q8' }];
         var lastErr;
         for (var i = 0; i < attempts.length; i++) {
             try {
@@ -12926,19 +12963,43 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         }
         throw lastErr || new Error('no backend loaded');
     }
-    async function embed(text) {
-        var p = await loadModel();
-        var out = await p(text || '', { pooling: 'mean', normalize: true });
-        return out.data;   // normalized Float32Array(384)
-    }
-    var qText = null, qVec = null;
-    async function qEmbed(text) {   // cache the last query vector so filter-box re-queries don't re-embed the same text
+    // The open report's own vector, for rankSemantic (normalized Float32Array(384)). The last one is kept, so filter-box
+    // re-queries don't embed the same text again.
+    // A model that gives no answer within QUERY_MS, fails, or answers with no usable vector is dropped and loaded again,
+    // and asked again, up to Q_TRIES in all; after two failures in a row the graphics card is left alone (gpuOff), so the
+    // last try runs on the processor. The embed pass always guarded its batches like this, but this call had no guard:
+    // after a standby the graphics card's model hung, and every report but the one embedded just before ranked by keywords
+    // alone, until the worker's tab was reloaded.
+    var qText = null, qVec = null, Q_TRIES = 3;
+    async function qEmbed(text) {
         if (qText === text && qVec) { return qVec; }
-        qVec = await embed(text); qText = text; return qVec;
+        var ms = cfg.QUERY_MS || 10000, err = null;
+        for (var t = 0; t < Q_TRIES; t++) {
+            var p = await loadModel(), wd = null;
+            try {
+                var out = await Promise.race([
+                    p(text || '', { pooling: 'mean', normalize: true }),
+                    new Promise(function (_r, rej) { wd = setTimeout(function () { rej(new Error('the model gave no answer in ' + Math.round(ms / 1000) + ' s')); }, ms); })
+                ]);
+                clearTimeout(wd);
+                var v = out && out.data;
+                if (!v || !v.length || !isFinite(v[0])) { throw new Error('the model answered with no usable vector'); }
+                qVec = v; qText = text;
+                return v;
+            } catch (e) {
+                clearTimeout(wd);
+                err = e;
+                dropPipe(p);
+                if (t === 1) { gpuOff = true; }
+                try { console.warn('[JiTA worker] query embed failed (try ' + (t + 1) + ' of ' + Q_TRIES + '): ' + ((e && e.message) || e)); } catch (_e) { /* ignore */ }
+            }
+        }
+        throw err;
     }
     // ---- embed pass (runs HERE now, so no tab ever loads a model) --------------------------------------
-    async function embedBatch(texts) {
-        var p = await loadModel();
+    // `p`: the pipeline to run on (the embed pass loads it first, so a failed batch drops only the pipeline it ran on).
+    async function embedBatch(texts, p) {
+        p = p || await loadModel();
         var inputs = texts.map(function (t) { return (t || ' ').slice(0, cfg.MAX_CHARS) || ' '; });
         if (inputs.length === 1) { var o1 = await p(inputs[0], { pooling: 'mean', normalize: true }); return [new Float32Array(o1.data)]; }
         var out = await p(inputs, { pooling: 'mean', normalize: true });
@@ -13020,10 +13081,11 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
         while (idx < todo.length) {
             var slice = todo.slice(idx, idx + BATCH);
             var texts = slice.map(function (x) { return SH.effectiveText(x); });   // English translation for foreign reports, else cleaned original
-            var wd = null;
+            var wd = null, bp = null;
             try {
+                bp = await loadModel();
                 var vecs = await Promise.race([
-                    embedBatch(texts),
+                    embedBatch(texts, bp),
                     new Promise(function (_r, rej) { wd = setTimeout(function () { rej(new Error('embed batch timeout')); }, 45000); })   // watchdog: a hung GPU batch
                 ]);
                 clearTimeout(wd);
@@ -13035,7 +13097,7 @@ function jitaWorkerBody(cfg, SH) {   // SH: jitaShared(), run in the worker (JiT
                 if (idx - lastPost >= 50 || idx >= todo.length) { lastPost = idx; postProgress(); }
             } catch (e) {
                 clearTimeout(wd);
-                dropPipe();                                   // drop the (possibly dead) pipeline and rebuild
+                dropPipe(bp);                                 // drop the (possibly dead) pipeline and rebuild
                 try { console.warn('[JiTA worker] embed batch failed (try ' + (retries + 1) + '): ' + ((e && e.message) || e)); } catch (_e) { /* ignore */ }
                 if (++retries > 3) {
                     // The work is listed in the same order every time, so a slice that always fails used to stop every
@@ -25899,7 +25961,7 @@ JiTA.worker = {
         var C = JiTA.credits;
         var cfg = {
             LIB: JiTA.embed.LIB_URL, MODEL: JiTA.embed.MODEL, MODEL_VERSION: JiTA.MODEL_VERSION,
-            DB_NAME: JiTA.DB_NAME, DB_VERSION: JiTA.DB_VERSION, MAX_CHARS: JiTA.embed.MAX_CHARS, GM_TEAM_ID: JiTA.GM_TEAM_ID, LEFT_OUT: JiTA.LEFT_OUT,
+            DB_NAME: JiTA.DB_NAME, DB_VERSION: JiTA.DB_VERSION, MAX_CHARS: JiTA.embed.MAX_CHARS, QUERY_MS: JiTA.embed.QUERY_MS, GM_TEAM_ID: JiTA.GM_TEAM_ID, LEFT_OUT: JiTA.LEFT_OUT,
             tryGpu: gmGet('sdTryWebgpu', true) && !gmGet('sdForceCpu', false),
             HOST: JiTA.HOST, MAX_RETRIES: JiTA.MAX_RETRIES, PAGE_DELAY_MS: JiTA.PAGE_DELAY_MS, SCRIPT_VERSION: JiTA.SCRIPT_VERSION,
             // ISD credits config (mirror of JiTA.credits' static fields) so the worker can run the monthly crawl.

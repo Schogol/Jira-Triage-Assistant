@@ -14,6 +14,13 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.58.2 (2026-11-25)
+
+### Fixed issues
+
+- Hybrid ranking recovers by itself when the matching model stops answering, for example after the PC wakes from standby. Before, every list stayed on Keyword until all Jira tabs were reloaded.
+- Hovering the Keyword badge above a list says why the list is not ranked Hybrid.
+
 ## 3.58.1 (2026-11-25)
 
 ### Fixed issues
