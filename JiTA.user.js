@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name        Jira Triage Assistant
-// @version     3.58.0
+// @version     3.58.1
 // @author      ISD BH Schogol, ISD Tulwar
 // @description Adds a Translate, Assign to GM, Convert to Defect and Close button to Jira, parses Log Files submitted from the EVE client, suggests similar existing defects on bug reports, and (on a defect) lists the open bug reports that best match it, brings back Jira's detail view (the issue list beside the open issue), and reads + translates text you select in screenshot attachments (in-browser OCR)
 // @updateURL   https://github.com/Schogol/Jira-Triage-Assistant/raw/main/JiTA.user.js
@@ -11,8 +11,8 @@
 // @match       https://fenriscreations.atlassian.net/wiki*
 // @match       https://*.cdn.prod.atlassian-dev.net/*
 // @require     https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js#sha256=/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=
-// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.58.0
-// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.58.0
+// @resource    changelog https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/CHANGELOG.md?v=3.58.1
+// @resource    settingswindow https://raw.githubusercontent.com/Schogol/Jira-Triage-Assistant/main/settings-window.json?v=3.58.1
 // @grant       GM_getResourceText
 // @grant       GM_addStyle
 // @grant       GM_getValue
@@ -2197,10 +2197,13 @@ JiTA.logparser = {
         setTimeout(function () { P.run(function () { P.draw(type, P.text); }); }, 250);
     },
 
-    // The code-block's raw text, kept as `text`: its empty spans and inline comment spans dropped first.
-    readBlock: function () {
+    // The code-block's raw text, kept as `text`: its empty spans dropped first, and the spans Jira's highlighter marks as
+    // comments too, unless keepComments. A settings.yaml keeps them (JiTA.settingsview.mount): the highlighter takes a #
+    // inside a quoted string for a YAML comment (a chat line's color="#bf'), and dropping it broke the quoting, so the file
+    // could not be read; its parser passes over the real comments itself.
+    readBlock: function (keepComments) {
         $('code > span:empty').remove();
-        $(SELECTORS.CODE_BLOCK).find('span > span.comment').remove();
+        if (!keepComments) { $(SELECTORS.CODE_BLOCK).find('span > span.comment').remove(); }
         JiTA.logparser.text = $(SELECTORS.CODE_BLOCK).text();
         return JiTA.logparser.text;
     },
@@ -3806,7 +3809,7 @@ JiTA.settingsview = {
     // Swap the code-block's raw settings.yaml for the window (JiTA.logparser.swap, once the file's text has landed). Should
     // drawing fail, the raw text stays as it is.
     mount: function () {
-        var SV = JiTA.settingsview, text = JiTA.logparser.readBlock(), $cb = $(SELECTORS.CODE_BLOCK).first(), html;
+        var SV = JiTA.settingsview, text = JiTA.logparser.readBlock(true), $cb = $(SELECTORS.CODE_BLOCK).first(), html;   // comments kept: see readBlock
         try { html = SV.view(text); } catch (e) { JiTA.log('[JiTA] settings view failed:', e); return; }
         $cb.html(html);
         SV.wire($cb.find('#jita-setv')[0], text);

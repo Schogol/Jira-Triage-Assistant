@@ -14,6 +14,12 @@ with JiTA.changelog.parse; tests/changelog-check.js fails the build on any line 
 node tests/release.js patch --fix "..." (or minor --feature "...") does the first three: see tests/README.md.
 -->
 
+## 3.58.1 (2026-11-25)
+
+### Fixed issues
+
+- A settings.yaml whose text holds a \# inside quotes (a chat line's colour, for example) now opens in the Settings window, instead of saying the file could not be read.
+
 ## 3.58.0 (2026-11-24)
 
 ### New features
