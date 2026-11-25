@@ -15,7 +15,7 @@ const muts = [
     [H, 'a bad slice stops the pass', '                    if (++skipRun > 2) { throw e; }', '                    throw e;'],
     [H, 'a dead device never stops the pass', '                    if (++skipRun > 2) { throw e; }', '                    ++skipRun;'],
     [H, 'a good slice does not reset the run of skips', '                idx += slice.length; retries = 0; skipRun = 0;', '                idx += slice.length; retries = 0;'],
-    [H, 'a failed batch keeps its pipeline undisposed', '                dropPipe();                                   // drop the (possibly dead) pipeline and rebuild', '                pipe = null;'],
+    [H, 'a failed batch keeps its pipeline undisposed', '                dropPipe(bp);                                 // drop the (possibly dead) pipeline and rebuild', '                pipe = null;'],
     [H, 'each first call opens a connection', '        if (dbP) { return dbP; }   // concurrent first calls used to open (and leak) a connection each\n', ''],
     [H, 'an aborted bulk write never settles', "                // JiTA.sync.running stayed true, so every Sync now said \"already running\" until a reload.\n                tx.onabort = function () { reject(tx.error || new Error('IndexedDB transaction aborted')); };\n", "                // JiTA.sync.running stayed true, so every Sync now said \"already running\" until a reload.\n"],
     [H, 'the worker drops a pass asked for while busy', 'if (embedding) { embedAgain = true; result = { started: false, busy: true, queued: true }; }', 'if (embedding) { result = { started: false, busy: true }; }'],
